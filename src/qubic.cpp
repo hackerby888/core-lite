@@ -8447,9 +8447,7 @@ void processArgs(int argc, const char* argv[]) {
         ("m,mode", "Core mode", cxxopts::value<std::string>())
         ("g,testnet-gbt", "Enable testnet go behind trick in aux node", cxxopts::value<bool>())
         ("r,rebuild-tx-hashmap", "Enable rebuild tx hashmap when start from snapshot", cxxopts::value<bool>())
-        ("t,threads", "Total Threads will be used by the core", cxxopts::value<int>())
         ("d,ticking-delay", "Delay ticking process by milliseconds", cxxopts::value<int>())
-        ("l,solution-threads", "Threads that will be used by the core to process solution", cxxopts::value<int>())
         ("sm, node-mode", "Set start mode to Main&aux,....", cxxopts::value<int>())
         ("seeds", "Set seeds (IDs) to run on this node (only apply for main node)", cxxopts::value<std::string>())
         ("rp, reader-passcode", "Passcode to access log reader", cxxopts::value<std::string>())
@@ -8503,14 +8501,6 @@ void processArgs(int argc, const char* argv[]) {
         mySubseed = subseed;
         myPublicKey = publicKey;
         logColorToScreen("INFO", "Lite node operator ID: " + myOperatorId + (!isOperatorIdProvided ? " (default)" : ""));
-    }
-
-    if (result.count("threads")) {
-        MAX_NUMBER_OF_PROCESSORS_DYNAMIC = result["threads"].as<int>();
-    }
-
-    if (result.count("solution-threads")) {
-        NUMBER_OF_SOLUTION_PROCESSORS_DYNAMIC = result["solution-threads"].as<int>();
     }
 
     if (result.count("security-tick")) {
