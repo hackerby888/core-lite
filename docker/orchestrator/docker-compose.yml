@@ -1,0 +1,41 @@
+# Normal mode - standard node operator
+services:
+  qubic-node:
+    build:
+      context: ../..
+      dockerfile: docker/orchestrator/Dockerfile
+    image: qubic-orchestrator:latest
+    container_name: qubic-mainnet
+    restart: unless-stopped
+    ports:
+      - "21841:21841"
+      - "41841:41841"
+    volumes:
+      - qubic-data:/qubic
+      # Optional: mount a custom config file
+      # - ./config/my-config.yaml:/opt/orchestrator/config/config.yaml:ro
+    environment:
+      QUBIC_MODE: "normal"
+      QUBIC_PEERS: ""
+      QUBIC_SECURITY_TICK: "32"
+      QUBIC_FORCE_DOWNLOAD: "false"
+      QUBIC_LOG_LEVEL: "INFO"
+      QUBIC_LOG_FORMAT: "json"
+      # QUBIC_HTTP_PASSCODE: ""
+      # QUBIC_OPERATOR_SEED: ""
+      # QUBIC_OPERATOR: ""
+      # QUBIC_OPERATOR_ALIAS: ""
+      # Watchdog
+      QUBIC_WATCHDOG__ENABLED: "true"
+      QUBIC_WATCHDOG__MAX_RESTARTS: "5"
+      # Alerting (optional)
+      # QUBIC_ALERTING__ENABLED: "true"
+      # QUBIC_ALERTING__WEBHOOK_URL: "https://hooks.slack.com/services/..."
+    # Uncomment to limit resources
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 64G
+
+volumes:
+  qubic-data:

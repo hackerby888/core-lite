@@ -1,0 +1,31 @@
+services:
+  qubic-node:
+    build:
+      context: .
+      args:
+        REPO_URL: https://github.com/qubic/core-lite.git
+        BRANCH: main
+    image: qubic-core-lite:latest
+    container_name: qubic-mainnet
+    restart: unless-stopped
+    ports:
+      - "21841:21841"
+    volumes:
+      - qubic-data:/qubic
+    environment:
+      # Override epoch (optional, defaults to compiled value)
+      - EPOCH=
+      # Comma-separated list of peer IPs
+      - PEERS=
+      # Security tick interval (default: 32)
+      - SECURITY_TICK=32
+      # Set to "true" to force re-download epoch files
+      - FORCE_DOWNLOAD=
+    # Uncomment to limit resources
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 64G
+
+volumes:
+  qubic-data:

@@ -1,0 +1,101 @@
+# Qubic Docker Orchestrator - Default Configuration
+# Override with environment variables (prefix QUBIC_) or CLI args.
+# ENV vars take highest precedence.
+
+# General
+mode: "normal"            # "source" or "normal"
+data_dir: "/qubic"
+binary_path: "/qubic/Qubic"
+log_level: "INFO"
+log_format: "json"        # "json" or "text"
+
+# External services
+epoch_api_url: "https://api.qubic.li/public/EpochInfo"
+snapshot_service_url: "https://storage.qubic.li"
+force_download: false
+
+# Management API
+management_api_port: 8080
+management_api_host: "127.0.0.1"  # local-only; set "0.0.0.0" for external access
+
+# Qubic binary params (uncomment and set as needed)
+# peers: "1.2.3.4,5.6.7.8"
+security_tick: 32
+# threads: 8
+# solution_threads: 2
+# ticking_delay: 1000
+# operator_seed: ""
+# operator: ""
+# http_passcode: ""
+# reader_passcode: ""
+# operator_alias: ""
+# node_mode: 0
+# seeds: ""
+
+# Watchdog
+watchdog:
+  enabled: true
+  poll_interval_seconds: 15
+  startup_grace_seconds: 300
+  stuck_threshold_seconds: 300
+  stuck_consecutive_polls: 3
+  misaligned_threshold_votes: 451
+  misaligned_consecutive_polls: 5
+  max_restarts: 5
+  restart_cooldown_seconds: 600
+  crash_restart_delay_seconds: 10
+  epoch_api_poll_seconds: 300    # how often to check epoch API for new epoch (seconds)
+  epoch_behind_restart_polls: 2  # consecutive polls showing node behind before restart
+
+# Source mode (snapshot production and upload)
+source:
+  snapshot_interval_seconds: 3600
+  snapshot_wait_timeout_seconds: 600
+  snapshot_poll_interval_seconds: 5
+  upload_timeout_seconds: 1800
+  upload_retry_count: 3
+  upload_retry_delay_seconds: 30
+  package_compression: "zip"
+  snapshot_keep_count: 2        # keep N most recent snapshots on remote, 0 = no cleanup
+  uploader_type: "scp"
+  # SCP/SSH uploader (default)
+  scp_host: ""
+  scp_user: ""
+  scp_port: 22
+  scp_dest_path: "/snapshots"
+  scp_key_file: "/qubic/.ssh/id_ed25519"
+  # Rsync uploader (set uploader_type: "rsync")
+  # Reuses scp_host, scp_user, scp_port, scp_dest_path, scp_key_file
+  # rsync_bandwidth_limit: 0       # KB/s, 0 = unlimited
+  # rsync_compress: false          # rsync -z flag (off: binary data is incompressible)
+  # rsync_timeout: 1800            # rsync + remote zip timeout (seconds)
+  # HTTP REST uploader (set uploader_type: "http_rest")
+  # http_upload_url: ""
+  # http_auth_token: ""
+  # S3 uploader (set uploader_type: "s3")
+  # s3_bucket: ""
+  # s3_prefix: "snapshots/"
+  # s3_endpoint_url: ""
+  # s3_region: "us-east-1"
+  # s3_access_key: ""
+  # s3_secret_key: ""
+
+# Downloader
+downloader:
+  type: "http"
+  timeout_seconds: 3600
+  retry_count: 5
+  retry_delay_seconds: 60
+
+# Cleanup (periodic removal of old state files and temp artefacts)
+cleanup:
+  enabled: true
+  interval_seconds: 3600            # run cleanup every hour
+  keep_epochs: 1                    # keep N old epochs alongside the current one
+
+# Alerting
+alerting:
+  enabled: false
+  webhook_url: ""
+  rate_limit_seconds: 300
+  include_node_info: true

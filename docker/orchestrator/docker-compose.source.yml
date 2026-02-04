@@ -1,0 +1,39 @@
+# Source mode - produces and uploads snapshots
+# Usage: docker compose -f docker-compose.yml -f docker-compose.source.yml up -d
+services:
+  qubic-node:
+    environment:
+      QUBIC_MODE: "source"
+      # Snapshot interval (seconds). Default: 3600 (1 hour)
+      QUBIC_SOURCE__SNAPSHOT_INTERVAL_SECONDS: "3600"
+      # Uploader type: "scp" (default), "http_rest", "s3", or "local_fs"
+      QUBIC_SOURCE__UPLOADER_TYPE: "scp"
+      # Keep N most recent snapshots on remote (0 = no cleanup)
+      # QUBIC_SOURCE__SNAPSHOT_KEEP_COUNT: "2"
+      # SCP/SSH uploader settings (default)
+      QUBIC_SOURCE__SCP_HOST: ""
+      QUBIC_SOURCE__SCP_USER: ""
+      QUBIC_SOURCE__SCP_PORT: "22"
+      QUBIC_SOURCE__SCP_DEST_PATH: "/snapshots"
+      # QUBIC_SOURCE__SCP_KEY_FILE: "/qubic/.ssh/id_ed25519"
+      # Rsync uploader (set UPLOADER_TYPE=rsync, reuses SCP_HOST etc.)
+      # QUBIC_SOURCE__RSYNC_BANDWIDTH_LIMIT: "0"
+      # QUBIC_SOURCE__RSYNC_COMPRESS: "false"
+      # QUBIC_SOURCE__RSYNC_TIMEOUT: "1800"
+      # HTTP REST uploader settings (if uploader_type=http_rest)
+      # QUBIC_SOURCE__HTTP_UPLOAD_URL: ""
+      # QUBIC_SOURCE__HTTP_AUTH_TOKEN: ""
+      # S3 uploader settings (if uploader_type=s3)
+      # QUBIC_SOURCE__S3_BUCKET: "qubic-snapshots"
+      # QUBIC_SOURCE__S3_PREFIX: "snapshots/"
+      # QUBIC_SOURCE__S3_ENDPOINT_URL: ""
+      # QUBIC_SOURCE__S3_REGION: "us-east-1"
+      # QUBIC_SOURCE__S3_ACCESS_KEY: ""
+      # QUBIC_SOURCE__S3_SECRET_KEY: ""
+      # For local testing (mount a volume for dest_dir)
+      # QUBIC_SOURCE__UPLOADER_TYPE: "local_fs"
+      # QUBIC_SOURCE__LOCAL_FS_DEST_DIR: "/snapshots"
+    volumes:
+      # Mount SSH key for SCP uploads
+      - ${SSH_KEY_PATH:-~/.ssh/id_ed25519}:/qubic/.ssh/id_ed25519:ro
+      # - snapshot-output:/snapshots  # For local_fs uploader testing

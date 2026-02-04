@@ -1,0 +1,211 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Optional
+
+import aiohttp
+
+from app.models import EpochInfo, SnapshotMeta
+
+logger = logging.getLogger(__name__)
+
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+
+class EpochService:
+    """Client for external epoch info API and snapshot service."""
+
+    def __init__(
+        self,
+        epoch_api_url: str,
+        snapshot_service_url: str,
+        compiled_epoch: Optional[int] = None,
+    ) -> None:
+        self._epoch_api_url = epoch_api_url.rstrip("/")
+        self._snapshot_service_url = snapshot_service_url.rstrip("/")
+        self._compiled_epoch = compiled_epoch
+        self._session: aiohttp.ClientSession | None = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(timeout=REQUEST_TIMEOUT)
+        return self._session
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+    async def get_current_epoch_info(self) -> EpochInfo:
+        """Query the epoch info API for current epoch, initialTick, and peers.
+
+        The configured URL is called directly (no path appended).
+        Expected JSON: ``{"epoch": N, "initialTick": N, "peers": [...],
+        "minVersion": "1.280"}``
+
+        The ``minVersion`` field is optional.  When absent, no version
+        restriction is applied.
+        """
+        session = await self._get_session()
+        try:
+            async with session.get(self._epoch_api_url) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+
+                min_ver: tuple[int, int] | None = None
+                raw = data.get("minVersion")
+                if raw:
+                    min_ver = EpochService.parse_version(str(raw))
+
+                return EpochInfo(
+                    epoch=data["epoch"],
+                    initial_tick=data["initialTick"],
+                    peers=data.get("peers", []),
+                    min_version=min_ver,
+                )
+        except (aiohttp.ClientError, KeyError) as e:
+            logger.warning(f"Failed to get epoch info from API: {e}")
+            raise
+
+    async def get_epoch_info_or_fallback(
+        self,
+        fallback_peers: list[str] | None = None,
+    ) -> EpochInfo:
+        """Get epoch info from API, falling back to compiled epoch if unavailable."""
+        try:
+            return await self.get_current_epoch_info()
+        except Exception:
+            if self._compiled_epoch is not None:
+                logger.warning(
+                    f"Using compiled epoch {self._compiled_epoch} as fallback"
+                )
+                return EpochInfo(
+                    epoch=self._compiled_epoch,
+                    initial_tick=0,
+                    peers=fallback_peers or [],
+                    min_version=None,
+                )
+            raise
+
+    async def get_latest_snapshot_meta(
+        self, epoch: int
+    ) -> Optional[SnapshotMeta]:
+        """Check snapshot service for the latest available snapshot.
+
+        Tries the index-based naming first
+        (``ep{epoch}-latest-snap.json``), then falls back to a direct
+        HEAD check on ``ep{epoch}-full.zip``.
+        """
+        session = await self._get_session()
+
+        # --- New naming: check ep{epoch}-latest-snap.json index ----------
+        index_url = (
+            f"{self._snapshot_service_url}/network/{epoch}/"
+            f"ep{epoch}-latest-snap.json"
+        )
+        try:
+            async with session.get(index_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    tick = data.get("tick", 0)
+                    filename = data.get(
+                        "file", f"ep{epoch}-t{tick}-snap.zip"
+                    )
+                    snap_url = (
+                        f"{self._snapshot_service_url}/network/"
+                        f"{epoch}/{filename}"
+                    )
+                    return SnapshotMeta(
+                        epoch=data.get("epoch", epoch),
+                        tick=tick,
+                        timestamp=data.get("timestamp", ""),
+                        url=snap_url,
+                        checksum=data.get("checksum", ""),
+                        size_bytes=data.get("size_bytes", 0),
+                    )
+        except (aiohttp.ClientError, KeyError) as e:
+            logger.debug(f"Index lookup failed for epoch {epoch}: {e}")
+
+        # --- Legacy: direct HEAD on ep{epoch}-full.zip --------------------
+        zip_url = (
+            f"{self._snapshot_service_url}/network/{epoch}/ep{epoch}-full.zip"
+        )
+        try:
+            async with session.head(zip_url) as resp:
+                if resp.status == 200:
+                    size = int(resp.headers.get("Content-Length", 0))
+                    return SnapshotMeta(
+                        epoch=epoch,
+                        tick=0,
+                        timestamp="",
+                        url=zip_url,
+                        size_bytes=size,
+                    )
+        except aiohttp.ClientError:
+            pass
+
+        return None
+
+    async def check_snapshot_available(self, epoch: int) -> bool:
+        meta = await self.get_latest_snapshot_meta(epoch)
+        return meta is not None
+
+    def get_compiled_epoch(self) -> Optional[int]:
+        return self._compiled_epoch
+
+    @staticmethod
+    def read_compiled_epoch(epoch_file: str = "/qubic/epoch.txt") -> Optional[int]:
+        """Read the compiled epoch number from the epoch.txt file."""
+        try:
+            path = Path(epoch_file)
+            if path.exists():
+                text = path.read_text().strip()
+                return int(text) if text else None
+        except (ValueError, OSError) as e:
+            logger.warning(f"Failed to read compiled epoch from {epoch_file}: {e}")
+        return None
+
+    @staticmethod
+    def read_local_version(
+        version_file: str = "/qubic/version.txt",
+    ) -> tuple[int, int] | None:
+        """Read VERSION_A.VERSION_B from version.txt."""
+        try:
+            path = Path(version_file)
+            if path.exists():
+                text = path.read_text().strip()
+                return EpochService.parse_version(text)
+        except OSError as e:
+            logger.warning(f"Failed to read version from {version_file}: {e}")
+        return None
+
+    @staticmethod
+    def parse_version(version_str: str) -> tuple[int, int] | None:
+        """Parse ``"1.276"`` → ``(1, 276)``.  Returns ``None`` on invalid input."""
+        try:
+            parts = version_str.strip().split(".")
+            if len(parts) >= 2:
+                return (int(parts[0]), int(parts[1]))
+        except (ValueError, IndexError):
+            pass
+        return None
+
+    @staticmethod
+    def format_version(version: tuple[int, int]) -> str:
+        """Format ``(1, 276)`` → ``"1.276"``."""
+        return f"{version[0]}.{version[1]}"
+
+    @staticmethod
+    def is_version_compatible(
+        local: tuple[int, int] | None,
+        minimum: tuple[int, int] | None,
+    ) -> bool:
+        """Return ``True`` if *minimum* is ``None`` (no check) or *local* >= *minimum*.
+
+        Returns ``False`` if *local* is ``None`` but *minimum* is set.
+        """
+        if minimum is None:
+            return True
+        if local is None:
+            return False
+        return local >= minimum
