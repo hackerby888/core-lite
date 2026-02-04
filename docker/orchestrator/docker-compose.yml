@@ -2,10 +2,8 @@
 services:
   qubic-node:
     build:
-      context: .
-      args:
-        QUBIC_REPO_URL: https://github.com/qubic/core-lite.git
-        QUBIC_BRANCH: main
+      context: ../..
+      dockerfile: docker/orchestrator/Dockerfile
     image: qubic-orchestrator:latest
     container_name: qubic-mainnet
     restart: unless-stopped

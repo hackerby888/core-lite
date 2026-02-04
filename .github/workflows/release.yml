@@ -54,3 +54,25 @@ jobs:
           files: ${{ env.RELEASE_BUILD_DIR }}/**/x64/Release/Qubic.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-docker:
+    needs: build-linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Linux build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: QubicLiteLinuxBuild-${{ env.BUILD_CONFIGURATION }}
+          path: build
+
+      - name: Build Docker image
+        run: docker build -t qubiccore/lite:${{ github.ref_name }} -f docker/orchestrator/Dockerfile .
+
+      - name: Log in to Docker Hub
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Push Docker image
+        run: docker push qubiccore/lite:${{ github.ref_name }}

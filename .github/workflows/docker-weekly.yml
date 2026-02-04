@@ -1,0 +1,22 @@
+name: Docker Weekly
+
+on:
+  schedule:
+    - cron: "5 12 * * 3" # every Wednesday at 12:05 UTC
+  workflow_dispatch: # manual trigger
+
+jobs:
+  publish-docker-latest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t qubiccore/lite:latest -f docker/orchestrator/Dockerfile .
+
+      - name: Log in to Docker Hub
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Push Docker image
+        run: docker push qubiccore/lite:latest

@@ -1,5 +1,7 @@
 # =============================================================================
 # Stage 1: Build the Qubic binary from source
+# If a pre-built binary exists at build/src/Qubic in the build context,
+# the compile step is skipped (used by CI to reuse an earlier build artifact).
 # =============================================================================
 FROM ubuntu:24.04 AS builder
 
@@ -14,37 +16,33 @@ RUN apt-get update && apt-get install -y \
     uuid-dev \
     zlib1g-dev \
     libssl-dev \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
+WORKDIR /build/qubic-core-lite
+COPY . .
 
-ARG QUBIC_REPO_URL=https://github.com/qubic/core-lite.git
-ARG QUBIC_BRANCH=main
-ARG QUBIC_COMMIT=""
+RUN if [ -f build/src/Qubic ]; then \
+      echo "Pre-built binary found, skipping build"; \
+    else \
+      cd build || mkdir -p build && cd build \
+      && cmake .. \
+          -D CMAKE_C_COMPILER=clang \
+          -D CMAKE_CXX_COMPILER=clang++ \
+          -D BUILD_TESTS:BOOL=OFF \
+          -D BUILD_BINARY:BOOL=ON \
+          -D CMAKE_BUILD_TYPE=Release \
+          -D ENABLE_AVX512=OFF \
+      && cmake --build . --target Qubic -- -j$(nproc); \
+    fi
 
-RUN git clone --depth 1 --branch ${QUBIC_BRANCH} ${QUBIC_REPO_URL} qubic-core-lite \
-    && if [ -n "${QUBIC_COMMIT}" ]; then \
-         cd qubic-core-lite && git fetch --depth 1 origin ${QUBIC_COMMIT} && git checkout ${QUBIC_COMMIT}; \
-       fi
-
-WORKDIR /build/qubic-core-lite/build
-
-RUN cmake .. \
-    -D CMAKE_C_COMPILER=clang \
-    -D CMAKE_CXX_COMPILER=clang++ \
-    -D BUILD_TESTS:BOOL=OFF \
-    -D BUILD_BINARY:BOOL=ON \
-    -D CMAKE_BUILD_TYPE=Release \
-    -D ENABLE_AVX512=OFF \
-    && cmake --build . --target Qubic -- -j$(nproc)
-
-# Extract compiled epoch and version for metadata
-RUN grep -oP '#define EPOCH \K[0-9]+' /build/qubic-core-lite/src/public_settings.h > /build/epoch.txt
-RUN printf "%s.%s" \
-    "$(grep -oP '#define VERSION_A \K[0-9]+' /build/qubic-core-lite/src/public_settings.h)" \
-    "$(grep -oP '#define VERSION_B \K[0-9]+' /build/qubic-core-lite/src/public_settings.h)" \
-    > /build/version.txt
+# Collect build outputs into a common location
+RUN mkdir -p /output \
+    && cp build/src/Qubic /output/Qubic \
+    && grep -oP '#define EPOCH \K[0-9]+' src/public_settings.h > /output/epoch.txt \
+    && printf "%s.%s" \
+        "$(grep -oP '#define VERSION_A \K[0-9]+' src/public_settings.h)" \
+        "$(grep -oP '#define VERSION_B \K[0-9]+' src/public_settings.h)" \
+        > /output/version.txt
 
 # =============================================================================
 # Stage 2: Runtime image with Python orchestrator
@@ -72,17 +70,17 @@ RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Install Python package
-COPY pyproject.toml /opt/orchestrator/pyproject.toml
-COPY app/ /opt/orchestrator/app/
-COPY config/ /opt/orchestrator/config/
+COPY docker/orchestrator/pyproject.toml /opt/orchestrator/pyproject.toml
+COPY docker/orchestrator/app/ /opt/orchestrator/app/
+COPY docker/orchestrator/config/ /opt/orchestrator/config/
 WORKDIR /opt/orchestrator
 RUN pip install --no-cache-dir .
 
 # Copy Qubic binary and epoch metadata
 WORKDIR /qubic
-COPY --from=builder /build/qubic-core-lite/build/src/Qubic /qubic/Qubic
-COPY --from=builder /build/epoch.txt /qubic/epoch.txt
-COPY --from=builder /build/version.txt /qubic/version.txt
+COPY --from=builder /output/Qubic /qubic/Qubic
+COPY --from=builder /output/epoch.txt /qubic/epoch.txt
+COPY --from=builder /output/version.txt /qubic/version.txt
 RUN chmod +x /qubic/Qubic
 
 # Ports: P2P mainnet (21841), P2P testnet (31841), HTTP API (41841), Management (8080)
