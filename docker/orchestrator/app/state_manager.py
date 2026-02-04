@@ -83,30 +83,34 @@ def _compress_file_worker(
     }
 
 
-def _extract_file_worker(
+def _extract_batch_worker(
     zip_path: str,
-    entry_name: str,
+    entry_names: list[str],
     dest_dir: str,
-) -> dict:
-    """Extract a single file from a ZIP archive (thread-safe).
+) -> list[dict]:
+    """Extract a batch of files from a ZIP archive (thread-safe).
 
-    Each worker opens its own ZipFile handle so reads don't
-    conflict.  zlib decompression releases the GIL.
+    Each worker opens its own ZipFile handle once and extracts all
+    assigned entries.  This avoids re-reading the central directory
+    for every file.  zlib decompression releases the GIL.
     """
-    target = Path(dest_dir) / entry_name
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    file_size = 0
+    results = []
     with zipfile.ZipFile(zip_path, "r") as zf:
-        with zf.open(entry_name) as src, open(target, "wb") as dst:
-            while True:
-                chunk = src.read(_CHUNK_SIZE)
-                if not chunk:
-                    break
-                dst.write(chunk)
-                file_size += len(chunk)
+        for entry_name in entry_names:
+            target = Path(dest_dir) / entry_name
+            target.parent.mkdir(parents=True, exist_ok=True)
 
-    return {"name": entry_name, "size": file_size}
+            file_size = 0
+            with zf.open(entry_name) as src, open(target, "wb") as dst:
+                while True:
+                    chunk = src.read(_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                    file_size += len(chunk)
+
+            results.append({"name": entry_name, "size": file_size})
+    return results
 
 
 # Files the Qubic node needs per epoch
@@ -221,29 +225,38 @@ class StateManager:
             f"Extracting {len(entries)} files with {workers} workers"
         )
 
+        # Split entries into batches so each worker opens the zip once
+        batch_size = max(1, (len(entries) + workers - 1) // workers)
+        batches = [
+            entries[i : i + batch_size]
+            for i in range(0, len(entries), batch_size)
+        ]
+        logger.info(
+            f"Split into {len(batches)} batches of ~{batch_size} files"
+        )
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
-            for name in entries:
+            for batch in batches:
                 future = pool.submit(
-                    _extract_file_worker,
+                    _extract_batch_worker,
                     str(zip_path),
-                    name,
+                    batch,
                     str(self._data_dir),
                 )
-                futures[future] = name
+                futures[future] = len(batch)
 
-            done_count = 0
+            done_files = 0
             for future in as_completed(futures):
-                done_count += 1
-                name = futures[future]
                 try:
-                    result = future.result()
-                    logger.debug(
-                        f"Extracted [{done_count}/{len(entries)}] "
-                        f"{name} ({result['size']} bytes)"
+                    results = future.result()
+                    done_files += len(results)
+                    logger.info(
+                        f"Extracted batch ({len(results)} files, "
+                        f"{done_files}/{len(entries)} total)"
                     )
                 except Exception as exc:
-                    logger.error(f"Failed to extract {name}: {exc}")
+                    logger.error(f"Batch extraction failed: {exc}")
                     raise
 
         # Rename files with .000 extension (or wrong epoch) to current epoch
@@ -300,11 +313,16 @@ class StateManager:
                         files.append(f)
                 break
         # Page files from SwapVirtualMemory (.pg files in subdirectories)
+        # Only include dirs whose trailing number matches the epoch
+        # e.g. td00data199, tickdata199 for epoch 199
         for sub_dir in sorted(self._data_dir.iterdir()):
             if not sub_dir.is_dir():
                 continue
             if sub_dir.name.startswith("ep"):
                 continue  # already handled above
+            match = re.search(r"(\d+)$", sub_dir.name)
+            if not match or int(match.group(1)) != epoch:
+                continue
             pg_files = sorted(sub_dir.glob("*.pg"))
             if pg_files:
                 files.extend(pg_files)

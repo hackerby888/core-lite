@@ -196,7 +196,7 @@ class TestStateManager:
         ep_dir.mkdir()
         (ep_dir / "system.snp").write_text("snp")
 
-        # Create page file directories
+        # Create page file directories for current epoch
         td_dir = tmp_data_dir / "td00data199"
         td_dir.mkdir()
         (td_dir / "abcdef12.pg").write_bytes(b"\x00" * 100)
@@ -206,12 +206,18 @@ class TestStateManager:
         tick_dir.mkdir()
         (tick_dir / "ghijkl56.pg").write_bytes(b"\x00" * 100)
 
+        # Create page file directory from a different epoch (should be excluded)
+        old_dir = tmp_data_dir / "td00data198"
+        old_dir.mkdir()
+        (old_dir / "oldpage.pg").write_bytes(b"\x00" * 100)
+
         sm = StateManager(tmp_data_dir, MockDownloader())
         files = sm.list_snapshot_files(199)
         names = [str(f.relative_to(tmp_data_dir)) for f in files]
         assert "td00data199/abcdef12.pg" in names
         assert "td00data199/abcdef34.pg" in names
         assert "tickdata199/ghijkl56.pg" in names
+        assert "td00data198/oldpage.pg" not in names
 
     def test_list_snapshot_files_skips_non_pg_subdirs(self, tmp_data_dir):
         """Subdirectories without .pg files are not included."""

@@ -91,7 +91,7 @@ downloader:
 cleanup:
   enabled: true
   interval_seconds: 3600            # run cleanup every hour
-  keep_epochs: 1                    # keep N old epochs alongside the current one
+  keep_epochs: 0                    # only keep the current epoch (0 = remove all non-current)
 
 # Alerting
 alerting:
