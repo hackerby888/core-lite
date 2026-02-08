@@ -15,7 +15,7 @@ One command to run the container:
 # -----------------------------------
 sudo apt update && apt install -y git
 git clone https://github.com/qubic/core-lite.git
-cd qubic-core-lite/docker/ubuntu-env
+cd core-lite/docker/ubuntu-env
 docker build -t qubic-global-env .
 
 if [ $? -ne 0 ]; then

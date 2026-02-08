@@ -7,9 +7,9 @@ ENV SSH_USERNAME="ubuntu"
 ENV SSHD_CONFIG_ADDITIONAL=""
 
 # Install OpenSSH server, clean up, create directories, set permissions, and configure SSH
-RUN apt-get update \
+RUN apt-get update -y \
     && apt install -y sudo \
-    && sudo apt upgrade \
+    && sudo apt upgrade -y \
     && sudo apt install -y build-essential clang cmake nasm \
     && apt-get install -y iproute2 iputils-ping openssh-server telnet \
     && apt-get clean \
