@@ -3040,7 +3040,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
     }
 }
 
-static void processTickTransaction(const Transaction* transaction, unsigned int transactionIndex, const unsigned long long txOffset, const m256i& transactionDigest, const m256i& dataLock, unsigned long long processorNumber)
+static void processTickTransaction(const Transaction* transaction, unsigned int transactionIndex, const unsigned long long txOffset, unsigned long long processorNumber)
 {
     PROFILE_SCOPE();
 
@@ -3559,7 +3559,7 @@ static void processTick(unsigned long long processorNumber)
                     // Store spectrum data for rollback if there is invalid solutions in the tick
                     auto sourceSpectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
                     spectrumDataRollback[transactionIndex] = spectrum[sourceSpectrumIndex];
-                    processTickTransaction(transaction, transactionIndex, tsCurrentTickTransactionOffsets[transactionIndex], nextTickData.transactionDigests[transactionIndex], nextTickData.timelock, processorNumber);
+                    processTickTransaction(transaction, transactionIndex, tsCurrentTickTransactionOffsets[transactionIndex], processorNumber);
                 }
                 else
                 {
