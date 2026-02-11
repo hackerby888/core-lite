@@ -724,6 +724,7 @@ public:
     // Cleanup at node shutdown
     static void deinit()
     {
+        return;
         if (tickDataPtr)
         {
             freePool(tickDataPtr);
