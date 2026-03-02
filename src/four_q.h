@@ -45,7 +45,7 @@
 #ifdef __AVX512F__
 namespace FourQ
 {
-static m256i B1, B2, B3, B4, C;
+static __m256i B1, B2, B3, B4, C;
 }
 
 static void initAVX512FourQConstants()
@@ -1956,3 +1956,4 @@ static bool verify(const unsigned char* publicKey, const unsigned char* messageD
     encode(A, (unsigned char*)A);
     return *(const m256i*)A == *(const m256i*)signature;
 }
+
