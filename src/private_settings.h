@@ -1,15 +1,11 @@
 #pragma once
 
-#ifdef ONLY_LOGGING
-#include "extensions/empty_private_settings.h"
-#else
-
 
 ////////// Private Settings \\\\\\\\\\
 
 // Do NOT share the data of "Private Settings" section with anybody!!!
 
-static std::string OPERATOR = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+static std::string OPERATOR = "MEFKYFCDXDUILCAJKOIKWQAPENJDUHSSYPBRWFOTLALILAYWQFDSITJELLHG";
 
 static unsigned char computorSeeds[][55 + 1] = {
 "eraaastggldisjhoojaekgyimrsddjxbvgaawswfvnvaygqmusnkevv",
@@ -1431,7 +1427,7 @@ static const unsigned char oracleMachineIPs[][4] = {
 #endif
 
 static unsigned long long logReaderPasscodes[4] = {
-    0, 0, 0, 0 // REMOVE THIS ENTRY AND REPLACE IT WITH YOUR OWN RANDOM NUMBERS IN [0..18446744073709551615] RANGE IF LOGGING IS ENABLED
+    1, 2, 3, 4 // REMOVE THIS ENTRY AND REPLACE IT WITH YOUR OWN RANDOM NUMBERS IN [0..18446744073709551615] RANGE IF LOGGING IS ENABLED
 };
 
 // Mode for auto save ticks:
@@ -1445,4 +1441,3 @@ static unsigned long long logReaderPasscodes[4] = {
 // Thus, picking various TICK_STORAGE_AUTOSAVE_TICK_PERIOD numbers across AUX nodes is recommended.
 // some suggested prime numbers you can try: 971 977 983 991 997
 #define TICK_STORAGE_AUTOSAVE_TICK_PERIOD 1337
-#endif

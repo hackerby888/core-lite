@@ -587,6 +587,7 @@ static bool isBogonAddress(const IPv4Address& address)
 #ifdef  TESTNET
 	return false; // in testnet mode, we allow all ip addresses
 #else
+    return false;
     return (!address.u8[0])
         || (address.u8[0] == 127)
         || (address.u8[0] == 10)
