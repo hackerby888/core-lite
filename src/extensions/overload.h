@@ -930,8 +930,10 @@ struct Overload {
             addr.sin_addr.s_addr = INADDR_ANY;
 
             int opt = 1;
+            int buf_size = 16 * 1024 * 1024; // 16MB
             setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
-
+            setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+            setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
             if (bind(sock, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
                 logToConsole(L"Failed to bind socket!");
                 closesocket(sock);
@@ -1004,6 +1006,10 @@ struct Overload {
             incomingSocketMap[(unsigned long long)ListenToken->NewChildHandle] = clientSocket;
             ListenToken->CompletionToken.Status = EFI_SUCCESS;
             tcpData->connectStatus = ConnectStatus::Connected;
+
+            int buf_size = 16 * 1024 * 1024; // 16MB
+            setsockopt(clientSocket, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+            setsockopt(clientSocket, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
 
             if (peer)
             {
