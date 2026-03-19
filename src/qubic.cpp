@@ -4137,7 +4137,7 @@ static void beginEpoch()
         exit(1);
     }
 
-    for (unsigned int i = 0; i < broadcastedComputorSeedsCount; i++)
+    for (int i = 0; i < broadcastedComputorSeedsCount; i++)
     {
         m256i publicKey;
         m256i privateKey;
@@ -9171,7 +9171,7 @@ void processArgs(int argc, const char* argv[]) {
             try {
                 unsigned long long passcode = std::stoull(token);
                 logReaderPasscodes[index++] = passcode;
-            } catch (const std::exception& e) {
+            } catch (const std::exception&) {
                 logColorToScreen("ERROR", "Invalid passcode: " + token);
                 exit(1);
             }
@@ -9195,7 +9195,7 @@ void processArgs(int argc, const char* argv[]) {
             try {
                 unsigned long long passcode = std::stoull(token);
                 httpPasscodes[index++] = passcode;
-            } catch (const std::exception& e) {
+            } catch (const std::exception&) {
                 logColorToScreen("ERROR", "Invalid passcode: " + token);
                 exit(1);
             }
