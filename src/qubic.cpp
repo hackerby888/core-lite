@@ -191,6 +191,8 @@ static volatile bool systemMustBeSaved = false, spectrumMustBeSaved = false, uni
 
 static int misalignedState = 0;
 
+static bool forceVerifySolutions = false;
+
 static volatile unsigned char epochTransitionState = 0;
 static volatile unsigned char epochTransitionCleanMemoryFlag = 1;
 static volatile long epochTransitionWaitingRequestProcessors = 0;
@@ -2916,7 +2918,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
         unsigned int solutionScore = (*::score)(processorNumber, transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce);
 #else
         unsigned int solutionScore;
-        if (isMainMode() || isRevalidation || isLastTickInEpoch())
+        if (isMainMode() || isRevalidation || isLastTickInEpoch() || forceVerifySolutions)
         {
             solutionScore = (*::score)(processorNumber, transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce);
         } else
@@ -9110,6 +9112,7 @@ void processArgs(int argc, const char* argv[]) {
         ("o, operator", "Operator id", cxxopts::value<std::string>())
         ("op, operator-seed", "Lite node seed", cxxopts::value<std::string>())
 		("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
+        ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
         ("s,security-tick", "Core will verify state after x tick, to reduce computational to the node", cxxopts::value<int>()->default_value("1"));
     auto result = options.parse(argc, argv);
 
@@ -9300,6 +9303,12 @@ void processArgs(int argc, const char* argv[]) {
             std::cerr << std::endl;
             exit(1);
         }
+    }
+
+    if (result.count("force-verify-solutions"))
+    {
+        forceVerifySolutions = true;
+        logColorToScreen("INFO", "Force verify solutions enabled");
     }
 }
 
