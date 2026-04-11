@@ -5210,11 +5210,11 @@ static int findCurrentDigestsFromNextTickVotes(m256i &spectrumDigest, unsigned i
 
         if (totalUniqueCurrentSpectrumDigestCounter < NUMBER_OF_COMPUTORS)
         {
-            setText(message, L"Not enough votes to decide current digests from next tick votes: ");
-            appendNumber(message, totalUniqueCurrentSpectrumDigestCounter, false);
-            appendText(message, L"/");
-            appendNumber(message, uniqueCurrentSpectrumDigestCounters[mostPopularUniqueCurrentSpectrumDigestIndex], false);
-            //logToConsole(message);
+            // setText(message, L"Not enough votes to decide current digests from next tick votes: ");
+            // appendNumber(message, totalUniqueCurrentSpectrumDigestCounter, false);
+            // appendText(message, L"/");
+            // appendNumber(message, uniqueCurrentSpectrumDigestCounters[mostPopularUniqueCurrentSpectrumDigestIndex], false);
+            // logToConsole(message);
             return 2;
         }
 
