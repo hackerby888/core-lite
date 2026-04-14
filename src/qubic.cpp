@@ -3870,7 +3870,7 @@ static void processTick(unsigned long long processorNumber)
                 ASSERT(finishedUserQuery->type == ORACLE_QUERY_TYPE_USER_QUERY);
                 ASSERT(ts.tickInCurrentEpochStorage(finishedUserQuery->queryTick));
                 const uint64_t* tsTickTransactionOffsets
-                    = ts.tickTransactionOffsets.getByTickInCurrentEpoch(finishedUserQuery->queryTick);
+                    = (uint64_t*)ts.tickTransactionOffsets.getByTickInCurrentEpoch(finishedUserQuery->queryTick);
                 const uint32_t txSlotInTickData = finishedUserQuery->typeVar.user.queryTxIndex;
                 ASSERT(txSlotInTickData < NUMBER_OF_TRANSACTIONS_PER_TICK);
                 const auto* prevTx = (OracleUserQueryTransactionPrefix*)ts.tickTransactions.ptr(
