@@ -885,7 +885,7 @@ class StateManager:
             f"tar -cf - -C {shlex.quote(str(self._data_dir))} "
             f"-T {shlex.quote(str(filelist_path))} "
             f"| zstd -T0 - "
-            f"| split -b {chunk_size_mb}M -d -a 2 - "
+            f"| split -b {chunk_size_mb}M -d -a 4 - "
             f"{shlex.quote(str(chunk_prefix))}"
         )
         proc = await asyncio.create_subprocess_exec(
@@ -989,7 +989,7 @@ class StateManager:
                 pass
 
         # Base name for chunks: ep199-t43669270-snap.tar.zst.
-        # split will append numeric suffixes: .00, .01, .02, etc.
+        # split will append numeric suffixes: .0000, .0001, .0002, etc.
         base_name = f"ep{epoch}-t{tick}-snap.tar.zst."
         chunk_prefix = dest / base_name
 
@@ -1012,8 +1012,8 @@ class StateManager:
         split_cmd = [
             "split",
             "-b", f"{chunk_size_mb}M",
-            "-d",  # numeric suffixes: 00, 01, 02
-            "-a", "2",  # 2-digit suffix
+            "-d",  # numeric suffixes: 0000, 0001, 0002
+            "-a", "4",  # 4-digit suffix -> 10000 chunks max (5 TB @ 512MB)
             "-",  # read from stdin
             str(chunk_prefix),  # output prefix
         ]
