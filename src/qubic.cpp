@@ -5544,6 +5544,7 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                             KangarooTwelve(data, sizeof(data), &flagIndex, sizeof(flagIndex));
 
                             score->addTask(transaction->sourcePublicKey, solution_miningSeed, solution_nonce);
+                            printf("added solution transaction from spectrum index %d to task queue in tick %u\n", spectrumIndex, system.tick);
                         }
                     }
                 }
