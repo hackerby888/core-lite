@@ -188,7 +188,7 @@ class StateManager:
         zip_path = self._data_dir / "epoch_files.zip"
         try:
             await self._downloader.download(url, zip_path)
-            self._extract_and_rename(zip_path, epoch)
+            self._extract_archive(zip_path, epoch)
             return True
         except Exception as e:
             logger.error(f"Failed to download epoch files: {e}")
