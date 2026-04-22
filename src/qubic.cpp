@@ -5553,7 +5553,6 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                             KangarooTwelve(data, sizeof(data), &flagIndex, sizeof(flagIndex));
 
                             score->addTask(transaction->sourcePublicKey, solution_miningSeed, solution_nonce);
-                            printf("added solution transaction from spectrum index %d to task queue in tick %u\n", spectrumIndex, transaction->tick);
                         }
                     }
                 }
@@ -5564,14 +5563,12 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
     {
         // Process solutions in this tick and store in cache. In parallel, score->tryProcessSolution() is called by
         // request processors to speed up solution processing.
-        printf("started to process solution transactions in tick %u\n", system.tick);
         score->startProcessTaskQueue();
         while (!score->isTaskQueueProcessed())
         {
             score->tryProcessSolution(processorNumber);
         }
         score->stopProcessTaskQueue();
-        printf("finished processing solution transactions in tick %u\n", system.tick);
     }
 
     solutionTotalExecutionTicks = __rdtsc() - solutionProcessStartTick; // for tracking the time processing solutions
