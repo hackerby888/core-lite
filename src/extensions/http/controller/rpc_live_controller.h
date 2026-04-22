@@ -399,6 +399,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
         json["misalignedVotes"] = gTickTotalNumberOfComputors - gTickNumberOfComputors;
         json["mainAuxStatus"] = mainAuxStatus;
         json["duration"] = 0;
+        json["tickInfo"]["tick"] = system.tick;
         auto resp = HttpResponse::newHttpJsonResponse(json);
         cb(resp);
     }

@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     libc++-dev \
     libc++abi-dev \
     libjsoncpp-dev \
+    libhiredis-dev \
     uuid-dev \
     zlib1g-dev \
     libssl-dev \
@@ -33,6 +34,7 @@ RUN if [ -f build/src/Qubic ]; then \
           -D BUILD_BINARY:BOOL=ON \
           -D CMAKE_BUILD_TYPE=Release \
           -D ENABLE_AVX512=OFF \
+          -D ONLY_LOGGING=ON \
       && cmake --build . --target Qubic -- -j$(nproc); \
     fi
 
@@ -55,6 +57,7 @@ RUN apt-get update && apt-get install -y \
     libc++1 \
     libc++abi1 \
     libjsoncpp25 \
+    libhiredis1.1.0 \
     libssl3 \
     openssh-client \
     rsync \

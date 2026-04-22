@@ -566,7 +566,7 @@ typedef EFI_STATUS(__cdecl* EFI_SET_WATCHDOG_TIMER) (IN unsigned long long Timeo
 typedef EFI_STATUS(__cdecl* EFI_SIGNAL_EVENT) (IN EFI_EVENT Event);
 typedef EFI_STATUS(__cdecl* EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_OPEN_VOLUME) (IN void* This, OUT void** Root);
 typedef EFI_STATUS(__cdecl* EFI_STALL) (IN unsigned long long Microseconds);
-typedef EFI_STATUS(__cdecl* EFI_TCP4_ACCEPT) (IN void* This, IN EFI_TCP4_LISTEN_TOKEN* ListenToken);
+typedef EFI_STATUS(__cdecl* EFI_TCP4_ACCEPT) (IN void* This, IN EFI_TCP4_LISTEN_TOKEN* ListenToken, IN void* peer OPTIONAL);
 typedef EFI_STATUS(__cdecl* EFI_TCP4_CANCEL)(IN void* This, IN EFI_TCP4_COMPLETION_TOKEN* Token OPTIONAL);
 typedef EFI_STATUS(__cdecl* EFI_TCP4_CLOSE)(IN void* This, IN EFI_TCP4_CLOSE_TOKEN* CloseToken);
 typedef EFI_STATUS(__cdecl* EFI_TCP4_CONFIGURE) (IN void* This, IN EFI_TCP4_CONFIG_DATA* TcpConfigData OPTIONAL);

@@ -1202,7 +1202,7 @@ static void peerReconnectIfInactive(unsigned int i, unsigned short port)
                 peers[i].isIncommingConnection = TRUE;
                 peers[i].receiveData.FragmentTable[0].FragmentBuffer = peers[i].receiveBuffer;
 
-                if (status = peerTcp4Protocol->Accept(peerTcp4Protocol, &peers[i].connectAcceptToken))
+                if (status = peerTcp4Protocol->Accept(peerTcp4Protocol, &peers[i].connectAcceptToken, &peers[i]))
                 {
                     logStatusToConsole(L"EFI_TCP4_PROTOCOL.Accept() fails", status, __LINE__);
                     if (peerTcp4Protocol == NULL)

@@ -179,5 +179,3 @@ static inline std::vector<uint8_t> base64_decode(const std::string &in) {
 
     return out;
 }
-
-#define _bswap_32(x) (x)

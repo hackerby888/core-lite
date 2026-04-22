@@ -39,7 +39,21 @@ namespace QPI
 
 	*/
 
-	typedef bool bit;
+	// Boolean type ensuring that input values > 1 are mapped to 1.
+	struct bit
+	{
+		bit(bool v = false) : charValue(v)
+		{
+		}
+
+		operator bool() const
+		{
+			return !!charValue;
+		}
+
+		char charValue;
+	};
+
 	typedef signed char sint8;
 	typedef unsigned char uint8;
 	typedef signed short sint16;
@@ -57,6 +71,7 @@ namespace QPI
 		CallErrorContractInErrorState = 1,      // Called contract is already in error state
 		CallErrorInsufficientFees = 2,          // Called contract has no execution fee reserve
 		CallErrorAllocationFailed = 3,          // Failed to allocate context on stack
+		CallErrorContractInactive = 4,			// Called contract has been inactive
 	};
 
 	typedef uint128_t uint128;
@@ -1413,9 +1428,105 @@ namespace QPI
 		sint64 tailIndex(const id& pov, sint64 minPriority) const;
 	};
 
+
+	// Doubly-linked list of elements of type T with fixed capacity L.
+	// Provides O(1) insertion at head/tail, O(1) insertion before/after a given index,
+	// O(1) removal by index, and bidirectional traversal.
+	// Removed nodes are immediately recycled via a free list (no deferred cleanup needed).
+	template <typename T, uint64 L>
+	class LinkedList
+	{
+	private:
+		static_assert(L && !(L & (L - 1)),
+			"The capacity of the LinkedList must be 2^N."
+			);
+
+		struct Node
+		{
+			T value;
+			sint64 nextIndex;  // Next in data list, or next in free list when freed
+			sint64 prevIndex;  // Previous in data list (undefined when freed)
+		} _nodes[L];
+
+		// 1 bit per node: 1 = occupied, 0 = free
+		uint64 _occupiedFlags[(L + 63) / 64];
+
+		sint64 _headIndex;      // First element in the list (NULL_INDEX if empty)
+		sint64 _tailIndex;      // Last element in the list (NULL_INDEX if empty)
+		sint64 _freeHeadIndex;  // Head of recycled-nodes free list (NULL_INDEX if none)
+		uint64 _nextUnusedIndex; // Next never-used node index (lazy free list init)
+		uint64 _population;
+
+		// Check if elementIndex is in range [0, L) and the slot is occupied.
+		bool _isValidAndOccupied(sint64 elementIndex) const;
+
+		// Initialize sentinel values if the list has never been used (handles zero-initialized contract state).
+		void _initIfNeeded();
+
+		// Get a node from the free list or unused pool. Returns NULL_INDEX if full.
+		sint64 _allocateNode();
+
+		// Return node to free list.
+		void _freeNode(sint64 nodeIndex);
+
+	public:
+		// Return maximum number of elements that may be stored.
+		static constexpr uint64 capacity()
+		{
+			return L;
+		}
+
+		// Return current number of elements.
+		inline uint64 population() const;
+
+		// Return elementIndex of first element in the list (or NULL_INDEX if empty).
+		inline sint64 headIndex() const;
+
+		// Return elementIndex of last element in the list (or NULL_INDEX if empty).
+		inline sint64 tailIndex() const;
+
+		// Return elementIndex of next element (or NULL_INDEX if this is the last element).
+		sint64 nextElementIndex(sint64 elementIndex) const;
+
+		// Return elementIndex of previous element (or NULL_INDEX if this is the first element).
+		sint64 prevElementIndex(sint64 elementIndex) const;
+
+		// Return element value at elementIndex.
+		inline const T& element(sint64 elementIndex) const;
+
+		// Return true if the slot at elementIndex is empty (not occupied by an element).
+		// Out-of-range indices are considered empty.
+		inline bool isEmptySlot(sint64 elementIndex) const;
+
+		// Add element at the head of the list, return elementIndex of new element (or NULL_INDEX if full).
+		sint64 addHead(const T& value);
+
+		// Add element at the tail of the list, return elementIndex of new element (or NULL_INDEX if full).
+		sint64 addTail(const T& value);
+
+		// Insert element after the element at elementIndex.
+		// Returns elementIndex of new element (or NULL_INDEX if full or elementIndex is invalid).
+		sint64 insertAfter(sint64 elementIndex, const T& value);
+
+		// Insert element before the element at elementIndex.
+		// Returns elementIndex of new element (or NULL_INDEX if full or elementIndex is invalid).
+		sint64 insertBefore(sint64 elementIndex, const T& value);
+
+		// Remove element at elementIndex. The node is immediately returned to the free list.
+		void remove(sint64 elementIndex);
+
+		// Replace the value at elementIndex with newValue.
+		// Returns true if elementIndex was valid and occupied, false otherwise.
+		bool replace(sint64 elementIndex, const T& newValue);
+
+		// Reinitialize as empty linked list.
+		void reset();
+	};
+
+
 	//////////
 	// safety multiplying a and b and then clamp
-	
+
 	inline static sint64 smul(sint64 a, sint64 b);
 	inline static uint64 smul(uint64 a, uint64 b);
 	inline static sint32 smul(sint32 a, sint32 b);
@@ -2503,7 +2614,7 @@ namespace QPI
 		*
 		* - ORACLE_QUERY_STATUS_UNKNOWN: Query not found / not valid.
 		* - ORACLE_QUERY_STATUS_PENDING: Query is being processed.
-		* - ORACLE_QUERY_STATUS_COMMITTED: The quorum has commited to a oracle reply, but it has not been revealed yet.
+		* - ORACLE_QUERY_STATUS_COMMITTED: The quorum has committed to an oracle reply, but it has not been revealed yet.
 		* - ORACLE_QUERY_STATUS_SUCCESS: The oracle reply has been confirmed and is available.
 		* - ORACLE_QUERY_STATUS_UNRESOLVABLE: No valid oracle reply is available, because computors disagreed about the value.
 		* - ORACLE_QUERY_STATUS_TIMEOUT: No valid oracle reply is available and timeout has hit.
@@ -2536,9 +2647,9 @@ namespace QPI
 	template <typename OracleInterface>
 	struct OracleNotificationInput
 	{
-		sint64 queryId;			///< ID of the oracle query that led to this notification.
-		sint32 subscriptionId;	///< ID of the oracle subscription or -1 in case of a pure oracle query.
-		uint8 status;			///< Oracle query status as defined in `network_messages/common_def.h`
+		sint64 queryId;         ///< ID of the oracle query that led to this notification.
+		sint32 subscriptionId;  ///< ID of the oracle subscription or -1 in case of a one-time oracle query.
+		uint8 status;           ///< Oracle query status as defined in `network_messages/common_def.h`
 		uint8 __reserved0;
 		uint16 __reserved1;
 		typename OracleInterface::OracleReply reply;	///< Oracle reply if status == ORACLE_QUERY_STATUS_SUCCESS
@@ -3087,22 +3198,24 @@ namespace QPI
 
 	/**
 	* @brief Initiate oracle query that will lead to notification later.
+	* @param OracleInterface Oracle interface struct of interface to query, e.g., OI::Price
 	* @param query Details about which oracle to query for which information, as defined by a specific oracle interface.
 	* @param userProcNotification User procedure that shall be executed when the oracle reply is available or an error occurs.
 	* @param timeoutMillisec Maximum number of milliseconds to wait for reply.
-	* @return Oracle query ID that can be used to get the status of the query, or 0 on error.
+	* @return Oracle query ID that can be used to get the status of the query, or -1 on error.
 	*
 	* This will automatically burn the oracle query fee as defined by the oracle interface (burning without
 	* adding to the contract's execution fee reserve). It will fail if the contract doesn't have enough QU.
 	*
 	* The notification callback will be executed when the reply is available or on error.
-	* The callback must be a user procedure of the contract calling qpi.queryOracle() with the procedure input type
+	* The callback must be a user procedure of the contract calling QUERY_ORACLE() with the procedure input type
 	* OracleNotificationInput<OracleInterface> and NoData as output. The procedure must be registered with
 	* REGISTER_USER_PROCEDURE_NOTIFICATION() in REGISTER_USER_FUNCTIONS_AND_PROCEDURES().
-	* Success is indicated by input.status == ORACLE_QUERY_STATUS_SUCCESS.
+	*
+	* In the notification callback, success is indicated by input.status == ORACLE_QUERY_STATUS_SUCCESS.
 	* If an error happened before the query has been created and sent, input.status is ORACLE_QUERY_STATUS_UNKNOWN
-	* and input.queryID is -1 (invalid).
-	* Other errors that may happen with valid input.queryID are input.status == ORACLE_QUERY_STATUS_TIMEOUT and
+	* and input.queryId is -1 (invalid).
+	* Other errors that may happen with valid input.queryId are input.status == ORACLE_QUERY_STATUS_TIMEOUT and
 	* input.status == ORACLE_QUERY_STATUS_UNRESOLVABLE.
 	*/
 	#define QUERY_ORACLE(OracleInterface, query, userProcNotification, timeoutMillisec) qpi.__qpiQueryOracle<OracleInterface>(query, userProcNotification, __id_##userProcNotification, timeoutMillisec)
@@ -3114,14 +3227,14 @@ namespace QPI
 	* @param notificationPeriodInMilliseconds Number of milliseconds between consecutive queries/replies that the contract
 	*           is notified about. Currently, only multiples of 60000 are supported and other values are rejected with an error.
 	* @param notifyWithPreviousReply Whether to immediately notify this contract with the most up-to-date value if any is available.
-	* @return Oracle subscription ID that can be used to get the status of the subscription, or -1 on error.
+	* @return Oracle subscription ID or -1 on error.
 	*
 	* Subscriptions automatically expire at the end of each epoch. So, a common pattern is to call SUBSCRIBE_ORACLE
 	* in BEGIN_EPOCH.
 	*
 	* Subscriptions facilitate sharing common oracle queries among multiple contracts. This saves network resources and allows
 	* to provide a fixed-price subscription for the whole epoch, which is usually much cheaper than the equivalent series of
-	* individual qpi.queryOracle() calls.
+	* individual QUERY_ORACLE() calls.
 	*
 	* The SUBSCRIBE_ORACLE call will automatically burn the oracle subscription fee as defined by the oracle interface
 	* (burning without adding to the contract's execution fee reserve). It will fail if the contract doesn't have enough QU.
@@ -3130,12 +3243,17 @@ namespace QPI
 	* The callback must be a user procedure of the contract calling SUBSCRIBE_ORACLE with the procedure input type
 	* OracleNotificationInput<OracleInterface> and NoData as output. The procedure must be registered with
 	* REGISTER_USER_PROCEDURE_NOTIFICATION() in REGISTER_USER_FUNCTIONS_AND_PROCEDURES().
-	* Success is indicated by input.status == ORACLE_QUERY_STATUS_SUCCESS.
+	*
+	* In the notification callback, success is indicated by input.status == ORACLE_QUERY_STATUS_SUCCESS.
 	* If an error happened before the query has been created and sent, input.status is ORACLE_QUERY_STATUS_UNKNOWN
-	* and input.queryID is -1 (invalid).
-	* Other errors that may happen with valid input.queryID are input.status == ORACLE_QUERY_STATUS_TIMEOUT and
+	* and input.queryId is -1 (invalid).
+	* Other errors that may happen with valid input.queryId are input.status == ORACLE_QUERY_STATUS_TIMEOUT and
 	* input.status == ORACLE_QUERY_STATUS_UNRESOLVABLE.
 	* The timeout of subscription queries is always 60000 milliseconds.
+	*
+	* A contract may subscribe to the same oracle interface with multiple different queries.
+	* However, it cannot subscribe with the same query multiple times.
+	* In order to change the notification period of an existing query, it needs to be unsubscribed first and subscribed again afterwards.
 	*/
 	#define SUBSCRIBE_ORACLE(OracleInterface, query, userProcNotification, notificationPeriodInMilliseconds, notifyWithPreviousReply) qpi.__qpiSubscribeOracle<OracleInterface>(query, userProcNotification, __id_##userProcNotification, notificationPeriodInMilliseconds, notifyWithPreviousReply)
 
