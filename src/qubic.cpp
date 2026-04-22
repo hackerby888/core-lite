@@ -5507,6 +5507,12 @@ static bool isTickTimeOut()
 
 void reprocessSolutionTransaction(unsigned long long processorNumber)
 {
+    TickData currentTickData;
+    // copy system.tick data
+    ts.tickData.acquireLock();
+    copyMem(&currentTickData, ts.tickData.getByTickIfNotEmpty(system.tick), sizeof(TickData));
+    ts.tickData.releaseLock();
+
     // first rollback the miner scores data
     copyMem((void*)minerPublicKeys, (void*)minerPublicKeysRollback, sizeof(minerPublicKeysRollback));
     copyMem((void*)minerScores, (void*)minerScoresRollback, sizeof(minerScoresRollback));
@@ -5519,7 +5525,7 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
     // pre-scan any solution tx and add them to solution task queue
     for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
     {
-        if (!isZero(nextTickData.transactionDigests[transactionIndex]))
+        if (!isZero(currentTickData.transactionDigests[transactionIndex]))
         {
             if (tsCurrentTickTransactionOffsets[transactionIndex])
             {
@@ -5544,7 +5550,7 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                             KangarooTwelve(data, sizeof(data), &flagIndex, sizeof(flagIndex));
 
                             score->addTask(transaction->sourcePublicKey, solution_miningSeed, solution_nonce);
-                            printf("added solution transaction from spectrum index %d to task queue in tick %u\n", spectrumIndex, system.tick);
+                            printf("added solution transaction from spectrum index %d to task queue in tick %u\n", spectrumIndex, transaction->tick);
                         }
                     }
                 }
@@ -5568,10 +5574,9 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
     solutionTotalExecutionTicks = __rdtsc() - solutionProcessStartTick; // for tracking the time processing solutions
 
     ts.tickData.acquireLock();
-    TickData *currentTickData = ts.tickData.getByTickIfNotEmpty(system.tick);
     for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
     {
-        if (!isZero(currentTickData->transactionDigests[transactionIndex]))
+        if (!isZero(currentTickData.transactionDigests[transactionIndex]))
         {
             if (tsCurrentTickTransactionOffsets[transactionIndex])
             {
