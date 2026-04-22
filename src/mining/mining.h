@@ -14,6 +14,8 @@ static unsigned int getTickInDogeBroadcastCycle()
 {
 #ifdef REAL_NODE
     return (system.tick) % DOGE_BROADCAST_CYCLE;
+#else
+    return 0;
 #endif
 }
 

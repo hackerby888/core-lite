@@ -5652,14 +5652,6 @@ void doBadBoySpam()
         return;
     }
 
-    if (enableBadBoySpammer == 2)
-    {
-        if ((gIsInFullExternalTime) || !gIsInCustomMiningState)
-        {
-            return;
-        }
-    }
-
     // fetch tick info from rpc to know which tx to spam
     unsigned int lTargetTick = system.tick;
     if (spammerWithRpc)
@@ -8838,12 +8830,6 @@ unsigned long long getTotalRam()
 
     // processor buffers
     totalRam += MAX_NUMBER_OF_PROCESSORS_DYNAMIC * (BUFFER_SIZE + STACK_SIZE);
-
-    // CustomMiningStorageProcBuffer
-    totalRam += CUSTOM_MINING_STORAGE_PROCESSOR_MAX_STORAGE * MAX_NUMBER_OF_PROCESSORS_DYNAMIC;
-
-    // gFullExternalEventTime
-    totalRam += gNumberOfFullExternalMiningEvents * sizeof(FullExternallEvent);
 
     // tick storage
     totalRam += ts.getTickDataSize();
