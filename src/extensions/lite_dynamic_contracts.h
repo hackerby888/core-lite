@@ -7,6 +7,7 @@
 #ifdef LITE_DYNAMIC_CONTRACTS
 
 #include <dlfcn.h>
+#include <sys/stat.h> // mkdir for the .so cache dir
 #include "extensions/lite_dyn_abi.h" // shared ABI structs (no LITE_DYN_SO_BUILD here -> structs only)
 
 // Upper bound on a deployable .so. Bytes live here (extension state), not in any StateData.
@@ -120,16 +121,17 @@ static void liteDynPatchSlot(unsigned int contractIndex, const LiteRegistration&
     while (nn) p[n++] = num[--nn];
     const char* ext = ".so"; for (const char* c = ext; *c; ++c) p[n++] = *c; p[n] = 0;
 
+    mkdir("contracts_dyn", 0755); // create cache dir; ignore EEXIST
     FILE* f = fopen(p, "wb");
-    if (!f) return false;
+    if (!f) { logToConsole(L"LITEDYN: ERROR cannot write .so (fopen failed)"); return false; }
     fwrite(bytes, 1, len, f);
     fclose(f);
 
     void* h = dlopen(p, RTLD_NOW | RTLD_LOCAL);
-    if (!h) return false;
+    if (!h) { logToConsole(L"LITEDYN: ERROR dlopen failed"); return false; }
     auto setSvc = (void (*)(LiteHostServices*))dlsym(h, "liteSetHostServices");
     auto reg = (void (*)(LiteRegistration*))dlsym(h, "liteContractRegister");
-    if (!setSvc || !reg) { dlclose(h); return false; }
+    if (!setSvc || !reg) { logToConsole(L"LITEDYN: ERROR .so missing entry points"); dlclose(h); return false; }
     setSvc(&g_liteHostServices);
 
     static LiteRegistration registration; // large; keep static
@@ -196,7 +198,8 @@ static bool liteDynUploadComplete() {
     s.version++;
     // Load the native code now (node-local, non-consensus); construction (state init) is
     // deferred to a framed tick step (liteDynConstructPending).
-    liteDynLoadAndPatch(targetSlot, g_liteDynBuf, g_liteDynUpload.totalSize);
+    if (!liteDynLoadAndPatch(targetSlot, g_liteDynBuf, g_liteDynUpload.totalSize))
+        logToConsole(L"LITEDYN: ERROR load/patch failed - slot armed but not runnable");
     g_liteDynUpload.active = false;
 }
 
@@ -244,9 +247,11 @@ static bool liteDynPendingForTick(unsigned int /*tick*/) {
         if (contractSystemProcedures[contractIndex][INITIALIZE]) {
             QpiContextSystemProcedureCall qpiContext(contractIndex, INITIALIZE);
             qpiContext.call();
+            logToConsole(L"LITEDYN: slot constructed (INITIALIZE ran)");
+        } else {
+            logToConsole(L"LITEDYN: ERROR construct skipped - tables unpatched (load failed)");
         }
         s.constructed = true;
-        logToConsole(L"LITEDYN: slot constructed (INITIALIZE ran)");
     }
 }
 

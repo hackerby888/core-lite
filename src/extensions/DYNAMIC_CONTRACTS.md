@@ -422,6 +422,30 @@ binary and all digests byte-identical to upstream.
 
 ---
 
+## Building & enabling the node (read this first)
+
+Enable with the CMake **option** — never via `CMAKE_CXX_FLAGS`:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+  -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
+  -DLITE_DYNAMIC_CONTRACTS=ON          # option in src/CMakeLists.txt -> target_compile_definitions
+cmake --build build --target Qubic -j$(nproc)
+```
+
+- **Do NOT pass it as `-DCMAKE_CXX_FLAGS="-DLITE_DYNAMIC_CONTRACTS"`.** The project resets
+  `CMAKE_CXX_FLAGS` ("Apply Common Flags"), so the define is dropped and the entire feature compiles
+  out **silently** — no error, no reserved slots, no banner. (This cost a long debugging detour.)
+- **Verify it actually compiled in:** `strings build/src/Qubic | grep -a LDYN0` must list `LDYN0..3`,
+  and the node prints a `LITE_DYNAMIC_CONTRACTS ENABLED` banner at startup.
+- A *runnable* testnet build needs the **real** `src/private_settings.h` (do NOT use
+  `-DONLY_LOGGING=ON`, whose empty `broadcastedComputorSeeds` breaks `std::size(...)`).
+  `TESTNET_PREFILL_QUS` funds the computors so a deploy tx has an in-spectrum (funded) source.
+- Run with `--node-mode 3` (MAIN&MAIN, ticks headless). **Wait for ticks to advance** before
+  broadcasting deploy txs — RPC-up ≠ network-ready, and broadcasting too early faults the node.
+- Deploy txs target the dedicated address **`id(99999,0,0,0)`** (not the core zero address).
+
 ## 8. Mainnet safety
 
 ```cpp
