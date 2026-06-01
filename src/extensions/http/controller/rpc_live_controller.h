@@ -27,6 +27,9 @@ class RpcLiveController : public HttpController<RpcLiveController>
     ADD_METHOD_TO(RpcLiveController::broadcastTransaction, "/live/v1/broadcast-transaction", Post);
     ADD_METHOD_TO(RpcLiveController::iposActive, "/live/v1/ipos/active", Get);
     ADD_METHOD_TO(RpcLiveController::querySmartContract, "/live/v1/querySmartContract", Post);
+#ifdef LITE_DYNAMIC_CONTRACTS
+    ADD_METHOD_TO(RpcLiveController::dynRegistry, "/live/v1/dyn-registry", Get);
+#endif
     METHOD_LIST_END
 
     inline void assetsIssuances(const HttpRequestPtr &req,
@@ -498,6 +501,52 @@ class RpcLiveController : public HttpController<RpcLiveController>
         result["ipos"] = iposArray;
         cb(HttpResponse::newHttpJsonResponse(result));
     }
+
+#ifdef LITE_DYNAMIC_CONTRACTS
+    // Dynamic-contract registry: deployed slots + their function/procedure inputTypes (tooling autocomplete).
+    inline void dynRegistry(const HttpRequestPtr &req,
+                            std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        Json::Value json;
+        Json::Value arr(Json::arrayValue);
+        for (unsigned int i = 0; i < LITE_DYN_SLOT_COUNT; i++)
+        {
+            const LiteDynSlot &s = g_liteDynSlots[i];
+            if (!s.armed) continue;
+            unsigned int idx = LITEDYN0_CONTRACT_INDEX + i;
+            Json::Value c;
+            c["index"] = idx;
+            c["constructed"] = s.constructed;
+            c["version"] = s.version;
+            char hex[65];
+            for (int b = 0; b < 32; b++) snprintf(hex + b * 2, 3, "%02x", s.codeHash[b]);
+            c["codeHash"] = std::string(hex, 64);
+            Json::Value fns(Json::arrayValue), procs(Json::arrayValue);
+            for (unsigned int t = 1; t <= 65535; t++)
+            {
+                if (contractUserFunctions[idx][t])
+                {
+                    Json::Value e; e["inputType"] = t;
+                    e["inputSize"] = contractUserFunctionInputSizes[idx][t];
+                    e["outputSize"] = contractUserFunctionOutputSizes[idx][t];
+                    fns.append(e);
+                }
+                if (contractUserProcedures[idx][t])
+                {
+                    Json::Value e; e["inputType"] = t;
+                    e["inputSize"] = contractUserProcedureInputSizes[idx][t];
+                    e["outputSize"] = contractUserProcedureOutputSizes[idx][t];
+                    procs.append(e);
+                }
+            }
+            c["functions"] = fns;
+            c["procedures"] = procs;
+            arr.append(c);
+        }
+        json["contracts"] = arr;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+#endif
 
     inline void querySmartContract(const HttpRequestPtr &req,
                                    std::function<void(const HttpResponsePtr &)> &&cb)
