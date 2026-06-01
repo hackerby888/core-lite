@@ -422,16 +422,21 @@ class RpcLiveController : public HttpController<RpcLiveController>
             std::string txBase64 = (*json)["encodedTransaction"].asString();
             // decode base64
             auto txData = base64_decode(txBase64);
-            std::cout << "tx data size: " << txData.size() << std::endl;
-            Transaction *tx = (Transaction*)txData.data();
-            if (!tx->checkValidity())
+            if (txData.size() < sizeof(Transaction))
             {
                 result["code"] = 3;
-                result["message"] = "Invalid validity";
+                result["message"] = "Transaction too small";
                 cb(HttpResponse::newHttpJsonResponse(result));
                 return;
             }
-            std::cout << "tx json" << HttpUtils::transactionToJson(tx, false) << std::endl;
+            Transaction *tx = (Transaction*)txData.data();
+            if (tx->totalSize() != txData.size() || !tx->checkValidity())
+            {
+                result["code"] = 3;
+                result["message"] = "Invalid transaction";
+                cb(HttpResponse::newHttpJsonResponse(result));
+                return;
+            }
             // verify signature
             {
                 unsigned char digest[32];

@@ -155,6 +155,10 @@ if(TESTNET_LITE_RAM)
     target_compile_definitions(Qubic PRIVATE TESTNET_LITE_RAM)
 endif()
 
+if(LITE_DYNAMIC_CONTRACTS)
+    target_compile_definitions(Qubic PRIVATE LITE_DYNAMIC_CONTRACTS)
+endif()
+
 # Set specific properties for assembly files to avoid C++ flags being applied
 set_source_files_properties(platform/custom_stack.nasm PROPERTIES
     COMPILE_FLAGS ""

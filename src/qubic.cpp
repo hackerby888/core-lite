@@ -36,6 +36,7 @@
 // #define TESTNET
 // #define TESTNET_PREFILL_QUS
 // #define TESTNET_LITE_RAM
+#define LITE_DYNAMIC_CONTRACTS
 #define USE_SWAP
 
 // ============================================================================
@@ -2928,20 +2929,19 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                 moneyFlew = true;
             }
 
+#ifdef LITE_DYNAMIC_CONTRACTS
+            if (transaction->destinationPublicKey == m256i(99999ULL, 0, 0, 0))
+            {
+                // Lite dynamic-contract deploy txs use a dedicated address (NOT the core zero address).
+                liteDynDispatchTx(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
+            }
+            else
+#endif
             if (isZero(transaction->destinationPublicKey))
             {
                 // Destination is system
                 switch (transaction->inputType)
                 {
-#ifdef LITE_DYNAMIC_CONTRACTS
-                case LITE_TX_UPLOAD_BEGIN:
-                case LITE_TX_UPLOAD_CHUNK:
-                case LITE_TX_DEPLOY:
-                {
-                    liteDynDispatchTx(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
-                }
-                break;
-#endif
                 case VOTE_COUNTER_INPUT_TYPE:
                 {
                     voteCounter.processTransactionData(transaction, dataLock);

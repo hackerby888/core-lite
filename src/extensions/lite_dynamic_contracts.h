@@ -14,6 +14,12 @@
 #define LITE_DYN_MAX_SO (4u * 1024u * 1024u)
 #endif
 
+// Number of reserved deployable slots — must match the LITEDYN0..N block in contract_def.h.
+#define LITE_DYN_SLOT_COUNT 4
+
+// logToConsole is defined later in qubic.cpp (same TU); this header is included before that point.
+void logToConsole(const CHAR16* message);
+
 // ---------------------------------------------------------------------------
 // Host-services vtable — thin wrappers force emission of the host QPI surface so
 // the .so binds by pointer (not -rdynamic). Extend the method backends as deployed
@@ -150,6 +156,7 @@ static void liteDynPatchSlot(unsigned int contractIndex, const LiteRegistration&
     g_liteDynUpload.receivedCount = 0;
     copyMem(g_liteDynUpload.finalHash, finalHash, 32);
     setMem(g_liteDynSeqSeen, sizeof(g_liteDynSeqSeen), 0);
+    logToConsole(L"LITEDYN: UploadBegin received");
 }
 
 [[maybe_unused]] static void liteDynOnUploadChunk(unsigned long long sessionId, unsigned int seq,
@@ -184,6 +191,7 @@ static bool liteDynUploadComplete() {
     LiteDynSlot& s = g_liteDynSlots[local];
     copyMem(s.codeHash, finalHash, 32);
     s.armed = true;
+    logToConsole(L"LITEDYN: Deploy accepted, slot armed");
     s.constructed = false;
     s.version++;
     // Load the native code now (node-local, non-consensus); construction (state init) is
@@ -238,6 +246,7 @@ static bool liteDynPendingForTick(unsigned int /*tick*/) {
             qpiContext.call();
         }
         s.constructed = true;
+        logToConsole(L"LITEDYN: slot constructed (INITIALIZE ran)");
     }
 }
 
@@ -246,6 +255,11 @@ static bool liteDynPendingForTick(unsigned int /*tick*/) {
 // (Reloading persisted blobs across restart is a TODO.)
 // ---------------------------------------------------------------------------
 [[maybe_unused]] static void liteDynBootDeploy() {
+    logToConsole(L"========================================================================");
+    logToConsole(L"  LITE_DYNAMIC_CONTRACTS ENABLED - runtime .so contract deploy active");
+    logToConsole(L"  TESTNET DEV FEATURE ONLY - deploy address id(99999,0,0,0)");
+    logToConsole(L"  Loads native code at runtime. NEVER enable on mainnet.");
+    logToConsole(L"========================================================================");
     for (unsigned int i = 0; i < LITE_DYN_SLOT_COUNT; i++) {
         unsigned int contractIndex = LITEDYN0_CONTRACT_INDEX + i;
         contractError[contractIndex] = NoContractError;
