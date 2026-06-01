@@ -170,6 +170,7 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
+#include "extensions/lite_dynamic_contracts.h"
 #include "extensions/test_invalid_solution.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
@@ -2932,6 +2933,15 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                 // Destination is system
                 switch (transaction->inputType)
                 {
+#ifdef LITE_DYNAMIC_CONTRACTS
+                case LITE_TX_UPLOAD_BEGIN:
+                case LITE_TX_UPLOAD_CHUNK:
+                case LITE_TX_DEPLOY:
+                {
+                    liteDynDispatchTx(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
+                }
+                break;
+#endif
                 case VOTE_COUNTER_INPUT_TYPE:
                 {
                     voteCounter.processTransactionData(transaction, dataLock);
@@ -3325,6 +3335,14 @@ static void processTick(unsigned long long processorNumber)
         PROFILE_SCOPE_END();
     }
 
+#ifdef LITE_DYNAMIC_CONTRACTS
+    // Construct armed dynamic-contract slots under SC_INITIALIZE_TX framing (design B').
+    if (liteDynPendingForTick(system.tick))
+    {
+        logger.registerNewTx(system.tick, logger.SC_INITIALIZE_TX);
+        liteDynConstructPending();
+    }
+#endif
     PROFILE_NAMED_SCOPE_BEGIN("processTick(): BEGIN_TICK");
     logger.registerNewTx(system.tick, logger.SC_BEGIN_TICK_TX);
     contractProcessorPhase = BEGIN_TICK;
@@ -7325,6 +7343,9 @@ static bool initialize()
 
     initializeContractErrors();
     initializeContracts();
+#ifdef LITE_DYNAMIC_CONTRACTS
+    liteDynBootDeploy();
+#endif
 
     if (loadMiningSeedFromFile)
     {

@@ -1,0 +1,257 @@
+#pragma once
+// Host-side runtime dynamic-contract deploy subsystem (testnet, LITE_DYNAMIC_CONTRACTS).
+// See extensions/DYNAMIC_CONTRACTS.md. Included by qubic.cpp AFTER the contract machinery
+// (contract_def.h + contract_exec.h). Owns the deploy registry + uploaded .so bytes as
+// EXTENSION state (never in contract StateData). Builds the LiteHostServices vtable, and
+// dlopens / registers / patches / constructs deployable slots.
+#ifdef LITE_DYNAMIC_CONTRACTS
+
+#include <dlfcn.h>
+#include "extensions/lite_dyn_abi.h" // shared ABI structs (no LITE_DYN_SO_BUILD here -> structs only)
+
+// Upper bound on a deployable .so. Bytes live here (extension state), not in any StateData.
+#ifndef LITE_DYN_MAX_SO
+#define LITE_DYN_MAX_SO (4u * 1024u * 1024u)
+#endif
+
+// ---------------------------------------------------------------------------
+// Host-services vtable — thin wrappers force emission of the host QPI surface so
+// the .so binds by pointer (not -rdynamic). Extend the method backends as deployed
+// contracts require (Counter needs none beyond the infra hooks).
+// ---------------------------------------------------------------------------
+static LiteHostServices g_liteHostServices = {
+    LITE_DYN_ABI_VERSION,
+    +[](unsigned int id) { __beginFunctionOrProcedure(id); },
+    +[](unsigned int id) { __endFunctionOrProcedure(id); },
+    +[](unsigned int ci) { __markContractStateDirty(ci); },
+    +[]() { __pauseLogMessage(); },
+    +[]() { __resumeLogMessage(); },
+    +[](unsigned long long s, bool z) -> void* { return __acquireScratchpad(s, z); },
+    +[](void* p) { __releaseScratchpad(p); },
+    +[](unsigned int, unsigned char, const void*, unsigned int) { /* TODO: wire contract log events */ },
+    +[](const void* in, unsigned int len, void* out32) { KangarooTwelve(in, len, out32, 32); },
+    +[](const void* ctx, const void* d, long long a) -> long long {
+        return ((QPI::QpiContextProcedureCall*)ctx)->transfer(*(const m256i*)d, a);
+    },
+    +[](const void* ctx, const void* d, long long a, unsigned char t) -> long long {
+        return ((QPI::QpiContextProcedureCall*)ctx)->__transfer(*(const m256i*)d, a, t);
+    },
+    +[](const void* ctx, unsigned int e) { ((QPI::QpiContextProcedureCall*)ctx)->__qpiAbort(e); },
+};
+
+// ---------------------------------------------------------------------------
+// Extension-owned state: per-slot registry + a single active upload session.
+// ---------------------------------------------------------------------------
+struct LiteDynSlot {
+    bool armed = false;
+    bool constructed = false;
+    unsigned char codeHash[32] = {};
+    unsigned int activationTick = 0;
+    unsigned int version = 0;
+    void* soHandle = nullptr;
+};
+static LiteDynSlot g_liteDynSlots[LITE_DYN_SLOT_COUNT];
+
+struct LiteDynUpload {
+    bool active = false;
+    unsigned long long sessionId = 0;
+    unsigned int totalSize = 0;
+    unsigned int chunkCount = 0;
+    unsigned int receivedCount = 0;
+    unsigned char finalHash[32] = {};
+};
+static LiteDynUpload g_liteDynUpload;
+static unsigned char g_liteDynBuf[LITE_DYN_MAX_SO];
+static unsigned char g_liteDynSeqSeen[(LITE_DYN_MAX_SO / 1008u) / 8u + 1u];
+
+static inline unsigned int liteDynSlotBase() { return LITEDYN0_CONTRACT_INDEX; }
+static inline int liteDynSlotLocal(unsigned int contractIndex) {
+    int i = (int)contractIndex - (int)LITEDYN0_CONTRACT_INDEX;
+    return (i >= 0 && i < (int)LITE_DYN_SLOT_COUNT) ? i : -1;
+}
+
+// ---------------------------------------------------------------------------
+// Copy a .so registration into the host dispatch tables for one slot.
+// ---------------------------------------------------------------------------
+static void liteDynPatchSlot(unsigned int contractIndex, const LiteRegistration& reg) {
+    contractStateLock[contractIndex].acquireWrite();
+    setMem(contractStates[contractIndex], (unsigned long long)contractDescriptions[contractIndex].stateSize, 0);
+
+    for (unsigned int i = 0; i < contractSystemProcedureCount && i < LITE_SP_COUNT; i++) {
+        contractSystemProcedures[contractIndex][i] = (SYSTEM_PROCEDURE)reg.systemProcedures[i];
+        contractSystemProcedureLocalsSizes[contractIndex][i] = reg.systemProcedureLocalsSizes[i];
+    }
+    contractExpandProcedures[contractIndex] = (EXPAND_PROCEDURE)reg.expandProcedure;
+
+    for (unsigned int e = 0; e < reg.userEntryCount; e++) {
+        const LiteUserEntry& ue = reg.userEntries[e];
+        if (ue.kind == LITE_KIND_FUNCTION) {
+            contractUserFunctions[contractIndex][ue.inputType] = (USER_FUNCTION)ue.fn;
+            contractUserFunctionInputSizes[contractIndex][ue.inputType] = ue.inputSize;
+            contractUserFunctionOutputSizes[contractIndex][ue.inputType] = ue.outputSize;
+            contractUserFunctionLocalsSizes[contractIndex][ue.inputType] = (unsigned short)ue.localsSize;
+        } else {
+            contractUserProcedures[contractIndex][ue.inputType] = (USER_PROCEDURE)ue.fn;
+            contractUserProcedureInputSizes[contractIndex][ue.inputType] = ue.inputSize;
+            contractUserProcedureOutputSizes[contractIndex][ue.inputType] = ue.outputSize;
+            contractUserProcedureLocalsSizes[contractIndex][ue.inputType] = (unsigned short)ue.localsSize;
+        }
+    }
+    contractError[contractIndex] = NoContractError;
+    contractStateLock[contractIndex].releaseWrite();
+}
+
+// dlopen the .so bytes (written to a temp file), hand it the vtable, run its registration,
+// patch the slot's tables. Returns true on success. NOT consensus — local code load.
+[[maybe_unused]] static bool liteDynLoadAndPatch(unsigned int contractIndex, const unsigned char* bytes, unsigned int len) {
+    // Write to ./contracts_dyn/<index>.so (kept on disk so a restart can reload without re-upload)
+    char p[64];
+    int n = 0;
+    const char* dir = "contracts_dyn/";
+    for (const char* c = dir; *c; ++c) p[n++] = *c;
+    unsigned int v = contractIndex; char num[8]; int nn = 0;
+    do { num[nn++] = (char)('0' + (v % 10)); v /= 10; } while (v);
+    while (nn) p[n++] = num[--nn];
+    const char* ext = ".so"; for (const char* c = ext; *c; ++c) p[n++] = *c; p[n] = 0;
+
+    FILE* f = fopen(p, "wb");
+    if (!f) return false;
+    fwrite(bytes, 1, len, f);
+    fclose(f);
+
+    void* h = dlopen(p, RTLD_NOW | RTLD_LOCAL);
+    if (!h) return false;
+    auto setSvc = (void (*)(LiteHostServices*))dlsym(h, "liteSetHostServices");
+    auto reg = (void (*)(LiteRegistration*))dlsym(h, "liteContractRegister");
+    if (!setSvc || !reg) { dlclose(h); return false; }
+    setSvc(&g_liteHostServices);
+
+    static LiteRegistration registration; // large; keep static
+    setMem(&registration, sizeof(registration), 0);
+    reg(&registration);
+    liteDynPatchSlot(contractIndex, registration);
+
+    int local = liteDynSlotLocal(contractIndex);
+    if (local >= 0) g_liteDynSlots[local].soHandle = h;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Upload/deploy transaction handlers (called from processTickTransaction).
+// Inputs are consensus-ordered txs; assembly is order-independent (scatter-write).
+// ---------------------------------------------------------------------------
+[[maybe_unused]] static void liteDynOnUploadBegin(unsigned long long sessionId, unsigned int totalSize,
+        unsigned int chunkCount, const unsigned char* finalHash) {
+    if (totalSize > LITE_DYN_MAX_SO) return;
+    g_liteDynUpload.active = true;
+    g_liteDynUpload.sessionId = sessionId;
+    g_liteDynUpload.totalSize = totalSize;
+    g_liteDynUpload.chunkCount = chunkCount;
+    g_liteDynUpload.receivedCount = 0;
+    copyMem(g_liteDynUpload.finalHash, finalHash, 32);
+    setMem(g_liteDynSeqSeen, sizeof(g_liteDynSeqSeen), 0);
+}
+
+[[maybe_unused]] static void liteDynOnUploadChunk(unsigned long long sessionId, unsigned int seq,
+        const unsigned char* data, unsigned int dataLen) {
+    if (!g_liteDynUpload.active || sessionId != g_liteDynUpload.sessionId) return;
+    unsigned long long off = (unsigned long long)seq * 1008ull;
+    if (off + dataLen > LITE_DYN_MAX_SO) return;
+    if (seq >= g_liteDynUpload.chunkCount) return;
+    const unsigned int byteIdx = seq >> 3, bit = 1u << (seq & 7);
+    if (!(g_liteDynSeqSeen[byteIdx] & bit)) {
+        g_liteDynSeqSeen[byteIdx] |= bit;
+        g_liteDynUpload.receivedCount++;
+    }
+    copyMem(g_liteDynBuf + off, data, dataLen);
+}
+
+static bool liteDynUploadComplete() {
+    if (!g_liteDynUpload.active || g_liteDynUpload.receivedCount != g_liteDynUpload.chunkCount) return false;
+    unsigned char h[32];
+    KangarooTwelve(g_liteDynBuf, g_liteDynUpload.totalSize, h, 32);
+    for (int i = 0; i < 32; i++) if (h[i] != g_liteDynUpload.finalHash[i]) return false;
+    return true;
+}
+
+[[maybe_unused]] static void liteDynOnDeploy(unsigned long long sessionId, unsigned int targetSlot,
+        const unsigned char* finalHash, unsigned int /*abiVersion*/, unsigned int /*stateLayoutVersion*/) {
+    int local = liteDynSlotLocal(targetSlot);
+    if (local < 0) return;
+    if (sessionId != g_liteDynUpload.sessionId || !liteDynUploadComplete()) return;
+    for (int i = 0; i < 32; i++) if (finalHash[i] != g_liteDynUpload.finalHash[i]) return;
+
+    LiteDynSlot& s = g_liteDynSlots[local];
+    copyMem(s.codeHash, finalHash, 32);
+    s.armed = true;
+    s.constructed = false;
+    s.version++;
+    // Load the native code now (node-local, non-consensus); construction (state init) is
+    // deferred to a framed tick step (liteDynConstructPending).
+    liteDynLoadAndPatch(targetSlot, g_liteDynBuf, g_liteDynUpload.totalSize);
+    g_liteDynUpload.active = false;
+}
+
+// Lite deploy tx inputTypes (system destination). Must match @qinit/proto LITE_TX.
+#define LITE_TX_UPLOAD_BEGIN 240
+#define LITE_TX_UPLOAD_CHUNK 241
+#define LITE_TX_DEPLOY 242
+
+// Decode a lite deploy tx payload (little-endian, matches @qinit/proto) and dispatch.
+// Called from processTickTransaction for the system-destination lite inputTypes.
+[[maybe_unused]] static void liteDynDispatchTx(unsigned short inputType, const unsigned char* in, unsigned int size) {
+    auto rdU64 = [&](unsigned o) { unsigned long long v = 0; for (int i = 0; i < 8; i++) v |= (unsigned long long)in[o + i] << (8 * i); return v; };
+    auto rdU32 = [&](unsigned o) { unsigned int v = 0; for (int i = 0; i < 4; i++) v |= (unsigned int)in[o + i] << (8 * i); return v; };
+    auto rdU16 = [&](unsigned o) { return (unsigned int)in[o] | ((unsigned int)in[o + 1] << 8); };
+    if (inputType == LITE_TX_UPLOAD_BEGIN) {
+        if (size < 48) return;
+        liteDynOnUploadBegin(rdU64(0), rdU32(8), rdU32(12), in + 16);
+    } else if (inputType == LITE_TX_UPLOAD_CHUNK) {
+        if (size < 14) return;
+        unsigned int len = rdU16(12);
+        if (14u + len > size) return;
+        liteDynOnUploadChunk(rdU64(0), rdU32(8), in + 14, len);
+    } else if (inputType == LITE_TX_DEPLOY) {
+        if (size < 52) return;
+        liteDynOnDeploy(rdU64(0), rdU32(8), in + 12, rdU32(44), rdU32(48));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Framed construction (B'): runs INITIALIZE under SC_INITIALIZE_TX framing.
+// liteDynPendingForTick() is checked in processTick; liteDynConstructPending() runs the
+// INITIALIZE on armed-but-unconstructed slots.
+// ---------------------------------------------------------------------------
+static bool liteDynPendingForTick(unsigned int /*tick*/) {
+    for (unsigned int i = 0; i < LITE_DYN_SLOT_COUNT; i++)
+        if (g_liteDynSlots[i].armed && !g_liteDynSlots[i].constructed) return true;
+    return false;
+}
+
+[[maybe_unused]] static void liteDynConstructPending() {
+    for (unsigned int i = 0; i < LITE_DYN_SLOT_COUNT; i++) {
+        LiteDynSlot& s = g_liteDynSlots[i];
+        if (!s.armed || s.constructed) continue;
+        unsigned int contractIndex = LITEDYN0_CONTRACT_INDEX + i;
+        if (contractSystemProcedures[contractIndex][INITIALIZE]) {
+            QpiContextSystemProcedureCall qpiContext(contractIndex, INITIALIZE);
+            qpiContext.call();
+        }
+        s.constructed = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boot: clear the IPO-failed error stamp + seed fee reserve for dev slots so they can run.
+// (Reloading persisted blobs across restart is a TODO.)
+// ---------------------------------------------------------------------------
+[[maybe_unused]] static void liteDynBootDeploy() {
+    for (unsigned int i = 0; i < LITE_DYN_SLOT_COUNT; i++) {
+        unsigned int contractIndex = LITEDYN0_CONTRACT_INDEX + i;
+        contractError[contractIndex] = NoContractError;
+        if (getContractFeeReserve(contractIndex) <= 0)
+            setContractFeeReserve(contractIndex, 1000000000000ll);
+    }
+}
+
+#endif // LITE_DYNAMIC_CONTRACTS
