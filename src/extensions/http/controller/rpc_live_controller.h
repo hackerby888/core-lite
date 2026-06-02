@@ -587,6 +587,17 @@ class RpcLiveController : public HttpController<RpcLiveController>
                 cb(res);
                 return;
             }
+            // Guard: unregistered function (e.g. a dynamic slot whose .so failed to load) would
+            // otherwise call a null fn ptr (contract_exec.h has no null check) and crash the node.
+            if (!contractUserFunctions[contractIndex][inputType])
+            {
+                result["code"] = 3;
+                result["message"] = "No function registered at the given inputType";
+                auto res = HttpResponse::newHttpJsonResponse(result);
+                res->setStatusCode(k400BadRequest);
+                cb(res);
+                return;
+            }
             QpiContextUserFunctionCall qpiContext(contractIndex);
             auto errorCode = qpiContext.call(inputType, inputData.data(), inputSize);
             if (errorCode == NoContractError)

@@ -102,6 +102,36 @@ struct LiteContractDescriptor {
 // ===========================================================================
 #ifdef LITE_DYN_SO_BUILD
 
+// QPI trivial mem templates: declared in qpi.h, normally defined in qpi_trivial_impl.h
+// (too heavy to include here — pulls four_q/k12/globals). Define them locally so the .so
+// self-resolves contract state/array assignment (else dlopen RTLD_NOW fails on copyMemory).
+namespace QPI
+{
+    template <typename T1, typename T2>
+    inline void copyMemory(T1& dst, const T2& src)
+    {
+        static_assert(sizeof(dst) == sizeof(src), "copyMemory size mismatch");
+        __builtin_memcpy(&dst, &src, sizeof(dst));
+    }
+    template <typename T1, typename T2>
+    inline void copyToBuffer(T1& dst, const T2& src, bool setTailToZero)
+    {
+        __builtin_memcpy(&dst, &src, sizeof(src));
+        if (sizeof(dst) > sizeof(src) && setTailToZero)
+            __builtin_memset(reinterpret_cast<unsigned char*>(&dst) + sizeof(src), 0, sizeof(dst) - sizeof(src));
+    }
+    template <typename T1, typename T2>
+    inline void copyFromBuffer(T1& dst, const T2& src)
+    {
+        __builtin_memcpy(&dst, &src, sizeof(dst));
+    }
+    template <typename T>
+    inline void setMemory(T& dst, unsigned char value)
+    {
+        __builtin_memset(&dst, value, sizeof(dst));
+    }
+}
+
 // Set by the host at dlopen, before any contract code runs.
 inline LiteHostServices* g_liteHost = nullptr;
 inline LiteRegistration* g_liteReg = nullptr;   // active during liteContractRegister()
