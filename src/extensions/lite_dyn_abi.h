@@ -65,6 +65,27 @@ struct LiteHostServices {
     unsigned short (*epoch)(const void* ctx);
     unsigned int   (*tick)(const void* ctx);
     int            (*numberOfTickTransactions)(const void* ctx);
+    // spectrum / identity reads (struct returns via out-ptr).
+    unsigned char  (*getEntity)(const void* ctx, const void* id32, void* entityOut); // bit; entityOut = QPI::Entity*
+    long long      (*queryFeeReserve)(const void* ctx, unsigned int contractIndex);
+    void           (*nextId)(const void* ctx, const void* id32, void* out32);
+    void           (*prevId)(const void* ctx, const void* id32, void* out32);
+    unsigned char  (*isContractId)(const void* ctx, const void* id32);
+    void           (*arbitrator)(const void* ctx, void* out32);
+    void           (*computor)(const void* ctx, unsigned short index, void* out32);
+    // time (from the tick's timestamp).
+    unsigned char  (*day)(const void* ctx);
+    unsigned char  (*year)(const void* ctx);
+    unsigned char  (*hour)(const void* ctx);
+    unsigned char  (*minute)(const void* ctx);
+    unsigned char  (*month)(const void* ctx);
+    unsigned char  (*second)(const void* ctx);
+    unsigned short (*millisecond)(const void* ctx);
+    void           (*now)(const void* ctx, void* dateAndTimeOut);
+    // etalon-tick digests (m256i via out-ptr).
+    void           (*prevSpectrumDigest)(const void* ctx, void* out32);
+    void           (*prevUniverseDigest)(const void* ctx, void* out32);
+    void           (*prevComputerDigest)(const void* ctx, void* out32);
 };
 
 // One registered user function/procedure (filled by the .so during liteContractRegister).
@@ -187,6 +208,24 @@ long long QPI::QpiContextProcedureCall::burn(long long amount, unsigned int cont
 unsigned short QPI::QpiContextFunctionCall::epoch() const { return g_liteHost->epoch(this); }
 unsigned int QPI::QpiContextFunctionCall::tick() const { return g_liteHost->tick(this); }
 int QPI::QpiContextFunctionCall::numberOfTickTransactions() const { return g_liteHost->numberOfTickTransactions(this); }
+QPI::bit QPI::QpiContextFunctionCall::getEntity(const m256i& id, QPI::Entity& entity) const { return g_liteHost->getEntity(this, &id, &entity); }
+long long QPI::QpiContextFunctionCall::queryFeeReserve(unsigned int contractIndex) const { return g_liteHost->queryFeeReserve(this, contractIndex); }
+m256i QPI::QpiContextFunctionCall::nextId(const m256i& currentId) const { m256i r; g_liteHost->nextId(this, &currentId, &r); return r; }
+m256i QPI::QpiContextFunctionCall::prevId(const m256i& currentId) const { m256i r; g_liteHost->prevId(this, &currentId, &r); return r; }
+QPI::bit QPI::QpiContextFunctionCall::isContractId(const QPI::id& id) const { return g_liteHost->isContractId(this, &id); }
+QPI::id QPI::QpiContextFunctionCall::arbitrator() const { m256i r; g_liteHost->arbitrator(this, &r); return r; }
+QPI::id QPI::QpiContextFunctionCall::computor(unsigned short index) const { m256i r; g_liteHost->computor(this, index, &r); return r; }
+unsigned char QPI::QpiContextFunctionCall::day() const { return g_liteHost->day(this); }
+unsigned char QPI::QpiContextFunctionCall::year() const { return g_liteHost->year(this); }
+unsigned char QPI::QpiContextFunctionCall::hour() const { return g_liteHost->hour(this); }
+unsigned char QPI::QpiContextFunctionCall::minute() const { return g_liteHost->minute(this); }
+unsigned char QPI::QpiContextFunctionCall::month() const { return g_liteHost->month(this); }
+unsigned char QPI::QpiContextFunctionCall::second() const { return g_liteHost->second(this); }
+unsigned short QPI::QpiContextFunctionCall::millisecond() const { return g_liteHost->millisecond(this); }
+QPI::DateAndTime QPI::QpiContextFunctionCall::now() const { QPI::DateAndTime d; g_liteHost->now(this, &d); return d; }
+m256i QPI::QpiContextFunctionCall::getPrevSpectrumDigest() const { m256i r; g_liteHost->prevSpectrumDigest(this, &r); return r; }
+m256i QPI::QpiContextFunctionCall::getPrevUniverseDigest() const { m256i r; g_liteHost->prevUniverseDigest(this, &r); return r; }
+m256i QPI::QpiContextFunctionCall::getPrevComputerDigest() const { m256i r; g_liteHost->prevComputerDigest(this, &r); return r; }
 
 // ---- registration: record into g_liteReg instead of host tables ----
 // entryPoint value must match REGISTER_USER_FUNCTIONS_AND_PROCEDURES_CALL in contract_def.h
