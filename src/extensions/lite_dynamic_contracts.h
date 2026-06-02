@@ -35,7 +35,10 @@ static LiteHostServices g_liteHostServices = {
     +[]() { __resumeLogMessage(); },
     +[](unsigned long long s, bool z) -> void* { return __acquireScratchpad(s, z); },
     +[](void* p) { __releaseScratchpad(p); },
-    +[](unsigned int, unsigned char, const void*, unsigned int) { /* TODO: wire contract log events */ },
+    +[](unsigned int ci, unsigned char type, const void* msg, unsigned int size) {
+        *((unsigned int*)(void*)msg) = ci;           // contractIndex into first 4 bytes (host convention)
+        qLogger::logMessage(size, type, msg);        // type = CONTRACT_{ERROR,WARNING,INFORMATION,DEBUG}_MESSAGE
+    },
     +[](const void* in, unsigned int len, void* out32) { KangarooTwelve(in, len, out32, 32); },
     +[](const void* ctx, const void* d, long long a) -> long long {
         return ((QPI::QpiContextProcedureCall*)ctx)->transfer(*(const m256i*)d, a);

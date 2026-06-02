@@ -186,10 +186,12 @@ static void __resumeLogMessage() { g_liteHost->resumeLog(); }
 static void* __acquireScratchpad(unsigned long long size, bool initZero) { return g_liteHost->acquireScratch(size, initZero); }
 static void __releaseScratchpad(void* ptr) { g_liteHost->releaseScratch(ptr); }
 
-template <typename T> static void __logContractDebugMessage(unsigned int ci, T& m)   { g_liteHost->logBytes(ci, 0, &m, sizeof(T)); }
-template <typename T> static void __logContractErrorMessage(unsigned int ci, T& m)   { g_liteHost->logBytes(ci, 1, &m, sizeof(T)); }
-template <typename T> static void __logContractInfoMessage(unsigned int ci, T& m)    { g_liteHost->logBytes(ci, 2, &m, sizeof(T)); }
-template <typename T> static void __logContractWarningMessage(unsigned int ci, T& m) { g_liteHost->logBytes(ci, 3, &m, sizeof(T)); }
+// level = host message type (CONTRACT_ERROR=4, WARNING=5, INFORMATION=6, DEBUG=7); size excludes the
+// struct's _terminator, matching the host's logMessage(offsetof(T,_terminator), type, &msg) convention.
+template <typename T> static void __logContractDebugMessage(unsigned int ci, T& m)   { g_liteHost->logBytes(ci, 7, &m, (unsigned int)__builtin_offsetof(T, _terminator)); }
+template <typename T> static void __logContractErrorMessage(unsigned int ci, T& m)   { g_liteHost->logBytes(ci, 4, &m, (unsigned int)__builtin_offsetof(T, _terminator)); }
+template <typename T> static void __logContractInfoMessage(unsigned int ci, T& m)    { g_liteHost->logBytes(ci, 6, &m, (unsigned int)__builtin_offsetof(T, _terminator)); }
+template <typename T> static void __logContractWarningMessage(unsigned int ci, T& m) { g_liteHost->logBytes(ci, 5, &m, (unsigned int)__builtin_offsetof(T, _terminator)); }
 
 // ---- templated QpiContext method (host-TU template; define locally, forward to backend) ----
 template <typename T>

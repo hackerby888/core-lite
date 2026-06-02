@@ -29,6 +29,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
     ADD_METHOD_TO(RpcLiveController::querySmartContract, "/live/v1/querySmartContract", Post);
 #ifdef LITE_DYNAMIC_CONTRACTS
     ADD_METHOD_TO(RpcLiveController::dynRegistry, "/live/v1/dyn-registry", Get);
+    ADD_METHOD_TO(RpcLiveController::logStats, "/live/v1/log-stats", Get);
 #endif
     METHOD_LIST_END
 
@@ -549,6 +550,35 @@ class RpcLiveController : public HttpController<RpcLiveController>
         json["slotBase"] = (unsigned int)LITEDYN0_CONTRACT_INDEX;
         json["slotCount"] = (unsigned int)LITE_DYN_SLOT_COUNT;
         json["contracts"] = arr;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+
+    // Running logId + the last few stored log entries (type + payload) — for verifying contract logs.
+    inline void logStats(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        Json::Value json;
+        unsigned long long cur = qLogger::logId;
+        json["logId"] = (Json::UInt64)cur;
+        Json::Value arr(Json::arrayValue);
+        unsigned long long start = cur > 16 ? cur - 16 : 0;
+        for (unsigned long long id = start; id < cur; id++)
+        {
+            auto it = qLogger::tmpLogBuffer.find(id);
+            if (it == qLogger::tmpLogBuffer.end() || !it->second) continue;
+            const unsigned char *b = (const unsigned char *)it->second;
+            unsigned int szType = *((unsigned int *)(b + 6));
+            unsigned int msgSize = szType & 0xFFFFFF;
+            Json::Value e;
+            e["logId"] = (Json::UInt64)id;
+            e["type"] = (unsigned int)(szType >> 24);
+            if (msgSize >= 4) e["contractIndex"] = *((unsigned int *)(b + 26));
+            char hx[65];
+            unsigned int n = msgSize < 32 ? msgSize : 32;
+            for (unsigned int k = 0; k < n; k++) snprintf(hx + k * 2, 3, "%02x", b[26 + k]);
+            e["payloadHex"] = std::string(hx, n * 2);
+            arr.append(e);
+        }
+        json["recent"] = arr;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 #endif
