@@ -509,40 +509,45 @@ class RpcLiveController : public HttpController<RpcLiveController>
     {
         Json::Value json;
         Json::Value arr(Json::arrayValue);
+        // All reserved slots (armed + free) so tooling can resolve name -> slot and auto-allocate.
         for (unsigned int i = 0; i < LITE_DYN_SLOT_COUNT; i++)
         {
             const LiteDynSlot &s = g_liteDynSlots[i];
-            if (!s.armed) continue;
             unsigned int idx = LITEDYN0_CONTRACT_INDEX + i;
             Json::Value c;
             c["index"] = idx;
+            c["armed"] = s.armed;
             c["constructed"] = s.constructed;
             c["version"] = s.version;
+            c["name"] = std::string(s.name);
             char hex[65];
             for (int b = 0; b < 32; b++) snprintf(hex + b * 2, 3, "%02x", s.codeHash[b]);
             c["codeHash"] = std::string(hex, 64);
             Json::Value fns(Json::arrayValue), procs(Json::arrayValue);
-            for (unsigned int t = 1; t <= 65535; t++)
-            {
-                if (contractUserFunctions[idx][t])
+            if (s.armed)
+                for (unsigned int t = 1; t <= 65535; t++)
                 {
-                    Json::Value e; e["inputType"] = t;
-                    e["inputSize"] = contractUserFunctionInputSizes[idx][t];
-                    e["outputSize"] = contractUserFunctionOutputSizes[idx][t];
-                    fns.append(e);
+                    if (contractUserFunctions[idx][t])
+                    {
+                        Json::Value e; e["inputType"] = t;
+                        e["inputSize"] = contractUserFunctionInputSizes[idx][t];
+                        e["outputSize"] = contractUserFunctionOutputSizes[idx][t];
+                        fns.append(e);
+                    }
+                    if (contractUserProcedures[idx][t])
+                    {
+                        Json::Value e; e["inputType"] = t;
+                        e["inputSize"] = contractUserProcedureInputSizes[idx][t];
+                        e["outputSize"] = contractUserProcedureOutputSizes[idx][t];
+                        procs.append(e);
+                    }
                 }
-                if (contractUserProcedures[idx][t])
-                {
-                    Json::Value e; e["inputType"] = t;
-                    e["inputSize"] = contractUserProcedureInputSizes[idx][t];
-                    e["outputSize"] = contractUserProcedureOutputSizes[idx][t];
-                    procs.append(e);
-                }
-            }
             c["functions"] = fns;
             c["procedures"] = procs;
             arr.append(c);
         }
+        json["slotBase"] = (unsigned int)LITEDYN0_CONTRACT_INDEX;
+        json["slotCount"] = (unsigned int)LITE_DYN_SLOT_COUNT;
         json["contracts"] = arr;
         cb(HttpResponse::newHttpJsonResponse(json));
     }

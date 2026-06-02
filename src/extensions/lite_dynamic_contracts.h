@@ -56,6 +56,7 @@ struct LiteDynSlot {
     unsigned int activationTick = 0;
     unsigned int version = 0;
     void* soHandle = nullptr;
+    char name[32] = {}; // contract name from the deploy tx; lets tooling resolve name -> slot
 };
 static LiteDynSlot g_liteDynSlots[LITE_DYN_SLOT_COUNT];
 
@@ -111,15 +112,16 @@ static void liteDynPatchSlot(unsigned int contractIndex, const LiteRegistration&
 // dlopen the .so bytes (written to a temp file), hand it the vtable, run its registration,
 // patch the slot's tables. Returns true on success. NOT consensus — local code load.
 [[maybe_unused]] static bool liteDynLoadAndPatch(unsigned int contractIndex, const unsigned char* bytes, unsigned int len) {
-    // Write to ./contracts_dyn/<index>.so (kept on disk so a restart can reload without re-upload)
-    char p[64];
-    int n = 0;
-    const char* dir = "contracts_dyn/";
-    for (const char* c = dir; *c; ++c) p[n++] = *c;
-    unsigned int v = contractIndex; char num[8]; int nn = 0;
-    do { num[nn++] = (char)('0' + (v % 10)); v /= 10; } while (v);
-    while (nn) p[n++] = num[--nn];
-    const char* ext = ".so"; for (const char* c = ext; *c; ++c) p[n++] = *c; p[n] = 0;
+    int local = liteDynSlotLocal(contractIndex);
+    unsigned int ver = (local >= 0) ? g_liteDynSlots[local].version : 0;
+
+    // Path: contracts_dyn/<slot>_<version>.so. The version suffix means a redeploy never overwrites a
+    // file still mmap'd by a prior dlopen (truncating a mapped image crashes the node on its next call).
+    char p[64]; int n = 0;
+    auto putUint = [&](unsigned int v) { char num[12]; int nn = 0; do { num[nn++] = (char)('0' + (v % 10)); v /= 10; } while (v); while (nn) p[n++] = num[--nn]; };
+    for (const char* c = "contracts_dyn/"; *c; ++c) p[n++] = *c;
+    putUint(contractIndex); p[n++] = '_'; putUint(ver);
+    for (const char* c = ".so"; *c; ++c) p[n++] = *c; p[n] = 0;
 
     mkdir("contracts_dyn", 0755); // create cache dir; ignore EEXIST
     FILE* f = fopen(p, "wb");
@@ -139,8 +141,11 @@ static void liteDynPatchSlot(unsigned int contractIndex, const LiteRegistration&
     reg(&registration);
     liteDynPatchSlot(contractIndex, registration);
 
-    int local = liteDynSlotLocal(contractIndex);
-    if (local >= 0) g_liteDynSlots[local].soHandle = h;
+    if (local >= 0) {
+        void* old = g_liteDynSlots[local].soHandle;
+        g_liteDynSlots[local].soHandle = h;
+        if (old && old != h) dlclose(old); // free prior mapping AFTER tables point to the new .so
+    }
     return true;
 }
 
@@ -184,7 +189,8 @@ static bool liteDynUploadComplete() {
 }
 
 [[maybe_unused]] static void liteDynOnDeploy(unsigned long long sessionId, unsigned int targetSlot,
-        const unsigned char* finalHash, unsigned int /*abiVersion*/, unsigned int /*stateLayoutVersion*/) {
+        const unsigned char* finalHash, unsigned int /*abiVersion*/, unsigned int /*stateLayoutVersion*/,
+        const char* name) {
     int local = liteDynSlotLocal(targetSlot);
     if (local < 0) return;
     if (sessionId != g_liteDynUpload.sessionId || !liteDynUploadComplete()) return;
@@ -192,6 +198,7 @@ static bool liteDynUploadComplete() {
 
     LiteDynSlot& s = g_liteDynSlots[local];
     copyMem(s.codeHash, finalHash, 32);
+    if (name) { copyMem(s.name, name, 32); s.name[31] = 0; }
     s.armed = true;
     logToConsole(L"LITEDYN: Deploy accepted, slot armed");
     s.constructed = false;
@@ -224,7 +231,8 @@ static bool liteDynUploadComplete() {
         liteDynOnUploadChunk(rdU64(0), rdU32(8), in + 14, len);
     } else if (inputType == LITE_TX_DEPLOY) {
         if (size < 52) return;
-        liteDynOnDeploy(rdU64(0), rdU32(8), in + 12, rdU32(44), rdU32(48));
+        liteDynOnDeploy(rdU64(0), rdU32(8), in + 12, rdU32(44), rdU32(48),
+                        (size >= 84) ? (const char*)(in + 52) : nullptr);
     }
 }
 
