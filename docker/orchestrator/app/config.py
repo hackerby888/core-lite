@@ -211,6 +211,12 @@ class OrchestratorConfig(BaseSettings):
     operator_alias: Optional[str] = None
     node_mode: Optional[int] = None
     seeds: str = ""
+    # Auto-recovery: if the tick processor sits on the same system.tick for longer
+    # than N seconds AND the node already has a tickData for system.tick+1 AND at
+    # least one peer reports a tick beyond it (= network is ahead), automatically
+    # wipe the local tickData for system.tick+1 so the request loop re-fetches a
+    # fresh copy from peers. 0 disables. Suggested production value: 60-120.
+    auto_flush_stuck_seconds: int = 0
 
     # Management API
     management_api_port: int = 8080
@@ -263,6 +269,8 @@ class OrchestratorConfig(BaseSettings):
         seeds = self.get_seeds_list()
         if seeds:
             args.extend(["--seeds", ",".join(seeds)])
+        if self.auto_flush_stuck_seconds and self.auto_flush_stuck_seconds > 0:
+            args.extend(["--auto-flush-stuck-seconds", str(self.auto_flush_stuck_seconds)])
         return args
 
 

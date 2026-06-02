@@ -26,6 +26,10 @@ services:
       # QUBIC_OPERATOR_SEED: ""
       # QUBIC_OPERATOR: ""
       # QUBIC_OPERATOR_ALIAS: ""
+      # Auto-recovery: if the node sits on the same tick for >N seconds AND has
+      # a tickData for the next tick AND a peer reports a tick beyond it, wipe
+      # the local tickData of system.tick+1 and re-fetch from peers. 0 disables.
+      QUBIC_AUTO_FLUSH_STUCK_SECONDS: "120"
       # Watchdog
       QUBIC_WATCHDOG__ENABLED: "true"
       QUBIC_WATCHDOG__MAX_RESTARTS: "5"

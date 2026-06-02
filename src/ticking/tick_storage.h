@@ -1311,10 +1311,10 @@ public:
         {
             ASSERT(tickIndex < tickDataLength);
 #ifdef USE_SWAP
-            return ticksSwapVM.getPtr(tickIndex * NUMBER_OF_COMPUTORS);
+            return ticksSwapVM.getPtr((unsigned long long)tickIndex * NUMBER_OF_COMPUTORS);
 #else
-            qVirtualCommit(ticksPtr + tickIndex * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
-            return ticksPtr + tickIndex * NUMBER_OF_COMPUTORS;
+            qVirtualCommit(ticksPtr + (unsigned long long)tickIndex * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
+            return ticksPtr + (unsigned long long)tickIndex * NUMBER_OF_COMPUTORS;
 #endif
         }
 
@@ -1323,10 +1323,10 @@ public:
         {
             ASSERT(tickInCurrentEpochStorage(tick));
 #ifdef USE_SWAP
-            return ticksSwapVM.getPtr(tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS);
+            return ticksSwapVM.getPtr((unsigned long long)tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS);
 #else
-            qVirtualCommit(ticksPtr + tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
-            return ticksPtr + tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS;
+            qVirtualCommit(ticksPtr + (unsigned long long)tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
+            return ticksPtr + (unsigned long long)tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS;
 #endif
         }
 
@@ -1335,10 +1335,10 @@ public:
         {
             ASSERT(tickInPreviousEpochStorage(tick));
 #ifdef USE_SWAP
-            return ticksSwapVM.getPtr(tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS);
+            return ticksSwapVM.getPtr((unsigned long long)tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS);
 #else
-            qVirtualCommit(ticksPtr + tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
-            return ticksPtr + tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS;
+            qVirtualCommit(ticksPtr + (unsigned long long)tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
+            return ticksPtr + (unsigned long long)tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS;
 #endif
         }
 

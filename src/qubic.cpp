@@ -221,6 +221,13 @@ struct Processor : public CustomStack
 // Dynamic peers that can be added using command line
 std::vector<IPv4Address> knownPublicPeersDynamic;
 
+// Auto-recovery: if the tick processor sits on the same system.tick for longer
+// than `autoFlushStuckSeconds`, wipe the local tickData + transaction offsets
+// for system.tick+1 so the normal request loop re-fetches from peers. Set to 0
+// to disable. Reasonable production values: 60 (Default)-120 seconds. Populated
+// by --auto-flush-stuck-seconds.
+static int autoFlushStuckSeconds = 60;
+
 static std::vector<int> mainAuxStatusChangeStack;
 static volatile unsigned char mainAuxStatus = 0;
 static volatile unsigned char isVirtualMachine = 0; // indicate that it is running on VM, to avoid running some functions for BM  (for testing and developing purposes)
@@ -6170,6 +6177,72 @@ static void tickProcessor(void*, unsigned long long processorNumber)
         const unsigned long long curTimeTick = __rdtsc();
         const unsigned int nextTick = system.tick + 1;
 
+        // qli-diag: auto-recovery for a node stuck on a corrupt tickData.
+        // If system.tick hasn't advanced for `autoFlushStuckSeconds` seconds,
+        // AND we have a tickData for system.tick+1 (epoch == current),
+        // AND at least one peer reports a tick beyond system.tick+1
+        // (proving the network is ahead and we're the stuck one),
+        // wipe local tickData + transaction offsets for system.tick+1 so
+        // the request loop re-fetches a fresh copy from peers.
+        static unsigned int autoFlushLastTick = 0;
+        static unsigned long long autoFlushLastTickTime = 0;
+        if (autoFlushStuckSeconds > 0 && frequency > 0)
+        {
+            if (system.tick != autoFlushLastTick)
+            {
+                autoFlushLastTick = system.tick;
+                autoFlushLastTickTime = curTimeTick;
+            }
+            else if ((curTimeTick - autoFlushLastTickTime)
+                     > (unsigned long long)autoFlushStuckSeconds * frequency)
+            {
+                if (ts.tickInCurrentEpochStorage(nextTick))
+                {
+                    const unsigned int idx = ts.tickToIndexCurrentEpoch(nextTick);
+                    const bool haveTickData = (ts.tickData[idx].epoch == system.epoch);
+                    bool networkAhead = false;
+                    for (unsigned int pi = 0;
+                         pi < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS;
+                         pi++)
+                    {
+                        if (peers[pi].tcp4Protocol
+                            && peers[pi].isConnectedAccepted
+                            && !peers[pi].isClosing
+                            && peers[pi].peerReportedTick > nextTick)
+                        {
+                            networkAhead = true;
+                            break;
+                        }
+                    }
+                    if (haveTickData && networkAhead)
+                    {
+                        ts.tickData.acquireLock();
+                        setMem(&ts.tickData[idx], sizeof(TickData), 0);
+                        ts.tickData.releaseLock();
+                        auto* offsets = ts.tickTransactionOffsets.getByTickIndex(idx);
+                        if (offsets)
+                        {
+                            setMem(offsets,
+                                   NUMBER_OF_TRANSACTIONS_PER_TICK * sizeof(unsigned long long),
+                                   0);
+                        }
+                        setText(message, L"AUTO-FLUSH: stuck on tick ");
+                        appendNumber(message, system.tick, false);
+                        appendText(message, L" for >");
+                        appendNumber(message, autoFlushStuckSeconds, false);
+                        appendText(message, L"s, network ahead of tick ");
+                        appendNumber(message, nextTick, false);
+                        appendText(message, L"; wiped local tickData of ");
+                        appendNumber(message, nextTick, false);
+                        appendText(message, L" to force re-fetch.");
+                        logToConsole(message);
+                    }
+                }
+                // Reset timer so we don't spam (next attempt only after another threshold).
+                autoFlushLastTickTime = curTimeTick;
+            }
+        }
+
         if (broadcastedComputors.computors.epoch == system.epoch
             && ts.tickInCurrentEpochStorage(nextTick))
         {
@@ -7155,7 +7228,7 @@ static bool initialize()
 #if TICK_STORAGE_AUTOSAVE_MODE
         bool canLoadFromFile = loadAllNodeStates();
 
-        // loading might have changed system.tick, so restart pendingTxsPool 
+        // loading might have changed system.tick, so restart pendingTxsPool
         pendingTxsPool.beginEpoch(system.tick);
 #else
         bool canLoadFromFile = false;
@@ -7622,7 +7695,7 @@ static void logInfo()
     appendNumber(message, numberOfDisseminatedRequests - prevNumberOfDisseminatedRequests, TRUE);
     appendText(message, L"] ");
 
-    unsigned int numberOfConnectingSlots = 0, numberOfConnectedSlots = 0;
+    unsigned int numberOfConnectingSlots = 0, numberOfConnectedSlots = 0, numberOfHandshakedSlots = 0;
     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
     {
         if (peers[i].tcp4Protocol)
@@ -7634,12 +7707,18 @@ static void logInfo()
             else
             {
                 numberOfConnectedSlots++;
+                if (peers[i].exchangedPublicPeers)
+                {
+                    numberOfHandshakedSlots++;
+                }
             }
         }
     }
     appendNumber(message, numberOfConnectingSlots, FALSE);
     appendText(message, L"|");
     appendNumber(message, numberOfConnectedSlots, FALSE);
+    appendText(message, L"|");
+    appendNumber(message, numberOfHandshakedSlots, FALSE);
 
     appendText(message, L" ");
     appendNumber(message, numberOfHandshakedPublicPeers, TRUE);
@@ -7648,6 +7727,51 @@ static void logInfo()
     appendText(message, L"/");    
     appendNumber(message, numberOfPublicPeers, TRUE);
     appendText(message, listOfPeersIsStatic ? L" Static" : L" Dynamic");
+#if USE_FUTURE_TICK_PREFETCH
+    {
+        // Catch-up indicator: how far behind the network tip we are and
+        // the current fan-out prefetch depth (2 = in sync, >2 = catching up).
+        unsigned int networkTipTick = 0;
+        for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
+        {
+            if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing)
+            {
+                if (peers[i].peerReportedTick > networkTipTick)
+                    networkTipTick = peers[i].peerReportedTick;
+            }
+        }
+        const unsigned int ticksBehind = networkTipTick > system.tick
+            ? (networkTipTick - system.tick) : 0;
+        unsigned int prefetchDepth = 2;
+        if (ticksBehind >= 2)
+            prefetchDepth = (ticksBehind < 20) ? ticksBehind : 20;
+        appendText(message, L" behind=");
+        appendNumber(message, ticksBehind, FALSE);
+        appendText(message, L" depth=");
+        appendNumber(message, prefetchDepth, FALSE);
+    }
+#endif
+    // Next-tick blocking-state indicator: shows what the tick processor is
+    // currently waiting for. Combined with the XXX:YYY vote count in the
+    // prefix, this lets an operator diagnose stuck-tick causes at a glance:
+    //   tx=?       votes have not converged on next-tick digest yet
+    //   tx=empty   next tick is expected to be empty (no tx required)
+    //   tx=K/T     K of T transactions for next tick are locally known
+    if (!targetNextTickDataDigestIsKnown)
+    {
+        appendText(message, L" tx=?");
+    }
+    else if (isZero(targetNextTickDataDigest))
+    {
+        appendText(message, L" tx=empty");
+    }
+    else
+    {
+        appendText(message, L" tx=");
+        appendNumber(message, numberOfKnownNextTickTransactions, FALSE);
+        appendText(message, L"/");
+        appendNumber(message, numberOfNextTickTransactions, FALSE);
+    }
     appendText(message, L" (+");
     appendNumber(message, numberOfReceivedBytes - prevNumberOfReceivedBytes, TRUE);
     appendText(message, L" -");
@@ -8736,7 +8860,10 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 #endif
                 tryResendTickVotes();
 
-                if (curTimeTick - peerRefreshingTick >= PEER_REFRESHING_PERIOD * frequency / 1000)
+                // Skip churn entirely in static peer mode — operators on this node
+                // explicitly asked us to keep peer connections stable.
+                if (!listOfPeersIsStatic
+                    && curTimeTick - peerRefreshingTick >= PEER_REFRESHING_PERIOD * frequency / 1000)
                 {
                     peerRefreshingTick = curTimeTick;
 
@@ -8792,8 +8919,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                                 requestedQuorumTick.requestQuorumTick.quorumTick.voteFlags[i >> 3] |= (1 << (i & 7));
                             }
                         }
-                        pushToAny(&requestedQuorumTick.header);
-                        pushToAnyFullNode(&requestedQuorumTick.header);
+                        // Current-tick quorum: most peers are at or near our tick,
+                        // so target filtering doesn't gain much.  Use plain fan-out.
+                        pushCatchupFanOut(&requestedQuorumTick.header);
                     }
                     tickRequestingIndicator = gTickTotalNumberOfComputors;
                     if (futureTickRequestingIndicator == gFutureTickTotalNumberOfComputors
@@ -8810,8 +8938,8 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                                 requestedQuorumTick.requestQuorumTick.quorumTick.voteFlags[i >> 3] |= (1 << (i & 7));
                             }
                         }
-                        pushToAny(&requestedQuorumTick.header);
-                        pushToAnyFullNode(&requestedQuorumTick.header);
+                        // Next-tick quorum: prefer peers we know are at or past tick + 1.
+                        pushPreferringAtOrAbove(&requestedQuorumTick.header, system.tick + 1);
                     }
                     futureTickRequestingIndicator = gFutureTickTotalNumberOfComputors;
 
@@ -8830,15 +8958,13 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                         // targetNextTickDataDigestIsKnown == false means there is no consensus on next tick data yet
                         requestedTickData.header.randomizeDejavu();
                         requestedTickData.requestTickData.requestedTickData.tick = system.tick + 1;
-                        pushToAny(&requestedTickData.header);
-                        pushToAnyFullNode(&requestedTickData.header);
+                        pushPreferringAtOrAbove(&requestedTickData.header, system.tick + 1);
                     }
                     if (ts.tickData[system.tick + 2 - system.initialTick].epoch != system.epoch && isNewTickPlus2)
                     {
                         requestedTickData.header.randomizeDejavu();
                         requestedTickData.requestTickData.requestedTickData.tick = system.tick + 2;
-                        pushToAny(&requestedTickData.header);
-                        pushToAnyFullNode(&requestedTickData.header);
+                        pushPreferringAtOrAbove(&requestedTickData.header, system.tick + 2);
                     }
                     ts.tickData.releaseLock();
 
@@ -8861,8 +8987,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                         if (requestedTickTransactions.requestedTickTransactions.tick)
                         {
                             requestedTickTransactions.header.randomizeDejavu();
-                            pushToAny(&requestedTickTransactions.header);
-                            pushToAnyFullNode(&requestedTickTransactions.header);
+                            pushPreferringAtOrAbove(
+                                &requestedTickTransactions.header,
+                                requestedTickTransactions.requestedTickTransactions.tick);
 
                             requestedTickTransactions.requestedTickTransactions.tick = 0;
                         }
@@ -9248,7 +9375,9 @@ void processArgs(int argc, const char* argv[]) {
         ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
         ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the reprocessSolutionTransaction() rollback path", cxxopts::value<bool>())
         ("s,security-tick", "Core will verify state after x tick, to reduce computational to the node", cxxopts::value<int>()->default_value("1"))
-        ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"));
+        ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
+        ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
+        ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"));
     auto result = options.parse(argc, argv);
 
     if (result.count("peers")) {
@@ -9301,6 +9430,15 @@ void processArgs(int argc, const char* argv[]) {
         logColorToScreen("INFO", "Security tick set to " + std::to_string(securityTick));
     }
 
+    if (result.count("auto-flush-stuck-seconds")) {
+        autoFlushStuckSeconds = result["auto-flush-stuck-seconds"].as<int>();
+        if (autoFlushStuckSeconds < 0) autoFlushStuckSeconds = 0;
+        if (autoFlushStuckSeconds > 0) {
+            logColorToScreen("INFO", "Auto-flush stuck-tick recovery enabled after "
+                + std::to_string(autoFlushStuckSeconds) + "s on same tick");
+        }
+    }
+
     if (result.count("ticking-delay")) {
         tickDelay = result["ticking-delay"].as<int>();
         logColorToScreen("INFO", "Ticking delay set to " + std::to_string(tickDelay) + " ms");
@@ -9339,6 +9477,13 @@ void processArgs(int argc, const char* argv[]) {
         mainAuxStatus = mode;
         std::string modeString = (isMainMode() ? "MAIN" : "aux") + std::string("&") + ((mainAuxStatus & 2) ? "MAIN" : "aux") + std::string(" mode enabled.");
         logColorToScreen("INFO", modeString);
+    }
+
+    if (result.count("static-peers"))
+    {
+        listOfPeersIsStatic = true;
+        listOfPeersIsStaticLiteNode = true;
+        logColorToScreen("INFO", "Static peer mode enabled (no peer churn, no new incoming connections)");
     }
 
     // expected format seed1,seed2 where seed1,seed2 is string of 55 lowercase alphabet character

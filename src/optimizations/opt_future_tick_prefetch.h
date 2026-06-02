@@ -65,8 +65,7 @@ static void requestFutureTickData(unsigned int prefetchDepth)
         {
             requestedTickData.header.randomizeDejavu();
             requestedTickData.requestTickData.requestedTickData.tick = futureTick;
-            pushToAny(&requestedTickData.header);
-            pushToAnyFullNode(&requestedTickData.header);
+            pushPreferringAtOrAbove(&requestedTickData.header, futureTick);
         }
     }
     ts.tickData.releaseLock();
@@ -91,8 +90,7 @@ static void requestFutureQuorumTicks(unsigned int prefetchDepth)
                 requestedQuorumTick.requestQuorumTick.quorumTick.voteFlags[i >> 3] |= (1 << (i & 7));
             }
         }
-        pushToAny(&requestedQuorumTick.header);
-        pushToAnyFullNode(&requestedQuorumTick.header);
+        pushPreferringAtOrAbove(&requestedQuorumTick.header, futureTick);
     }
 }
 
@@ -113,8 +111,7 @@ static void requestFutureTickTransactions(unsigned int prefetchDepth)
             requestedTickTransactions.requestedTickTransactions.tick = futureTick;
             setMem(requestedTickTransactions.requestedTickTransactions.transactionFlags,
                    sizeof(requestedTickTransactions.requestedTickTransactions.transactionFlags), 0);
-            pushToAny(&requestedTickTransactions.header);
-            pushToAnyFullNode(&requestedTickTransactions.header);
+            pushPreferringAtOrAbove(&requestedTickTransactions.header, futureTick);
         }
     }
     ts.tickData.releaseLock();
