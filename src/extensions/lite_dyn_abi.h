@@ -86,6 +86,13 @@ struct LiteHostServices {
     void           (*prevSpectrumDigest)(const void* ctx, void* out32);
     void           (*prevUniverseDigest)(const void* ctx, void* out32);
     void           (*prevComputerDigest)(const void* ctx, void* out32);
+    // assets / shares.
+    unsigned char  (*isAssetIssued)(const void* ctx, const void* issuer32, unsigned long long assetName);
+    long long      (*issueAsset)(const void* ctx, unsigned long long name, const void* issuer32, signed char decimals, long long shares, unsigned long long unit);
+    long long      (*numberOfShares)(const void* ctx, const void* asset, const void* ownSel, const void* posSel);
+    long long      (*numberOfPossessedShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, unsigned short ownMgmt, unsigned short posMgmt);
+    long long      (*transferShareOwnershipAndPossession)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, const void* newOwner32);
+    unsigned char  (*distributeDividends)(const void* ctx, long long amountPerShare);
 };
 
 // One registered user function/procedure (filled by the .so during liteContractRegister).
@@ -226,6 +233,12 @@ QPI::DateAndTime QPI::QpiContextFunctionCall::now() const { QPI::DateAndTime d; 
 m256i QPI::QpiContextFunctionCall::getPrevSpectrumDigest() const { m256i r; g_liteHost->prevSpectrumDigest(this, &r); return r; }
 m256i QPI::QpiContextFunctionCall::getPrevUniverseDigest() const { m256i r; g_liteHost->prevUniverseDigest(this, &r); return r; }
 m256i QPI::QpiContextFunctionCall::getPrevComputerDigest() const { m256i r; g_liteHost->prevComputerDigest(this, &r); return r; }
+bool QPI::QpiContextFunctionCall::isAssetIssued(const m256i& issuer, unsigned long long assetName) const { return g_liteHost->isAssetIssued(this, &issuer, assetName); }
+long long QPI::QpiContextProcedureCall::issueAsset(unsigned long long name, const QPI::id& issuer, signed char numberOfDecimalPlaces, long long numberOfShares, unsigned long long unitOfMeasurement) const { return g_liteHost->issueAsset(this, name, &issuer, numberOfDecimalPlaces, numberOfShares, unitOfMeasurement); }
+long long QPI::QpiContextFunctionCall::numberOfShares(const QPI::Asset& asset, const QPI::AssetOwnershipSelect& ownership, const QPI::AssetPossessionSelect& possession) const { return g_liteHost->numberOfShares(this, &asset, &ownership, &possession); }
+long long QPI::QpiContextFunctionCall::numberOfPossessedShares(unsigned long long assetName, const m256i& issuer, const m256i& owner, const m256i& possessor, unsigned short ownershipManagingContractIndex, unsigned short possessionManagingContractIndex) const { return g_liteHost->numberOfPossessedShares(this, assetName, &issuer, &owner, &possessor, ownershipManagingContractIndex, possessionManagingContractIndex); }
+long long QPI::QpiContextProcedureCall::transferShareOwnershipAndPossession(unsigned long long assetName, const m256i& issuer, const m256i& owner, const m256i& possessor, long long numberOfShares, const m256i& newOwnerAndPossessor) const { return g_liteHost->transferShareOwnershipAndPossession(this, assetName, &issuer, &owner, &possessor, numberOfShares, &newOwnerAndPossessor); }
+bool QPI::QpiContextProcedureCall::distributeDividends(long long amountPerShare) const { return g_liteHost->distributeDividends(this, amountPerShare); }
 
 // ---- registration: record into g_liteReg instead of host tables ----
 // entryPoint value must match REGISTER_USER_FUNCTIONS_AND_PROCEDURES_CALL in contract_def.h

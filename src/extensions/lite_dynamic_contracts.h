@@ -66,6 +66,12 @@ static LiteHostServices g_liteHostServices = {
     +[](const void* c, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->getPrevSpectrumDigest(); },
     +[](const void* c, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->getPrevUniverseDigest(); },
     +[](const void* c, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->getPrevComputerDigest(); },
+    +[](const void* c, const void* i, unsigned long long n) -> unsigned char { return (unsigned char)((QPI::QpiContextFunctionCall*)c)->isAssetIssued(*(const m256i*)i, n); },
+    +[](const void* c, unsigned long long n, const void* i, signed char d, long long s, unsigned long long u) -> long long { return ((QPI::QpiContextProcedureCall*)c)->issueAsset(n, *(const QPI::id*)i, d, s, u); },
+    +[](const void* c, const void* a, const void* o, const void* p) -> long long { return ((QPI::QpiContextFunctionCall*)c)->numberOfShares(*(const QPI::Asset*)a, *(const QPI::AssetOwnershipSelect*)o, *(const QPI::AssetPossessionSelect*)p); },
+    +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, unsigned short om, unsigned short pm) -> long long { return ((QPI::QpiContextFunctionCall*)c)->numberOfPossessedShares(n, *(const m256i*)i, *(const m256i*)o, *(const m256i*)p, om, pm); },
+    +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, long long s, const void* no) -> long long { return ((QPI::QpiContextProcedureCall*)c)->transferShareOwnershipAndPossession(n, *(const m256i*)i, *(const m256i*)o, *(const m256i*)p, s, *(const m256i*)no); },
+    +[](const void* c, long long a) -> unsigned char { return (unsigned char)((QPI::QpiContextProcedureCall*)c)->distributeDividends(a); },
 };
 
 // ---------------------------------------------------------------------------
