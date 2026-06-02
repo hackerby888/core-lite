@@ -61,6 +61,10 @@ struct LiteHostServices {
     long long (*transfer)(const void* ctx, const void* dest32, long long amount);
     long long (*transferTyped)(const void* ctx, const void* dest32, long long amount, unsigned char transferType);
     void      (*abort)(const void* ctx, unsigned int errorCode);
+    long long (*burn)(const void* ctx, long long amount, unsigned int contractIndexBurnedFor);
+    unsigned short (*epoch)(const void* ctx);
+    unsigned int   (*tick)(const void* ctx);
+    int            (*numberOfTickTransactions)(const void* ctx);
 };
 
 // One registered user function/procedure (filled by the .so during liteContractRegister).
@@ -177,6 +181,12 @@ long long QPI::QpiContextProcedureCall::__transfer(const m256i& destination, lon
 void QPI::QpiContextFunctionCall::__qpiAbort(unsigned int errorCode) const {
     g_liteHost->abort(this, errorCode);
 }
+long long QPI::QpiContextProcedureCall::burn(long long amount, unsigned int contractIndexBurnedFor) const {
+    return g_liteHost->burn(this, amount, contractIndexBurnedFor);
+}
+unsigned short QPI::QpiContextFunctionCall::epoch() const { return g_liteHost->epoch(this); }
+unsigned int QPI::QpiContextFunctionCall::tick() const { return g_liteHost->tick(this); }
+int QPI::QpiContextFunctionCall::numberOfTickTransactions() const { return g_liteHost->numberOfTickTransactions(this); }
 
 // ---- registration: record into g_liteReg instead of host tables ----
 // entryPoint value must match REGISTER_USER_FUNCTIONS_AND_PROCEDURES_CALL in contract_def.h

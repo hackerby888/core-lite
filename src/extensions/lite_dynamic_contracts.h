@@ -44,6 +44,10 @@ static LiteHostServices g_liteHostServices = {
         return ((QPI::QpiContextProcedureCall*)ctx)->__transfer(*(const m256i*)d, a, t);
     },
     +[](const void* ctx, unsigned int e) { ((QPI::QpiContextProcedureCall*)ctx)->__qpiAbort(e); },
+    +[](const void* ctx, long long a, unsigned int idx) -> long long { return ((QPI::QpiContextProcedureCall*)ctx)->burn(a, idx); },
+    +[](const void* ctx) -> unsigned short { return ((QPI::QpiContextFunctionCall*)ctx)->epoch(); },
+    +[](const void* ctx) -> unsigned int { return ((QPI::QpiContextFunctionCall*)ctx)->tick(); },
+    +[](const void* ctx) -> int { return ((QPI::QpiContextFunctionCall*)ctx)->numberOfTickTransactions(); },
 };
 
 // ---------------------------------------------------------------------------
