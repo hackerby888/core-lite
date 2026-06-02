@@ -75,6 +75,36 @@ static LiteHostServices g_liteHostServices = {
     +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, unsigned short om, unsigned short pm) -> long long { return ((QPI::QpiContextFunctionCall*)c)->numberOfPossessedShares(n, *(const m256i*)i, *(const m256i*)o, *(const m256i*)p, om, pm); },
     +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, long long s, const void* no) -> long long { return ((QPI::QpiContextProcedureCall*)c)->transferShareOwnershipAndPossession(n, *(const m256i*)i, *(const m256i*)o, *(const m256i*)p, s, *(const m256i*)no); },
     +[](const void* c, long long a) -> unsigned char { return (unsigned char)((QPI::QpiContextProcedureCall*)c)->distributeDividends(a); },
+    // liteCallFunction: run the callee's DEPLOYED function (table dispatch) under a nested context.
+    +[](const void* cc, unsigned int idx, unsigned short it, const void* in, unsigned int, void* out, unsigned int) -> int {
+        if (idx >= contractCount || !contractUserFunctions[idx][it]) return (int)QPI::CallErrorContractInactive;
+        auto* caller = (QPI::QpiContextFunctionCall*)cc;
+        QPI::InterContractCallError err = QPI::NoCallError;
+        const QPI::QpiContextFunctionCall* cctx = caller->__qpiConstructContextOtherContractFunctionCall(idx, err);
+        if (!cctx) return (int)err;
+        void* st = caller->__qpiAcquireStateForReading(idx);
+        void* lo = caller->__qpiAllocLocals(contractUserFunctionLocalsSizes[idx][it]);
+        contractUserFunctions[idx][it](*cctx, st, (void*)in, out, lo);
+        caller->__qpiFreeLocals();
+        caller->__qpiReleaseStateForReading(idx);
+        caller->__qpiFreeContext();
+        return (int)QPI::NoCallError;
+    },
+    // liteInvokeProcedure: run the callee's DEPLOYED procedure (table dispatch) + transfer invocationReward.
+    +[](const void* cc, unsigned int idx, unsigned short it, const void* in, unsigned int, void* out, unsigned int, long long reward) -> int {
+        if (idx >= contractCount || !contractUserProcedures[idx][it]) return (int)QPI::CallErrorContractInactive;
+        auto* caller = (QPI::QpiContextProcedureCall*)cc;
+        QPI::InterContractCallError err = QPI::NoCallError;
+        const QPI::QpiContextProcedureCall* cctx = caller->__qpiConstructProcedureCallContext(idx, reward, err, false);
+        if (!cctx) return (int)err;
+        void* st = caller->__qpiAcquireStateForWriting(idx);
+        void* lo = caller->__qpiAllocLocals(contractUserProcedureLocalsSizes[idx][it]);
+        contractUserProcedures[idx][it](*cctx, st, (void*)in, out, lo);
+        caller->__qpiFreeLocals();
+        caller->__qpiReleaseStateForWriting(idx);
+        caller->__qpiFreeContext();
+        return (int)QPI::NoCallError;
+    },
 };
 
 // ---------------------------------------------------------------------------

@@ -93,6 +93,13 @@ struct LiteHostServices {
     long long      (*numberOfPossessedShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, unsigned short ownMgmt, unsigned short posMgmt);
     long long      (*transferShareOwnershipAndPossession)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, const void* newOwner32);
     unsigned char  (*distributeDividends)(const void* ctx, long long amountPerShare);
+    // inter-contract calls (late-bound): run the callee's DEPLOYED code via the host dispatch tables.
+    // returns 0 (NoCallError) on success, else an InterContractCallError code.
+    int (*liteCallFunction)(const void* callerCtx, unsigned int calleeIdx, unsigned short inputType,
+                            const void* in, unsigned int inSize, void* out, unsigned int outSize);
+    int (*liteInvokeProcedure)(const void* callerCtx, unsigned int calleeIdx, unsigned short inputType,
+                               const void* in, unsigned int inSize, void* out, unsigned int outSize,
+                               long long invocationReward);
 };
 
 // One registered user function/procedure (filled by the .so during liteContractRegister).
@@ -176,6 +183,18 @@ inline LiteHostServices* g_liteHost = nullptr;
 inline LiteRegistration* g_liteReg = nullptr;   // active during liteContractRegister()
 
 extern "C" void liteSetHostServices(LiteHostServices* services) { g_liteHost = services; }
+
+// ---- inter-contract call helpers (forward-declared in lite_contract_calls.h, called by the
+// redefined CALL_OTHER_CONTRACT_* macros from contract code, then defined here) ----
+int liteCallFunction(const void* callerCtx, unsigned int calleeIdx, unsigned short inputType,
+                     const void* in, unsigned int inSize, void* out, unsigned int outSize) {
+    return g_liteHost->liteCallFunction(callerCtx, calleeIdx, inputType, in, inSize, out, outSize);
+}
+int liteInvokeProcedure(const void* callerCtx, unsigned int calleeIdx, unsigned short inputType,
+                        const void* in, unsigned int inSize, void* out, unsigned int outSize,
+                        long long invocationReward) {
+    return g_liteHost->liteInvokeProcedure(callerCtx, calleeIdx, inputType, in, inSize, out, outSize, invocationReward);
+}
 
 // ---- static QPI hooks (declared static in pre_qpi_def.h) ----
 static void __markContractStateDirty(unsigned int contractIndex) { g_liteHost->markDirty(contractIndex); }
