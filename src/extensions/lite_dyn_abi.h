@@ -132,6 +132,13 @@ namespace QPI
     }
 }
 
+// Core mem ops: under NO_UEFI, platform/memory.h declares these (defined in test/stdlib_impl.cpp,
+// not linked into the .so). Provide them here so the .so self-resolves (HashMap/Collection use them).
+void setMem(void* buffer, unsigned long long size, unsigned char value) { __builtin_memset(buffer, value, size); }
+void copyMem(void* destination, const void* source, unsigned long long length) { __builtin_memcpy(destination, source, length); }
+bool allocatePool(unsigned long long size, void** buffer) { void* q = __builtin_malloc(size); *buffer = q; return q != nullptr; }
+void freePool(void* buffer) { __builtin_free(buffer); }
+
 // Set by the host at dlopen, before any contract code runs.
 inline LiteHostServices* g_liteHost = nullptr;
 inline LiteRegistration* g_liteReg = nullptr;   // active during liteContractRegister()
