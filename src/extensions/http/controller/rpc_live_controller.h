@@ -30,6 +30,9 @@ class RpcLiveController : public HttpController<RpcLiveController>
 #ifdef LITE_DYNAMIC_CONTRACTS
     ADD_METHOD_TO(RpcLiveController::dynRegistry, "/live/v1/dyn-registry", Get);
     ADD_METHOD_TO(RpcLiveController::logStats, "/live/v1/log-stats", Get);
+#if defined(TESTNET)
+    ADD_METHOD_TO(RpcLiveController::devFundedSeed, "/live/v1/dev/funded-seed", Get);
+#endif
 #endif
     METHOD_LIST_END
 
@@ -581,6 +584,17 @@ class RpcLiveController : public HttpController<RpcLiveController>
         json["recent"] = arr;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
+
+#if defined(TESTNET)
+    // Testnet dev only: a prefilled (funded) seed so tooling can sign deploy txs with no seed set.
+    inline void devFundedSeed(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        Json::Value json;
+        if (std::size(broadcastedComputorSeeds) > 0)
+            json["seed"] = std::string((const char *)broadcastedComputorSeeds[0]);
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+#endif
 #endif
 
     inline void querySmartContract(const HttpRequestPtr &req,
