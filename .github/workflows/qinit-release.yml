@@ -1,0 +1,77 @@
+# Publishes qinit turnkey assets (prebuilt node + header snapshot + sha-pinned manifest) via gh.
+# Run on the fork (hackerby888/core-lite), NEVER qubic upstream. Assets use ${{ github.repository }}.
+# ONLY_LOGGING=OFF embeds committed src/private_settings.h — ensure it's a PUBLIC testnet fixture.
+name: qinit-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release tag"
+        required: true
+        default: "qinit-dev"
+  push:
+    tags: ["qinit-v*"]
+
+permissions:
+  contents: write   # create releases + upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt update -y
+          wget https://apt.llvm.org/llvm.sh; chmod +x llvm.sh; sudo ./llvm.sh 18
+          sudo apt install -y clang cmake nasm
+          sudo apt install -y libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev liblz4-dev
+
+      - name: Resolve tag
+        id: t
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      # Lite testnet + dynamic contracts + tx-status addon; logging event on (NO_ENABLE_... not passed).
+      - name: Build node
+        run: |
+          cmake -S . -B build-node \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF \
+            -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
+            -DLITE_DYNAMIC_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON \
+            -DADDON_TX_STATUS_REQUEST=ON \
+            -DONLY_LOGGING=OFF
+          cmake --build build-node -- -j"$(nproc)" Qubic
+          cp build-node/src/Qubic ./Qubic
+          sha256sum Qubic | awk '{print $1}' > Qubic.sha256
+
+      - name: Build header snapshot
+        run: |
+          CLANG=clang++-18 bash scripts/qinit-header-snapshot.sh "$PWD/snapshot-out"
+          cp snapshot-out/core-headers.tar.gz ./core-headers.tar.gz
+          cp snapshot-out/core-headers.sha256 ./core-headers.sha256
+
+      - name: Generate manifest
+        run: |
+          TAG="${{ steps.t.outputs.tag }}"
+          BASE="https://github.com/${{ github.repository }}/releases/download/$TAG"
+          cat > qinit-manifest.json <<EOF
+          {
+            "version": "$TAG",
+            "node":    { "url": "$BASE/Qubic",              "sha256": "$(cat Qubic.sha256)" },
+            "headers": { "url": "$BASE/core-headers.tar.gz", "sha256": "$(cat core-headers.sha256)" }
+          }
+          EOF
+          cat qinit-manifest.json
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.t.outputs.tag }}"
+          gh release create "$TAG" Qubic core-headers.tar.gz qinit-manifest.json \
+            --title "$TAG" --notes "qinit turnkey: prebuilt dynamic-contract node + core-header snapshot" \
+          || gh release upload "$TAG" Qubic core-headers.tar.gz qinit-manifest.json --clobber

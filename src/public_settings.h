@@ -94,7 +94,9 @@ static_assert(AUTO_FORCE_NEXT_TICK_THRESHOLD* TARGET_TICK_DURATION >= PEER_REFRE
 #define START_NETWORK_FROM_SCRATCH 1
 #endif
 // Addons: If you don't know it, leave it 0.
+#ifndef ADDON_TX_STATUS_REQUEST   // -DADDON_TX_STATUS_REQUEST=1 (CMake) overrides
 #define ADDON_TX_STATUS_REQUEST 0
+#endif
 
 
 //////////////////////////////////////////////////////////////////////////
