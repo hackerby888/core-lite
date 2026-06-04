@@ -81,7 +81,10 @@ add_executable(
 apply_test_compiler_flags(qubic_core_tests)
 
 # Add additional test-specific flags if needed
-if(IS_CLANG OR IS_GCC)
+if((IS_CLANG OR IS_GCC) AND IS_ARM)
+  # arm: x86 bit/rng intrinsics (-mrdrnd/-mbmi/-mlzcnt) are invalid; provided via SIMDe + qintrin shims
+  target_compile_options(qubic_core_tests PRIVATE -fshort-wchar -w)
+elseif(IS_CLANG OR IS_GCC)
   target_compile_options(
           qubic_core_tests
           PRIVATE

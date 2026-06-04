@@ -64,6 +64,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     endif()
 endif()
 
+# Detect ARM (aarch64 / Apple Silicon). The arm build uses the SIMDe-simulated x86 SIMD path
+# (see lib/platform_common/qintrin.h) instead of native AVX, so no -mavx*/-mrdrnd flags apply.
+set(IS_ARM FALSE CACHE INTERNAL "ARM/aarch64 detected")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64|armv8")
+    set(IS_ARM TRUE CACHE INTERNAL "ARM/aarch64 detected" FORCE)
+    message(STATUS "ARM/aarch64 detected -- x86 intrinsics simulated via SIMDe (no -mavx flags)")
+endif()
+
 # --- Clear all default flags to use only specified ones ---
 set(CMAKE_CONFIGURATION_TYPES Debug Release CACHE STRING "Available build types" FORCE)
 
@@ -189,7 +197,10 @@ if(IS_MSVC)
         message(STATUS "AVX-512 is disabled. If you would like to activate make sure you set ENABLE_AVX512 to ON while running cmake.")
     endif()
 elseif(IS_CLANG OR IS_GCC)
-    if(ENABLE_AVX512)
+    if(IS_ARM)
+        set(CPU_INSTRUCTION_FLAGS "" CACHE INTERNAL "CPU instruction set flags" FORCE)
+        message(STATUS "ARM: x86 SIMD simulated via SIMDe -- no -mavx flags")
+    elseif(ENABLE_AVX512)
         set(CPU_INSTRUCTION_FLAGS "-mavx -mavx512vbmi2 -mavx2 -mavx512f -mavx512cd -mavx512vl -mavx512bw -mavx512dq -mavx512vpopcntdq" CACHE INTERNAL "CPU instruction set flags" FORCE)
         message(STATUS "GCC/Clang: Enabling AVX-512 and AVX/AVX2")
     else()
@@ -204,6 +215,10 @@ set(TEST_SPECIFIC_FLAGS "" CACHE INTERNAL "Test-specific compiler flags")
 
 if(IS_MSVC)
     set(TEST_SPECIFIC_FLAGS "/WX /EHsc" CACHE INTERNAL "Test-specific compiler flags" FORCE)
+elseif(IS_ARM)
+    # SIMDe emits portability warnings; -mrdrnd is x86-only. Keep it lenient on arm.
+    set(TEST_SPECIFIC_FLAGS "-Wcast-align -w" CACHE INTERNAL "Test-specific compiler flags" FORCE)
+    set(TEST_SPECIFIC_LINK_FLAGS "" CACHE INTERNAL "Test-specific linker flags" FORCE)
 elseif(IS_CLANG OR IS_GCC)
     if(USE_SANITIZER)
         set(TEST_SPECIFIC_FLAGS "-Wpedantic -Werror -mrdrnd -Wcast-align -fsanitize=alignment -fno-sanitize-recover=alignment" CACHE INTERNAL "Test-specific compiler flags" FORCE)
