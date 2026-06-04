@@ -30,6 +30,9 @@ class RpcLiveController : public HttpController<RpcLiveController>
 #ifdef LITE_DYNAMIC_CONTRACTS
     ADD_METHOD_TO(RpcLiveController::dynRegistry, "/live/v1/dyn-registry", Get);
     ADD_METHOD_TO(RpcLiveController::logStats, "/live/v1/log-stats", Get);
+#if ADDON_TX_STATUS_REQUEST
+    ADD_METHOD_TO(RpcLiveController::txStatus, "/live/v1/tx-status/{tick}/{tx}", Get);
+#endif
 #if defined(TESTNET)
     ADD_METHOD_TO(RpcLiveController::devFundedSeed, "/live/v1/dev/funded-seed", Get);
 #endif
@@ -584,6 +587,61 @@ class RpcLiveController : public HttpController<RpcLiveController>
         json["recent"] = arr;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
+
+#if ADDON_TX_STATUS_REQUEST
+    // Exact tx confirmation: is transaction <tx> (60-char id) included+processed in tick <tick>?
+    // Reads the qli tx-status store (confirmedTx, keyed per tick). Lets tooling wait for a specific
+    // tx instead of guessing a tick margin. found => included; processed => node ticked past <tick>
+    // (so a false `found` with processed=true means the tx was dropped/not accepted).
+    inline void txStatus(const HttpRequestPtr &req,
+                         std::function<void(const HttpResponsePtr &)> &&cb,
+                         const std::string &tickStr, const std::string &txId)
+    {
+        Json::Value result;
+        unsigned int tick = (unsigned int)strtoul(tickStr.c_str(), nullptr, 10);
+        result["tick"] = tick;
+        result["currentTick"] = system.tick;
+        result["txId"] = txId;
+
+        // tx id is the digest in the identity alphabet, lowercased — uppercase, then decode to m256i.
+        std::string up = txId;
+        for (auto &ch : up) if (ch >= 'a' && ch <= 'z') ch -= 32;
+        m256i target;
+        getPublicKeyFromIdentity(reinterpret_cast<const unsigned char *>(up.c_str()), target.m256i_u8);
+
+        // Locate the tick in the confirmed-tx store (current epoch, or kept ticks of the previous one).
+        bool inRange = false;
+        int tickIndex = 0;
+        if (tick >= txStatusData.confirmedTxCurrentEpochBeginTick && tick < txStatusData.confirmedTxCurrentEpochBeginTick + MAX_NUMBER_OF_TICKS_PER_EPOCH)
+        {
+            tickIndex = tick - txStatusData.confirmedTxCurrentEpochBeginTick;
+            inRange = true;
+        }
+        else if (txStatusData.confirmedTxPreviousEpochBeginTick != 0 && tick >= txStatusData.confirmedTxPreviousEpochBeginTick && tick < txStatusData.confirmedTxCurrentEpochBeginTick)
+        {
+            tickIndex = tick - txStatusData.confirmedTxPreviousEpochBeginTick + MAX_NUMBER_OF_TICKS_PER_EPOCH;
+            inRange = true;
+        }
+
+        bool found = false, moneyFlew = false;
+        if (inRange)
+        {
+            ACQUIRE(confirmedTxLock);
+            unsigned int start = txStatusData.tickTxIndexStart[tickIndex];
+            unsigned int count = txStatusData.tickTxCounter[tickIndex];
+            for (unsigned int i = 0; i < count; i++)
+            {
+                ConfirmedTx &c = confirmedTx[start + i];
+                if (c.digest == target) { found = true; moneyFlew = (c.moneyFlew != 0); break; }
+            }
+            RELEASE(confirmedTxLock);
+        }
+        result["found"] = found;
+        result["moneyFlew"] = moneyFlew;
+        result["processed"] = (system.tick > tick); // verdict is final once the node ticked past <tick>
+        cb(HttpResponse::newHttpJsonResponse(result));
+    }
+#endif
 
 #if defined(TESTNET)
     // Testnet dev only: a prefilled (funded) seed so tooling can sign deploy txs with no seed set.
