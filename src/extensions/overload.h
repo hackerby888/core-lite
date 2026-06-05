@@ -420,7 +420,7 @@ struct Overload {
         #ifdef _MSC_VER
         HANDLE hThread = (HANDLE)thread.native_handle();
         SetThreadAffinityMask(hThread, 1ULL << ProcessorNumber);
-        #else
+        #elif defined(__linux__)
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(ProcessorNumber, &cpuset);
@@ -430,7 +430,7 @@ struct Overload {
         if (rc != 0) {
             logToConsole(L"Error calling pthread_setaffinity_np");
         }
-        #endif
+        #endif // macOS: no cpu affinity API (scheduler handles placement)
 
         if (TimeoutInMicroseconds > 0) {
             thread.detach();
@@ -1211,11 +1211,12 @@ struct Overload {
         const unsigned int lastCpu = hwConcurrency > 0 ? hwConcurrency - 1 : 0;
         #ifndef _MSC_VER
         setNonBlockingInput(true);
-
+        #if defined(__linux__)
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(lastCpu, &cpuset);
         pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+        #endif // macOS: no cpu affinity API
         #else
 		// NOTE: In MSVC Release Mode, so the scheduler often just keeps the main thread on one CPU core (the best core), dont need to set affinity because it will slow down the main thread performance
         HANDLE hThread = GetCurrentThread();

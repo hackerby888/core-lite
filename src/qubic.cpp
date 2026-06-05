@@ -19,7 +19,9 @@
 #include "platform/msvc_polyfill.h"
 #elif defined(__APPLE__)
 // macOS: same POSIX set, minus <byteswap.h> (concurrency.h uses __builtin_bswap) and minus the
-// libbacktrace backend (boost::stacktrace picks its macOS default).
+// libbacktrace backend (boost::stacktrace picks its macOS default). _Unwind_Backtrace is available
+// without _GNU_SOURCE on macOS, so tell boost not to require it.
+#define BOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED
 #include <boost/stacktrace.hpp>
 #include <cstring>
 #include <cstdio>
