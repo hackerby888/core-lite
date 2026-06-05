@@ -14,6 +14,16 @@
 // This is the dev/"simulate" build path — mainnet x86 keeps native AVX2/512 (the branch above).
 // NOTE: _umul128 / __shiftleft128 / __shiftright128 are defined (portably) in four_q.h — not here.
 // ---------------------------------------------------------------------------------------------
+// x86 calling-convention keywords are no-ops on arm (single ABI). The legacy UEFI fn-ptr typedefs
+// in uefi.h hardcode __cdecl; arm has no such keyword -> define them empty so those typedefs parse.
+// Runtime-neutral: those EFI function pointers are never called on the OS port.
+#ifndef __cdecl
+#define __cdecl
+#endif
+#ifndef __stdcall
+#define __stdcall
+#endif
+
 #define SIMDE_ENABLE_NATIVE_ALIASES
 #include "simde/x86/sse2.h"
 #include "simde/x86/sse4.2.h"
@@ -62,6 +72,10 @@ static inline unsigned char _BitScanForward(unsigned long* index, unsigned int m
     *index = (unsigned long)__builtin_ctz(mask);
     return 1;
 }
+static inline unsigned long long _andn_u64(unsigned long long a, unsigned long long b) { return (~a) & b; }
+static inline unsigned int _andn_u32(unsigned int a, unsigned int b) { return (~a) & b; }
+// MSVC-style CPUID (x86 feature/TSC-freq query). No x86 features on arm -> zero (TSC freq via __rdtsc).
+static inline void __cpuid(int info[4], int leaf) { (void)leaf; info[0] = info[1] = info[2] = info[3] = 0; }
 
 // --- HW RNG: arm has no RDRAND. Dev/simulate build only -> weak xorshift fallback (NOT a CSPRNG).
 //     Mainnet uses x86 RDRAND. Fine for a testnet/dev node + the gtests. ---
