@@ -67,7 +67,14 @@ elseif(IS_LINUX_CLANG AND ASM_LANG STREQUAL ASM_NASM)
 endif()
 
 # --- Target Definition ---
-add_library(platform_common STATIC ${C_SOURCES} ${CMAKE_CURRENT_BINARY_DIR}/LongJump.nasm.o ${CMAKE_CURRENT_BINARY_DIR}/SetJump.nasm.o)
+# The x86 LongJump/SetJump.nasm.o are only generated on Linux+clang/gcc (IS_LINUX_CLANG above) and are
+# dead on the OS port anyway (setjmp/longjmp come from the system header). Don't reference them where
+# they aren't built (e.g. macOS) — else CMake errors on the missing source. (Linux path unchanged.)
+if(IS_LINUX_CLANG AND ASM_LANG STREQUAL ASM_NASM)
+    add_library(platform_common STATIC ${C_SOURCES} ${CMAKE_CURRENT_BINARY_DIR}/LongJump.nasm.o ${CMAKE_CURRENT_BINARY_DIR}/SetJump.nasm.o)
+else()
+    add_library(platform_common STATIC ${C_SOURCES})
+endif()
 
 # Apply common compiler flags from the centralized detection module
 apply_common_compiler_flags(platform_common)
