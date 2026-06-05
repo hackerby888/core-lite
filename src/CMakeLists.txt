@@ -16,15 +16,22 @@ include(ExternalProject)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/lib/)
 
-set(ASM_FILE "${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack.nasm")
-set(ASM_OBJ "${CMAKE_CURRENT_BINARY_DIR}/custom_stack.obj")
-
-add_custom_command(
-    OUTPUT ${ASM_OBJ}
-    COMMAND ${NASM_EXECUTABLE} -f elf64 ${ASM_FILE} -o ${ASM_OBJ}
-    DEPENDS ${ASM_FILE}
-    COMMENT "Assembling ${ASM_FILE}"
-)
+if(IS_ARM)
+    # custom_stack.nasm is x86-64 asm + deadcode on the OS port (setjmp is used instead). Skip it on
+    # arm and link a never-called stub symbol. Also expose the x86 <cpuid.h> shim for arm.
+    include_directories(${CMAKE_SOURCE_DIR}/lib/platform_common/arm_shims)
+    set(CUSTOM_STACK_OBJ ${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack_arm_stub.cpp)
+else()
+    set(ASM_FILE "${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack.nasm")
+    set(ASM_OBJ "${CMAKE_CURRENT_BINARY_DIR}/custom_stack.obj")
+    add_custom_command(
+        OUTPUT ${ASM_OBJ}
+        COMMAND ${NASM_EXECUTABLE} -f elf64 ${ASM_FILE} -o ${ASM_OBJ}
+        DEPENDS ${ASM_FILE}
+        COMMENT "Assembling ${ASM_FILE}"
+    )
+    set(CUSTOM_STACK_OBJ ${ASM_OBJ})
+endif()
 
 # Extra libraries
 set(JSONCPP_WITH_POST_INSTALL OFF CACHE BOOL "" FORCE)
@@ -102,7 +109,7 @@ include_directories(SYSTEM ${LIBBACKTRACE_INCLUDE_DIR})
 add_executable(
   Qubic
   qubic.cpp
-  ${ASM_OBJ}
+  ${CUSTOM_STACK_OBJ}
 )
 
 # Explorer asset bundling: regen embedded header when HTML/CSS/JS change.
