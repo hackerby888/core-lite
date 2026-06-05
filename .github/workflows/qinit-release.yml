@@ -106,7 +106,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/download-artifact@v4
-        with: { name: node-${{ matrix.key }} }
+        with:
+          name: node-${{ matrix.key }}
       - name: Boot + tick
         run: |
           chmod +x "Qubic-${{ matrix.key }}"
