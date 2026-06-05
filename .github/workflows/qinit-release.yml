@@ -84,7 +84,7 @@ jobs:
             -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
             -DLITE_DYNAMIC_CONTRACTS=ON -DTESTNET=ON
           cmake --build build-tests -- -j"$J" qubic_core_tests
-          ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:KangarooTwelve*'
+          ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:TestCoreK12*'
 
       - name: Upload node artifact
         uses: actions/upload-artifact@v4
@@ -139,7 +139,7 @@ jobs:
               -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
               -DLITE_DYNAMIC_CONTRACTS=ON -DTESTNET=ON
             cmake --build build-tests -- -j"$J" qubic_core_tests
-            ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:KangarooTwelve*'
+            ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:TestCoreK12*'
           } 2>&1 | tee -a "$GITHUB_WORKSPACE/macos-build.log"
       # Publish the full build+test log to a public debug release (diagnosable without CI-log auth).
       - name: Publish macOS build log (debug)
