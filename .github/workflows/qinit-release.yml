@@ -166,26 +166,23 @@ jobs:
   # Readable runtime smoke per platform: boot the built node, confirm the tick advances via RPC.
   # Does NOT gate the release (publish needs [node, headers]) — but its conclusion is authoritative:
   # a crash / no-tick FAILS this job, so the result is visible (incl. OOM on a small runner).
+  # linux-only: the darwin node needs ~26 GB (TESTNET_LITE_RAM, no-swap) but the free macos-14
+  # runner has only 7 GB -> jetsam-kills it at genesis (same RAM ceiling as the arm qemu OOM, not a
+  # code defect). macOS native execution was confirmed once via the smoke log (boots, RPC up, network
+  # checkin, mach_absolute_time TSC, no crash); real Macs (>=16 GB) tick. Build + crypto KATs gate macOS.
   smoke:
-    needs: [node, node-macos]
+    needs: node
     strategy:
       fail-fast: false
       matrix:
         include:
           - { runner: ubuntu-22.04,     key: linux-x64 }
           - { runner: ubuntu-24.04-arm, key: linux-arm64 }
-          - { runner: macos-14,         key: darwin-arm64 }
     runs-on: ${{ matrix.runner }}
-    # darwin smoke is best-effort: the node links brew dylibs (z/zstd/ssl/...) so it needs them
-    # present; a runner/dylib hiccup shouldn't fail the run (KATs already prove correctness).
-    continue-on-error: ${{ matrix.key == 'darwin-arm64' }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: node-${{ matrix.key }}
-      - name: Install runtime deps (macOS dylibs)
-        if: runner.os == 'macOS'
-        run: brew install zlib zstd lz4 lzo openssl@3 c-ares brotli || true
       - name: Boot + tick
         run: |
           chmod +x "Qubic-${{ matrix.key }}"
@@ -207,17 +204,6 @@ jobs:
           echo "=== log tail ==="; tail -15 node.log
           if [ "$ok" != "1" ]; then echo "RESULT: node did NOT tick on ${{ matrix.key }}"; exit 1; fi
           echo "RESULT: node TICKED on ${{ matrix.key }}"
-      # macOS smoke has no readable CI log without auth — publish the node boot log to the public
-      # debug release so the darwin boot+tick result is visible. Drop once darwin runtime is confirmed.
-      - name: Publish darwin smoke log (debug)
-        if: always() && runner.os == 'macOS'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          tail -c 100000 run/node.log > macos-smoke.tail.log 2>/dev/null || echo "no node.log" > macos-smoke.tail.log
-          gh release upload qinit-macos-debug macos-smoke.tail.log --clobber \
-          || gh release create qinit-macos-debug macos-smoke.tail.log -t "macOS build debug" -n "macOS debug logs (build + smoke)"
 
   headers:
     needs: resolve
