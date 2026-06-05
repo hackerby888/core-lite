@@ -95,9 +95,9 @@ jobs:
             Qubic-${{ matrix.key }}.sha256
           if-no-files-found: error
 
-  # macOS-native (Apple Silicon, Mach-O). Standalone + non-gating so the in-progress macOS port can't
-  # block the linux release. Validates that the OS-layer port compiles + crypto KATs pass on real macOS.
-  # Once green: fold darwin-arm64 into the publish manifest + a smoke job.
+  # macOS-native (Apple Silicon, Mach-O). Builds the node + runs crypto KATs on real macOS, and its
+  # Qubic-darwin-arm64 is folded into the published manifest below. Non-gating (continue-on-error) so a
+  # macOS runner hiccup never blocks the linux release; publish degrades gracefully if darwin is absent.
   node-macos:
     needs: resolve
     runs-on: macos-14
