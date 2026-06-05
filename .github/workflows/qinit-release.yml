@@ -110,10 +110,15 @@ jobs:
           set -o pipefail
           J=$(getconf _NPROCESSORS_ONLN)
           CC=/opt/homebrew/opt/llvm@18/bin/clang; CXX=/opt/homebrew/opt/llvm@18/bin/clang++
-          ZR=$(brew --prefix zlib)   # macOS ships libz only as a .tbd stub CMake's FindZLIB misses
+          ZR=$(brew --prefix zlib)        # macOS ships libz only as a .tbd stub CMake's FindZLIB misses
+          LL=$(brew --prefix llvm@18)
+          # drogon/trantor are built with brew llvm@18 libc++ (new exception ABI ne180100); link against
+          # THAT libc++ runtime, not Apple's older system one, or those symbols are undefined.
+          LDF="-L$LL/lib/c++ -L$LL/lib/unwind -Wl,-rpath,$LL/lib/c++"
           {
             cmake -S . -B build-node -DCMAKE_BUILD_TYPE=RelWithDebInfo \
               -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+              -DCMAKE_EXE_LINKER_FLAGS="$LDF" \
               -DZLIB_ROOT="$ZR" -DZLIB_LIBRARY="$ZR/lib/libz.dylib" -DZLIB_INCLUDE_DIR="$ZR/include" \
               -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF \
               -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
@@ -137,8 +142,10 @@ jobs:
         run: |
           J=$(getconf _NPROCESSORS_ONLN)
           CC=/opt/homebrew/opt/llvm@18/bin/clang; CXX=/opt/homebrew/opt/llvm@18/bin/clang++
+          LL=$(brew --prefix llvm@18); LDF="-L$LL/lib/c++ -L$LL/lib/unwind -Wl,-rpath,$LL/lib/c++"
           cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_EXE_LINKER_FLAGS="$LDF" \
             -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
             -DLITE_DYNAMIC_CONTRACTS=ON -DTESTNET=ON
           cmake --build build-tests -- -j"$J" qubic_core_tests
