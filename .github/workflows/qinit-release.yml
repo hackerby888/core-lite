@@ -144,9 +144,10 @@ jobs:
             cmake --build build-tests -- -j"$J" qubic_core_tests
             ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:TestCoreK12*'
           } 2>&1 | tee -a "$GITHUB_WORKSPACE/macos-build.log"
-      # Publish the full build+test log to a public debug release (diagnosable without CI-log auth).
+      # On failure only, publish the build+test log tail to a public debug release so a macOS
+      # regression is diagnosable without CI-log auth. Dormant while the port stays green.
       - name: Publish macOS build log (debug)
-        if: always()
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -206,6 +207,17 @@ jobs:
           echo "=== log tail ==="; tail -15 node.log
           if [ "$ok" != "1" ]; then echo "RESULT: node did NOT tick on ${{ matrix.key }}"; exit 1; fi
           echo "RESULT: node TICKED on ${{ matrix.key }}"
+      # macOS smoke has no readable CI log without auth — publish the node boot log to the public
+      # debug release so the darwin boot+tick result is visible. Drop once darwin runtime is confirmed.
+      - name: Publish darwin smoke log (debug)
+        if: always() && runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tail -c 100000 run/node.log > macos-smoke.tail.log 2>/dev/null || echo "no node.log" > macos-smoke.tail.log
+          gh release upload qinit-macos-debug macos-smoke.tail.log --clobber \
+          || gh release create qinit-macos-debug macos-smoke.tail.log -t "macOS build debug" -n "macOS debug logs (build + smoke)"
 
   headers:
     needs: resolve
