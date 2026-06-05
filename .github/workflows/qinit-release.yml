@@ -83,6 +83,17 @@ jobs:
           cmake --build build-tests -- -j"$(nproc)" qubic_core_tests
           ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:KangarooTwelve*'
 
+      # Best-effort node smoke: boot the freshly-built node, confirm it ticks (runtime sanity on the
+      # platform). Informational — RAM-dependent (TESTNET_LITE_RAM), so it does not block the release.
+      - name: Smoke-run node
+        continue-on-error: true
+        run: |
+          mkdir -p run && cd run
+          timeout 60 ../build-node/src/Qubic --peers 127.0.0.1 --node-mode 3 --ticking-delay 1000 > node.log 2>&1 || true
+          echo "=== crash? ==="; grep -ciE "segmentation|signal 11|abort" node.log || true
+          echo "=== tick markers ==="; grep -oE "\.[0-9]{8}\.[0-9]+ " node.log | tail -3 || true
+          tail -5 node.log
+
       - name: Upload node artifact
         uses: actions/upload-artifact@v4
         with:

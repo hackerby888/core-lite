@@ -18,6 +18,10 @@ FetchContent_MakeAvailable(googletest)
 
 get_filename_component(PROJECT_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
+if(IS_ARM)
+    # x86 <cpuid.h> shim for arm (must precede the system include) — see lib/platform_common/qintrin.h
+    include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_common/arm_shims)
+endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_common)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_os)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_efi) # Currently still needed due to various imports
