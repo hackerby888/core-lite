@@ -16,6 +16,18 @@ include(ExternalProject)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/lib/)
 
+# macOS: brew installs deps (boost/zstd/lz4/lzo/openssl) under the Homebrew prefix, which clang does
+# NOT search by default. Add them so the build finds the headers/libs. (IS_MACOS => Linux unchanged.)
+if(IS_MACOS)
+    if(EXISTS /opt/homebrew)            # Apple Silicon
+        set(BREW_PREFIX /opt/homebrew)
+    else()                              # Intel mac
+        set(BREW_PREFIX /usr/local)
+    endif()
+    include_directories(SYSTEM ${BREW_PREFIX}/include ${BREW_PREFIX}/opt/openssl@3/include)
+    link_directories(${BREW_PREFIX}/lib ${BREW_PREFIX}/opt/openssl@3/lib)
+endif()
+
 if(IS_ARM)
     # custom_stack.nasm is x86-64 asm + deadcode on the OS port (setjmp is used instead). Skip it on
     # arm and link a never-called stub symbol. Also expose the x86 <cpuid.h> shim for arm.
