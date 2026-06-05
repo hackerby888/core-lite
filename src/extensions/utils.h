@@ -72,7 +72,7 @@ static bool isAllBytesZero(void *buffer, unsigned long long length) {
     return true;
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 static int exec(const char* cmd) {
     FILE* pipe = popen(cmd, "r");   // "r" = read output (even if we ignore it)
     if (!pipe) return -1;

@@ -2,8 +2,8 @@
 
 #include <lib/platform_common/qintrin.h>
 
-#ifdef __linux__
-#define _byteswap_ulong(x) bswap_32(x)
+#if defined(__linux__) || defined(__APPLE__)
+#define _byteswap_ulong(x) __builtin_bswap32(x)
 #define _InterlockedExchange8(target, val) __atomic_exchange_n(target, val, __ATOMIC_SEQ_CST)
 #define _InterlockedIncrement64(target) __atomic_add_fetch(target, 1, __ATOMIC_SEQ_CST)
 #define _InterlockedAnd64(target, val) __atomic_fetch_and(target, val, __ATOMIC_SEQ_CST)

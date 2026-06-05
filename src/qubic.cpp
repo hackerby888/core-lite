@@ -17,6 +17,19 @@
 #include <unistd.h>
 #include "extensions/utils.h"
 #include "platform/msvc_polyfill.h"
+#elif defined(__APPLE__)
+// macOS: same POSIX set, minus <byteswap.h> (concurrency.h uses __builtin_bswap) and minus the
+// libbacktrace backend (boost::stacktrace picks its macOS default).
+#include <boost/stacktrace.hpp>
+#include <cstring>
+#include <cstdio>
+#include <codecvt>
+#include <locale>
+#include <csignal>
+#include <cstdlib>
+#include <unistd.h>
+#include "extensions/utils.h"
+#include "platform/msvc_polyfill.h"
 #endif
 
 // ============================================================================
@@ -151,7 +164,7 @@
 #include "revenue.h"
 
 #include <csignal>
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #include <sys/wait.h>
 #endif
 
@@ -5922,7 +5935,7 @@ void checkAllContractLocksReleased()
 
 void doBadBoySpam()
 {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #ifdef TESTNET
     const std::string rpcApi = "http://127.0.0.1:41841";
 #else
@@ -9608,7 +9621,7 @@ void processArgs(int argc, const char* argv[]) {
     }
 }
 
-#if defined(__linux__) && !defined(NO_RPC)
+#if (defined(__linux__) || defined(__APPLE__)) && !defined(NO_RPC)
 void watchAndCheckin()
 {
     // start watch thread
@@ -9664,7 +9677,7 @@ void watchAndCheckin()
 }
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 void signalHandler(int sig) {
     boost::stacktrace::safe_dump_to("crash.dump");
     // Send to server in a child process
@@ -9718,7 +9731,7 @@ void setupSignalHandlers() {
 #endif
 
 int main(int argc, const char* argv[]) {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
     setupSignalHandlers();
 #endif
     logColorToScreen("INFO", "================== Qubic Core Lite ==================");
@@ -9726,7 +9739,7 @@ int main(int argc, const char* argv[]) {
     logColorToScreen("INFO", "================== ~~~~~~~~~~~~~~~ ==================\n");
 
     Overload::initializeUefi();
-#if defined(__linux__) && !defined(NO_RPC)
+#if (defined(__linux__) || defined(__APPLE__)) && !defined(NO_RPC)
     QubicHttpServer::start(httpPort);
     watchAndCheckin();
 #endif

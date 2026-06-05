@@ -11,7 +11,7 @@
 #include <conio.h>
 #define MSG_DONTWAIT 0
 #define MSG_NOSIGNAL 0
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <sched.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -52,7 +52,7 @@ static std::string nodeAlias = "My Qubic Lite Node";
 static const auto liteNodeStartTime = std::chrono::system_clock::now();
 
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #include <json/config.h>
 #include <json/value.h>
 #include <json/writer.h>

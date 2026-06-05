@@ -27,6 +27,13 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     message(STATUS "Linux platform detected")
 endif()
 
+# Detect macOS (Darwin). Additive — Linux/Windows detection above is unchanged.
+set(IS_MACOS FALSE CACHE INTERNAL "macOS platform detected")
+if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "Darwin")
+    set(IS_MACOS TRUE CACHE INTERNAL "macOS platform detected" FORCE)
+    message(STATUS "macOS (Darwin) platform detected")
+endif()
+
 # Detect MSVC compiler
 if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     set(IS_MSVC TRUE CACHE INTERNAL "MSVC compiler detected" FORCE)

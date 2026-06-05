@@ -32,11 +32,16 @@
 
 #include <cstdint>
 #include <cstdlib>
+#if defined(__APPLE__)
+#include <mach/mach_time.h>   // mach_absolute_time() — the macOS cycle/time source
+#endif
 
 // --- cycle counter -> arm virtual timer ---
 static inline unsigned long long __rdtsc(void)
 {
-#if defined(__aarch64__)
+#if defined(__APPLE__)
+    return (unsigned long long)mach_absolute_time();
+#elif defined(__aarch64__)
     unsigned long long v;
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
     return v;

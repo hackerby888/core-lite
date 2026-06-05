@@ -72,6 +72,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fmt)
 
+# libbacktrace is the boost::stacktrace backend on Linux. macOS uses boost's default (execinfo)
+# backend instead, so skip building/linking it there. (NOT APPLE => Linux/x86 unchanged.)
+if(NOT APPLE)
 set(LIBBACKTRACE_PREFIX ${CMAKE_BINARY_DIR}/libbacktrace)
 set(LIBBACKTRACE_BINARY_DIR ${LIBBACKTRACE_PREFIX}/src/libbacktrace_project-build)
 set(LIBBACKTRACE_STATIC_LIB ${LIBBACKTRACE_BINARY_DIR}/.libs/libbacktrace.a)
@@ -104,6 +107,7 @@ set_target_properties(backtrace_static PROPERTIES
 )
 add_dependencies(backtrace_static libbacktrace_project)
 include_directories(SYSTEM ${LIBBACKTRACE_INCLUDE_DIR})
+endif() # NOT APPLE (libbacktrace)
 
 # Define the shared library (matches Visual Studio DynamicLibrary configuration)
 add_executable(
@@ -208,6 +212,18 @@ endif()
 find_package(Threads REQUIRED)
 
 apply_common_compiler_flags(Qubic)
+if(APPLE)
+    # macOS ld64: no -Bstatic/-Bdynamic, no librt/libdl (in libSystem), no libbacktrace.
+    target_link_libraries(Qubic
+            platform_common
+            platform_efi
+            jsoncpp_static drogon fmt::fmt
+            Threads::Threads
+            z
+            zstd
+            m
+    )
+else()
 target_link_libraries(Qubic
         platform_common
         platform_efi
@@ -221,6 +237,7 @@ target_link_libraries(Qubic
         rt
         m
 )
+endif()
 
 # Configure linker settings based on compiler
 if(IS_MSVC)
