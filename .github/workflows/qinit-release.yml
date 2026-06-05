@@ -101,6 +101,9 @@ jobs:
   node-macos:
     needs: resolve
     runs-on: macos-14
+    # Non-blocking: a macOS runner hiccup (brew flake) reports success to `needs` so it never
+    # blocks the linux release; publish then degrades gracefully (no darwin in the manifest).
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain (brew)
@@ -163,18 +166,25 @@ jobs:
   # Does NOT gate the release (publish needs [node, headers]) — but its conclusion is authoritative:
   # a crash / no-tick FAILS this job, so the result is visible (incl. OOM on a small runner).
   smoke:
-    needs: node
+    needs: [node, node-macos]
     strategy:
       fail-fast: false
       matrix:
         include:
           - { runner: ubuntu-22.04,     key: linux-x64 }
           - { runner: ubuntu-24.04-arm, key: linux-arm64 }
+          - { runner: macos-14,         key: darwin-arm64 }
     runs-on: ${{ matrix.runner }}
+    # darwin smoke is best-effort: the node links brew dylibs (z/zstd/ssl/...) so it needs them
+    # present; a runner/dylib hiccup shouldn't fail the run (KATs already prove correctness).
+    continue-on-error: ${{ matrix.key == 'darwin-arm64' }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: node-${{ matrix.key }}
+      - name: Install runtime deps (macOS dylibs)
+        if: runner.os == 'macOS'
+        run: brew install zlib zstd lz4 lzo openssl@3 c-ares brotli || true
       - name: Boot + tick
         run: |
           chmod +x "Qubic-${{ matrix.key }}"
@@ -216,7 +226,7 @@ jobs:
         with: { name: headers, path: "core-headers.*", if-no-files-found: error }
 
   publish:
-    needs: [resolve, node, headers]
+    needs: [resolve, node, node-macos, headers]
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ github.token }}
@@ -233,13 +243,21 @@ jobs:
           BASE="https://github.com/${{ github.repository }}/releases/download/$TAG"
           x64sha=$(cat Qubic-linux-x64.sha256); armsha=$(cat Qubic-linux-arm64.sha256)
           hsha=$(cat core-headers.sha256)
+          # darwin-arm64 is best-effort (node-macos is continue-on-error): include it only if the
+          # artifact made it here, so a skipped/flaked macOS build still yields a valid manifest.
+          DARWIN_ENTRY=""
+          if [ -f Qubic-darwin-arm64.sha256 ]; then
+            dsha=$(cat Qubic-darwin-arm64.sha256)
+            DARWIN_ENTRY=",
+              \"darwin-arm64\": { \"url\": \"$BASE/Qubic-darwin-arm64\", \"sha256\": \"$dsha\" }"
+          fi
           cat > qinit-manifest.json <<EOF
           {
             "version": "$TAG",
             "node":    { "url": "$BASE/Qubic-linux-x64", "sha256": "$x64sha" },
             "nodes": {
               "linux-x64":   { "url": "$BASE/Qubic-linux-x64",   "sha256": "$x64sha" },
-              "linux-arm64": { "url": "$BASE/Qubic-linux-arm64", "sha256": "$armsha" }
+              "linux-arm64": { "url": "$BASE/Qubic-linux-arm64", "sha256": "$armsha" }$DARWIN_ENTRY
             },
             "headers": { "url": "$BASE/core-headers.tar.gz", "sha256": "$hsha" }
           }
@@ -248,6 +266,12 @@ jobs:
       - name: Publish release
         working-directory: dist
         run: |
-          gh release create "$TAG" Qubic-linux-x64 Qubic-linux-arm64 core-headers.tar.gz qinit-manifest.json \
-            --title "$TAG" --notes "qinit turnkey: prebuilt dynamic-contract node (linux-x64 + linux-arm64) + core-header snapshot" \
-          || gh release upload "$TAG" Qubic-linux-x64 Qubic-linux-arm64 core-headers.tar.gz qinit-manifest.json --clobber
+          FILES="Qubic-linux-x64 Qubic-linux-arm64 core-headers.tar.gz qinit-manifest.json"
+          PLATFORMS="linux-x64 + linux-arm64"
+          if [ -f Qubic-darwin-arm64 ]; then
+            FILES="$FILES Qubic-darwin-arm64"
+            PLATFORMS="$PLATFORMS + darwin-arm64"
+          fi
+          gh release create "$TAG" $FILES \
+            --title "$TAG" --notes "qinit turnkey: prebuilt dynamic-contract node ($PLATFORMS) + core-header snapshot" \
+          || gh release upload "$TAG" $FILES --clobber
