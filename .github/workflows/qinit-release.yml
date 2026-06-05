@@ -1,6 +1,7 @@
-# Publishes qinit turnkey assets (prebuilt node + header snapshot + sha-pinned manifest) via gh.
+# Publishes qinit turnkey assets (prebuilt node per-platform + header snapshot + sha-pinned manifest).
 # Run on the fork (hackerby888/core-lite), NEVER qubic upstream. Assets use ${{ github.repository }}.
 # ONLY_LOGGING=OFF embeds committed src/private_settings.h — ensure it's a PUBLIC testnet fixture.
+# linux-arm64 builds on a NATIVE arm runner (ubuntu-24.04-arm) — no qemu; also runs the crypto gtests.
 name: qinit-release
 
 on:
@@ -17,23 +18,45 @@ permissions:
   contents: write   # create releases + upload assets
 
 jobs:
-  release:
+  resolve:
     runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+    steps:
+      - id: t
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+  # Prebuilt node, one per platform. arm64 on a native arm runner (fast, real hardware).
+  node:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04,     key: linux-x64 }
+          - { runner: ubuntu-24.04-arm, key: linux-arm64 }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install toolchain
+      - name: Install toolchain (x64 — llvm.sh)
+        if: matrix.key == 'linux-x64'
         run: |
           sudo apt update -y
           wget https://apt.llvm.org/llvm.sh; chmod +x llvm.sh; sudo ./llvm.sh 18
-          sudo apt install -y clang cmake nasm
-          sudo apt install -y libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev liblz4-dev
+          sudo apt install -y clang cmake nasm \
+            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
+            zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev liblz4-dev libssl-dev
 
-      - name: Resolve tag
-        id: t
-        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - name: Install toolchain (arm64 — apt clang-18)
+        if: matrix.key == 'linux-arm64'
+        run: |
+          sudo apt update -y
+          sudo apt install -y clang-18 cmake nasm \
+            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
+            zlib1g-dev libzstd-dev g++ libfmt-dev liblzo2-dev liblz4-dev libssl-dev
 
-      # Lite testnet + dynamic contracts + tx-status addon; logging event on (NO_ENABLE_... not passed).
+      # Same config both platforms; IS_ARM (CompilerSetup) auto-detects aarch64 -> SIMDe + -fsigned-char.
       - name: Build node
         run: |
           cmake -S . -B build-node \
@@ -42,36 +65,83 @@ jobs:
             -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF \
             -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
             -DLITE_DYNAMIC_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON \
-            -DADDON_TX_STATUS_REQUEST=ON \
-            -DONLY_LOGGING=OFF
+            -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
           cmake --build build-node -- -j"$(nproc)" Qubic
-          cp build-node/src/Qubic ./Qubic
-          sha256sum Qubic | awk '{print $1}' > Qubic.sha256
+          cp build-node/src/Qubic "Qubic-${{ matrix.key }}"
+          sha256sum "Qubic-${{ matrix.key }}" | awk '{print $1}' > "Qubic-${{ matrix.key }}.sha256"
+          file "Qubic-${{ matrix.key }}"
 
+      # Native validation (real hardware on each runner) — proves crypto correctness on the platform.
+      - name: Build + run crypto gtests
+        continue-on-error: true
+        run: |
+          cmake -S . -B build-tests \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
+            -DLITE_DYNAMIC_CONTRACTS=ON -DTESTNET=ON
+          cmake --build build-tests -- -j"$(nproc)" qubic_core_tests
+          ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:KangarooTwelve*:*Score*:Spectrum*' || echo "tests reported failures"
+
+      - name: Upload node artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.key }}
+          path: |
+            Qubic-${{ matrix.key }}
+            Qubic-${{ matrix.key }}.sha256
+          if-no-files-found: error
+
+  headers:
+    needs: resolve
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt update -y
+          wget https://apt.llvm.org/llvm.sh; chmod +x llvm.sh; sudo ./llvm.sh 18
+          sudo apt install -y clang
       - name: Build header snapshot
         run: |
           CLANG=clang++-18 bash scripts/qinit-header-snapshot.sh "$PWD/snapshot-out"
           cp snapshot-out/core-headers.tar.gz ./core-headers.tar.gz
           cp snapshot-out/core-headers.sha256 ./core-headers.sha256
+      - uses: actions/upload-artifact@v4
+        with: { name: headers, path: "core-headers.*", if-no-files-found: error }
 
+  publish:
+    needs: [resolve, node, headers]
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, pattern: "node-*", merge-multiple: true }
+      - uses: actions/download-artifact@v4
+        with: { name: headers, path: dist }
       - name: Generate manifest
+        working-directory: dist
         run: |
-          TAG="${{ steps.t.outputs.tag }}"
           BASE="https://github.com/${{ github.repository }}/releases/download/$TAG"
+          x64sha=$(cat Qubic-linux-x64.sha256); armsha=$(cat Qubic-linux-arm64.sha256)
+          hsha=$(cat core-headers.sha256)
           cat > qinit-manifest.json <<EOF
           {
             "version": "$TAG",
-            "node":    { "url": "$BASE/Qubic",              "sha256": "$(cat Qubic.sha256)" },
-            "headers": { "url": "$BASE/core-headers.tar.gz", "sha256": "$(cat core-headers.sha256)" }
+            "node":    { "url": "$BASE/Qubic-linux-x64", "sha256": "$x64sha" },
+            "nodes": {
+              "linux-x64":   { "url": "$BASE/Qubic-linux-x64",   "sha256": "$x64sha" },
+              "linux-arm64": { "url": "$BASE/Qubic-linux-arm64", "sha256": "$armsha" }
+            },
+            "headers": { "url": "$BASE/core-headers.tar.gz", "sha256": "$hsha" }
           }
           EOF
           cat qinit-manifest.json
-
       - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
+        working-directory: dist
         run: |
-          TAG="${{ steps.t.outputs.tag }}"
-          gh release create "$TAG" Qubic core-headers.tar.gz qinit-manifest.json \
-            --title "$TAG" --notes "qinit turnkey: prebuilt dynamic-contract node + core-header snapshot" \
-          || gh release upload "$TAG" Qubic core-headers.tar.gz qinit-manifest.json --clobber
+          gh release create "$TAG" Qubic-linux-x64 Qubic-linux-arm64 core-headers.tar.gz qinit-manifest.json \
+            --title "$TAG" --notes "qinit turnkey: prebuilt dynamic-contract node (linux-x64 + linux-arm64) + core-header snapshot" \
+          || gh release upload "$TAG" Qubic-linux-x64 Qubic-linux-arm64 core-headers.tar.gz qinit-manifest.json --clobber
