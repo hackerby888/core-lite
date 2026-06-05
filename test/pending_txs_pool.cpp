@@ -2,7 +2,7 @@
 
 #include "gtest/gtest.h"
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #include "platform/msvc_polyfill.h"
 #endif
 

@@ -1,6 +1,6 @@
 #define NO_UEFI
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #include "platform/msvc_polyfill.h"
 #endif
 #include "gtest/gtest.h"

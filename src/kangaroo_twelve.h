@@ -2501,10 +2501,6 @@ static void random(const unsigned char* publicKey, const unsigned char* nonce, u
 #ifdef _MSC_VER
     *((__m256i*)&state[0]) = *((__m256i*)publicKey);
     *((__m256i*)&state[32]) = *((__m256i*)nonce);
-#elif defined(__APPLE__)
-    // macOS test TU lacks the m256i union here; a 32-byte copy is identical.
-    memcpy(&state[0], publicKey, 32);
-    memcpy(&state[32], nonce, 32);
 #else
     *((m256i*)&state[0]) = *((m256i*)publicKey);
     *((m256i*)&state[32]) = *((m256i*)nonce);
