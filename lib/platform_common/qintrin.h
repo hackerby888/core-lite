@@ -61,6 +61,22 @@ static inline unsigned char _subborrow_u64(unsigned char b_in, unsigned long lon
 
 // --- bit ops (BMI/ABM/LZCNT scalar forms) ---
 static inline unsigned long long _lzcnt_u64(unsigned long long x) { return x ? (unsigned long long)__builtin_clzll(x) : 64ULL; }
+static inline unsigned long long __lzcnt64(unsigned long long x) { return x ? (unsigned long long)__builtin_clzll(x) : 64ULL; }
+static inline unsigned int __lzcnt(unsigned int x) { return x ? (unsigned int)__builtin_clz(x) : 32u; }
+// SIMDe maps _mm256_srli/slli_epiN to NEON vshrq_n/vshlq_n which require a CONSTANT shift. The core
+// (score_common.h) shifts by a RUNTIME value (x86 allows it). Override with scalar variable shifts.
+#undef _mm256_srli_epi64
+#undef _mm256_slli_epi64
+static inline __m256i _mm256_srli_epi64(__m256i a, int c) {
+    unsigned long long t[4]; __builtin_memcpy(t, &a, 32);
+    for (int i = 0; i < 4; i++) t[i] = (c <= 0) ? t[i] : (c >= 64 ? 0ULL : (t[i] >> c));
+    __m256i r; __builtin_memcpy(&r, t, 32); return r;
+}
+static inline __m256i _mm256_slli_epi64(__m256i a, int c) {
+    unsigned long long t[4]; __builtin_memcpy(t, &a, 32);
+    for (int i = 0; i < 4; i++) t[i] = (c <= 0) ? t[i] : (c >= 64 ? 0ULL : (t[i] << c));
+    __m256i r; __builtin_memcpy(&r, t, 32); return r;
+}
 static inline unsigned long long _tzcnt_u64(unsigned long long x) { return x ? (unsigned long long)__builtin_ctzll(x) : 64ULL; }
 static inline unsigned int _blsr_u32(unsigned int x) { return x & (x - 1u); }
 static inline unsigned long long _blsr_u64(unsigned long long x) { return x & (x - 1ULL); }
