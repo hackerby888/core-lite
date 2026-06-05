@@ -198,8 +198,11 @@ if(IS_MSVC)
     endif()
 elseif(IS_CLANG OR IS_GCC)
     if(IS_ARM)
-        set(CPU_INSTRUCTION_FLAGS "" CACHE INTERNAL "CPU instruction set flags" FORCE)
-        message(STATUS "ARM: x86 SIMD simulated via SIMDe -- no -mavx flags")
+        # No -mavx on arm (SIMDe simulates). -fsigned-char is MANDATORY: arm defaults char to
+        # unsigned, but FourQ wNAF (four_q.h) stores SIGNED digits in char[] -> wrong points /
+        # broken signature verify without it. x86 char is already signed.
+        set(CPU_INSTRUCTION_FLAGS "-fsigned-char" CACHE INTERNAL "CPU instruction set flags" FORCE)
+        message(STATUS "ARM: x86 SIMD simulated via SIMDe -- no -mavx flags, -fsigned-char on")
     elseif(ENABLE_AVX512)
         set(CPU_INSTRUCTION_FLAGS "-mavx -mavx512vbmi2 -mavx2 -mavx512f -mavx512cd -mavx512vl -mavx512bw -mavx512dq -mavx512vpopcntdq" CACHE INTERNAL "CPU instruction set flags" FORCE)
         message(STATUS "GCC/Clang: Enabling AVX-512 and AVX/AVX2")
@@ -216,8 +219,8 @@ set(TEST_SPECIFIC_FLAGS "" CACHE INTERNAL "Test-specific compiler flags")
 if(IS_MSVC)
     set(TEST_SPECIFIC_FLAGS "/WX /EHsc" CACHE INTERNAL "Test-specific compiler flags" FORCE)
 elseif(IS_ARM)
-    # SIMDe emits portability warnings; -mrdrnd is x86-only. Keep it lenient on arm.
-    set(TEST_SPECIFIC_FLAGS "-Wcast-align -w" CACHE INTERNAL "Test-specific compiler flags" FORCE)
+    # SIMDe emits portability warnings; -mrdrnd is x86-only. -fsigned-char: FourQ wNAF needs signed char.
+    set(TEST_SPECIFIC_FLAGS "-Wcast-align -fsigned-char -w" CACHE INTERNAL "Test-specific compiler flags" FORCE)
     set(TEST_SPECIFIC_LINK_FLAGS "" CACHE INTERNAL "Test-specific linker flags" FORCE)
 elseif(IS_CLANG OR IS_GCC)
     if(USE_SANITIZER)
