@@ -33,8 +33,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-22.04,     key: linux-x64 }
-          - { runner: ubuntu-24.04-arm, key: linux-arm64 }
+          - { runner: ubuntu-22.04,     key: linux-x64,   cc: clang-18, cxx: clang++-18 }
+          - { runner: ubuntu-24.04-arm, key: linux-arm64, cc: clang-18, cxx: clang++-18 }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -56,31 +56,34 @@ jobs:
             libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
             zlib1g-dev libzstd-dev g++ libfmt-dev liblzo2-dev liblz4-dev libssl-dev
 
-      # Same config both platforms; IS_ARM (CompilerSetup) auto-detects aarch64 -> SIMDe + -fsigned-char.
+      # Same config every platform; IS_ARM auto-detects aarch64 -> SIMDe + -fsigned-char;
+      # IS_MACOS handles the Darwin link/backtrace differences.
       - name: Build node
         run: |
+          J=$(getconf _NPROCESSORS_ONLN)
           cmake -S . -B build-node \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
             -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF \
             -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
             -DLITE_DYNAMIC_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON \
             -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
-          cmake --build build-node -- -j"$(nproc)" Qubic
+          cmake --build build-node -- -j"$J" Qubic
           cp build-node/src/Qubic "Qubic-${{ matrix.key }}"
-          sha256sum "Qubic-${{ matrix.key }}" | awk '{print $1}' > "Qubic-${{ matrix.key }}.sha256"
+          shasum -a 256 "Qubic-${{ matrix.key }}" | awk '{print $1}' > "Qubic-${{ matrix.key }}.sha256"
           file "Qubic-${{ matrix.key }}"
 
       # Native validation (real hardware) — authoritative: a crypto KAT failure FAILS the job,
       # so a broken-on-platform build never ships. Pure deterministic suites (FourQ/m256/K12).
       - name: Build + run crypto gtests
         run: |
+          J=$(getconf _NPROCESSORS_ONLN)
           cmake -S . -B build-tests \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
             -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
             -DLITE_DYNAMIC_CONTRACTS=ON -DTESTNET=ON
-          cmake --build build-tests -- -j"$(nproc)" qubic_core_tests
+          cmake --build build-tests -- -j"$J" qubic_core_tests
           ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:KangarooTwelve*'
 
       - name: Upload node artifact
@@ -90,6 +93,47 @@ jobs:
           path: |
             Qubic-${{ matrix.key }}
             Qubic-${{ matrix.key }}.sha256
+          if-no-files-found: error
+
+  # macOS-native (Apple Silicon, Mach-O). Standalone + non-gating so the in-progress macOS port can't
+  # block the linux release. Validates that the OS-layer port compiles + crypto KATs pass on real macOS.
+  # Once green: fold darwin-arm64 into the publish manifest + a smoke job.
+  node-macos:
+    needs: resolve
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (brew)
+        run: brew install llvm@18 cmake nasm jsoncpp fmt boost lz4 zstd lzo openssl@3 || true
+      - name: Build node
+        run: |
+          J=$(getconf _NPROCESSORS_ONLN)
+          CC=/opt/homebrew/opt/llvm@18/bin/clang; CXX=/opt/homebrew/opt/llvm@18/bin/clang++
+          cmake -S . -B build-node -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+            -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF \
+            -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
+            -DLITE_DYNAMIC_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
+          cmake --build build-node -- -j"$J" Qubic
+          cp build-node/src/Qubic Qubic-darwin-arm64
+          shasum -a 256 Qubic-darwin-arm64 | awk '{print $1}' > Qubic-darwin-arm64.sha256
+          file Qubic-darwin-arm64
+      - name: Build + run crypto gtests
+        run: |
+          J=$(getconf _NPROCESSORS_ONLN)
+          CC=/opt/homebrew/opt/llvm@18/bin/clang; CXX=/opt/homebrew/opt/llvm@18/bin/clang++
+          cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+            -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
+            -DLITE_DYNAMIC_CONTRACTS=ON -DTESTNET=ON
+          cmake --build build-tests -- -j"$J" qubic_core_tests
+          ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:KangarooTwelve*'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-darwin-arm64
+          path: |
+            Qubic-darwin-arm64
+            Qubic-darwin-arm64.sha256
           if-no-files-found: error
 
   # Readable runtime smoke per platform: boot the built node, confirm the tick advances via RPC.
