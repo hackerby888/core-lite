@@ -126,26 +126,29 @@ jobs:
           cp build-node/src/Qubic Qubic-darwin-arm64
           shasum -a 256 Qubic-darwin-arm64 | awk '{print $1}' > Qubic-darwin-arm64.sha256
           file Qubic-darwin-arm64
-      # Publish the build log to a public debug release so failures are diagnosable without CI-log auth.
+      - name: Build + run crypto gtests
+        run: |
+          set -o pipefail
+          J=$(getconf _NPROCESSORS_ONLN)
+          CC=$(xcrun -f clang); CXX=$(xcrun -f clang++)
+          {
+            cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+              -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
+              -DLITE_DYNAMIC_CONTRACTS=ON -DTESTNET=ON
+            cmake --build build-tests -- -j"$J" qubic_core_tests
+            ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:KangarooTwelve*'
+          } 2>&1 | tee -a "$GITHUB_WORKSPACE/macos-build.log"
+      # Publish the full build+test log to a public debug release (diagnosable without CI-log auth).
       - name: Publish macOS build log (debug)
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          tail -c 200000 "$GITHUB_WORKSPACE/macos-build.log" > macos-build.tail.log || true
-          gh release create qinit-macos-debug macos-build.tail.log -t "macOS build debug" -n "node-macos build log (errors tail)" \
+          tail -c 250000 "$GITHUB_WORKSPACE/macos-build.log" > macos-build.tail.log || true
+          gh release create qinit-macos-debug macos-build.tail.log -t "macOS build debug" -n "node-macos build+test log (tail)" \
           || gh release upload qinit-macos-debug macos-build.tail.log --clobber
-      - name: Build + run crypto gtests
-        run: |
-          J=$(getconf _NPROCESSORS_ONLN)
-          CC=$(xcrun -f clang); CXX=$(xcrun -f clang++)
-          cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
-            -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
-            -DLITE_DYNAMIC_CONTRACTS=ON -DTESTNET=ON
-          cmake --build build-tests -- -j"$J" qubic_core_tests
-          ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:KangarooTwelve*'
       - uses: actions/upload-artifact@v4
         with:
           name: node-darwin-arm64
