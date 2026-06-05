@@ -50,6 +50,16 @@ static inline unsigned long long __rdtsc(void)
 #endif
 }
 
+// Signed 128-bit multiply (MSVC intrinsic; math_lib.h's smul uses it). math_lib includes only qintrin,
+// so define it here for non-x86 to avoid msvc_polyfill include-order fragility. Non-template -> preferred
+// over msvc_polyfill's template overload when both are visible, so no conflict on the node build.
+static inline long long _mul128(long long a, long long b, long long* hi)
+{
+    __int128 p = (__int128)a * (__int128)b;
+    *hi = (long long)(p >> 64);
+    return (long long)p;
+}
+
 // --- add/sub with carry (used heavily by four_q; not a SIMD intrinsic). __int128 => gcc+clang. ---
 static inline unsigned char _addcarry_u64(unsigned char c_in, unsigned long long a, unsigned long long b, unsigned long long* out)
 {

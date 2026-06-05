@@ -127,7 +127,7 @@ public:
         issuanceIdx = indexLists.issuancesFirstIdx;
         while (issuanceIdx != NO_ASSET_INDEX)
         {
-            Asset asset(assets[issuanceIdx].varStruct.issuance.publicKey, assetNameFromString(assets[issuanceIdx].varStruct.issuance.name));
+            Asset asset{assets[issuanceIdx].varStruct.issuance.publicKey, assetNameFromString(assets[issuanceIdx].varStruct.issuance.name)};
             long long numOfSharesOwned = 0, numOfSharesPossessed = 0;
             for (AssetOwnershipIterator iter(asset); !iter.reachedEnd(); iter.next())
             {
