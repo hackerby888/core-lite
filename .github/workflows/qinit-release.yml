@@ -83,17 +83,6 @@ jobs:
           cmake --build build-tests -- -j"$(nproc)" qubic_core_tests
           ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:KangarooTwelve*'
 
-      # Best-effort node smoke: boot the freshly-built node, confirm it ticks (runtime sanity on the
-      # platform). Informational — RAM-dependent (TESTNET_LITE_RAM), so it does not block the release.
-      - name: Smoke-run node
-        continue-on-error: true
-        run: |
-          mkdir -p run && cd run
-          timeout 60 ../build-node/src/Qubic --peers 127.0.0.1 --node-mode 3 --ticking-delay 1000 > node.log 2>&1 || true
-          echo "=== crash? ==="; grep -ciE "segmentation|signal 11|abort" node.log || true
-          echo "=== tick markers ==="; grep -oE "\.[0-9]{8}\.[0-9]+ " node.log | tail -3 || true
-          tail -5 node.log
-
       - name: Upload node artifact
         uses: actions/upload-artifact@v4
         with:
@@ -102,6 +91,43 @@ jobs:
             Qubic-${{ matrix.key }}
             Qubic-${{ matrix.key }}.sha256
           if-no-files-found: error
+
+  # Readable runtime smoke per platform: boot the built node, confirm the tick advances via RPC.
+  # Does NOT gate the release (publish needs [node, headers]) — but its conclusion is authoritative:
+  # a crash / no-tick FAILS this job, so the result is visible (incl. OOM on a small runner).
+  smoke:
+    needs: node
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04,     key: linux-x64 }
+          - { runner: ubuntu-24.04-arm, key: linux-arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: node-${{ matrix.key }} }
+      - name: Boot + tick
+        run: |
+          chmod +x "Qubic-${{ matrix.key }}"
+          free -h || true
+          mkdir run && cd run
+          nohup "../Qubic-${{ matrix.key }}" --peers 127.0.0.1 --node-mode 3 --ticking-delay 1000 > node.log 2>&1 &
+          PID=$!
+          ok=0; T0=""
+          for i in $(seq 1 40); do
+            sleep 3
+            if ! kill -0 $PID 2>/dev/null; then echo "node process exited early"; break; fi
+            t=$(curl -s http://127.0.0.1:41841/tick-info 2>/dev/null | grep -oE '"tick"[^0-9]*[0-9]+' | grep -oE '[0-9]+$')
+            [ -z "$t" ] && continue
+            if [ -z "$T0" ]; then T0=$t; echo "first tick=$T0"; continue; fi
+            if [ "$t" -gt "$T0" ]; then ok=1; echo "TICKING: $T0 -> $t"; break; fi
+          done
+          kill $PID 2>/dev/null || true; sleep 1
+          echo "=== crash markers ==="; grep -ciE "segmentation|signal 11|abort|bad_alloc|out of memory" node.log || true
+          echo "=== log tail ==="; tail -15 node.log
+          if [ "$ok" != "1" ]; then echo "RESULT: node did NOT tick on ${{ matrix.key }}"; exit 1; fi
+          echo "RESULT: node TICKED on ${{ matrix.key }}"
 
   headers:
     needs: resolve
