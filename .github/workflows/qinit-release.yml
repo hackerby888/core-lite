@@ -71,9 +71,9 @@ jobs:
           sha256sum "Qubic-${{ matrix.key }}" | awk '{print $1}' > "Qubic-${{ matrix.key }}.sha256"
           file "Qubic-${{ matrix.key }}"
 
-      # Native validation (real hardware on each runner) — proves crypto correctness on the platform.
+      # Native validation (real hardware) — authoritative: a crypto KAT failure FAILS the job,
+      # so a broken-on-platform build never ships. Pure deterministic suites (FourQ/m256/K12).
       - name: Build + run crypto gtests
-        continue-on-error: true
         run: |
           cmake -S . -B build-tests \
             -DCMAKE_BUILD_TYPE=Release \
@@ -81,7 +81,7 @@ jobs:
             -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
             -DLITE_DYNAMIC_CONTRACTS=ON -DTESTNET=ON
           cmake --build build-tests -- -j"$(nproc)" qubic_core_tests
-          ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:KangarooTwelve*:*Score*:Spectrum*' || echo "tests reported failures"
+          ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:KangarooTwelve*'
 
       - name: Upload node artifact
         uses: actions/upload-artifact@v4
