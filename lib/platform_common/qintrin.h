@@ -87,4 +87,11 @@ static inline unsigned long long __qinit_xorshift64(void)
 }
 static inline int _rdrand64_step(unsigned long long* out) { *out = __qinit_xorshift64(); return 1; }
 static inline int _rdrand32_step(unsigned int* out) { *out = (unsigned int)__qinit_xorshift64(); return 1; }
+
+// Make code that gates on __AVX2__ take the AVX2 path (e.g. score's "AVX2 or AVX512 required"
+// static_assert) — SIMDe is already included above, so those _mm256_* calls resolve to its emulation.
+// Defined AFTER the SIMDe includes so SIMDe itself still saw __AVX2__ undefined and used emulation.
+#ifndef __AVX2__
+#define __AVX2__ 1
+#endif
 #endif
