@@ -29,6 +29,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
     ADD_METHOD_TO(RpcLiveController::querySmartContract, "/live/v1/querySmartContract", Post);
 #ifdef LITE_DYNAMIC_CONTRACTS
     ADD_METHOD_TO(RpcLiveController::dynRegistry, "/live/v1/dyn-registry", Get);
+    ADD_METHOD_TO(RpcLiveController::dynUpload, "/live/v1/dyn-upload", Get);
     ADD_METHOD_TO(RpcLiveController::logStats, "/live/v1/log-stats", Get);
 #if ADDON_TX_STATUS_REQUEST
     ADD_METHOD_TO(RpcLiveController::txStatus, "/live/v1/tx-status/{tick}/{tx}", Get);
@@ -556,6 +557,42 @@ class RpcLiveController : public HttpController<RpcLiveController>
         json["slotBase"] = (unsigned int)LITEDYN0_CONTRACT_INDEX;
         json["slotCount"] = (unsigned int)LITE_DYN_SLOT_COUNT;
         json["contracts"] = arr;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+
+    // Active dynamic-contract upload session: which chunks landed, which are still missing. Lets tooling
+    // confirm assembly before sending DEPLOY and resend only the missing seqs (idempotent, order-free).
+    inline void dynUpload(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        Json::Value json;
+        const LiteDynUpload &u = g_liteDynUpload;
+        char sid[32]; snprintf(sid, sizeof(sid), "%llu", (unsigned long long)u.sessionId);
+        json["active"] = u.active;
+        json["sessionId"] = std::string(sid);     // u64 as string (JSON loses precision past 2^53)
+        json["totalSize"] = u.totalSize;
+        json["chunkSize"] = 1008u;                 // mirrors liteDynOnUploadChunk's seq*1008 layout
+        json["chunkCount"] = u.chunkCount;
+        json["receivedCount"] = u.receivedCount;
+        json["complete"] = (u.active && u.receivedCount == u.chunkCount);
+        char hex[65];
+        for (int b = 0; b < 32; b++) snprintf(hex + b * 2, 3, "%02x", u.finalHash[b]);
+        json["finalHash"] = std::string(hex, 64);
+        // Missing seqs (bit clear in g_liteDynSeqSeen), capped so a large upload can't bloat the response.
+        Json::Value missing(Json::arrayValue);
+        unsigned int missingCount = 0;
+        const unsigned int CAP = 4096;
+        if (u.active)
+            for (unsigned int seq = 0; seq < u.chunkCount; seq++)
+            {
+                const unsigned int byteIdx = seq >> 3, bit = 1u << (seq & 7);
+                if (!(g_liteDynSeqSeen[byteIdx] & bit))
+                {
+                    if (missingCount < CAP) missing.append(seq);
+                    missingCount++;
+                }
+            }
+        json["missing"] = missing;
+        json["missingCount"] = missingCount;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
