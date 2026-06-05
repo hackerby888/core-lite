@@ -106,7 +106,11 @@ static void hexToByte(const std::string& hex, const int sizeInByte, unsigned cha
 {
     if (hex.length() != sizeInByte * 2)
     {
+#if defined(LITEDYN_CONTRACT_TU)
+        return; // dynamic-contract TU compiles -fno-exceptions; this node-only helper isn't called there
+#else
         throw std::invalid_argument("Hex string length does not match the expected size");
+#endif
     }
 
     for (size_t i = 0; i < sizeInByte; ++i)
