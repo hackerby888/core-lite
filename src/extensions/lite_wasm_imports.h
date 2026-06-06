@@ -133,4 +133,9 @@ static NativeSymbol g_liteWasmNatives[] = {
 };
 static const uint32_t g_liteWasmNativesCount = (uint32_t)(sizeof(g_liteWasmNatives) / sizeof(g_liteWasmNatives[0]));
 
+// Every host vtable fn must have exactly one wasm import; adding one + forgetting the other fails the BUILD
+// here instead of trapping at runtime. +1 = the leading abiVersion field (a pointer-sized slot).
+static_assert(sizeof(LiteHostServices) == sizeof(void*) * (g_liteWasmNativesCount + 1),
+              "wasm import table (g_liteWasmNatives) out of sync with the host vtable (LiteHostServices)");
+
 #endif // LITE_WASM_CONTRACTS

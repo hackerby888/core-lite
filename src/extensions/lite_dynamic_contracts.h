@@ -26,57 +26,59 @@ void logToConsole(const CHAR16* message);
 // the .so binds by pointer (not -rdynamic). Extend the method backends as deployed
 // contracts require (Counter needs none beyond the infra hooks).
 // ---------------------------------------------------------------------------
+// Designated initializers (C++20): each lambda binds to its vtable member BY NAME, so the struct and this
+// table can never silently desync by order (a reorder/insert is a compile error, not a wrong-fn-at-runtime).
 static LiteHostServices g_liteHostServices = {
-    LITE_DYN_ABI_VERSION,
-    +[](unsigned int id) { __beginFunctionOrProcedure(id); },
-    +[](unsigned int id) { __endFunctionOrProcedure(id); },
-    +[](unsigned int ci) { __markContractStateDirty(ci); },
-    +[]() { __pauseLogMessage(); },
-    +[]() { __resumeLogMessage(); },
-    +[](unsigned long long s, bool z) -> void* { return __acquireScratchpad(s, z); },
-    +[](void* p) { __releaseScratchpad(p); },
-    +[](unsigned int ci, unsigned char type, const void* msg, unsigned int size) {
+    .abiVersion = LITE_DYN_ABI_VERSION,
+    .beginFn = +[](unsigned int id) { __beginFunctionOrProcedure(id); },
+    .endFn = +[](unsigned int id) { __endFunctionOrProcedure(id); },
+    .markDirty = +[](unsigned int ci) { __markContractStateDirty(ci); },
+    .pauseLog = +[]() { __pauseLogMessage(); },
+    .resumeLog = +[]() { __resumeLogMessage(); },
+    .acquireScratch = +[](unsigned long long s, bool z) -> void* { return __acquireScratchpad(s, z); },
+    .releaseScratch = +[](void* p) { __releaseScratchpad(p); },
+    .logBytes = +[](unsigned int ci, unsigned char type, const void* msg, unsigned int size) {
         *((unsigned int*)(void*)msg) = ci;           // contractIndex into first 4 bytes (host convention)
         qLogger::logMessage(size, type, msg);        // type = CONTRACT_{ERROR,WARNING,INFORMATION,DEBUG}_MESSAGE
     },
-    +[](const void* in, unsigned int len, void* out32) { KangarooTwelve(in, len, out32, 32); },
-    +[](const void* ctx, const void* d, long long a) -> long long {
+    .k12 = +[](const void* in, unsigned int len, void* out32) { KangarooTwelve(in, len, out32, 32); },
+    .transfer = +[](const void* ctx, const void* d, long long a) -> long long {
         return ((QPI::QpiContextProcedureCall*)ctx)->transfer(*(const m256i*)d, a);
     },
-    +[](const void* ctx, const void* d, long long a, unsigned char t) -> long long {
+    .transferTyped = +[](const void* ctx, const void* d, long long a, unsigned char t) -> long long {
         return ((QPI::QpiContextProcedureCall*)ctx)->__transfer(*(const m256i*)d, a, t);
     },
-    +[](const void* ctx, unsigned int e) { ((QPI::QpiContextProcedureCall*)ctx)->__qpiAbort(e); },
-    +[](const void* ctx, long long a, unsigned int idx) -> long long { return ((QPI::QpiContextProcedureCall*)ctx)->burn(a, idx); },
-    +[](const void* ctx) -> unsigned short { return ((QPI::QpiContextFunctionCall*)ctx)->epoch(); },
-    +[](const void* ctx) -> unsigned int { return ((QPI::QpiContextFunctionCall*)ctx)->tick(); },
-    +[](const void* ctx) -> int { return ((QPI::QpiContextFunctionCall*)ctx)->numberOfTickTransactions(); },
-    +[](const void* c, const void* id32, void* eo) -> unsigned char { return (unsigned char)((QPI::QpiContextFunctionCall*)c)->getEntity(*(const m256i*)id32, *(QPI::Entity*)eo); },
-    +[](const void* c, unsigned int ci) -> long long { return ((QPI::QpiContextFunctionCall*)c)->queryFeeReserve(ci); },
-    +[](const void* c, const void* id32, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->nextId(*(const m256i*)id32); },
-    +[](const void* c, const void* id32, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->prevId(*(const m256i*)id32); },
-    +[](const void* c, const void* id32) -> unsigned char { return (unsigned char)((QPI::QpiContextFunctionCall*)c)->isContractId(*(const m256i*)id32); },
-    +[](const void* c, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->arbitrator(); },
-    +[](const void* c, unsigned short i, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->computor(i); },
-    +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->day(); },
-    +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->year(); },
-    +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->hour(); },
-    +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->minute(); },
-    +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->month(); },
-    +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->second(); },
-    +[](const void* c) -> unsigned short { return ((QPI::QpiContextFunctionCall*)c)->millisecond(); },
-    +[](const void* c, void* o) { *(QPI::DateAndTime*)o = ((QPI::QpiContextFunctionCall*)c)->now(); },
-    +[](const void* c, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->getPrevSpectrumDigest(); },
-    +[](const void* c, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->getPrevUniverseDigest(); },
-    +[](const void* c, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->getPrevComputerDigest(); },
-    +[](const void* c, const void* i, unsigned long long n) -> unsigned char { return (unsigned char)((QPI::QpiContextFunctionCall*)c)->isAssetIssued(*(const m256i*)i, n); },
-    +[](const void* c, unsigned long long n, const void* i, signed char d, long long s, unsigned long long u) -> long long { return ((QPI::QpiContextProcedureCall*)c)->issueAsset(n, *(const QPI::id*)i, d, s, u); },
-    +[](const void* c, const void* a, const void* o, const void* p) -> long long { return ((QPI::QpiContextFunctionCall*)c)->numberOfShares(*(const QPI::Asset*)a, *(const QPI::AssetOwnershipSelect*)o, *(const QPI::AssetPossessionSelect*)p); },
-    +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, unsigned short om, unsigned short pm) -> long long { return ((QPI::QpiContextFunctionCall*)c)->numberOfPossessedShares(n, *(const m256i*)i, *(const m256i*)o, *(const m256i*)p, om, pm); },
-    +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, long long s, const void* no) -> long long { return ((QPI::QpiContextProcedureCall*)c)->transferShareOwnershipAndPossession(n, *(const m256i*)i, *(const m256i*)o, *(const m256i*)p, s, *(const m256i*)no); },
-    +[](const void* c, long long a) -> unsigned char { return (unsigned char)((QPI::QpiContextProcedureCall*)c)->distributeDividends(a); },
+    .abort = +[](const void* ctx, unsigned int e) { ((QPI::QpiContextProcedureCall*)ctx)->__qpiAbort(e); },
+    .burn = +[](const void* ctx, long long a, unsigned int idx) -> long long { return ((QPI::QpiContextProcedureCall*)ctx)->burn(a, idx); },
+    .epoch = +[](const void* ctx) -> unsigned short { return ((QPI::QpiContextFunctionCall*)ctx)->epoch(); },
+    .tick = +[](const void* ctx) -> unsigned int { return ((QPI::QpiContextFunctionCall*)ctx)->tick(); },
+    .numberOfTickTransactions = +[](const void* ctx) -> int { return ((QPI::QpiContextFunctionCall*)ctx)->numberOfTickTransactions(); },
+    .getEntity = +[](const void* c, const void* id32, void* eo) -> unsigned char { return (unsigned char)((QPI::QpiContextFunctionCall*)c)->getEntity(*(const m256i*)id32, *(QPI::Entity*)eo); },
+    .queryFeeReserve = +[](const void* c, unsigned int ci) -> long long { return ((QPI::QpiContextFunctionCall*)c)->queryFeeReserve(ci); },
+    .nextId = +[](const void* c, const void* id32, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->nextId(*(const m256i*)id32); },
+    .prevId = +[](const void* c, const void* id32, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->prevId(*(const m256i*)id32); },
+    .isContractId = +[](const void* c, const void* id32) -> unsigned char { return (unsigned char)((QPI::QpiContextFunctionCall*)c)->isContractId(*(const m256i*)id32); },
+    .arbitrator = +[](const void* c, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->arbitrator(); },
+    .computor = +[](const void* c, unsigned short i, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->computor(i); },
+    .day = +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->day(); },
+    .year = +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->year(); },
+    .hour = +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->hour(); },
+    .minute = +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->minute(); },
+    .month = +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->month(); },
+    .second = +[](const void* c) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->second(); },
+    .millisecond = +[](const void* c) -> unsigned short { return ((QPI::QpiContextFunctionCall*)c)->millisecond(); },
+    .now = +[](const void* c, void* o) { *(QPI::DateAndTime*)o = ((QPI::QpiContextFunctionCall*)c)->now(); },
+    .prevSpectrumDigest = +[](const void* c, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->getPrevSpectrumDigest(); },
+    .prevUniverseDigest = +[](const void* c, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->getPrevUniverseDigest(); },
+    .prevComputerDigest = +[](const void* c, void* o) { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->getPrevComputerDigest(); },
+    .isAssetIssued = +[](const void* c, const void* i, unsigned long long n) -> unsigned char { return (unsigned char)((QPI::QpiContextFunctionCall*)c)->isAssetIssued(*(const m256i*)i, n); },
+    .issueAsset = +[](const void* c, unsigned long long n, const void* i, signed char d, long long s, unsigned long long u) -> long long { return ((QPI::QpiContextProcedureCall*)c)->issueAsset(n, *(const QPI::id*)i, d, s, u); },
+    .numberOfShares = +[](const void* c, const void* a, const void* o, const void* p) -> long long { return ((QPI::QpiContextFunctionCall*)c)->numberOfShares(*(const QPI::Asset*)a, *(const QPI::AssetOwnershipSelect*)o, *(const QPI::AssetPossessionSelect*)p); },
+    .numberOfPossessedShares = +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, unsigned short om, unsigned short pm) -> long long { return ((QPI::QpiContextFunctionCall*)c)->numberOfPossessedShares(n, *(const m256i*)i, *(const m256i*)o, *(const m256i*)p, om, pm); },
+    .transferShareOwnershipAndPossession = +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, long long s, const void* no) -> long long { return ((QPI::QpiContextProcedureCall*)c)->transferShareOwnershipAndPossession(n, *(const m256i*)i, *(const m256i*)o, *(const m256i*)p, s, *(const m256i*)no); },
+    .distributeDividends = +[](const void* c, long long a) -> unsigned char { return (unsigned char)((QPI::QpiContextProcedureCall*)c)->distributeDividends(a); },
     // liteCallFunction: run the callee's DEPLOYED function (table dispatch) under a nested context.
-    +[](const void* cc, unsigned int idx, unsigned short it, const void* in, unsigned int, void* out, unsigned int) -> int {
+    .liteCallFunction = +[](const void* cc, unsigned int idx, unsigned short it, const void* in, unsigned int, void* out, unsigned int) -> int {
         if (idx >= contractCount || !contractUserFunctions[idx][it]) return (int)QPI::CallErrorContractInactive;
         auto* caller = (QPI::QpiContextFunctionCall*)cc;
         QPI::InterContractCallError err = QPI::NoCallError;
@@ -91,7 +93,7 @@ static LiteHostServices g_liteHostServices = {
         return (int)QPI::NoCallError;
     },
     // liteInvokeProcedure: run the callee's DEPLOYED procedure (table dispatch) + transfer invocationReward.
-    +[](const void* cc, unsigned int idx, unsigned short it, const void* in, unsigned int, void* out, unsigned int, long long reward) -> int {
+    .liteInvokeProcedure = +[](const void* cc, unsigned int idx, unsigned short it, const void* in, unsigned int, void* out, unsigned int, long long reward) -> int {
         if (idx >= contractCount || !contractUserProcedures[idx][it]) return (int)QPI::CallErrorContractInactive;
         auto* caller = (QPI::QpiContextProcedureCall*)cc;
         QPI::InterContractCallError err = QPI::NoCallError;
@@ -106,10 +108,10 @@ static LiteHostServices g_liteHostServices = {
         return (int)QPI::NoCallError;
     },
     // setShareholderProposal / setShareholderVotes: invoke the callee's governance callback via the QPI method.
-    +[](const void* c, unsigned int idx, const void* p, long long reward) -> unsigned short {
+    .setShareholderProposal = +[](const void* c, unsigned int idx, const void* p, long long reward) -> unsigned short {
         return ((QPI::QpiContextProcedureCall*)c)->setShareholderProposal((unsigned short)idx, *(const QPI::Array<QPI::uint8, 1024>*)p, reward);
     },
-    +[](const void* c, unsigned int idx, const void* v, unsigned int, long long reward) -> unsigned char {
+    .setShareholderVotes = +[](const void* c, unsigned int idx, const void* v, unsigned int, long long reward) -> unsigned char {
         return (unsigned char)((QPI::QpiContextProcedureCall*)c)->setShareholderVotes((unsigned short)idx, *(const QPI::ProposalMultiVoteDataV1*)v, reward);
     },
 };
