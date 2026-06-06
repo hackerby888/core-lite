@@ -142,8 +142,12 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     setMem(wasm_runtime_addr_app_to_native(s.inst, wOut), outSize ? outSize : 1, 0);
 
     uint32_t argv[5] = { kind, it, wIn, wOut, wLocals };
-    if (!wasm_runtime_call_wasm(env, s.dispatchFn, 5, argv))
-        logToConsole(L"LITEWASM: dispatch trap");
+    if (!wasm_runtime_call_wasm(env, s.dispatchFn, 5, argv)) {
+        const char* ex = wasm_runtime_get_exception(s.inst);   // which contract/entry trapped + why
+        logColorToScreen("ERROR", "LITEWASM dispatch trap idx=" + std::to_string(idx) + " it=" + std::to_string(it)
+                         + " kind=" + std::to_string(kind) + (ex ? std::string(" — ") + ex : std::string()));
+        wasm_runtime_clear_exception(s.inst);                  // clear so a later valid call on this slot still runs
+    }
 
     // output out; state is resident (nothing to copy out). Refresh contractStates[idx] in case the linear-mem
     // base moved (memory.grow), then flag dirty so the digest re-hashes.
