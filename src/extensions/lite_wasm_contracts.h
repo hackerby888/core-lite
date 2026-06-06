@@ -1,0 +1,242 @@
+#pragma once
+// WASM-executed contracts (testnet, experimental). Second contract backend beside the native .so engine
+// (lite_dynamic_contracts.h); wasm is the default deploy target, native .so the opt-in escape hatch.
+// Embeds WAMR (one persistent instance per slot) + uses libffi closures to drop a per-(idx,it) trampoline
+// into the core's contractUser{Functions,Procedures}[idx][it] tables, so core dispatch (contract_exec.h)
+// stays byte-identical to upstream. State is canonical in contractStates[idx] (v1: copy in/out per call).
+// See extensions/WASM_CONTRACTS.md §13.
+#ifdef LITE_WASM_CONTRACTS
+
+#if !defined(LITE_DYNAMIC_CONTRACTS)
+#error "LITE_WASM_CONTRACTS requires LITE_DYNAMIC_CONTRACTS (shares the host vtable + deploy/slot machinery)"
+#endif
+
+#include <ffi.h>
+#include "wasm_export.h"
+#include "extensions/lite_wasm_imports.h"   // g_liteWasmNatives[] + LiteWasmCallCtx -> g_liteHostServices
+
+// Per-call scratch layout inside the contract's exported io_base region: [in | out | locals | arena].
+#define LITE_WASM_IO_SLOT   (8u * 1024u)    // max in / out / locals each
+#define LITE_WASM_ARENA_SZ  (16u * 1024u)   // acquireScratch bump arena
+#define LITE_WASM_IO_TOTAL  (3u * LITE_WASM_IO_SLOT + LITE_WASM_ARENA_SZ)
+
+static bool    g_liteWasmReady = false;
+static ffi_cif g_liteWasmDispatchCif;                 // shared 5-pointer->void CIF for every dispatch closure
+static ffi_type* g_liteWasmCifArgs[5];
+
+// closure user_data: identifies which contract entry a trampoline stands for.
+struct LiteWasmEntryBind { uint32_t idx; uint16_t it; uint8_t kind; };
+
+// One loaded wasm contract = one persistent instance (Stage-3: reused, no per-call churn).
+struct LiteWasmSlot {
+    bool                 loaded = false;
+    wasm_module_t        mod = nullptr;
+    wasm_module_inst_t   inst = nullptr;
+    wasm_exec_env_t      env = nullptr;
+    wasm_function_inst_t dispatchFn = nullptr;
+    unsigned char*       wasmBuf = nullptr;       // owned mutable copy; WAMR writes into + references it for life
+    uint32_t             stateOff = 0, stateSize = 0;
+    uint32_t             ioBase = 0;
+    uint32_t             entryCount = 0;
+    LiteWasmEntryBind    binds[LITE_MAX_USER_ENTRIES] = {};
+    ffi_closure*         closures[LITE_MAX_USER_ENTRIES] = {};
+};
+static LiteWasmSlot g_liteWasmSlots[LITE_DYN_SLOT_COUNT];
+
+static inline int liteWasmSlotLocal(unsigned int idx) {
+    int l = (int)idx - (int)liteDynSlotBase();
+    return (l >= 0 && l < LITE_DYN_SLOT_COUNT) ? l : -1;
+}
+static inline bool liteWasmIsWasm(unsigned int idx) {
+    int l = liteWasmSlotLocal(idx);
+    return l >= 0 && g_liteWasmSlots[l].loaded;
+}
+static inline uint32_t liteWasmCallU32(wasm_exec_env_t env, wasm_function_inst_t fn) {
+    uint32_t a[1] = { 0 }; wasm_runtime_call_wasm(env, fn, 0, a); return a[0];
+}
+
+// The current thread's active wasm exec_env, if any. The outermost dispatch (called from native core) uses
+// the slot's own env; a NESTED wasm->wasm call (via liteCallFunction) must REUSE the current env and swap its
+// module_inst (Stage-3b: a fresh/foreign env traps "invalid exec env" against WAMR's per-thread TLS env).
+static thread_local wasm_exec_env_t t_liteWasmCurEnv = nullptr;
+
+// The real engine entry: marshal one contract call through the wasm instance. Receives the SAME native ptrs
+// the core hands a native contract fn (ctx, state, input, output, locals); copies them in/out of linear memory.
+static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void* ctx,
+                             void* statePtr, void* input, void* output, void* locals)
+{
+    (void)locals;
+    int local = liteWasmSlotLocal(idx);
+    if (local < 0) return;
+    LiteWasmSlot& s = g_liteWasmSlots[local];
+    if (!s.loaded) return;
+
+    uint16_t inSize  = (kind == LITE_KIND_FUNCTION) ? contractUserFunctionInputSizes[idx][it]  : contractUserProcedureInputSizes[idx][it];
+    uint16_t outSize = (kind == LITE_KIND_FUNCTION) ? contractUserFunctionOutputSizes[idx][it] : contractUserProcedureOutputSizes[idx][it];
+
+    // env selection: outermost uses the slot env; nested reuses the thread's current env + set_module_inst.
+    wasm_exec_env_t env;
+    bool outer;
+    wasm_module_inst_t savedInst = nullptr;
+    void* savedUD = nullptr;
+    if (t_liteWasmCurEnv) {
+        env = t_liteWasmCurEnv;
+        savedInst = wasm_runtime_get_module_inst(env);
+        savedUD   = wasm_runtime_get_user_data(env);
+        wasm_runtime_set_module_inst(env, s.inst);
+        outer = false;
+    } else {
+        env = s.env;
+        t_liteWasmCurEnv = env;
+        outer = true;
+    }
+
+    const uint32_t wIn     = s.ioBase;
+    const uint32_t wOut    = s.ioBase + LITE_WASM_IO_SLOT;
+    const uint32_t wLocals = s.ioBase + 2 * LITE_WASM_IO_SLOT;
+    const uint32_t wArena  = s.ioBase + 3 * LITE_WASM_IO_SLOT;
+
+    LiteWasmCallCtx cc;
+    cc.ctx = ctx;
+    cc.arenaBase = wArena; cc.arenaBump = wArena; cc.arenaEnd = wArena + LITE_WASM_ARENA_SZ;
+    wasm_runtime_set_user_data(env, &cc);
+
+    // state in (v1: contractStates[idx] is canonical) + input in + zero output.
+    void* st = wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
+    if (s.stateSize) copyMem(st, statePtr, s.stateSize);
+    if (inSize)      copyMem(wasm_runtime_addr_app_to_native(s.inst, wIn), input, inSize);
+    setMem(wasm_runtime_addr_app_to_native(s.inst, wOut), outSize ? outSize : 1, 0);
+
+    uint32_t argv[5] = { kind, it, wIn, wOut, wLocals };
+    if (!wasm_runtime_call_wasm(env, s.dispatchFn, 5, argv))
+        logToConsole(L"LITEWASM: dispatch trap");
+
+    // output out + state out (procedures write; functions are read-only).
+    if (outSize) copyMem(output, wasm_runtime_addr_app_to_native(s.inst, wOut), outSize);
+    if (kind == LITE_KIND_PROCEDURE && s.stateSize) {
+        copyMem(statePtr, st, s.stateSize);
+        g_liteHostServices.markDirty(idx);
+    }
+
+    if (outer) { wasm_runtime_set_user_data(env, nullptr); t_liteWasmCurEnv = nullptr; }
+    else       { wasm_runtime_set_user_data(env, savedUD); wasm_runtime_set_module_inst(env, savedInst); }
+}
+
+// libffi closure trampoline: core calls it as a native USER_FUNCTION/USER_PROCEDURE; we recover (idx,it,kind)
+// from the bound user_data and forward to liteWasmDispatch. args[] = the 5 ptrs (ctx,state,input,output,locals).
+static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, void* user)
+{
+    LiteWasmEntryBind* b = (LiteWasmEntryBind*)user;
+    liteWasmDispatch(b->idx, b->it, b->kind,
+                     *(const void**)args[0], *(void**)args[1], *(void**)args[2], *(void**)args[3], *(void**)args[4]);
+}
+
+// Load a contract.wasm into a slot: instantiate, read its registration (reg_count/reg_info) + state/io
+// exports, and patch the core dispatch tables with one libffi closure per entry. NOT consensus — local load.
+[[maybe_unused]] static bool liteWasmLoadFromBytes(unsigned int idx, const unsigned char* bytes, unsigned int len)
+{
+    int local = liteWasmSlotLocal(idx);
+    if (local < 0) return false;
+    LiteWasmSlot& s = g_liteWasmSlots[local];
+
+    // WAMR modifies the load buffer in place and references it for the module's life -> own a mutable copy.
+    if (s.wasmBuf) { free(s.wasmBuf); s.wasmBuf = nullptr; }
+    s.wasmBuf = (unsigned char*)malloc(len);
+    if (!s.wasmBuf) { logToConsole(L"LITEWASM: oom"); return false; }
+    copyMem(s.wasmBuf, bytes, len);
+
+    char err[192];
+    wasm_module_t mod = wasm_runtime_load(s.wasmBuf, len, err, sizeof(err));
+    if (!mod) { logToConsole(L"LITEWASM: load failed"); free(s.wasmBuf); s.wasmBuf = nullptr; return false; }
+    wasm_module_inst_t inst = wasm_runtime_instantiate(mod, 64 * 1024, 1024 * 1024, err, sizeof(err));
+    if (!inst) { logToConsole(L"LITEWASM: instantiate failed"); wasm_runtime_unload(mod); return false; }
+    wasm_exec_env_t env = wasm_runtime_create_exec_env(inst, 64 * 1024);
+
+    wasm_function_inst_t f_state_addr = wasm_runtime_lookup_function(inst, "state_addr");
+    wasm_function_inst_t f_state_size = wasm_runtime_lookup_function(inst, "state_size");
+    wasm_function_inst_t f_io_base    = wasm_runtime_lookup_function(inst, "io_base");
+    wasm_function_inst_t f_reg_count  = wasm_runtime_lookup_function(inst, "reg_count");
+    wasm_function_inst_t f_reg_info   = wasm_runtime_lookup_function(inst, "reg_info");
+    wasm_function_inst_t f_dispatch   = wasm_runtime_lookup_function(inst, "dispatch");
+    if (!f_state_addr || !f_state_size || !f_io_base || !f_reg_count || !f_reg_info || !f_dispatch) {
+        logToConsole(L"LITEWASM: missing required export");
+        wasm_runtime_destroy_exec_env(env); wasm_runtime_deinstantiate(inst); wasm_runtime_unload(mod);
+        return false;
+    }
+
+    s.mod = mod; s.inst = inst; s.env = env; s.dispatchFn = f_dispatch;
+    s.stateOff = liteWasmCallU32(env, f_state_addr);
+    s.stateSize = liteWasmCallU32(env, f_state_size);
+    s.ioBase = liteWasmCallU32(env, f_io_base);
+    s.entryCount = liteWasmCallU32(env, f_reg_count);
+    if (s.entryCount > LITE_MAX_USER_ENTRIES) s.entryCount = LITE_MAX_USER_ENTRIES;
+
+    // reg_info(k, outOff) writes EntryInfo{inputType,kind,inSize,outSize} into linear mem; reuse ioBase as scratch.
+    struct EntryInfo { uint32_t inputType, kind, inSize, outSize; };
+    for (uint32_t k = 0; k < s.entryCount; k++) {
+        uint32_t a[2] = { k, s.ioBase };
+        wasm_runtime_call_wasm(env, f_reg_info, 2, a);
+        EntryInfo* ei = (EntryInfo*)wasm_runtime_addr_app_to_native(inst, s.ioBase);
+        uint16_t it = (uint16_t)ei->inputType;
+        s.binds[k] = { idx, it, (uint8_t)ei->kind };
+
+        void* code = nullptr;
+        ffi_closure* cl = (ffi_closure*)ffi_closure_alloc(sizeof(ffi_closure), &code);
+        if (!cl || ffi_prep_closure_loc(cl, &g_liteWasmDispatchCif, liteWasmClosureHandler, &s.binds[k], code) != FFI_OK) {
+            logToConsole(L"LITEWASM: closure alloc failed");
+            continue;
+        }
+        s.closures[k] = cl;
+
+        if (ei->kind == LITE_KIND_FUNCTION) {
+            contractUserFunctions[idx][it] = (USER_FUNCTION)code;
+            contractUserFunctionInputSizes[idx][it]  = (uint16_t)ei->inSize;
+            contractUserFunctionOutputSizes[idx][it] = (uint16_t)ei->outSize;
+            contractUserFunctionLocalsSizes[idx][it] = 0;
+        } else {
+            contractUserProcedures[idx][it] = (USER_PROCEDURE)code;
+            contractUserProcedureInputSizes[idx][it]  = (uint16_t)ei->inSize;
+            contractUserProcedureOutputSizes[idx][it] = (uint16_t)ei->outSize;
+            contractUserProcedureLocalsSizes[idx][it] = 0;
+        }
+    }
+
+    s.loaded = true;
+    logToConsole(L"LITEWASM: slot loaded");
+    return true;
+}
+
+// One-time WAMR bring-up at node boot (WASM_CONTRACTS.md §13.2). Registers the QPI import table (module
+// "lhost") + prepares the 5-pointer libffi dispatch CIF used by the per-(idx,it) closures (§13.3).
+[[maybe_unused]] static bool liteWasmRuntimeInit()
+{
+    if (g_liteWasmReady) return true;
+
+    for (int i = 0; i < 5; i++) g_liteWasmCifArgs[i] = &ffi_type_pointer;
+    if (ffi_prep_cif(&g_liteWasmDispatchCif, FFI_DEFAULT_ABI, 5, &ffi_type_void, g_liteWasmCifArgs) != FFI_OK) {
+        logToConsole(L"LITEWASM: libffi cif prep failed");
+        return false;
+    }
+
+    // Static pool allocator (matches the proven spike). Alloc_With_System_Allocator returned null in the
+    // loader -> SIGSEGV in wasm_const_str_list_insert/b_memmove_s. Sized for the slot instances + metadata.
+    static char s_liteWasmHeap[32 * 1024 * 1024];
+    RuntimeInitArgs args;
+    setMem(&args, sizeof(args), 0);
+    args.mem_alloc_type = Alloc_With_Pool;
+    args.mem_alloc_option.pool.heap_buf = s_liteWasmHeap;
+    args.mem_alloc_option.pool.heap_size = sizeof(s_liteWasmHeap);
+    args.native_module_name = "lhost";
+    args.native_symbols = g_liteWasmNatives;
+    args.n_native_symbols = (int)g_liteWasmNativesCount;
+    if (!wasm_runtime_full_init(&args)) {
+        logToConsole(L"LITEWASM: WAMR init failed");
+        return false;
+    }
+
+    g_liteWasmReady = true;
+    logToConsole(L"LITEWASM: runtime ready (WAMR + libffi)");
+    return true;
+}
+
+#endif // LITE_WASM_CONTRACTS

@@ -182,6 +182,53 @@ if(LITE_DYNAMIC_CONTRACTS)
     target_compile_definitions(Qubic PRIVATE LITE_DYNAMIC_CONTRACTS)
 endif()
 
+# WASM-executed contracts (testnet, experimental). Embeds WAMR (interp) + libffi for the dispatch closures.
+# Default OFF -> the whole block is skipped and the native build is byte-identical. See extensions/WASM_CONTRACTS.md.
+if(LITE_WASM_CONTRACTS)
+    target_compile_definitions(Qubic PRIVATE LITE_WASM_CONTRACTS)
+    enable_language(C)   # WAMR runtime is C; the node project is C++/ASM only
+
+    # --- WAMR static runtime (fast-interp; AOT added later) ---
+    set(WAMR_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../lib/wamr)
+    if(APPLE)
+        set(WAMR_BUILD_PLATFORM "darwin")
+    else()
+        set(WAMR_BUILD_PLATFORM "linux")
+    endif()
+    if(IS_ARM)
+        set(WAMR_BUILD_TARGET "AARCH64")
+    else()
+        set(WAMR_BUILD_TARGET "X86_64")
+    endif()
+    set(WAMR_BUILD_INTERP 1)
+    set(WAMR_BUILD_FAST_INTERP 1)
+    set(WAMR_BUILD_AOT 0)
+    set(WAMR_BUILD_JIT 0)
+    set(WAMR_BUILD_LIBC_BUILTIN 0)   # contracts use our host imports, not libc
+    set(WAMR_BUILD_LIBC_WASI 0)
+    set(WAMR_BUILD_MULTI_MODULE 0)
+    include(${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
+    add_library(vmlib STATIC ${WAMR_RUNTIME_LIB_SOURCE})
+    target_include_directories(Qubic PRIVATE ${WAMR_ROOT_DIR}/core/iwasm/include)
+
+    # --- libffi (host-side node dep; prefer the static archive for distribution) ---
+    find_library(FFI_LIB_STATIC libffi.a)
+    find_library(FFI_LIB_SHARED ffi)
+    if(FFI_LIB_STATIC)
+        set(FFI_LIB ${FFI_LIB_STATIC})
+    else()
+        set(FFI_LIB ${FFI_LIB_SHARED})
+    endif()
+    find_path(FFI_INCLUDE_DIR ffi.h PATH_SUFFIXES x86_64-linux-gnu aarch64-linux-gnu)
+    if(NOT FFI_LIB OR NOT FFI_INCLUDE_DIR)
+        message(FATAL_ERROR "LITE_WASM_CONTRACTS: libffi not found (install libffi-dev / libffi)")
+    endif()
+    target_include_directories(Qubic PRIVATE ${FFI_INCLUDE_DIR})
+
+    target_link_libraries(Qubic vmlib ${FFI_LIB})   # plain form to match the other Qubic link calls
+    message(STATUS "LITE_WASM_CONTRACTS: WAMR(${WAMR_BUILD_PLATFORM}/${WAMR_BUILD_TARGET}) + libffi(${FFI_LIB})")
+endif()
+
 if(ADDON_TX_STATUS_REQUEST)
     target_compile_definitions(Qubic PRIVATE ADDON_TX_STATUS_REQUEST=1)
 endif()

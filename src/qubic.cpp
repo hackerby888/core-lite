@@ -187,6 +187,7 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
 #include "extensions/lite_dynamic_contracts.h"
+#include "extensions/lite_wasm_contracts.h"
 #include "extensions/test_invalid_solution.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
@@ -7433,6 +7434,9 @@ static bool initialize()
     initializeContracts();
 #ifdef LITE_DYNAMIC_CONTRACTS
     liteDynBootDeploy();
+#endif
+#ifdef LITE_WASM_CONTRACTS
+    liteWasmRuntimeInit();
 #endif
 
     if (loadMiningSeedFromFile)
