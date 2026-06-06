@@ -4,10 +4,14 @@
 
 #include "gtest/gtest.h"
 
+#ifndef contractCount
+#define contractCount 1024
+#endif
+
 #include "../src/revenue.h"
 
 #include <algorithm>
-#include <fstream>
+#include <cstdio>
 #include <functional>
 #include <memory>
 
@@ -193,11 +197,11 @@ TEST(TestCoreRevenue, V2OverflowExtremeValues)
     }
 
     // Sliding window per-tick score: logScore * S * WINDOW_SIZE
-    //    Max logScore = 7099 (gTxRevenuePoints[1024])
-    //    Per-tick max = 7099 * 1024 * 1351 = 9,820,926,976 (fits u32? no, needs u64)
+    //    Max logScore = 34071 (gTxRevenuePoints[4096])
+    //    Per-tick max = 34071 * 1024 * 1351 = 47,134,639,104 (needs u64)
     {
         unsigned long long perTickMax = (unsigned long long)maxTxRevPoints * S * REVENUE_WINDOW_SIZE;
-        EXPECT_EQ(perTickMax, 9820926976ULL);
+        EXPECT_EQ(perTickMax, 47134639104ULL);
         EXPECT_LE(perTickMax, u64Max);
     }
 
@@ -225,7 +229,7 @@ TEST(TestCoreRevenue, V2OverflowExtremeValues)
         EXPECT_LE(intermediate, u64Max);
     }
 
-    // End-to-end: run computeRevenueV2 with max TX (1024/tick), max mining scores,
+    // End-to-end: run computeRevenueV2 with max TX (NUMBER_OF_TRANSACTIONS_PER_TICK/tick), max mining scores,
     //    full epoch worth of ticks. Must not produce negative or >IPC revenue.
     {
         constexpr unsigned int TOTAL_TICKS = REVENUE_WINDOW_SIZE + NUMBER_OF_COMPUTORS * 10;
@@ -237,7 +241,7 @@ TEST(TestCoreRevenue, V2OverflowExtremeValues)
         data.totalTicks = TOTAL_TICKS;
         for (unsigned int t = 0; t < TOTAL_TICKS; t++)
         {
-            data.perTickTxCount[t] = 1024;
+            data.perTickTxCount[t] = NUMBER_OF_TRANSACTIONS_PER_TICK;
         }
         for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
         {
@@ -285,69 +289,61 @@ TEST(TestCoreRevenue, ReadFile)
 
     for (size_t i = 0; i < REVENUE_FILES.size(); ++i)
     {
-        // Open input file in binary mode
         std::string input = TEST_DIR + REVENUE_FILES[i];
-        std::ifstream infile(input, std::ios::binary);
+        FILE* infile = std::fopen(input.c_str(), "rb");
         if (!infile)
         {
             std::cerr << "Error opening file: " << input << "\n";
             std::exit(EXIT_FAILURE);
         }
 
-        // Read transaction, vote and custom mining share
-        infile.read(reinterpret_cast<char*>(&tx), sizeof(tx));
-        if (!infile)
+        if (std::fread(&tx, 1, sizeof(tx), infile) != sizeof(tx))
         {
             std::cerr << "Error reading tx score from file.\n";
+            std::fclose(infile);
             std::exit(EXIT_FAILURE);
         }
-
-        infile.read(reinterpret_cast<char*>(&votes), sizeof(votes));
-        if (!infile)
+        if (std::fread(&votes, 1, sizeof(votes), infile) != sizeof(votes))
         {
             std::cerr << "Error reading votes score from file.\n";
+            std::fclose(infile);
             std::exit(EXIT_FAILURE);
         }
-
-        infile.read(reinterpret_cast<char*>(&customMining), sizeof(customMining));
-        if (!infile)
+        if (std::fread(&customMining, 1, sizeof(customMining), infile) != sizeof(customMining))
         {
             std::cerr << "Error reading custom mining score from file.\n";
+            std::fclose(infile);
             std::exit(EXIT_FAILURE);
         }
+        std::fclose(infile);
 
-        infile.close();
-
-        // Start to compute and write out data
         computeRevenue(tx, votes, customMining, revenue);
 
-        // Write the data out for investigation
-        // Open output file in text mode
+        // Output to file using fopen path too:
         std::string output = input + ".csv";
-        std::ofstream outfile(output);
+        FILE* outfile = std::fopen(output.c_str(), "w");
         if (!outfile)
         {
             std::cerr << "Error opening output file: " << output << "\n";
             std::exit(EXIT_FAILURE);
         }
 
-        // Write CSV header
-        outfile << "Index,txScore,voteScore,customMiningScore,txScoreFactor,voteScoreFactor,customMiningScoreFactor,revenue,percentage\n";
-
-        // Write the content
+        std::fprintf(outfile, "Index,txScore,voteScore,customMiningScore,txScoreFactor,voteScoreFactor,customMiningScoreFactor,revenue,percentage\n");
         for (int k = 0; k < NUMBER_OF_COMPUTORS; k++)
         {
-            outfile << k << ","
-                << tx[k] << ","
-                << votes[k] << ","
-                << customMining[k] << ","
-                << gRevenueComponents.txScoreFactor[k] << ","
-                << gRevenueComponents.voteScoreFactor[k] << ","
-                << gRevenueComponents.customMiningScoreFactor[k] << ","
-                << revenue[k] << ","
-                << (double)revenue[k] * 100 / issuancePerComputor
-                << "\n";
+            std::fprintf(outfile,
+                "%d,%llu,%llu,%llu,%llu,%llu,%llu,%lld,%.6f\n",
+                k,
+                (unsigned long long)tx[k],
+                (unsigned long long)votes[k],
+                (unsigned long long)customMining[k],
+                (unsigned long long)gRevenueComponents.txScoreFactor[k],
+                (unsigned long long)gRevenueComponents.voteScoreFactor[k],
+                (unsigned long long)gRevenueComponents.customMiningScoreFactor[k],
+                (long long)revenue[k],
+                (double)revenue[k] * 100 / issuancePerComputor
+            );
         }
-        outfile.close();
+        std::fclose(outfile);
     }
 }

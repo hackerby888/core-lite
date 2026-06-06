@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include <lib/platform_common/processor.h>
 #include <lib/platform_efi/uefi.h>
 #include "platform/random.h"
@@ -20,7 +22,11 @@
 #include "private_settings.h"
 
 #ifdef TESTNET
-#define NETWORK_QUEUEUE_REDUCED_TIME 4
+  #ifdef TESTNET_LITE_RAM
+  #define NETWORK_QUEUEUE_REDUCED_TIME 16 // 64 MB request/response queues — LITE testnet
+  #else
+  #define NETWORK_QUEUEUE_REDUCED_TIME 4
+  #endif
 #else
 #define NETWORK_QUEUEUE_REDUCED_TIME 1
 #endif
@@ -97,6 +103,7 @@ struct Peer
     unsigned int trackRequestedTick[dejavuListSize];
     long trackRequestedCounter; // "long" to discard warning from intrin.h
     unsigned int lastActiveTick; // indicate the tick number that this peer transfer valid tick/vote data
+    unsigned int peerReportedTick; // highest tick number received from this peer (votes/tickData), used for network-tip / catch-up detection
 
     bool isFullNode() const
     {
@@ -153,6 +160,7 @@ struct Peer
 
         dataToTransmitSize = 0;
         lastActiveTick = 0;
+        peerReportedTick = 0;
         trackRequestedCounter = 0;
         setMem(trackRequestedTick, sizeof(trackRequestedTick), 0);
         setMem(trackRequestedDejavu, sizeof(trackRequestedDejavu), 0);
@@ -448,6 +456,77 @@ static void pushToFullNodes(RequestResponseHeader* requestResponseHeader, int nu
     }
 }
 
+// Fan-out widths for catch-up "fetch missing data" requests.  Each upstream
+// pushToAny + pushToAnyFullNode pair sends to only 2 peers; if either is slow
+// the whole 500 ms tick-request poll is wasted.  Sending to a few more peers
+// in parallel shortens the average wait at negligible bandwidth cost.
+static constexpr int CATCHUP_FANOUT_ANY      = 3;
+static constexpr int CATCHUP_FANOUT_FULLNODE = 2;
+static constexpr int CATCHUP_FANOUT_TOTAL    = CATCHUP_FANOUT_ANY + CATCHUP_FANOUT_FULLNODE;
+
+// Fan out a "fetch missing data" request to several random peers plus several
+// fullnode peers.  Replaces the upstream pushToAny + pushToAnyFullNode pair
+// for requests whose completion gates tick advancement.
+static void pushCatchupFanOut(RequestResponseHeader* requestResponseHeader)
+{
+    PROFILE_SCOPE();
+    pushCustom(requestResponseHeader, CATCHUP_FANOUT_ANY,      /*filterFullNode=*/false);
+    pushCustom(requestResponseHeader, CATCHUP_FANOUT_FULLNODE, /*filterFullNode=*/true);
+}
+
+// Send a "fetch data for tick T" request preferring peers whose peerReportedTick
+// is >= T (i.e. peers that have provably processed up to or past that tick, so
+// they must have its tick-data, votes, and transactions).  Falls back to peers
+// below the target when not enough qualified peers exist — so we always send
+// to up to `numberOfReceivers` peers total, just with a quality preference.
+//
+// Used in catch-up mode for tick-data, quorum-tick, and tick-transaction
+// requests where the target tick is known.  Peers below the target can't help,
+// so prefer the ones that can.
+static void pushPreferringAtOrAbove(
+    RequestResponseHeader* requestResponseHeader,
+    unsigned int targetTick,
+    int numberOfReceivers = CATCHUP_FANOUT_TOTAL)
+{
+    PROFILE_SCOPE();
+    unsigned short qualified[NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS];
+    unsigned short unqualified[NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS];
+    int numQualified = 0;
+    int numUnqualified = 0;
+
+    for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
+    {
+        if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted
+            && peers[i].exchangedPublicPeers && !peers[i].isClosing)
+        {
+            if (peers[i].peerReportedTick >= targetTick)
+                qualified[numQualified++] = i;
+            else
+                unqualified[numUnqualified++] = i;
+        }
+    }
+
+    int remaining = numberOfReceivers;
+    // Prefer qualified peers (known to have data for this tick).
+    while (remaining > 0 && numQualified > 0)
+    {
+        const unsigned short idx = random(numQualified);
+        push(&peers[qualified[idx]], requestResponseHeader);
+        qualified[idx] = qualified[--numQualified];
+        remaining--;
+    }
+    // Fall back to the rest of the pool so we still hit the fan-out width
+    // when qualified candidates are sparse (e.g. fresh node, peerReportedTick
+    // still 0 for most peers because nobody has replied to us yet).
+    while (remaining > 0 && numUnqualified > 0)
+    {
+        const unsigned short idx = random(numUnqualified);
+        push(&peers[unqualified[idx]], requestResponseHeader);
+        unqualified[idx] = unqualified[--numUnqualified];
+        remaining--;
+    }
+}
+
 // Add message to response queue of specific peer. If peer is NULL, it will be sent to random peers. Can be called from any thread.
 static void enqueueResponse(Peer* peer, RequestResponseHeader* responseHeader)
 {
@@ -653,6 +732,12 @@ static void forgetPublicPeer(const IPv4Address& address)
 // Penalize rejected connection by setting verified peer to non-verified or forgetting a non-verified peer
 static void penalizePublicPeerRejectedConnection(const IPv4Address& address)
 {
+    // Never demote baked-in knownPublicPeers (seed list). Transient connect
+    // rejects (peer's incoming slots full, momentary network blip) shouldn't
+    // strip the seed-quality flag from peers we explicitly chose to trust.
+    if (isAddressInKnownPublicPeers(address))
+        return;
+
     bool forgetPeer = false;
 
     ACQUIRE(publicPeersLock);
@@ -860,12 +945,14 @@ static void processReceivedData(unsigned int i, unsigned int salt)
                     numberOfReceivedBytes += peers[i].receiveData.DataLength;
                     *((unsigned long long*) & peers[i].receiveData.FragmentTable[0].FragmentBuffer) += peers[i].receiveData.DataLength;
 
-                iteration:
-                    unsigned int receivedDataSize = (unsigned int)(((unsigned long long)peers[i].receiveData.FragmentTable[0].FragmentBuffer) - ((unsigned long long)peers[i].receiveBuffer));
+                    // Parse every complete packet in place, advancing a read cursor per packet.
+                    const unsigned int totalReceivedSize = (unsigned int)(((unsigned long long)peers[i].receiveData.FragmentTable[0].FragmentBuffer) - ((unsigned long long)peers[i].receiveBuffer));
+                    unsigned int readOffset = 0;
+                    bool peerForgotten = false;
 
-                    if (receivedDataSize >= sizeof(RequestResponseHeader))
+                    while (totalReceivedSize - readOffset >= sizeof(RequestResponseHeader))
                     {
-                        RequestResponseHeader* requestResponseHeader = (RequestResponseHeader*)peers[i].receiveBuffer;
+                        RequestResponseHeader* requestResponseHeader = (RequestResponseHeader*)((char*)peers[i].receiveBuffer + readOffset);
                         if (requestResponseHeader->size() < sizeof(RequestResponseHeader))
                         {
                             // protocol violation -> forget peer
@@ -875,72 +962,85 @@ static void processReceivedData(unsigned int i, unsigned int salt)
                             logToConsole(message);
                             forgetPublicPeer(peers[i].address);
                             closePeer(&peers[i]);
+                            peerForgotten = true;
+                            break;
+                        }
+
+                        // Packet not fully received yet; stop and wait for more bytes.
+                        if (totalReceivedSize - readOffset < requestResponseHeader->size())
+                        {
+                            break;
+                        }
+
+                        // Compute saltId of packet with K12 of payload and header (size + type temporarily
+                        // overwritten with salt). This is used recognized and skip packet duplicates with
+                        // dejavu0 (checking/setting flag for received package). After receiving a certain
+                        // number of packages (DEJAVU_SWAP_LIMIT), dejavu0 is moved to dejavu1 for checking
+                        // and dejavu0 is initialized with an empty buffer for checking/setting.
+                        unsigned int saltedId;
+                        const unsigned int header = *((unsigned int*)requestResponseHeader);
+                        *((unsigned int*)requestResponseHeader) = salt;
+                        KangarooTwelve(requestResponseHeader, header & 0xFFFFFF, &saltedId, sizeof(saltedId));
+                        *((unsigned int*)requestResponseHeader) = header;
+                        // mask hash into allocated dejavu bit-range (no-op at 512 MB; required when LITE shrinks pool)
+                        saltedId &= (unsigned int)(DEJAVU_POOL_SIZE * 8ULL - 1);
+
+                        // Initiate transfer of already received packet to processing thread
+                        // (or drop it without processing if Dejavu filter tells to ignore it)
+                        if (!((dejavu0[saltedId >> 6] | dejavu1[saltedId >> 6]) & (1ULL << (saltedId & 63))))
+                        {
+                            if ((requestQueueBufferHead >= requestQueueBufferTail || requestQueueBufferHead + requestResponseHeader->size() < requestQueueBufferTail)
+                                && (unsigned short)(requestQueueElementHead + 1) != requestQueueElementTail)
+                            {
+                                dejavu0[saltedId >> 6] |= (1ULL << (saltedId & 63));
+
+                                ASSERT(requestQueueElementHead < REQUEST_QUEUE_LENGTH);
+                                ASSERT(requestQueueBufferHead < REQUEST_QUEUE_BUFFER_SIZE);
+                                ASSERT(requestQueueBufferHead + requestResponseHeader->size() < REQUEST_QUEUE_BUFFER_SIZE);
+
+                                requestQueueElements[requestQueueElementHead].offset = requestQueueBufferHead;
+                                copyMem(&requestQueueBuffer[requestQueueBufferHead], (char*)peers[i].receiveBuffer + readOffset, requestResponseHeader->size());
+                                requestQueueBufferHead += requestResponseHeader->size();
+                                requestQueueElements[requestQueueElementHead].peer = &peers[i];
+                                if (requestQueueBufferHead > REQUEST_QUEUE_BUFFER_SIZE - BUFFER_SIZE)
+                                {
+                                    requestQueueBufferHead = 0;
+                                }
+                                // TODO: Place a fence
+                                requestQueueElementHead++;
+
+                                if (!(--dejavuSwapCounter))
+                                {
+                                    unsigned long long* tmp = dejavu1;
+                                    dejavu1 = dejavu0;
+                                    setMem(dejavu0 = tmp, DEJAVU_POOL_SIZE, 0);
+                                    dejavuSwapCounter = DEJAVU_SWAP_LIMIT;
+                                }
+                            }
+                            else
+                            {
+                                _InterlockedIncrement64(&numberOfDiscardedRequests);
+
+                                enqueueResponse(&peers[i], 0, TryAgain::type(), requestResponseHeader->dejavu(), NULL);
+                            }
                         }
                         else
                         {
-                            if (receivedDataSize >= requestResponseHeader->size())
-                            {
-                                // Compute saltId of packet with K12 of payload and header (size + type temporarily
-                                // overwritten with salt). This is used recognized and skip packet duplicates with
-                                // dejavu0 (checking/setting flag for received package). After receiving a certain
-                                // number of packages (DEJAVU_SWAP_LIMIT), dejavu0 is moved to dejavu1 for checking
-                                // and dejavu0 is initialized with an empty buffer for checking/setting.
-                                unsigned int saltedId;
-                                const unsigned int header = *((unsigned int*)requestResponseHeader);
-                                *((unsigned int*)requestResponseHeader) = salt;
-                                KangarooTwelve(requestResponseHeader, header & 0xFFFFFF, &saltedId, sizeof(saltedId));
-                                *((unsigned int*)requestResponseHeader) = header;
-
-                                // Initiate transfer of already received packet to processing thread
-                                // (or drop it without processing if Dejavu filter tells to ignore it)
-                                if (!((dejavu0[saltedId >> 6] | dejavu1[saltedId >> 6]) & (1ULL << (saltedId & 63))))
-                                {
-                                    if ((requestQueueBufferHead >= requestQueueBufferTail || requestQueueBufferHead + requestResponseHeader->size() < requestQueueBufferTail)
-                                        && (unsigned short)(requestQueueElementHead + 1) != requestQueueElementTail)
-                                    {
-                                        dejavu0[saltedId >> 6] |= (1ULL << (saltedId & 63));
-
-                                        ASSERT(requestQueueElementHead < REQUEST_QUEUE_LENGTH);
-                                        ASSERT(requestQueueBufferHead < REQUEST_QUEUE_BUFFER_SIZE);
-                                        ASSERT(requestQueueBufferHead + requestResponseHeader->size() < REQUEST_QUEUE_BUFFER_SIZE);
-
-                                        requestQueueElements[requestQueueElementHead].offset = requestQueueBufferHead;
-                                        copyMem(&requestQueueBuffer[requestQueueBufferHead], peers[i].receiveBuffer, requestResponseHeader->size());
-                                        requestQueueBufferHead += requestResponseHeader->size();
-                                        requestQueueElements[requestQueueElementHead].peer = &peers[i];
-                                        if (requestQueueBufferHead > REQUEST_QUEUE_BUFFER_SIZE - BUFFER_SIZE)
-                                        {
-                                            requestQueueBufferHead = 0;
-                                        }
-                                        // TODO: Place a fence
-                                        requestQueueElementHead++;
-
-                                        if (!(--dejavuSwapCounter))
-                                        {
-                                            unsigned long long* tmp = dejavu1;
-                                            dejavu1 = dejavu0;
-                                            setMem(dejavu0 = tmp, 536870912, 0);
-                                            dejavuSwapCounter = DEJAVU_SWAP_LIMIT;
-                                        }
-                                    }
-                                    else
-                                    {
-                                        _InterlockedIncrement64(&numberOfDiscardedRequests);
-
-                                        enqueueResponse(&peers[i], 0, TryAgain::type(), requestResponseHeader->dejavu(), NULL);
-                                    }
-                                }
-                                else
-                                {
-                                    _InterlockedIncrement64(&numberOfDuplicateRequests);
-                                }
-
-                                copyMem(peers[i].receiveBuffer, ((char*)peers[i].receiveBuffer) + requestResponseHeader->size(), receivedDataSize -= requestResponseHeader->size());
-                                peers[i].receiveData.FragmentTable[0].FragmentBuffer = ((char*)peers[i].receiveBuffer) + receivedDataSize;
-
-                                goto iteration;
-                            }
+                            _InterlockedIncrement64(&numberOfDuplicateRequests);
                         }
+
+                        readOffset += requestResponseHeader->size();
+                    }
+
+                    // Compact the unparsed remainder to the front once, then reposition the write cursor.
+                    if (!peerForgotten)
+                    {
+                        const unsigned int remainingSize = totalReceivedSize - readOffset;
+                        if (readOffset && remainingSize)
+                        {
+                            copyMem(peers[i].receiveBuffer, (char*)peers[i].receiveBuffer + readOffset, remainingSize);
+                        }
+                        peers[i].receiveData.FragmentTable[0].FragmentBuffer = (char*)peers[i].receiveBuffer + remainingSize;
                     }
                 }
             }

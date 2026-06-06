@@ -41,7 +41,11 @@ enum ContractError
 };
 
 // Used to store: locals and for first invocation level also input and output
+#if defined(TESTNET) && defined(TESTNET_LITE_RAM)
+typedef StackBuffer<unsigned int, 4 * 1024 * 1024> ContractLocalsStack;
+#else
 typedef StackBuffer<unsigned int, 32 * 1024 * 1024> ContractLocalsStack;
+#endif
 GLOBAL_VAR_DECL ContractLocalsStack contractLocalsStack[NUMBER_OF_CONTRACT_EXECUTION_BUFFERS];
 GLOBAL_VAR_DECL volatile char contractLocalsStackLock[NUMBER_OF_CONTRACT_EXECUTION_BUFFERS];
 GLOBAL_VAR_DECL volatile long contractLocalsStackLockWaitingCount;

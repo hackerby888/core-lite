@@ -114,6 +114,7 @@ class DownloaderConfig(BaseModel):
     timeout_seconds: int = 3600
     retry_count: int = 5
     retry_delay_seconds: int = 60
+    snapshot_download_concurrency: int = 3
 
     # S3 downloader
     s3_bucket: str = ""
@@ -133,6 +134,24 @@ class CleanupConfig(BaseModel):
 class LocalSnapshotConfig(BaseModel):
     enabled: bool = True
     interval_seconds: int = 3600     # save local snapshot every hour (like pressing F8)
+
+
+class WipeWindowConfig(BaseModel):
+    """Aggressive recovery during the expected non-seamless epoch transition.
+
+    Window opens weekly at ``weekday_utc hour_utc:minute_utc`` UTC (default
+    Wed 12:10 UTC) and stays open for ``duration_hours``.  Inside the
+    window, the watchdog wipes the entire data dir and re-syncs whenever
+    the local node falls behind the current epoch's ``initialTick``,
+    crashes, or stays stuck.
+    """
+
+    enabled: bool = True
+    weekday_utc: int = 2             # 0=Mon … 6=Sun; Wednesday = 2
+    hour_utc: int = 12
+    minute_utc: int = 10
+    duration_hours: int = 4
+    max_wipes_per_window: int = 2    # safety cap against wipe-loops
 
 
 class AlertingConfig(BaseModel):
@@ -192,6 +211,12 @@ class OrchestratorConfig(BaseSettings):
     operator_alias: Optional[str] = None
     node_mode: Optional[int] = None
     seeds: str = ""
+    # Auto-recovery: if the tick processor sits on the same system.tick for longer
+    # than N seconds AND the node already has a tickData for system.tick+1 AND at
+    # least one peer reports a tick beyond it (= network is ahead), automatically
+    # wipe the local tickData for system.tick+1 so the request loop re-fetches a
+    # fresh copy from peers. 0 disables. Suggested production value: 60-120.
+    auto_flush_stuck_seconds: int = 0
 
     # Management API
     management_api_port: int = 8080
@@ -204,6 +229,7 @@ class OrchestratorConfig(BaseSettings):
     alerting: AlertingConfig = Field(default_factory=AlertingConfig)
     cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
     local_snapshot: LocalSnapshotConfig = Field(default_factory=LocalSnapshotConfig)
+    wipe_window: WipeWindowConfig = Field(default_factory=WipeWindowConfig)
 
     def get_peers_list(self) -> list[str]:
         if not self.peers:
@@ -243,6 +269,8 @@ class OrchestratorConfig(BaseSettings):
         seeds = self.get_seeds_list()
         if seeds:
             args.extend(["--seeds", ",".join(seeds)])
+        if self.auto_flush_stuck_seconds and self.auto_flush_stuck_seconds > 0:
+            args.extend(["--auto-flush-stuck-seconds", str(self.auto_flush_stuck_seconds)])
         return args
 
 

@@ -23,6 +23,7 @@ The lite version of Qubic Core that can run directly on the OS without a UEFI en
   - [Node State](#node-state)
   - [Ticking](#ticking)
   - [RPC](#rpc)
+  - [Explorer](#explorer)
   - [Tips](#tips)
   - [FAQs](#faqs)
   - [Command Line Argument](#command-line-argument)
@@ -175,6 +176,25 @@ Qubic Core Lite provides a built-in RPC API that enables developers to interact 
 
 https://qubic.github.io/integration/Partners/swagger/qubic-rpc-doc.html?urls.primaryName=Qubic%20RPC%20Live%20Tree  
 > Remember to select the appropriate API definition for each endpoint.
+
+## Explorer
+
+> This feature only available in Linux!
+
+A built-in block explorer is served directly by the node — no separate frontend to deploy. Open it in a browser:
+
+**`http://localhost:41841/explorer`**
+
+Views:
+
+- **Overview** — live tick, epoch, quorum, mempool, peers, top miners, supply
+- **Ticks** — transactions per tick, contract-name tags, per-tx event-log popup, vote-alignment popup
+- **Transactions / Identities** — full tx detail and transfer history
+- **Contracts** — registry and recent contract calls
+- **Logs** — live event-log feed (newest first), filterable by tick
+- **Computors** — 676-node quorum list with current leader
+
+Terminal-style UI with 5 switchable color themes (saved in your browser).
 
 ## Tips
 

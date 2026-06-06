@@ -9,6 +9,14 @@
 
 #include "four_q.h"
 #include "kangaroo_twelve.h"
+#include <lib/platform_common/sleep.h>
+
+#include "extensions/zipper.h"
+
+#ifdef __linux__
+// Runtime toggle for SwapVM page compression (blosc2); off unless --swap-compression is passed.
+inline bool gSwapCompressionEnabled = false;
+#endif
 
 template <class T>
 inline constexpr const T& max(const T& left, const T& right)
@@ -21,6 +29,10 @@ inline constexpr const T& min(const T& left, const T& right)
 {
     return (left < right) ? left : right;
 }
+
+// bounded retry: 100ms, 200ms, 400ms, 800ms, 1600ms (~3.1s max)
+static constexpr int SWAPVM_IO_MAX_ATTEMPTS = 5;
+static constexpr unsigned int SWAPVM_IO_INITIAL_DELAY_MS = 100;
 
 // an util to use disk as RAM to reduce hardware requirement for qubic core node
 // this VirtualMemory doesn't (yet) support amend operation. That means data stay persisted once they are written
@@ -691,7 +703,11 @@ class SwapVirtualMemory : private VirtualMemory<T, prefixName, pageDirectory, pa
     using VMBase::loadPageToCache;
     using VMBase::getMostOutdatedCachePage;
 
+#if defined(TESTNET) && defined(TESTNET_LITE_RAM)
+    static constexpr unsigned long long MAX_PAGE = 128 * 1024; // 128K pages — LITE testnet
+#else
     static constexpr unsigned long long MAX_PAGE = 1024 * 1024; // max 1 million pages, can be adjusted later
+#endif
 
 private:
     bool* isPageWrittenToDisk; // if current page is written to disk
@@ -722,18 +738,52 @@ private:
         }
         unsigned char *pageBuffer = (unsigned char*)cache[cache_idx];
 
-#if defined(NO_UEFI) && !defined(REAL_NODE)
-        auto sz = save(pageName, pageSize, (unsigned char*)pageBuffer, pageDir);
-#else
-        auto sz = save(pageName, pageSize, (unsigned char*)pageBuffer, pageDir);
+        // bounded retry on save() failure
+        unsigned long long sz = 0;
+        unsigned long long expectedSize = pageSize;
+        unsigned char* saveBuffer = (unsigned char*)pageBuffer;
+#ifdef __linux__
+        std::vector<unsigned char> compressed;
+        if (gSwapCompressionEnabled)
+        {
+            compressed = Zipper::zip(pageBuffer, pageSize, 4);
+            saveBuffer = compressed.data();
+            expectedSize = (unsigned long long)compressed.size();
+        }
 #endif
+        unsigned int delayMs = SWAPVM_IO_INITIAL_DELAY_MS;
+        for (int attempt = 0; attempt < SWAPVM_IO_MAX_ATTEMPTS; attempt++)
+        {
+            sz = save(pageName, expectedSize, saveBuffer, pageDir);
+            if (sz == expectedSize)
+                break;
+
+            setText(message, L"swapVM writePageToDisk failed (attempt ");
+            appendNumber(message, (unsigned long long)(attempt + 1), false);
+            appendText(message, L"/");
+            appendNumber(message, (unsigned long long)SWAPVM_IO_MAX_ATTEMPTS, false);
+            appendText(message, L") page ");
+            appendNumber(message, pageId, true);
+            logToConsole(message);
+
+            if (attempt + 1 < SWAPVM_IO_MAX_ATTEMPTS)
+            {
+                sleepMilliseconds(delayMs);
+                delayMs *= 2;
+            }
+        }
+
+        if (sz != expectedSize)
+        {
+            setText(message, L"Fatal: swapVM writePageToDisk exhausted retries | page ");
+            appendNumber(message, pageId, true);
+            appendText(message, L" | prefix ");
+            appendText(message, pageDir);
+            logToConsole(message);
+            exit(1);
+        }
 
 #if !defined(NDEBUG)
-        if (sz != pageSize)
-        {
-            addDebugMessage(L"Failed to store virtualMemory to disk. Old data maybe lost");
-        }
-        else
         {
             CHAR16 debugMsg[128];
             unsigned long long tmp = prefixName;
@@ -749,6 +799,7 @@ private:
         }
 #endif
 
+        // only mark written on confirmed success
         isPageWrittenToDisk[pageId] = true;
     }
 
@@ -782,8 +833,54 @@ private:
         unsigned long long sz = 0;
         if (isPageWrittenToDisk[pageId])
         {
-            sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
-        } else
+            // bounded retry on load() failure
+            unsigned int delayMs = SWAPVM_IO_INITIAL_DELAY_MS;
+            for (int attempt = 0; attempt < SWAPVM_IO_MAX_ATTEMPTS; attempt++)
+            {
+#ifdef __linux__
+                if (gSwapCompressionEnabled)
+                {
+                    sz = 0;
+                    long long compressedSize = getFileSize((CHAR16*)pageName, (CHAR16*)pageDir);
+                    if (compressedSize > 0)
+                    {
+                        std::vector<unsigned char> tmp((size_t)compressedSize);
+                        long long readBytes = load(pageName, (unsigned long long)compressedSize, tmp.data(), pageDir);
+                        if (readBytes == compressedSize)
+                        {
+                            std::vector<unsigned char> decompressed = Zipper::unzip(tmp.data(), (size_t)compressedSize, 4);
+                            if (decompressed.size() == pageSize)
+                            {
+                                copyMem(cache[cache_page_id], decompressed.data(), pageSize);
+                                sz = pageSize;
+                            }
+                        }
+                    }
+                }
+                else
+#endif
+                {
+                    sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
+                }
+                if (sz == pageSize)
+                    break;
+
+                setText(message, L"swapVM loadPage failed (attempt ");
+                appendNumber(message, (unsigned long long)(attempt + 1), false);
+                appendText(message, L"/");
+                appendNumber(message, (unsigned long long)SWAPVM_IO_MAX_ATTEMPTS, false);
+                appendText(message, L") page ");
+                appendNumber(message, pageId, true);
+                logToConsole(message);
+
+                if (attempt + 1 < SWAPVM_IO_MAX_ATTEMPTS)
+                {
+                    sleepMilliseconds(delayMs);
+                    delayMs *= 2;
+                }
+            }
+        }
+        else
         {
             sz = pageSize;
             setMem(cache[cache_page_id], pageSize, 0);

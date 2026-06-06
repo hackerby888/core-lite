@@ -510,6 +510,16 @@ class RpcLiveController : public HttpController<RpcLiveController>
             }
 
             unsigned int contractIndex = (*json)["contractIndex"].asUInt();
+            // contract indices: 1..contractCount-1. idx 0 is the null/burn sentinel.
+            if (contractIndex < 1 || contractIndex >= contractCount)
+            {
+                result["code"] = 3;
+                result["message"] = "contractIndex out of range";
+                auto res = HttpResponse::newHttpJsonResponse(result);
+                res->setStatusCode(k400BadRequest);
+                cb(res);
+                return;
+            }
             unsigned short inputType = (*json)["inputType"].asUInt();
             unsigned short inputSize = (*json)["inputSize"].asUInt();
             std::string requestData = (*json)["requestData"].asString();

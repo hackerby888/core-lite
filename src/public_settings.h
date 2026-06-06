@@ -14,21 +14,29 @@
 #define MAX_NUMBER_OF_PROCESSORS 6
 #define NUMBER_OF_SOLUTION_PROCESSORS 2
 #else
-#define MAX_NUMBER_OF_PROCESSORS 8
-#define NUMBER_OF_SOLUTION_PROCESSORS 2
+#define MAX_NUMBER_OF_PROCESSORS 32
+#define NUMBER_OF_SOLUTION_PROCESSORS (MAX_NUMBER_OF_PROCESSORS - 4)
 #endif
 
 // Maximum number of NUMBER_OF_PREPROCESS_SOLUTION_PROCESSORS can be used for pre-process the mining solution.
 // Must not exceed half of NUMBER_OF_SOLUTION_PROCESSORS. Set 0 to disable.
-#define NUMBER_OF_PREPROCESS_SOLUTION_PROCESSORS 0
+#define NUMBER_OF_PREPROCESS_SOLUTION_PROCESSORS (NUMBER_OF_SOLUTION_PROCESSORS / 2)
 
 // Number of buffers available for executing contract functions in parallel; having more means reserving a bit more RAM (+1 = +32 MB)
 // and less waiting in request processors if there are more parallel contract function requests. The maximum value that may make sense
 // is MAX_NUMBER_OF_PROCESSORS - 1.
+#if defined(TESTNET) && defined(TESTNET_LITE_RAM)
+#define NUMBER_OF_CONTRACT_EXECUTION_BUFFERS 2
+#else
 #define NUMBER_OF_CONTRACT_EXECUTION_BUFFERS 10
+#endif
 
 #define USE_SCORE_CACHE 1
+#if defined(TESTNET) && defined(TESTNET_LITE_RAM)
+#define SCORE_CACHE_SIZE 256000
+#else
 #define SCORE_CACHE_SIZE 2000000 // the larger the better
+#endif
 #define SCORE_CACHE_COLLISION_RETRIES 20 // number of retries to find entry in cache in case of hash collision
 
 // Number of ticks from prior epoch that are kept after seamless epoch transition. These can be requested after transition.
@@ -38,7 +46,11 @@
 #define TARGET_TICK_DURATION 7000
 #define TRANSACTION_SPARSENESS 1
 // Number of ticks that are stored in the pending txs pool. This also defines how many ticks in advance a tx can be registered.
-#define PENDING_TXS_POOL_NUM_TICKS (32ULL) // 10 minutes
+  #ifdef TESTNET_LITE_RAM
+  #define PENDING_TXS_POOL_NUM_TICKS (32ULL)
+  #else
+  #define PENDING_TXS_POOL_NUM_TICKS (32ULL)
+  #endif
 #else
 // The tick duration used for timing and scheduling logic.
 #define TARGET_TICK_DURATION 1000
@@ -46,9 +58,9 @@
 // The tick duration used to calculate the size of memory buffers.
 // This determines the memory footprint of the application.
 #define TICK_DURATION_FOR_ALLOCATION_MS 350
-#define TRANSACTION_SPARSENESS 3
+#define TRANSACTION_SPARSENESS 10
 // Number of ticks that are stored in the pending txs pool. This also defines how many ticks in advance a tx can be registered.
-#define PENDING_TXS_POOL_NUM_TICKS (1000 * 60 * 10ULL / TICK_DURATION_FOR_ALLOCATION_MS) // 10 minutes
+#define PENDING_TXS_POOL_NUM_TICKS (1000 * 60 * 3ULL / TICK_DURATION_FOR_ALLOCATION_MS) // 3 minutes
 #endif
 
 #ifdef TESTNET
@@ -89,12 +101,12 @@ static_assert(AUTO_FORCE_NEXT_TICK_THRESHOLD* TARGET_TICK_DURATION >= PEER_REFRE
 // Config options that should NOT be changed by operators
 
 #define VERSION_A 1
-#define VERSION_B 288
-#define VERSION_C 1
+#define VERSION_B 294
+#define VERSION_C 0
 
 // Epoch and initial tick for node startup
-#define EPOCH 210
-#define TICK 50005000
+#define EPOCH 216
+#define TICK 55900000
 #define TICK_IS_FIRST_TICK_OF_EPOCH 1 // Set to 0 if the network is restarted during the EPOCH with a new initial TICK
 
 #define ARBITRATOR "AFZPUAIYVPNUYGJRQVLUKOPPVLHAZQTGLYAAUUNBXFTVTAMSBKQBLEIEPCVJ"
@@ -106,11 +118,12 @@ static wchar_t SPECTRUM_FILE_NAME[] = L"spectrum.???";
 static wchar_t UNIVERSE_FILE_NAME[] = L"universe.???";
 static wchar_t SCORE_CACHE_FILE_NAME[] = L"score.???";
 static wchar_t CONTRACT_FILE_NAME[] = L"contract????.???";
-static wchar_t CUSTOM_MINING_REVENUE_END_OF_EPOCH_FILE_NAME[] = L"custom_revenue.eoe";
 static wchar_t CONTRACT_EXEC_FEES_ACC_FILE_NAME[] = L"contract_exec_fees_acc.???";
 static wchar_t CONTRACT_EXEC_FEES_REC_FILE_NAME[] = L"contract_exec_fees_rec.???";
 static wchar_t REVENUE_DATA_END_OF_EPOCH_FILE_NAME[] = L"revenue_data.eoe";
 static wchar_t REVENUE_DATA_SNAPSHOT_FILE_NAME[] = L"revenue_data.???";
+static wchar_t MULTIDIM_REVENUE_SNAPSHOT_FILE_NAME[] = L"revenue_data_multi.???";
+static wchar_t MULTIDIM_REVENUE_END_OF_EPOCH_FILE_NAME[] = L"revenue_data_multi.eoe";
 
 static constexpr unsigned long long HYPERIDENTITY_NUMBER_OF_INPUT_NEURONS = 512;     // K
 static constexpr unsigned long long HYPERIDENTITY_NUMBER_OF_OUTPUT_NEURONS = 512;    // L
@@ -120,13 +133,14 @@ static constexpr unsigned long long HYPERIDENTITY_NUMBER_OF_MUTATIONS = 150;
 static constexpr unsigned long long HYPERIDENTITY_POPULATION_THRESHOLD = HYPERIDENTITY_NUMBER_OF_INPUT_NEURONS + HYPERIDENTITY_NUMBER_OF_OUTPUT_NEURONS + HYPERIDENTITY_NUMBER_OF_MUTATIONS; // P
 static constexpr unsigned int HYPERIDENTITY_SOLUTION_THRESHOLD_DEFAULT = 321;
 
-static constexpr unsigned long long ADDITION_NUMBER_OF_INPUT_NEURONS = 14;     // K
-static constexpr unsigned long long ADDITION_NUMBER_OF_OUTPUT_NEURONS = 8;    // L
-static constexpr unsigned long long ADDITION_NUMBER_OF_TICKS = 1000;               // N
-static constexpr unsigned long long ADDITION_NUMBER_OF_NEIGHBORS = 728;    // 2M. Must be divided by 2
-static constexpr unsigned long long ADDITION_NUMBER_OF_MUTATIONS = 500;
-static constexpr unsigned long long ADDITION_POPULATION_THRESHOLD = ADDITION_NUMBER_OF_INPUT_NEURONS + ADDITION_NUMBER_OF_OUTPUT_NEURONS + ADDITION_NUMBER_OF_MUTATIONS; // P
-static constexpr unsigned int ADDITION_SOLUTION_THRESHOLD_DEFAULT = 76100;
+static constexpr unsigned long long ADDITION_NUMBER_OF_INPUT_NEURONS = 14;
+static constexpr unsigned long long ADDITION_NUMBER_OF_OUTPUT_NEURONS = 8;
+static constexpr unsigned long long ADDITION_NUMBER_OF_TICKS = 256;
+static constexpr unsigned long long ADDITION_POPULATION_THRESHOLD = 256;
+// Each neuron is connected to every other neuron(exclude self). The effective is clamp to (ADDITION_POPULATION_THRESHOLD - 1) at runtime
+static constexpr unsigned long long ADDITION_NUMBER_OF_NEIGHBORS = ADDITION_POPULATION_THRESHOLD;
+static constexpr unsigned long long ADDITION_NUMBER_OF_MUTATIONS = 256;
+static constexpr unsigned int ADDITION_SOLUTION_THRESHOLD_DEFAULT = 76000;
 
 // Multipler of score
 static constexpr unsigned int HYPERIDENTITY_SOLUTION_MULTIPLER = 1;

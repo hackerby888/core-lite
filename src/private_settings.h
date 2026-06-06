@@ -1392,17 +1392,6 @@ static const unsigned char whiteListPeers[][4] = {
 };
 */
 
-// Enables basic DOGE oracle query handling, i.e. an oracle query tx is broadcasted once when a solution from an associated comp pool arrives.
-#define BASIC_DOGE_ORACLE_QUERIES 1
-// Enables retry mechanisms for DOGE oracle queries where the query tx was either not included in the scheduled tick or the oracle query failed (e.g. timeout).
-#define RETRY_DOGE_ORACLE_QUERIES 1
-
-// DO NOT CHANGE: Basic DOGE oracle queries need to be enabled to support the retry mechanisms.
-#if RETRY_DOGE_ORACLE_QUERIES && !BASIC_DOGE_ORACLE_QUERIES
-#undef BASIC_DOGE_ORACLE_QUERIES
-#define BASIC_DOGE_ORACLE_QUERIES 1
-#endif
-
 // Enter static IPs of one or multiple oracle machine node(s). This node will connect to these and try to keep the
 // connection open for low latency. The oracle machine nodes also need to whitelist the IP of this core node.
 static const unsigned char oracleMachineIPs[][4] = {
@@ -1417,10 +1406,16 @@ static const unsigned char oracleMachineIPs[][4] = {
 #endif
 
 // Virtual memory settings for logging
-#define LOG_BUFFER_PAGE_SIZE 300000000ULL
-#define PMAP_LOG_PAGE_SIZE 30000000ULL
+#if defined(TESTNET) && defined(TESTNET_LITE_RAM)
+#define LOG_BUFFER_PAGE_SIZE (16000000ULL)   // 16 MB page — LITE testnet
+#define PMAP_LOG_PAGE_SIZE   (3000000ULL)    // 3 MB page — LITE testnet
+#define IMAP_LOG_PAGE_SIZE   500ULL          // 500 tick-blob entries/page — LITE testnet
+#else
+#define LOG_BUFFER_PAGE_SIZE (300000000ULL / 2)
+#define PMAP_LOG_PAGE_SIZE (30000000ULL / 2)
 #define IMAP_LOG_PAGE_SIZE 10000ULL
-#define VM_NUM_CACHE_PAGE 8
+#endif
+#define VM_NUM_CACHE_PAGE 4
 
 #if ENABLE_QUBIC_LOGGING_EVENT
 // DO NOT MODIFY THIS AREA UNLESS YOU ARE DEVELOPING LOGGING FEATURES

@@ -25,7 +25,11 @@ constexpr unsigned int MAX_SIZE_OF_CONTRACT_LOCALS = 32 * 1024;
 constexpr unsigned short MAX_NESTED_CONTRACT_CALLS = 10;
 
 // Size of the contract action tracker, limits the number of transfers that one contract call can execute.
+#if defined(TESTNET) && defined(TESTNET_LITE_RAM)
+constexpr unsigned long long CONTRACT_ACTION_TRACKER_SIZE = 1 * 1024 * 1024;
+#else
 constexpr unsigned long long CONTRACT_ACTION_TRACKER_SIZE = 16 * 1024 * 1024;
+#endif
 
 // Maximum number of contract procedures that may be registered, e.g. for user procedure notifications
 constexpr unsigned int MAX_CONTRACT_PROCEDURES_REGISTERED = 16 * 1024;

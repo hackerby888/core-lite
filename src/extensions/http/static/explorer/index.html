@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>QUBIC // explorer</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><filter id='g' x='-50%25' y='-50%25' width='200%25' height='200%25'><feGaussianBlur stdDeviation='1.8'/></filter></defs><rect width='64' height='64' fill='%230a0a14'/><g transform='translate(32 32)'><g><rect x='-22' y='-22' width='44' height='44' transform='rotate(45)' fill='none' stroke='%23f7931a' stroke-width='3.4' opacity='0.55' filter='url(%23g)'/><rect x='-22' y='-22' width='44' height='44' transform='rotate(45)' fill='none' stroke='%23f7931a' stroke-width='2.4'/><rect x='-10' y='-10' width='20' height='20' transform='rotate(45)' fill='%23f7931a'/><animateTransform attributeName='transform' type='rotate' from='0 0 0' to='360 0 0' dur='8s' repeatCount='indefinite'/></g></g></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Major+Mono+Display&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/explorer/style.css">
+</head>
+<body>
+  <div class="scanlines" aria-hidden="true"></div>
+  <div class="grain" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <span class="logo">◈</span>
+      <span class="logo-text">QUBIC <span class="logo-sub">// EXPLORER</span></span>
+    </a>
+    <nav>
+      <a href="#/">_overview</a>
+      <a href="#/computors">_computors</a>
+      <a href="#/contracts">_contracts</a>
+      <a href="#/logs">_logs</a>
+      <a href="#/id/">_lookup</a>
+    </nav>
+    <div class="topbar-right">
+      <div class="theme-picker" id="theme-picker" title="theme"></div>
+      <div class="status">
+        <span class="led" id="conn-led"></span>
+        <span class="status-text mono" id="conn-text">CONNECTING</span>
+      </div>
+    </div>
+  </header>
+
+  <main id="view"><p class="muted mono">› awaiting feed…</p></main>
+
+  <footer>
+    <div class="ticker-tape" id="ticker">
+      <span class="mono muted">QUBIC-CORE-LITE :: TICK FEED LIVE :: 0x</span>
+    </div>
+  </footer>
+
+  <script src="/explorer/app.js"></script>
+</body>
+</html>

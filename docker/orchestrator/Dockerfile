@@ -17,26 +17,32 @@ RUN apt-get update && apt-get install -y \
     uuid-dev \
     zlib1g-dev \
     libssl-dev \
+    libboost-stacktrace-dev \
+    libzstd-dev \
+    libfmt-dev \
+    liblzo2-dev \
+    liblz4-dev \
     git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build/qubic-core-lite
 COPY . .
 
-RUN if [ -f build/src/Qubic ]; then \
-      echo "Pre-built binary found, skipping build"; \
-    else \
-      mkdir -p build && cd build \
-      && cmake .. \
-          -D CMAKE_C_COMPILER=clang \
-          -D CMAKE_CXX_COMPILER=clang++ \
-          -D BUILD_TESTS:BOOL=OFF \
-          -D BUILD_BINARY:BOOL=ON \
-          -D CMAKE_BUILD_TYPE=Release \
-          -D ENABLE_AVX512=OFF \
-          -D ONLY_LOGGING=ON \
-      && cmake --build . --target Qubic -- -j$(nproc); \
-    fi
+# Always build from source inside the container so the binary's compile
+# flags (notably ENABLE_AVX512=OFF) are guaranteed to match this Dockerfile.
+# Any local build/ tree from the host is discarded — it may have been
+# configured with different flags (e.g. AVX-512 on, the cmake default).
+RUN rm -rf build \
+    && mkdir -p build && cd build \
+    && cmake .. \
+        -D CMAKE_C_COMPILER=clang \
+        -D CMAKE_CXX_COMPILER=clang++ \
+        -D BUILD_TESTS:BOOL=OFF \
+        -D BUILD_BINARY:BOOL=ON \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D ENABLE_AVX512=OFF \
+        -D ONLY_LOGGING=ON \
+    && cmake --build . --target Qubic -- -j$(nproc)
 
 # Collect build outputs into a common location
 RUN mkdir -p /output \
@@ -59,6 +65,7 @@ RUN apt-get update && apt-get install -y \
     libjsoncpp25 \
     libhiredis1.1.0 \
     libssl3 \
+    libzstd1 \
     openssh-client \
     rsync \
     curl \
@@ -102,9 +109,10 @@ ENV QUBIC_BINARY_STAGING_DIR="/opt/qubic-bin"
 ENV QUBIC_LOG_LEVEL="INFO"
 ENV QUBIC_LOG_FORMAT="json"
 
-# Docker health check via the Qubic HTTP API
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
-    CMD curl -sf http://127.0.0.1:41841/tick-info || exit 1
+# No Docker HEALTHCHECK: the Python orchestrator's watchdog already polls the
+# node and reacts on failure. A HEALTHCHECK CMD would just spawn a child of
+# PID 1 every interval, and PID 1 (Python asyncio) doesn't reap arbitrary
+# orphans — that produced zombie curl processes. Remove the duplication.
 
 # PID 1: Python orchestrator
 ENTRYPOINT ["python", "-m", "app"]

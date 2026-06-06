@@ -17,14 +17,15 @@ static std::string wchar_to_string(const wchar_t* wstr) {
         return std::string();
     }
 
-    std::string result;
+    // volatile defeats clang rewriting this scan into libc wcslen(); libc's wcslen reads 4-byte wchar_t and mis-lengths our -fshort-wchar (2-byte) strings.
+    const volatile unsigned short* u = reinterpret_cast<const volatile unsigned short*>(wstr);
     size_t len = 0;
+    while (u[len] != 0) len++;
 
-    while (wstr[len] != L'\0') len++;
-
+    std::string result;
     result.reserve(len);
     for (size_t i = 0; i < len; i++) {
-        result.push_back(static_cast<char>(wstr[i]));
+        result.push_back(static_cast<char>(u[i]));
     }
     return result;
 }
@@ -35,7 +36,7 @@ static std::string wchar_to_string(const wchar_t* wstr) {
 static void print_wstr(const wchar_t* wstr, ...) {
     std::string utf8String = wchar_to_string(wstr);
     va_list args;
-    va_start(args, utf8String.c_str());
+    va_start(args, wstr);
     vprintf(utf8String.c_str(), args);
     va_end(args);
     printf("\n");
