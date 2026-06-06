@@ -3,9 +3,8 @@
 // (lite_dynamic_contracts.h); wasm is the default deploy target, native .so the opt-in escape hatch.
 // Embeds WAMR (one persistent instance per slot) + uses libffi closures to drop a per-(idx,it) trampoline
 // into the core's contractUser{Functions,Procedures}[idx][it] tables, so core dispatch (contract_exec.h)
-// stays byte-identical to upstream. State is canonical + resident in the wasm instance's linear memory
-// (v2: no per-call copy); the node's stub buffer contractStates[idx] is synced lazily only at digest +
-// snapshot via liteWasmFlushState(). See extensions/WASM_CONTRACTS.md §13, §15.
+// stays byte-identical to upstream. The contract's state lives in the wasm instance's linear memory; the node's
+// contractStates[idx] is pointed AT that region at load (the slot's 1GB reserve is freed). See WASM_CONTRACTS.md.
 #ifdef LITE_WASM_CONTRACTS
 
 #if !defined(LITE_DYNAMIC_CONTRACTS)
@@ -49,7 +48,7 @@ struct LiteWasmSlot {
     ffi_closure*         sysClosures[LITE_SP_COUNT] = {};
     uint16_t             sysInSize[LITE_SP_COUNT] = {};      // QPI-defined in/out sizes per sysproc (share-mgmt)
     uint16_t             sysOutSize[LITE_SP_COUNT] = {};
-    bool                 stubStale = false;       // v2: a procedure wrote linear-mem state since the last stub flush
+    bool                 stubFreed = false;       // set once the slot's 1GB reserve is freed + contractStates[idx] aliased to the resident state
 };
 #define LITE_WASM_KIND_SYSPROC 2
 static LiteWasmSlot g_liteWasmSlots[LITE_DYN_SLOT_COUNT];
@@ -66,20 +65,8 @@ static inline uint32_t liteWasmCallU32(wasm_exec_env_t env, wasm_function_inst_t
     uint32_t a[1] = { 0 }; wasm_runtime_call_wasm(env, fn, 0, a); return a[0];
 }
 
-// v2 no-copy state. The wasm linear memory holds the canonical state across calls (dispatch no longer copies it
-// in/out per call). The node reads contractStates[idx] only at digest + snapshot; sync the live state into that
-// stub buffer here, lazily — once per dirty tick (stubStale gates redundant copies), not per call.
-static inline void liteWasmFlushState(unsigned int idx) {
-    int local = liteWasmSlotLocal(idx);
-    if (local < 0) return;
-    LiteWasmSlot& s = g_liteWasmSlots[local];
-    if (!s.loaded || !s.stubStale || !s.stateSize) return;
-    copyMem(contractStates[idx], wasm_runtime_addr_app_to_native(s.inst, s.stateOff), s.stateSize);
-    s.stubStale = false;
-}
-// State span the node should hash/scan for a wasm slot = the contract's real state size, not the 1GB stub
-// reserve (so the digest hashes only meaningful bytes; the stub tail past stateSize is never read). Returns
-// deflt (the constexpr contractDescriptions size) for non-wasm contracts.
+// Real state span for a wasm slot (its resident size); deflt for non-wasm. The node hashes/saves this, not the
+// slot's 1GB reserve, so it never reads past the resident region.
 static inline unsigned long long liteWasmEffectiveStateSize(unsigned int idx, unsigned long long deflt) {
     int local = liteWasmSlotLocal(idx);
     if (local < 0 || !g_liteWasmSlots[local].loaded) return deflt;
@@ -102,7 +89,7 @@ static thread_local wasm_exec_env_t t_liteWasmCurEnv = nullptr;
 static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void* ctx,
                              void* statePtr, void* input, void* output, void* locals)
 {
-    (void)locals; (void)statePtr;   // v2: state is resident in linear mem, not handed in via statePtr
+    (void)locals; (void)statePtr;   // state is resident in linear mem, not handed in via statePtr
     int local = liteWasmSlotLocal(idx);
     if (local < 0) return;
     LiteWasmSlot& s = g_liteWasmSlots[local];
@@ -149,8 +136,8 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     // wasm32/x64, so a raw copy of the base populates them.
     if (ctx && s.ctxOff) copyMem(wasm_runtime_addr_app_to_native(s.inst, s.ctxOff), ctx, sizeof(QPI::QpiContext));
 
-    // input in + zero output. State is NOT copied in: it's canonical + resident in the wasm linear memory
-    // across calls (v2); the node syncs it out lazily via liteWasmFlushState() at digest/snapshot.
+    // input in + zero output. State is not passed in: it's resident in the wasm linear memory (contractStates[idx]
+    // aliases it) and the contract mutates it in place.
     if (inSize) copyMem(wasm_runtime_addr_app_to_native(s.inst, wIn), input, inSize);
     setMem(wasm_runtime_addr_app_to_native(s.inst, wOut), outSize ? outSize : 1, 0);
 
@@ -158,13 +145,11 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     if (!wasm_runtime_call_wasm(env, s.dispatchFn, 5, argv))
         logToConsole(L"LITEWASM: dispatch trap");
 
-    // output out. State stays resident in linear mem (no copy out); mark it stale so the next digest/snapshot
-    // flushes it to the stub, and set the core's change-flag so the digest re-hashes this contract.
+    // output out; state is resident (nothing to copy out). Refresh contractStates[idx] in case the linear-mem
+    // base moved (memory.grow), then flag dirty so the digest re-hashes.
     if (outSize) copyMem(output, wasm_runtime_addr_app_to_native(s.inst, wOut), outSize);
-    if (kind != LITE_KIND_FUNCTION) {   // procedures + system procedures write state
-        if (s.stateSize) s.stubStale = true;
-        g_liteHostServices.markDirty(idx);
-    }
+    contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
+    if (kind != LITE_KIND_FUNCTION) g_liteHostServices.markDirty(idx);   // procedures + system procedures write state
 
     if (outer) { wasm_runtime_set_user_data(env, nullptr); wasm_runtime_destroy_exec_env(env); t_liteWasmCurEnv = nullptr; }
     else       { wasm_runtime_set_user_data(env, savedUD); wasm_runtime_set_module_inst(env, savedInst); }
@@ -218,6 +203,10 @@ static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, v
     s.stateOff = liteWasmCallU32(env, f_state_addr);
     s.stateSize = liteWasmCallU32(env, f_state_size);
     s.ioBase = liteWasmCallU32(env, f_io_base);
+
+    // free the slot's 1GB reserve (once) and point contractStates[idx] AT the instance's resident state region.
+    if (!s.stubFreed) { freePool(contractStates[idx]); s.stubFreed = true; }
+    contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(inst, s.stateOff);
     { wasm_function_inst_t f_ctx = wasm_runtime_lookup_function(inst, "ctx_addr"); if (f_ctx) s.ctxOff = liteWasmCallU32(env, f_ctx); }
     s.entryCount = liteWasmCallU32(env, f_reg_count);
     if (s.entryCount > LITE_MAX_USER_ENTRIES) s.entryCount = LITE_MAX_USER_ENTRIES;
@@ -277,7 +266,6 @@ static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, v
     }
 
     s.loaded = true;
-    s.stubStale = true;   // v2: force the first digest/snapshot to sync the freshly-constructed state to the stub
     logColorToScreen("INFO", "LITEWASM: slot loaded (" + std::to_string(s.entryCount) + " user entries)");
     return true;
 }

@@ -577,7 +577,7 @@ static void getComputerDigest(m256i& digest)
         if (contractStateChangeFlags[digestIndex >> 6] & (1ULL << (digestIndex & 63)))
         {
 #ifdef LITE_WASM_CONTRACTS
-            // wasm slots hash only the contract's real state (not the 1GB stub reserve); no-op for others.
+            // wasm slots hash only the contract's real state (not the 1GB slot reserve); no-op for others.
             const unsigned long long size = digestIndex < contractCount ? liteWasmEffectiveStateSize(digestIndex, contractDescriptions[digestIndex].stateSize) : 0;
 #else
             const unsigned long long size = digestIndex < contractCount ? contractDescriptions[digestIndex].stateSize : 0;
@@ -595,9 +595,7 @@ static void getComputerDigest(m256i& digest)
                 // This is currently avoided by calling getComputerDigest() from tick processor only (and in non-concurrent init)
                 contractStateLock[digestIndex].acquireRead();
 
-#ifdef LITE_WASM_CONTRACTS
-                liteWasmFlushState(digestIndex);   // wasm slot: sync resident linear-mem state into the stub before hashing
-#endif
+                // wasm slots: contractStates[idx] aliases the resident state, hashed at `size` (its real span).
                 const unsigned long long startTime = __rdtsc();
                 KangarooTwelve(contractStates[digestIndex], (unsigned int)size, &contractStateDigests[digestIndex], 32);
                 const unsigned long long executionTime = __rdtsc() - startTime;
@@ -7094,12 +7092,15 @@ static bool saveContractStateFiles(CHAR16* directory)
         CONTRACT_FILE_NAME[sizeof(CONTRACT_FILE_NAME) / sizeof(CONTRACT_FILE_NAME[0]) - 6] = contractIndex % 10 + L'0';
         contractStateLock[contractIndex].acquireRead();
 #ifdef LITE_WASM_CONTRACTS
-        liteWasmFlushState(contractIndex);   // wasm slot: sync resident linear-mem state into the stub before saving
+        // wasm slots alias a resident state smaller than the 1GB reserve; save its real span (avoid OOB read).
+        const unsigned long long saveSize = liteWasmEffectiveStateSize(contractIndex, contractDescriptions[contractIndex].stateSize);
+#else
+        const unsigned long long saveSize = contractDescriptions[contractIndex].stateSize;
 #endif
-        savedSize = save(CONTRACT_FILE_NAME, contractDescriptions[contractIndex].stateSize, contractStates[contractIndex], directory);
+        savedSize = save(CONTRACT_FILE_NAME, saveSize, contractStates[contractIndex], directory);
         contractStateLock[contractIndex].releaseRead();
         totalSize += savedSize;
-        if (savedSize != contractDescriptions[contractIndex].stateSize)
+        if (savedSize != saveSize)
         {
             return false;
         }

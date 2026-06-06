@@ -582,3 +582,76 @@ native x64 layout differ, so all nodes must run a given contract as wasm).
 (RAM-resident state). It's the right path for QX/QEARN-scale; v1 stays correct for everything and is simpler for
 small contracts. The clean cut is: alias `contractStates[idx]` to the wasm state region, fix the linear memory so
 the alias is stable, and the existing digest/persist code "just works" over it.
+
+## 16. v3 plan — aliasing (drop the stub, single state copy)
+
+v2 keeps two RAM copies of a wasm contract's state: the resident wasm linear memory (canonical) + the node's
+stub `contractStates[idx]`. VERIFIED (2026-06-06): the stub is **committed RAM** — `qubic.cpp:7225-7232` allocs
+every contract's state via `allocPoolWithErrorLog(stateSize)` → `bs->AllocatePool` malloc + `setMem(buf,size,0)`
+(memory_util.h:65/97), and a dyn slot's `stateSize` = `LITE_DYN_SLOT_STATE_SIZE` = 1GB. So each of the 4 dyn
+slots is a 1GB zeroed RAM block at init; a 500MB wasm contract = 1GB stub + ~500MB resident ≈ 1.5GB RAM.
+`USE_SWAP` (qubic.cpp:46) pages **tick storage** to disk, not contract state — it does NOT make the stub cheap.
+
+v3 removes the stub: point `contractStates[idx]` directly at the resident wasm state region. 500MB contract →
+~500MB RAM; the 4×1GB reserve is reclaimed.
+
+### 16.1 Core idea
+At wasm load, `freePool(contractStates[idx])` (reclaim the 1GB init block) and
+`contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(inst, stateOff)`. Now the contract mutates
+`contractStates[idx]` in place (it IS the resident region), and the node reads it directly. No stub, no flush.
+
+### 16.2 Verified read-sites of `contractStates[idx]` (the audit aliasing requires)
+Every site that pairs `contractStates[idx]` with the constexpr `contractDescriptions[idx].stateSize` (=1GB) would
+OOB over a smaller resident region. Audited (qubic.cpp, current lines):
+- **:602 digest** `KangarooTwelve(contractStates[i], size, …)` — already routed through `liteWasmEffectiveStateSize`
+  in v2 → hashes realSize. **No change** (just drop the flush before it; reads resident directly).
+- **:2361 setMem reset** (IPO construct loop) — **NOT reached for wasm**: dyn slots have `constructionEpoch=1`
+  (contract_def.h:481-484); guard is `system.epoch==1` (epoch is 216). Verified unreachable → no edit.
+- **:7099 save + :7102 compare** — use constexpr 1GB. **Must override** both to the effective size for wasm
+  (else OOB read + the `savedSize != stateSize` check fails). Gated.
+- **:6985-7033 loadContractStateFiles** (restart) — constexpr 1GB; restart path, see §16.4.
+- **:7483 isAllBytesZero(contractStates[0])** — contract 0 only, never a dyn slot → no edit.
+- All contract *execution* (fn/proc/sysproc/inter-contract via RPC/network/tick) reads the resident region through
+  `liteWasmDispatch` already (ignores the passed ptr) → unaffected.
+
+So the steady-state edits are small: **save size+compare** (gated) + **engine alias at load** + **drop flush/stubStale**.
+
+### 16.3 Stable pointer (memory.grow)
+The alias dangles if the linear memory base moves on `memory.grow`. Contract state is static (data/bss), scratch
+is static (`g_wasmIo`), QPI collections are fixed-size — no `malloc`/grow expected. Robust mitigation: re-resolve
+`contractStates[idx] = addr_app_to_native(inst, stateOff)` at the END of `liteWasmDispatch` (one lookup+store/call,
+negligible). digest/save run after dispatch under `contractStateLock` (serialized) → always see the fresh ptr.
+Alternative: compile contracts with `-Wl,--max-memory=<initial>` (ban grow) — but re-resolve needs no toolchain
+change. Assert no grow either way.
+
+### 16.4 Restart / persistence (the one tricky path)
+At restart-boot the wasm contract isn't instantiated yet (deploy-via-tx), so `contractStates[idx]` is still the
+init stub when `loadContractStateFiles` runs. Sequence for a snapshot reload:
+1. init allocs the 1GB stub (unchanged); `loadContractStateFiles` loads saved bytes into it (size override → realSize).
+2. wasm contract re-instantiates (snapshot reload / redeploy) → copy stub→resident (restore), then
+   `freePool(stub)` + alias `contractStates[idx]` = resident.
+3. Steady state: aliased, stub freed, 1GB reclaimed.
+For a fresh deploy (no snapshot) the stub is zeroed → instantiate → INITIALIZE → free+alias immediately.
+Restart-from-genesis is the norm ([[project_node_restart_from_zero]]); this restore path only matters via the
+snapshot route. Net: the 1GB stub is transient (boot only), freed once the contract loads.
+
+### 16.5 Drop the v2 machinery
+With the alias, the stub no longer exists in steady state → remove `liteWasmFlushState`, `stubStale`, and the two
+flush call sites (digest :599, save :7097). `liteWasmEffectiveStateSize` stays (digest + save size).
+
+### 16.6 Risks
+- **Dangling alias on redeploy**: deinstantiate frees the linear memory → `contractStates[idx]` dangles until
+  re-alias. Reload is serialized (deploy thread holds the slot lock); ensure no digest of that slot races the
+  re-instantiate window. Re-alias before the slot is markable-dirty again.
+- **memory.grow** (§16.3) — re-resolve mitigates.
+- **freePool/AllocatePool pairing** — the init stub came from `bs->AllocatePool`; free with `freePool`
+  (`bs->FreePool`, memory.h:13). Verify the OS shim pairs them.
+- **Restart ordering** (§16.4) — instantiate+restore before free+alias.
+- Native/non-wasm contracts: untouched (alias only on wasm slots; helpers early-return otherwise).
+
+### 16.7 Edits summary + win
+Engine (lite_wasm_contracts.h): alias at load (freePool + repoint) + re-resolve after dispatch + remove
+flush/stubStale + restart restore helper. Core (qubic.cpp, gated): save size+compare (:7099/:7102); restart load
+size + restore hook (:6985-7033). digest already done (v2); reset site :2361 unreachable (verified). ~3 gated core
+sites. **Win:** 500MB contract = ~500MB RAM (was 1.5GB); 4×1GB dyn reserve reclaimed. Cost: restart-reload
+redesign + the dangling-alias care on redeploy. Ship behind LITE_WASM_CONTRACTS; v2 (stub mirror) is the fallback.
