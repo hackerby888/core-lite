@@ -12,8 +12,11 @@
 #endif
 
 #include <ffi.h>
+#include <string>
 #include "wasm_export.h"
 #include "extensions/lite_wasm_imports.h"   // g_liteWasmNatives[] + LiteWasmCallCtx -> g_liteHostServices
+
+void logColorToScreen(std::string type, std::string msg);   // defined later in qubic.cpp (same TU)
 
 // Per-call scratch layout inside the contract's exported io_base region: [in | out | locals | arena].
 #define LITE_WASM_IO_SLOT   (8u * 1024u)    // max in / out / locals each
@@ -55,6 +58,12 @@ static inline uint32_t liteWasmCallU32(wasm_exec_env_t env, wasm_function_inst_t
     uint32_t a[1] = { 0 }; wasm_runtime_call_wasm(env, fn, 0, a); return a[0];
 }
 
+// WAMR requires each thread that runs wasm to init its thread env. load/dispatch run on tick-processor
+// threads (and the RPC thread for read-only functions), none of which WAMR created -> init on demand.
+static inline void liteWasmEnsureThreadEnv() {
+    if (!wasm_runtime_thread_env_inited()) wasm_runtime_init_thread_env();
+}
+
 // The current thread's active wasm exec_env, if any. The outermost dispatch (called from native core) uses
 // the slot's own env; a NESTED wasm->wasm call (via liteCallFunction) must REUSE the current env and swap its
 // module_inst (Stage-3b: a fresh/foreign env traps "invalid exec env" against WAMR's per-thread TLS env).
@@ -86,7 +95,11 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
         wasm_runtime_set_module_inst(env, s.inst);
         outer = false;
     } else {
-        env = s.env;
+        // outermost call on this thread: WAMR exec_envs are thread-bound, and the slot's load-time env
+        // belongs to the deploy thread. Init this thread's wasm env + use a fresh exec_env on it.
+        liteWasmEnsureThreadEnv();
+        env = wasm_runtime_create_exec_env(s.inst, 64 * 1024);
+        if (!env) return;
         t_liteWasmCurEnv = env;
         outer = true;
     }
@@ -118,7 +131,7 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
         g_liteHostServices.markDirty(idx);
     }
 
-    if (outer) { wasm_runtime_set_user_data(env, nullptr); t_liteWasmCurEnv = nullptr; }
+    if (outer) { wasm_runtime_set_user_data(env, nullptr); wasm_runtime_destroy_exec_env(env); t_liteWasmCurEnv = nullptr; }
     else       { wasm_runtime_set_user_data(env, savedUD); wasm_runtime_set_module_inst(env, savedInst); }
 }
 
@@ -138,6 +151,8 @@ static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, v
     int local = liteWasmSlotLocal(idx);
     if (local < 0) return false;
     LiteWasmSlot& s = g_liteWasmSlots[local];
+
+    liteWasmEnsureThreadEnv();   // load runs on a tick-processor thread (not main)
 
     // WAMR modifies the load buffer in place and references it for the module's life -> own a mutable copy.
     if (s.wasmBuf) { free(s.wasmBuf); s.wasmBuf = nullptr; }
@@ -170,6 +185,7 @@ static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, v
     s.ioBase = liteWasmCallU32(env, f_io_base);
     s.entryCount = liteWasmCallU32(env, f_reg_count);
     if (s.entryCount > LITE_MAX_USER_ENTRIES) s.entryCount = LITE_MAX_USER_ENTRIES;
+    logColorToScreen("INFO", "LITEWASM: loaded contract — " + std::to_string(s.entryCount) + " entries, stateSize=" + std::to_string(s.stateSize));
 
     // reg_info(k, outOff) writes EntryInfo{inputType,kind,inSize,outSize} into linear mem; reuse ioBase as scratch.
     struct EntryInfo { uint32_t inputType, kind, inSize, outSize; };
