@@ -207,6 +207,7 @@ if(LITE_WASM_CONTRACTS)
     set(WAMR_BUILD_LIBC_BUILTIN 0)   # contracts use our host imports, not libc
     set(WAMR_BUILD_LIBC_WASI 0)
     set(WAMR_BUILD_MULTI_MODULE 0)
+    set(WAMR_BUILD_REF_TYPES 1)      # real contracts use call_indirect/funcref (lite_wasm_tu.h fn-ptr dispatch)
     include(${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
     add_library(vmlib STATIC ${WAMR_RUNTIME_LIB_SOURCE})
     target_include_directories(Qubic PRIVATE ${WAMR_ROOT_DIR}/core/iwasm/include)
