@@ -1,16 +1,21 @@
 # Runtime Smart-Contract Deployment (testnet dev feature)
 
-**Status:** design / not yet implemented
+**Status:** shipped (testnet). **Backend:** wasm-only — the native `.so` backend was removed.
 **Scope:** testnet + dev only. Hard-gated behind `TESTNET` and `LITE_DYNAMIC_CONTRACTS`.
 **Goal:** deploy a smart contract into a running node without recompiling the core — compile a
-contract to a shared object (`.so`), distribute it, and register + construct it on-chain. First
-step toward an Anchor-like contract framework for Qubic (build / deploy / upgrade / IDL / client
-codegen loop).
+contract to a **wasm module**, upload it on-chain, and register + construct it on a running node.
+First step toward an Anchor-like contract framework for Qubic (build / deploy / upgrade / IDL /
+client codegen loop), driven by the `qinit` CLI.
 
-> ⚠️ **Not a mainnet mechanism.** Loading a `.so` runs arbitrary native code in the node process
-> (RCE by design). Mainnet contracts stay compiled-in and IPO/quorum-governed. This feature must
-> never be compiled into a shippable mainnet binary, and the framework must never wire `deploy` to
-> a mainnet target. See [Security](#security).
+This document is the **deploy framework**: reserved slots, on-chain chunked upload, the framed
+construction lifecycle, determinism, and safety — all backend-agnostic. The **execution engine +
+contract ABI** (WAMR, the `lhost` import surface, state, dispatch) live in
+[`WASM_CONTRACTS.md`](WASM_CONTRACTS.md); this doc points there for engine detail.
+
+> ⚠️ **Not a mainnet mechanism.** wasm is a memory-safe sandbox (no RCE-by-design like the old
+> `.so` path), but dynamic deploy still **bypasses mainnet's IPO / quorum contract governance**.
+> Mainnet contracts stay compiled-in and IPO-governed. This feature must never be compiled into a
+> shippable mainnet binary, nor `deploy` wired to a mainnet target. See [Security](#security).
 
 ---
 
@@ -43,9 +48,9 @@ Three concerns, cleanly separated — mapping onto Qubic's native proposal → c
 
 ```
 CONSENSUS (in a tick)          NODE-LOCAL (off-chain)        CONSTRUCTION (core-framed)
-deploy tx → loader registry    .so bytes matched by hash     INITIALIZE at activation tick
-framed by its own tx index     patch slot's fn-ptr tables    framed by SC_INITIALIZE_TX
-all nodes agree {slot,H,tick}  (pointers are NOT consensus)  → correct event stream
+deploy tx → loader registry    wasm bytes matched by hash    INITIALIZE at activation tick
+framed by its own tx index     load module + patch tables    framed by SC_INITIALIZE_TX
+all nodes agree {slot,H,tick}  (closures are NOT consensus)  → correct event stream
 ```
 
 ### 2.1 Slot model (Anchor analogy)
@@ -53,84 +58,69 @@ all nodes agree {slot,H,tick}  (pointers are NOT consensus)  → correct event s
 | Anchor | Qubic dynamic deploy |
 | --- | --- |
 | program id / address | reserved **slot index** |
-| program binary | staged **`.so`** |
-| `anchor deploy` / `upgrade` | (re-)stage `.so` into a slot |
-| IDL | descriptor the `.so` exports (§5.3) |
-| program registry / upgradeable loader | **loader contract** (§2.2) |
+| program binary | staged **wasm module** |
+| `anchor deploy` / `upgrade` | (re-)stage a wasm module into a slot |
+| IDL | the IDL `qinit` emits from the contract source |
+| program registry / upgradeable loader | extension-owned **deploy registry** (§2.2) |
 | account model / PDAs | *no analog* — state is one `StateData` blob + QPI collections |
 | local validator + tests | testnet node + deploy tx + RPC |
 
 Compiled in **only** under `LITE_DYNAMIC_CONTRACTS` (testnet):
 
 - **Deployable slots `D0..Dn`** — reserved contract slots. Their `StateData` holds **only the
-  deployed contract's own business state** (digested, consensus). Register nothing at boot; user
-  `.so`s land here.
+  deployed contract's own business state** (digested, consensus). Register nothing at boot; uploaded
+  wasm modules land here.
 - **Control entry point** — a guarded `processTickTransaction` hook (no contract): upload/deploy txs
   target the system address with lite-range `inputType`s and dispatch to the extension (§2.2).
 
 > **Framework state is extension-owned, never in any contract `StateData`.** The deploy **registry**
-> and the uploaded **`.so` bytes** are framework plumbing, not contract business data — they live in
-> extension globals, persisted to the extension's own files (§2.2). Putting them in a `StateData`
-> would conflate infrastructure with consensus business state.
+> and the uploaded **wasm bytes** are framework plumbing, not contract business data — they live in
+> extension globals. Putting them in a `StateData` would conflate infrastructure with consensus
+> business state.
 
 Deployable slots are counted in `contractCount`, so *all* core machinery works unmodified for them:
-dispatch-table sizing, `contractStateLock`, state-buffer allocation (`qubic.cpp:7587`), the digest
-tree, transaction routing, and the function-call RPC.
+dispatch-table sizing, `contractStateLock`, state-buffer allocation, the digest tree, transaction
+routing, and the function-call RPC.
 
 ### 2.2 Deploy subsystem & on-chain upload
 
-The registry and the raw `.so` bytes are framework plumbing, held in **extension-owned** state
-(globals + the extension's own persisted files), content-addressed by K12 hash — never in a contract
-`StateData`. Determinism holds because this state is a pure function of consensus txs (below), and
-the *constructed contract's* `StateData` (which IS digested) catches any execution divergence.
+The registry and the raw wasm bytes are framework plumbing, held in **extension-owned** state
+(globals), content-addressed by K12 hash — never in a contract `StateData`. Determinism holds
+because this state is a pure function of consensus txs (below), and the *constructed contract's*
+`StateData` (which IS digested) catches any execution divergence.
 
-**Entry mechanism — tx-dispatch hook (chosen, no contract).** Upload/deploy txs reuse the existing
-*"destination is system"* protocol-tx path: `destinationPublicKey == 0` with new `inputType`s in the
-lite range (mirroring the `LiteCheckin` 230+ convention, to avoid colliding with upstream protocol tx
-types). A guarded `#ifdef` block adds cases to the `isZero(destination)` switch in
-`processTickTransaction` (`qubic.cpp:2930`), beside the existing `MiningSolution` / `Oracle*` /
-`FileFragment` cases:
-
-```cpp
-#ifdef LITE_DYNAMIC_CONTRACTS
-case LiteUploadBeginTx::transactionType(): liteDynOnUploadBegin(transaction); break;
-case LiteUploadChunkTx::transactionType(): liteDynOnUploadChunk(transaction); break;
-case LiteDeployTx::transactionType():      liteDynOnDeploy(transaction);      break;
-#endif
-```
-
-The handlers mutate only extension-owned state (blob store + registry), run in the same
-tick-processor context as the existing system-tx handlers, and the txs still pay fees via the normal
-`decreaseEnergy` path above the switch. No contract, no loader slot.
-
-**Transport = on-chain chunked txs** (chosen). `MAX_INPUT_SIZE = 1024`,
-`NUMBER_OF_TRANSACTIONS_PER_TICK = 4096` → ~1008 B payload/chunk × 4096 ≈ **4 MB/tick capacity**
-(capacity, not a guarantee — the leader controls inclusion, so a large `.so` may span several ticks).
+**Entry mechanism — tx-dispatch hook (no contract).** Upload/deploy txs reuse the existing
+*"destination is system"* protocol-tx path with new `inputType`s in the lite range (mirroring the
+`LiteCheckin` 230+ convention). A guarded `#ifdef` block dispatches them from
+`processTickTransaction` to `liteDynDispatchTx` (`lite_dynamic_contracts.h`), beside the existing
+`MiningSolution` / `Oracle*` cases. The handlers mutate only extension-owned state (blob buffer +
+registry), run in the same tick-processor context, and pay fees via the normal path. The lite tx
+inputTypes:
 
 ```
-tx UploadBegin { sessionId, totalSize, chunkCount, finalHash }
-tx UploadChunk { sessionId, seq, len, bytes[<=1008] }
-tx Deploy      { sessionId, targetSlot, finalHash, abiVersion, stateLayoutVersion }
-auth (all): source / invocator() == configured deployer pubkey
+240 UploadBegin { sessionId, totalSize, chunkCount, finalHash }
+241 UploadChunk { sessionId, seq, len, bytes[<=1008] }
+242 Deploy      { sessionId, targetSlot, finalHash, abiVersion, stateLayoutVersion, name }
+auth (all): tx source == configured deployer pubkey (deploy address id(99999,0,0,0))
 ```
 
-**Tx order is leader-chosen but consensus-fixed** — it is recorded in `tickData` and agreed by
-quorum, so every node replays the identical order; "random" order never causes divergence.
-Reassembly is made order-independent regardless:
+**Transport = on-chain chunked txs.** `MAX_INPUT_SIZE = 1024`, `NUMBER_OF_TRANSACTIONS_PER_TICK =
+4096` → ~1008 B payload/chunk × 4096 ≈ **4 MB/tick capacity** (capacity, not a guarantee — the
+leader controls inclusion, so a large module may span several ticks). A ~160 KB contract.wasm is
+~165 chunks, landing in one tick once the source seed is funded.
+
+**Tx order is leader-chosen but consensus-fixed** — recorded in `tickData`, agreed by quorum, so
+every node replays the identical order. Reassembly is order-independent regardless:
 
 - **Self-addressing chunks → scatter-write.** `buf[seq*CHUNK ..] = bytes`. Any order, any number of
-  ticks → the same buffer. No append, no ordering assumption.
-- **Completion = seq bitmap full** (all `chunkCount` seqs present), not "last chunk seen." The tick
-  stream is consensus, so every node flips *complete* on the same tick.
-- **Hash gate.** Blob is usable only when `K12(buf[0:totalSize]) == finalHash` — catches any
-  missing / duplicate / corrupt chunk independent of order.
-- **Anti-grief.** A session is scoped to its deployer pubkey; only that key may write its
-  `sessionId`. Stops a third party poisoning a `seq` to break the hash.
-- **ARQ for dropped chunks.** The leader may omit chunks; the uploader polls a read endpoint /
-  function returning the missing-seq bitmap and resends only the gaps.
+  ticks → the same buffer.
+- **Completion = seq bitmap full** (all `chunkCount` seqs present), not "last chunk seen."
+- **Hash gate.** Blob is usable only when `K12(buf[0:totalSize]) == finalHash`.
+- **Anti-grief.** A session is scoped to its deployer pubkey; only that key may write its `sessionId`.
+- **ARQ for dropped chunks.** The uploader polls a read endpoint for the missing-seq bitmap and
+  resends only the gaps.
 
-**Activation is derived, never an uploader-chosen tick.** The uploader cannot know which tick the
-leader finishes inclusion on, so timing is computed:
+**Activation is derived, never an uploader-chosen tick.**
 
 ```
 construct slot D at the first tick where:
@@ -138,14 +128,11 @@ construct slot D at the first tick where:
     AND (blob[finalHash] is complete AND K12 == finalHash)
 ```
 
-Both conditions are pure functions of consensus txs → every node derives the same trigger tick
-(whichever becomes true last). Leader ordering of `Deploy` vs the chunk txs is irrelevant: whichever
-lands first waits for the other. (This replaces the earlier, wrong "uploader picks `activationTick`"
-idea.)
-
-A read endpoint (lite HTTP GET / request message, served by the extension) exposes
-`{ slot, finalHash, status, missing-seq bitmap, version }` for explorers, clients, and the uploader's
-ARQ loop — the seed of an IDL/program registry.
+Both conditions are pure functions of consensus txs → every node derives the same trigger tick.
+Leader ordering of `Deploy` vs the chunk txs is irrelevant: whichever lands first waits for the
+other. A read endpoint (lite HTTP GET, served by the extension's dyn-registry) exposes
+`{ slot, finalHash, status, name, version }` for explorers, clients, and the uploader's ARQ loop —
+the seed of an IDL / program registry.
 
 ---
 
@@ -164,287 +151,153 @@ with the correct frame (`qubic.cpp`):
 ```
 
 **INITIALIZE events must appear under `SC_INITIALIZE_TX`.** Third-party indexers key off the
-pseudo-tx reason; INITIALIZE events tagged as anything else (e.g. `SC_BEGIN_TICK_TX`) corrupt their
-view. So construction must run under genuine `SC_INITIALIZE_TX` framing — not merely "paired with
-some tx."
+pseudo-tx reason; INITIALIZE events tagged as anything else corrupt their view. So construction must
+run under genuine `SC_INITIALIZE_TX` framing.
 
-### 3.2 Threading
+### 3.2 Flow
 
-`processTick` (tick-processor thread) drives phases via
-`contractProcessorPhase = X; contractProcessorState = 1; WAIT_WHILE(contractProcessorState)`.
-`contractProcessor()` (`qubic.cpp:2510`) runs the work on a **separate thread** and clears the flag
-when done (`:2726`). Contract code only ever runs on the contractProcessor thread (it `enableAVX()`s
-at entry, `:2512`). Construction must reuse this handshake — not call INITIALIZE directly from the
-processTick thread.
+1. **Deploy tx (consensus).** Processed in-tick, framed by its own tx index — correct. Arms the
+   registry entry for the target slot. All nodes see it at the same tick.
 
-### 3.3 Flow
+2. **Load (node-local).** Each node hands the assembled, hash-verified wasm bytes to the engine —
+   `liteWasmLoadFromBytes` (`lite_wasm_contracts.h`) instantiates the module in WAMR, reads its
+   `reg_count` / `reg_info` / `state_addr` / `state_size` exports, and patches slot `D`'s
+   `contractUserFunctions/Procedures/SystemProcedures[D][·]` with libffi closures that forward into
+   the engine (engine detail: `WASM_CONTRACTS.md`). Safe off-tick: a pre-construction slot has **no
+   readers** (execution gated `epoch >= constructionEpoch`, RPC rejects `epoch < constructionEpoch`),
+   and the patched closures are per-process, **not** consensus. If the bytes are not a wasm module
+   (`'\0asm'` magic), the slot stays armed-but-unrunnable and the node logs loudly.
 
-1. **Deploy tx (consensus).** A `Deploy` procedure call to the loader. Processed in-tick, framed by
-   its own tx index (`:3726`) — correct. Writes the registry entry. All nodes see it at the same
-   tick.
+3. **Framed construction (consensus).** `liteDynPendingForTick()` is checked in `processTick`;
+   `liteDynConstructPending()` runs INITIALIZE on armed-but-unconstructed slots via
+   `QpiContextSystemProcedureCall(D, INITIALIZE)` — under genuine `SC_INITIALIZE_TX` framing, the
+   same path native contracts use. wasm slots patch `contractSystemProcedures[D][INITIALIZE]` with a
+   closure at load, so this path runs the wasm INITIALIZE identically.
 
-2. **Stage (node-local, any time before activation).** Each node `dlopen`s the local `.so` whose
-   K12 hash matches `registry[D].codeHash`, validates the descriptor (§5.3), and patches slot `D`'s
-   dispatch tables. Safe to do off-tick: a pre-construction slot has **no readers** (execution
-   phases are gated `epoch >= constructionEpoch`, RPC rejects `epoch < constructionEpoch` at
-   `:1716`), and function-pointer values are per-process, **not** consensus. If the `.so` is
-   missing, the node logs loudly and must halt rather than diverge (§4).
+### 3.3 Idempotency / restart
 
-3. **Framed construction (consensus, at `activationTick`).** Two tiny guarded insertion points:
+- A slot is marked `constructed` after INITIALIZE; the pending check skips it thereafter (never wipes
+  live state mid-run). Re-deploy = registry `version++` → re-load + re-construct (a reinit upgrade,
+  §6).
+- Restart-from-snapshot reload is a separate concern (see `WASM_CONTRACTS.md`); a plain restart boots
+  from genesis (the documented norm).
 
-   - In `processTick`, single-threaded section, **before** the BEGIN_TICK phase (`:3580`):
-     ```cpp
-     #ifdef LITE_DYNAMIC_CONTRACTS
-     if (liteDynPendingForTick(system.tick)) {                  // reads loader registry
-         logger.registerNewTx(system.tick, logger.SC_INITIALIZE_TX);  // correct frame
-         contractProcessorPhase = LITE_DYN_INITIALIZE;
-         contractProcessorState = 1;
-         WAIT_WHILE(contractProcessorState);
-         // optional: repeat with SC_BEGIN_EPOCH_TX + LITE_DYN_BEGIN_EPOCH to mirror epoch start
-     }
-     #endif
-     ```
-   - In `contractProcessor()`'s `switch` (runs on the safe thread):
-     ```cpp
-     #ifdef LITE_DYNAMIC_CONTRACTS
-     case LITE_DYN_INITIALIZE:
-         liteDynConstructPending(system.tick);   // extension
-         break;
-     #endif
-     ```
-   - Extension body — identical context to a real construction (AVX on, contractProcessor thread):
-     ```cpp
-     for (each slot S with registry[S].activationTick == tick && not already constructed) {
-         patchSlotTables(S, localSo[registry[S].codeHash]);   // idempotent; non-consensus
-         setMem(contractStates[S], slotStateSize, 0);
-         QpiContextSystemProcedureCall(S, INITIALIZE).call();  // framed by SC_INITIALIZE_TX
-         stampConstructedVersion(S, registry[S].version);      // into slot StateData header
-     }
-     ```
+### 3.4 Boot-time deploy (special case)
 
-   Placing it before BEGIN_TICK means the freshly constructed slot also gets its BEGIN_TICK and is
-   live for this tick's transactions.
+`liteDynBootDeploy()` clears the IPO-failed error stamp + seeds a fee reserve for the dev slots so
+they can run, and prints the `LITE_DYNAMIC_CONTRACTS ENABLED` banner.
 
-### 3.4 Idempotency / restart
+### 3.5 Bootstrap gates (must hold for a slot to run)
 
-- Stamp `constructedVersion` in the slot's `StateData` header. On restart the core reloads the slot
-  state from disk; the hook compares `header.version == registry.version` and **skips re-INITIALIZE**
-  (so it never wipes live state). Survives restarts.
-- Re-deploy = registry `version++` → the hook re-constructs (a reinit upgrade, §6).
-
-### 3.5 Boot-time deploy (special case)
-
-If the chosen slot's compile-time `constructionEpoch` equals the node's start epoch, the core's own
-INITIALIZE phase (`:3556-3568`) constructs it with native `SC_INITIALIZE_TX` framing and a real
-BEGIN_EPOCH — no hook needed. Boot deploy just patches tables after `initializeContracts()`
-(`:7861`); the rest is the normal contract lifecycle. Use it when you want a contract present from
-genesis with a full, unmodified lifecycle.
-
-### 3.6 Bootstrap gates (must hold for a slot to run)
-
-- **Fee reserve > 0** — BEGIN_TICK is fee-gated (`:2578`). Fresh testnet boot auto-seeds every slot
-  with 10B (`:7849-7857`), so this is free on a clean start; it persists across restarts.
-- **`contractError == NoContractError`** — `initializeContractErrors()` (`:7860`, gate at
-  `contract_exec.h:225/:385`) stamps `ContractErrorIPOFailed` on slots without
-  `NUMBER_OF_COMPUTORS` shares. Dev slots skip IPO, so clear `contractError[slot]` for all dev slots
-  once, **after** `:7860`.
+- **Fee reserve > 0** — BEGIN_TICK is fee-gated. `liteDynBootDeploy` auto-seeds every dev slot.
+- **`contractError == NoContractError`** — `initializeContractErrors()` stamps `ContractErrorIPOFailed`
+  on slots without `NUMBER_OF_COMPUTORS` shares. Dev slots skip IPO, so the boot hook clears
+  `contractError[slot]` for all dev slots.
 
 ---
 
 ## 4. Determinism & multi-node
 
 - **Timing & order** are consensus: upload/deploy txs live in `tickData` (quorum-agreed set *and*
-  order). The extension blob store + registry are a deterministic function of that tx stream, so
-  every node assembles identical bytes and derives the same activation tick (§2.2). Framework state
-  itself need not be in the computer digest.
-- **Code identity** is hash-verified (`K12(blob) == finalHash`) before use. Function-pointer *values*
-  are per-process and never hashed; only the constructed contract's `StateData` and its execution
-  effects are consensus — and that `StateData` IS digested, so any divergence in deployed behavior
-  surfaces as a computer-digest mismatch.
-- **Restart:** the extension persists assembled blobs (content-addressed) + the registry to its own
-  files; on boot it re-`dlopen`s and re-patches each armed slot. No re-upload.
+  order). The extension blob buffer + registry are a deterministic function of that tx stream, so
+  every node assembles identical bytes and derives the same activation tick (§2.2).
+- **Code identity** is hash-verified (`K12(blob) == finalHash`) before use. The patched closure
+  values are per-process and never hashed; only the constructed contract's `StateData` and its
+  execution effects are consensus — and that `StateData` IS digested, so any divergence in deployed
+  behavior surfaces as a computer-digest mismatch.
+- **Cross-arch determinism** is a property of the wasm engine (fixed integer semantics, no float in
+  QPI, bounded memory) — one `contract.wasm` runs bit-identically on every node platform, which is a
+  key reason for the wasm-only backend.
 - **Late joiner from a state snapshot** does not get the bytes via contract-state sync (they are in
   no `StateData`). It obtains them by replaying the relevant ticks, or — preferred — a
-  content-addressed peer fetch: the registry tells it which `finalHash`es it needs; it requests them
-  from peers (a lite 230+ message, §9 phase 2) and hash-verifies. Missing + unfetchable → halt
-  loudly, never guess.
+  content-addressed peer fetch (a lite 230+ message, §8 phase 2) and hash-verifies. Missing +
+  unfetchable → halt loudly, never guess.
 
 ---
 
-## 5. The `.so` ABI
+## 5. Contract ABI (wasm)
 
-### 5.1 Empirical finding — `-rdynamic` alone does not work
+The contract compiles to a wasm module whose `qpi.X()` calls resolve to **imports** from module
+`"lhost"`, and whose entry points are **exports** (`dispatch` / `reg_count` / `reg_info` /
+`state_addr` / `state_size` / system-proc mask). The node fills a `LiteHostServices` vtable
+(`lite_dyn_abi.h`) — the QPI surface — and exposes it to the module as those imports
+(`lite_wasm_imports.h`); the contract-side binding is `lite_wasm_tu.h` (compiled INTO the wasm by
+`qinit`, not into the node). Pointers cross the boundary as i32 linear-memory offsets; the host binds
+the per-call `QpiContext` out-of-band.
 
-The core is a single translation unit (`SINGLE_COMPILE_UNIT`) and inlines aggressively. On the
-current build (`nm` of `cmake-build-relwithdebinfo/src/Qubic`):
-
-```
-nm -D  QpiContext exports      : 0
-full symtab QpiContext symbols : 824 W (weak/comdat), 0 T (strong global)
-  present (weak): issueAsset, __qpiAcquireStateForWriting, burn, …
-  ABSENT entirely: transfer, numberOfShares, __registerUserProcedure, …
-  ABSENT (inline-declared): getOracleQueryStatus, setShareholderProposal,
-                            setShareholderVotes, unsubscribeOracle
-```
-
-Methods whose every host call site is inlined emit **no standalone symbol**. `-rdynamic` only
-promotes already-emitted symbols into the dynamic table; it cannot export what does not exist. So
-name-binding a `.so` against the host would leave core methods (`transfer`, `numberOfShares`, …)
-unresolved → `dlopen` fails. Release inlines even more. **Conclusion: do not rely on `-rdynamic`.**
-
-### 5.2 Resolution — explicit host-services vtable (bind by pointer, not name)
-
-The host hands the `.so` a table of thin free-function wrappers, one per needed `QpiContext`
-method. Each wrapper references the method, which **forces emission and absorbs the inlining**; the
-wrapper is the stable entry. The `.so` calls through the table — immune to inlining, comdat GC, and
-name mangling.
-
-```cpp
-// host side: building the vtable forces the methods to be emitted
-svc.transfer       = +[](QPI::QpiContextProcedureCall* c, const m256i& d, long long a){ return c->transfer(d, a); };
-svc.numberOfShares = +[](QPI::QpiContextFunctionCall*  c, const QPI::Asset& a, /*…*/)  { return c->numberOfShares(a /*…*/); };
-// … ~58 entries …
-// plus the static/template backends (§Appendix C/D):
-svc.k12      = +[](const void* in, unsigned len, void* out32){ /* host KT128 */ };
-svc.logBytes = +[](unsigned lvl, const void* m, unsigned n){ /* host logger */ };
-svc.beginFn  = …; svc.endFn = …; svc.markDirty = …; svc.acquireScratch = …; svc.releaseScratch = …;
-svc.pauseLog = …; svc.resumeLog = …;
-```
-
-```cpp
-// .so side (lite_dyn_abi.h, included after qpi.h): member forwarders + static defs + template defs
-inline LiteHostServices* g_host = nullptr;
-extern "C" void liteSetHostServices(LiteHostServices* s) { g_host = s; }
-
-long long QPI::QpiContextProcedureCall::transfer(const m256i& d, long long a) const
-{ return g_host->transfer(const_cast<QpiContextProcedureCall*>(this), d, a); }
-
-// the 11 pre_qpi_def.h statics, defined locally as forwarders:
-static void __beginFunctionOrProcedure(unsigned int id){ g_host->beginFn(id); }
-// … etc …
-
-// host-TU template methods the .so cannot otherwise instantiate (forward to non-template backends):
-template <typename T> m256i QPI::QpiContextFunctionCall::K12(const T& d) const
-{ m256i o; g_host->k12(&d, sizeof(T), &o); return o; }
-```
-
-Handshake: the `.so` exports a single `extern "C" liteSetHostServices(...)`; the host calls it at
-`dlopen`. **No `-rdynamic`, no exported host symbols, no data symbols.** (No host *data* symbols are
-needed: a scan of `qpi.h` found no inline QPI code that reads `system`/`spectrum`/`universe`/
-`assets` directly — all host state is reached through methods, now all in the vtable.)
-
-Cost: ~58 host wrappers + ~58 `.so` forwarders + ~9 static/template backends. All mechanical and
-**codegen-able from the `qpi.h` declarations** — a small generator is itself a future framework
-tool (the "ABI generator"). Phase-1 can restrict deployed contracts to the non-oracle surface and
-omit the 6 oracle/cross-contract template entries (Appendix C); add them in phase 2.
-
-ABI risks, all acceptable for a same-compiler dev tool: template definitions differing across TUs
-are technically ODR-UB but benign (disjoint instantiation sets, no cross-TU inlining); pin
-**clang-18** both sides.
-
-### 5.3 Descriptor (seed of the IDL)
-
-Beyond code, the `.so` exports a machine-readable descriptor so the framework can generate clients
-and track versions:
-
-```cpp
-struct LiteEntrypoint { uint16 inputType; uint8 kind; char name[32];
-                        uint16 inputSize, outputSize, localsSize; };
-struct LiteContractDescriptor {
-    uint32 abiVersion;          // ABI compatibility gate
-    char   name[16];
-    uint64 stateSize;
-    uint32 stateLayoutVersion;  // for upgrade / migration (§6)
-    m256i  codeHash;            // multi-node verification
-    uint16 entrypointCount;
-    LiteEntrypoint entrypoints[];
-};
-extern "C" const LiteContractDescriptor* liteContractDescriptor();
-extern "C" void liteContractRegister(/* fills sysproc fn ptrs + runs __registerUserFunctionsAndProcedures */);
-```
-
-Runtime truth (sizes, input-type ids, hash) comes from the `.so`. Rich type info (field names,
-nested layouts) is emitted as a separate IDL JSON by the build tool, kept consistent with the
-descriptor. Do not try to extract full C++ type layouts at runtime.
-
-### 5.4 Build recipe ("anchor build")
-
-Deterministic and reproducible (so `codeHash` agrees across nodes):
-
-- clang-18, fixed flags, `-fPIC -shared`, `-O2` (pin everything).
-- include `qpi.h` + the contract source + `lite_dyn_abi.h`; **never** include `contract_exec.h`
-  (its method bodies reference host globals the `.so` does not have).
-- compile with `CONTRACT_INDEX = <target slot>` and the contract's `CONTRACT_STATE_TYPE` macros.
-- `static_assert(sizeof(StateData) <= slotStateSize)`.
+Full ABI — the import table, marshalling shapes, state model, dispatch via libffi closures, system
+procedures, big-state handling — is documented in [`WASM_CONTRACTS.md`](WASM_CONTRACTS.md). The
+**IDL** (field names, nested layouts, entry input/output types) is emitted as JSON by `qinit` from
+the contract source.
 
 ---
 
-## 6. Upgrade (designed-for, not yet built)
+## 6. Upgrade (designed-for)
 
-Upgrade = re-stage a new `.so` into the same slot (new registry `version`). `stateLayoutVersion`
+Upgrade = re-stage a new wasm module into the same slot (registry `version++`). `stateLayoutVersion`
 lets the framework choose:
 
-- **Reinit** — wipe state + INITIALIZE (framed). What the dev loop uses; B' already does it.
-- **Migrate** — keep state, run a contract-defined migration procedure after the swap. Needs a
-  frame; reuse the B' `SC_INITIALIZE_TX` hook (or a dedicated reason). Not built in phase 1; the
-  version field + "INITIALIZE does not always wipe" assumption keep the door open.
+- **Reinit** — wipe state + INITIALIZE (framed). What the dev loop uses.
+- **Migrate** — keep state, run a contract-defined migration after the swap. Reuses the
+  `SC_INITIALIZE_TX` framing. The version field + "INITIALIZE does not always wipe" keep the door open.
 
 ---
 
-## 7. Upstream footprint (all `#ifdef LITE_DYNAMIC_CONTRACTS`)
+## 7. Upstream footprint (all `#ifdef LITE_DYNAMIC_CONTRACTS` / `LITE_WASM_CONTRACTS`)
 
 Minimized; everything else is in `src/extensions/`.
 
-| File | Change | ~lines |
-| --- | --- | --- |
-| `contract_core/contract_def.h` | deployable slots `D0..Dn`: includes, `contractDescriptions[]` rows, `REGISTER_…` calls | ~12 |
-| `contract_core/contract_def.h` (or near) | `LITE_DYN_INITIALIZE` (+ optional `LITE_DYN_BEGIN_EPOCH`) phase enum value | ~2 |
-| `qubic.cpp` `processTick` | framed trigger block before BEGIN_TICK (`:3580`) | ~7 |
-| `qubic.cpp` `contractProcessor` | one `case LITE_DYN_INITIALIZE` | ~3 |
-| `qubic.cpp` `processTickTransaction` | 3 upload/deploy `inputType` cases in the `isZero(destination)` switch (`:2930`) | ~6 |
-| `qubic.cpp` boot | `#include "extensions/lite_dynamic_contracts.h"` + `liteDynBootDeploy()` after `:7861` | ~2 |
+| File | Change |
+| --- | --- |
+| `contract_core/contract_def.h` | deployable slots `LITEDYN0..N`: includes, `contractDescriptions[]` rows, `REGISTER_…` calls |
+| `qubic.cpp` `processTick` | framed construction trigger (`liteDynPendingForTick` → `SC_INITIALIZE_TX` → `liteDynConstructPending`) |
+| `qubic.cpp` `processTickTransaction` | upload/deploy `inputType` dispatch to `liteDynDispatchTx` |
+| `qubic.cpp` boot | include `lite_dynamic_contracts.h` + `lite_wasm_contracts.h`; `liteDynBootDeploy()` + `liteWasmRuntimeInit()` |
+| `qubic.cpp` digest/save | `#ifdef LITE_WASM_CONTRACTS` hooks for the wasm slot's effective state size |
 
-No `-rdynamic`. Mainnet build (flag off): zero reserved slots, `contractCount` unchanged, no hooks,
-binary and all digests byte-identical to upstream.
+Mainnet build (flags off): zero reserved slots, `contractCount` unchanged, no hooks — binary and all
+digests byte-identical to upstream.
 
-### Extension files (new, in `src/extensions/`)
+### Extension files (`src/extensions/`)
 
-- `lite_dynamic_contracts.h` — **extension-owned framework state** (registry + content-addressed
-  blob store, persisted to own files); chunk reassembly (scatter-write / seq bitmap / hash gate /
-  ARQ read endpoint); `.so` `dlopen`/validate; slot table patching; `liteDynPendingForTick` /
-  `liteDynConstructPending` / `liteDynBootDeploy`; host-services vtable construction; upload/deploy
-  tx handlers.
-- `lite_dyn_stub_contract.h` — the deployable stub registered for slots `Dn` (registers nothing
-  live; patched at deploy); included from `contract_def.h`. No loader contract — entry is the
-  tx-dispatch hook.
-- `lite_dyn_abi.h` — shipped to **compile** the `.so`: vtable type, `liteSetHostServices`, member
-  forwarders, the 11 static forwarders, template definitions (`K12`, logs, optionally oracle).
+- `lite_dynamic_contracts.h` — **deploy framework**: extension-owned registry + content-addressed
+  blob buffer; chunk reassembly (scatter-write / seq bitmap / hash gate / ARQ); the
+  `LiteHostServices` vtable (`g_liteHostServices`); `liteDynOnUpload*` / `liteDynOnDeploy` (magic-sniff
+  `'\0asm'` → wasm engine); `liteDynPendingForTick` / `liteDynConstructPending` / `liteDynBootDeploy`.
+- `lite_dyn_abi.h` — **shared ABI structs**: the `LiteHostServices` vtable type, the system-procedure
+  id enum, small descriptors. (Host + engine; no `.so` forwarders.)
+- `lite_dyn_stub_contract.h` — the deployable stub registered for slots `LITEDYN0..N` (registers
+  nothing live; the engine patches its dispatch tables at deploy); included from `contract_def.h`.
+- `lite_wasm_contracts.h` / `lite_wasm_imports.h` / `lite_wasm_tu.h` — the wasm engine, the `lhost`
+  import table, and the contract-side binding. See `WASM_CONTRACTS.md`.
 
 ---
 
 ## Building & enabling the node (read this first)
 
-Enable with the CMake **option** — never via `CMAKE_CXX_FLAGS`:
+Enable with the CMake **options** — never via `CMAKE_CXX_FLAGS` (the project resets it, silently
+dropping the define):
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+cmake -S . -B build-wasm -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
   -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
-  -DLITE_DYNAMIC_CONTRACTS=ON          # option in src/CMakeLists.txt -> target_compile_definitions
-cmake --build build --target Qubic -j$(nproc)
+  -DLITE_WASM_CONTRACTS=ON          # pulls in the framework (LITE_DYNAMIC_CONTRACTS is set in qubic.cpp)
+cmake --build build-wasm --target Qubic -j$(nproc)
 ```
 
-- **Do NOT pass it as `-DCMAKE_CXX_FLAGS="-DLITE_DYNAMIC_CONTRACTS"`.** The project resets
-  `CMAKE_CXX_FLAGS` ("Apply Common Flags"), so the define is dropped and the entire feature compiles
-  out **silently** — no error, no reserved slots, no banner. (This cost a long debugging detour.)
-- **Verify it actually compiled in:** `strings build/src/Qubic | grep -a LDYN0` must list `LDYN0..3`,
-  and the node prints a `LITE_DYNAMIC_CONTRACTS ENABLED` banner at startup.
-- A *runnable* testnet build needs the **real** `src/private_settings.h` (do NOT use
-  `-DONLY_LOGGING=ON`, whose empty `broadcastedComputorSeeds` breaks `std::size(...)`).
-  `TESTNET_PREFILL_QUS` funds the computors so a deploy tx has an in-spectrum (funded) source.
-- Run with `--node-mode 3` (MAIN&MAIN, ticks headless). **Wait for ticks to advance** before
-  broadcasting deploy txs — RPC-up ≠ network-ready, and broadcasting too early faults the node.
-- Deploy txs target the dedicated address **`id(99999,0,0,0)`** (not the core zero address).
+- **Verify it compiled in:** `strings build-wasm/src/Qubic | grep -aE 'LITEDYN|LITEWASM'` is
+  non-empty, and the node prints `LITE_DYNAMIC_CONTRACTS ENABLED` at startup.
+- A *runnable* testnet build needs the **real** `src/private_settings.h` (do NOT use `-DONLY_LOGGING=ON`,
+  whose empty `broadcastedComputorSeeds` breaks `std::size(...)`). `TESTNET_PREFILL_QUS` funds the
+  computors so a deploy tx has a funded source.
+- `LITE_WASM_CONTRACTS` needs `libffi` (`apt install libffi-dev`).
+- Run with `--node-mode 3` (MAIN, ticks headless) and `--ticking-delay 1000`. **Wait for ticks to
+  advance** before broadcasting deploy txs — RPC-up ≠ network-ready.
+- Deploy txs target the dedicated address **`id(99999,0,0,0)`**. Use `qinit deploy --contract <h>`
+  (wasm is the only/implicit target).
+
+---
 
 ## 8. Mainnet safety
 
@@ -454,96 +307,49 @@ cmake --build build --target Qubic -j$(nproc)
 #endif
 ```
 
-CI builds with `-DONLY_LOGGING=ON` and without the flag, so it never compiles the feature. Flag off
-⇒ the codebase is byte-for-byte upstream.
+CI builds without the flag, so it never compiles the feature. Flag off ⇒ the codebase is
+byte-for-byte upstream.
 
 ## Security
 
-- Loading a `.so` = arbitrary native code in the node process (RCE by design). Testnet + dev only.
+- wasm is a memory-safe sandbox — no arbitrary-native-code RCE (the reason the `.so` backend was
+  retired). But dynamic deploy still bypasses mainnet's IPO/quorum contract governance, so it stays
+  **testnet + dev only**.
 - Authorization is the **deploy tx signature**, checked against a configured deployer pubkey —
-  on-chain and auditable. (If any HTTP/CLI control surface is added, it is GET-only per project
-  convention, bound to localhost, and is a convenience over the tx, not a substitute.)
-- The framework must present `deploy`/`upgrade` as a **dev-loop accelerator**, never a mainnet
-  deployment path. State this boundary in the framework README before anyone wires `deploy` to a
-  real target.
-- Treat `.so` paths as trusted-operator input only; never accept a peer-supplied path.
+  on-chain and auditable. Any HTTP/CLI control surface is GET-only per project convention, bound to
+  localhost, a convenience over the tx, not a substitute.
+- The framework presents `deploy`/`upgrade` as a **dev-loop accelerator**, never a mainnet path.
 
 ---
 
 ## 9. Phasing
 
-1. **Smoke test** — trivial `.so` + minimal vtable (force-emit the few needed methods via
-   `__attribute__((used))` + `-rdynamic` as a throwaway), prove `dlopen` → patch tables → INITIALIZE
-   → a user procedure call end-to-end on a single node.
-2. **Phase 1** — full vtable (non-oracle surface), reserved slots, the chosen entry mechanism +
-   on-chain chunked upload (scatter-write / seq bitmap / hash gate / ARQ), derived activation, B'
-   framed construction hook, restart-safe idempotency. Single + multi-node determinism.
-3. **Phase 2** — content-addressed peer fetch-by-hash for late joiners (lite 230+ msg);
-   oracle/cross-contract template entries; descriptor → IDL JSON generator; client codegen;
-   upgrade-with-migration.
-
----
-
-## Appendix — QPI symbol surface (`.so` imports)
-
-All resolved via the §5.2 vtable (bind by pointer). Counts from the current tree.
-
-**A. External, non-inline, non-template `QpiContext` methods (~54)** — host wrappers force emission:
-`transfer __transfer burn issueAsset numberOfShares numberOfPossessedShares
-transferShareOwnershipAndPossession acquireShares releaseShares distributeDividends bidInIPO
-ipoBidId ipoBidPrice queryFeeReserve arbitrator computor epoch tick year month day hour minute
-second millisecond now dayOfWeek getEntity isContractId isAssetIssued signatureValidity nextId
-prevId computeMiningFunction initMiningSeed numberOfTickTransactions getPrevSpectrumDigest
-getPrevUniverseDigest getPrevComputerDigest __qpiAcquireStateForReading __qpiAcquireStateForWriting
-__qpiReleaseStateForReading __qpiReleaseStateForWriting __qpiAllocLocals __qpiFreeLocals
-__qpiFreeContext __qpiConstructContextOtherContractFunctionCall __qpiConstructProcedureCallContext
-__qpiNotifyPostIncomingTransfer __qpiAbort __registerUserFunction __registerUserProcedure
-__registerUserProcedureNotification`
-
-**B. `inline`-declared methods (4)** — confirmed ABSENT from the symtab; the vtable wrappers force
-their emission too: `getOracleQueryStatus setShareholderProposal setShareholderVotes
-unsubscribeOracle`
-
-**C. Host-TU template methods (6)** — `.so` shim defines, forwarding to non-template backends:
-`K12` (required — contracts hash structs), `__qpiCallSystemProc` (internal; reached via non-template
-host wrappers, so usually not needed directly), `__qpiQueryOracle __qpiSubscribeOracle
-getOracleQuery getOracleReply` (oracle — phase 2 only).
-
-**D. `static` free helpers (11, `pre_qpi_def.h:39-53`)** — `.so` defines as forwarders to vtable:
-`__markContractStateDirty __beginFunctionOrProcedure __endFunctionOrProcedure __pauseLogMessage
-__resumeLogMessage __acquireScratchpad __releaseScratchpad` + 4 templated
-`__logContract{Debug,Error,Info,Warning}Message<T>` (funnel to one `logBytes`).
-
-**Phase-1 minimal vtable ≈ 9 backends** (`beginFn endFn markDirty pauseLog resumeLog acquireScratch
-releaseScratch logBytes k12`) **+ the ~58 method wrappers**, omitting all oracle entries.
+1. **Engine** — WAMR + libffi, the `lhost` ABI, state, dispatch, system procedures, big state. Done
+   (`WASM_CONTRACTS.md`).
+2. **Framework** — reserved slots, the tx-dispatch entry + on-chain chunked upload (scatter-write /
+   seq bitmap / hash gate / ARQ), derived activation, B' framed construction, restart-safe
+   idempotency. Done.
+3. **Next** — content-addressed peer fetch-by-hash for late joiners (lite 230+ msg); restart-from-
+   snapshot reload; descriptor → richer IDL; upgrade-with-migration.
 
 ---
 
 ## Decision log
 
+- **wasm-only backend.** The native `.so` path (dlopen of host-compiled shared objects, bound via an
+  explicit host-services vtable) was removed once the wasm engine reached full QPI parity. wasm gives
+  a memory-safe sandbox, cross-arch-deterministic execution, and **one** platform-independent
+  artifact — retiring the per-platform `.so`/sysroot build matrix. The host-services vtable survives
+  (it is the QPI surface), now exposed to the module as `lhost` wasm imports instead of bound into a
+  `.so`.
 - **Deploy timing via tx, not out-of-band.** Anything consensus-relevant goes through a tick. The
-  deploy tx makes activation timing a consensus fact; the loader registry is the on-chain record.
-- **Construction stays under `SC_INITIALIZE_TX`.** Hard requirement for third-party indexers. Ruled
-  out running INITIALIZE under any other frame.
-- **Chose B' (arbitrary-tick, framed hook) over A' (epoch-boundary only).** Framework DX needs
-  instant, repeatable deploy without epoch waits or restarts. B' adds one framed `processTick` hook
-  + one `contractProcessor` case, both guarded.
-- **Reuse the contractProcessor thread for construction**, not a direct call from the processTick
-  thread (AVX + the never-run-contract-code-off-that-thread invariant).
-- **`.so` ABI is an explicit vtable, not `-rdynamic`.** `nm` proved most `QpiContext` methods are
-  inlined away (weak/absent), so name-binding fails. Vtable binds by pointer — robust against the
-  inliner, comdat GC, and mangling.
-- **Framework state is extension-owned, never in contract `StateData`.** The `.so` bytes + deploy
-  registry are infrastructure; only the deployed contract's own business state lives in its
-  `StateData`.
-- **Upload = on-chain chunked txs** (4096 txs/tick × ~1 KB ≈ 4 MB/tick). Bytes ride the consensus tx
-  stream, assembled into extension-owned storage.
-- **Order-independent reassembly + derived activation.** Tick order is leader-chosen but
-  consensus-fixed; chunks self-address (scatter-write) and are hash-gated, so order/multi-tick spread
-  is moot. Activation is derived from `(deploy intent ∧ blob complete-and-verified)`, never an
-  uploader-chosen tick.
-- **Entry mechanism = tx-dispatch hook (chosen).** Upload/deploy txs target the system address
-  (`destination == 0`) with lite-range `inputType`s, dispatched in the `processTickTransaction`
-  `isZero` switch (`:2930`) to extension handlers — beside the existing `MiningSolution`/`Oracle*`
-  cases. No contract/loader slot. Chosen over a thin loader contract to avoid a contract calling host
-  code and the rollback-idempotency concern.
+  deploy tx makes activation timing a consensus fact; the registry is the on-chain record.
+- **Construction stays under `SC_INITIALIZE_TX`.** Hard requirement for third-party indexers.
+- **Chose B' (arbitrary-tick, framed hook) over epoch-boundary-only.** Framework DX needs instant,
+  repeatable deploy without epoch waits or restarts.
+- **Framework state is extension-owned, never in contract `StateData`.** The wasm bytes + deploy
+  registry are infrastructure; only the deployed contract's own business state lives in its `StateData`.
+- **Upload = on-chain chunked txs** (4096 txs/tick × ~1 KB ≈ 4 MB/tick), assembled into
+  extension-owned storage; order-independent reassembly + derived activation.
+- **Entry mechanism = tx-dispatch hook.** Upload/deploy txs target the system address with lite-range
+  `inputType`s, dispatched in `processTickTransaction` to extension handlers — no contract/loader slot.
