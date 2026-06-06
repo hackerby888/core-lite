@@ -1313,8 +1313,8 @@ public:
 #ifdef USE_SWAP
             return ticksSwapVM.getPtr((unsigned long long)tickIndex * NUMBER_OF_COMPUTORS);
 #else
-            qVirtualCommit(ticksPtr + (unsigned long long)tickIndex * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
-            return ticksPtr + (unsigned long long)tickIndex * NUMBER_OF_COMPUTORS;
+            qVirtualCommit(ticksPtr + static_cast<unsigned long long>(tickIndex) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
+            return ticksPtr + tickIndex * NUMBER_OF_COMPUTORS;
 #endif
         }
 
@@ -1325,8 +1325,8 @@ public:
 #ifdef USE_SWAP
             return ticksSwapVM.getPtr((unsigned long long)tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS);
 #else
-            qVirtualCommit(ticksPtr + (unsigned long long)tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
-            return ticksPtr + (unsigned long long)tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS;
+            qVirtualCommit(ticksPtr + static_cast<unsigned long long>(tickToIndexCurrentEpoch(tick)) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
+            return ticksPtr + tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS;
 #endif
         }
 
@@ -1337,13 +1337,13 @@ public:
 #ifdef USE_SWAP
             return ticksSwapVM.getPtr((unsigned long long)tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS);
 #else
-            qVirtualCommit(ticksPtr + (unsigned long long)tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
-            return ticksPtr + (unsigned long long)tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS;
+            qVirtualCommit(ticksPtr + static_cast<unsigned long long>(tickToIndexPreviousEpoch(tick)) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
+            return ticksPtr + tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS;
 #endif
         }
 
         // Get ticks element at offset (checking offset with ASSERT)
-        inline Tick& operator[](unsigned int offset)
+        inline Tick& operator[](unsigned long long offset)
         {
             ASSERT(offset < ticksLength);
 #ifdef USE_SWAP
@@ -1355,7 +1355,7 @@ public:
         }
 
         // Get ticks element at offset (checking offset with ASSERT)
-        inline const Tick& operator[](unsigned int offset) const
+        inline const Tick& operator[](unsigned long long offset) const
         {
             ASSERT(offset < ticksLength);
 #ifdef USE_SWAP

@@ -11,6 +11,13 @@
 #include "kangaroo_twelve.h"
 #include <lib/platform_common/sleep.h>
 
+#include "extensions/zipper.h"
+
+#ifdef __linux__
+// Runtime toggle for SwapVM page compression (blosc2); off unless --swap-compression is passed.
+inline bool gSwapCompressionEnabled = false;
+#endif
+
 template <class T>
 inline constexpr const T& max(const T& left, const T& right)
 {
@@ -733,11 +740,22 @@ private:
 
         // bounded retry on save() failure
         unsigned long long sz = 0;
+        unsigned long long expectedSize = pageSize;
+        unsigned char* saveBuffer = (unsigned char*)pageBuffer;
+#ifdef __linux__
+        std::vector<unsigned char> compressed;
+        if (gSwapCompressionEnabled)
+        {
+            compressed = Zipper::zip(pageBuffer, pageSize, 4);
+            saveBuffer = compressed.data();
+            expectedSize = (unsigned long long)compressed.size();
+        }
+#endif
         unsigned int delayMs = SWAPVM_IO_INITIAL_DELAY_MS;
         for (int attempt = 0; attempt < SWAPVM_IO_MAX_ATTEMPTS; attempt++)
         {
-            sz = save(pageName, pageSize, (unsigned char*)pageBuffer, pageDir);
-            if (sz == pageSize)
+            sz = save(pageName, expectedSize, saveBuffer, pageDir);
+            if (sz == expectedSize)
                 break;
 
             setText(message, L"swapVM writePageToDisk failed (attempt ");
@@ -755,7 +773,7 @@ private:
             }
         }
 
-        if (sz != pageSize)
+        if (sz != expectedSize)
         {
             setText(message, L"Fatal: swapVM writePageToDisk exhausted retries | page ");
             appendNumber(message, pageId, true);
@@ -819,7 +837,31 @@ private:
             unsigned int delayMs = SWAPVM_IO_INITIAL_DELAY_MS;
             for (int attempt = 0; attempt < SWAPVM_IO_MAX_ATTEMPTS; attempt++)
             {
-                sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
+#ifdef __linux__
+                if (gSwapCompressionEnabled)
+                {
+                    sz = 0;
+                    long long compressedSize = getFileSize((CHAR16*)pageName, (CHAR16*)pageDir);
+                    if (compressedSize > 0)
+                    {
+                        std::vector<unsigned char> tmp((size_t)compressedSize);
+                        long long readBytes = load(pageName, (unsigned long long)compressedSize, tmp.data(), pageDir);
+                        if (readBytes == compressedSize)
+                        {
+                            std::vector<unsigned char> decompressed = Zipper::unzip(tmp.data(), (size_t)compressedSize, 4);
+                            if (decompressed.size() == pageSize)
+                            {
+                                copyMem(cache[cache_page_id], decompressed.data(), pageSize);
+                                sz = pageSize;
+                            }
+                        }
+                    }
+                }
+                else
+#endif
+                {
+                    sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
+                }
                 if (sz == pageSize)
                     break;
 
