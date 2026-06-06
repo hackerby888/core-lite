@@ -249,6 +249,12 @@ static bool liteDynUploadComplete() {
     return true;
 }
 
+#ifdef LITE_WASM_CONTRACTS
+// Defined later in the same TU (extensions/lite_wasm_contracts.h, included after this header in qubic.cpp).
+static bool liteWasmLoadFromBytes(unsigned int idx, const unsigned char* bytes, unsigned int len);
+static bool liteWasmIsWasm(unsigned int idx);
+#endif
+
 [[maybe_unused]] static void liteDynOnDeploy(unsigned long long sessionId, unsigned int targetSlot,
         const unsigned char* finalHash, unsigned int /*abiVersion*/, unsigned int /*stateLayoutVersion*/,
         const char* name) {
@@ -264,9 +270,21 @@ static bool liteDynUploadComplete() {
     logToConsole(L"LITEDYN: Deploy accepted, slot armed");
     s.constructed = false;
     s.version++;
-    // Load the native code now (node-local, non-consensus); construction (state init) is
-    // deferred to a framed tick step (liteDynConstructPending).
-    if (!liteDynLoadAndPatch(targetSlot, g_liteDynBuf, g_liteDynUpload.totalSize))
+    // Load the code now (node-local, non-consensus); construction (state init) is deferred to a framed tick
+    // step (liteDynConstructPending). Route by the uploaded artifact's magic: '\0asm' -> wasm engine,
+    // ELF/Mach-O -> native .so engine (WASM_CONTRACTS.md §13.9). qinit signals the engine by what it uploads.
+    bool loadOk;
+    const unsigned char* art = g_liteDynBuf;
+#ifdef LITE_WASM_CONTRACTS
+    if (g_liteDynUpload.totalSize >= 4 && art[0] == 0x00 && art[1] == 0x61 && art[2] == 0x73 && art[3] == 0x6d) {
+        loadOk = liteWasmLoadFromBytes(targetSlot, g_liteDynBuf, g_liteDynUpload.totalSize);
+        logToConsole(loadOk ? L"LITEDYN: wasm contract loaded" : L"LITEDYN: ERROR wasm load failed");
+    } else
+#endif
+    {
+        loadOk = liteDynLoadAndPatch(targetSlot, g_liteDynBuf, g_liteDynUpload.totalSize);
+    }
+    if (!loadOk)
         logToConsole(L"LITEDYN: ERROR load/patch failed - slot armed but not runnable");
     g_liteDynUpload.active = false;
 }
@@ -313,6 +331,15 @@ static bool liteDynPendingForTick(unsigned int /*tick*/) {
         LiteDynSlot& s = g_liteDynSlots[i];
         if (!s.armed || s.constructed) continue;
         unsigned int contractIndex = LITEDYN0_CONTRACT_INDEX + i;
+#ifdef LITE_WASM_CONTRACTS
+        if (liteWasmIsWasm(contractIndex)) {
+            // wasm slot: user fn/proc dispatch is live; INITIALIZE (a system procedure) on wasm isn't wired
+            // yet, so state relies on zero-init. TODO: wasm system-procedure dispatch.
+            logToConsole(L"LITEDYN: wasm slot armed (INITIALIZE skipped; zero-init state)");
+            s.constructed = true;
+            continue;
+        }
+#endif
         if (contractSystemProcedures[contractIndex][INITIALIZE]) {
             QpiContextSystemProcedureCall qpiContext(contractIndex, INITIALIZE);
             qpiContext.call();
