@@ -100,6 +100,9 @@ struct LiteHostServices {
     int (*liteInvokeProcedure)(const void* callerCtx, unsigned int calleeIdx, unsigned short inputType,
                                const void* in, unsigned int inSize, void* out, unsigned int outSize,
                                long long invocationReward);
+    // shareholder governance: invoke another contract's SET_SHAREHOLDER_PROPOSAL / SET_SHAREHOLDER_VOTES callback.
+    unsigned short (*setShareholderProposal)(const void* callerCtx, unsigned int calleeIdx, const void* proposal1024, long long invocationReward);
+    unsigned char  (*setShareholderVotes)(const void* callerCtx, unsigned int calleeIdx, const void* voteData, unsigned int voteSize, long long invocationReward);
 };
 
 // One registered user function/procedure (filled by the .so during liteContractRegister).
@@ -232,6 +235,12 @@ void QPI::QpiContextFunctionCall::__qpiAbort(unsigned int errorCode) const {
 }
 long long QPI::QpiContextProcedureCall::burn(long long amount, unsigned int contractIndexBurnedFor) const {
     return g_liteHost->burn(this, amount, contractIndexBurnedFor);
+}
+QPI::uint16 QPI::QpiContextProcedureCall::setShareholderProposal(QPI::uint16 contractIndex, const QPI::Array<QPI::uint8, 1024>& proposalDataBuffer, QPI::sint64 invocationReward) const {
+    return g_liteHost->setShareholderProposal(this, contractIndex, &proposalDataBuffer, invocationReward);
+}
+bool QPI::QpiContextProcedureCall::setShareholderVotes(QPI::uint16 contractIndex, const QPI::ProposalMultiVoteDataV1& shareholderVoteData, QPI::sint64 invocationReward) const {
+    return g_liteHost->setShareholderVotes(this, contractIndex, &shareholderVoteData, sizeof(shareholderVoteData), invocationReward) != 0;
 }
 unsigned short QPI::QpiContextFunctionCall::epoch() const { return g_liteHost->epoch(this); }
 unsigned int QPI::QpiContextFunctionCall::tick() const { return g_liteHost->tick(this); }

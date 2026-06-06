@@ -105,6 +105,13 @@ static LiteHostServices g_liteHostServices = {
         caller->__qpiFreeContext();
         return (int)QPI::NoCallError;
     },
+    // setShareholderProposal / setShareholderVotes: invoke the callee's governance callback via the QPI method.
+    +[](const void* c, unsigned int idx, const void* p, long long reward) -> unsigned short {
+        return ((QPI::QpiContextProcedureCall*)c)->setShareholderProposal((unsigned short)idx, *(const QPI::Array<QPI::uint8, 1024>*)p, reward);
+    },
+    +[](const void* c, unsigned int idx, const void* v, unsigned int, long long reward) -> unsigned char {
+        return (unsigned char)((QPI::QpiContextProcedureCall*)c)->setShareholderVotes((unsigned short)idx, *(const QPI::ProposalMultiVoteDataV1*)v, reward);
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -118,6 +125,7 @@ struct LiteDynSlot {
     unsigned int version = 0;
     void* soHandle = nullptr;
     char name[32] = {}; // contract name from the deploy tx; lets tooling resolve name -> slot
+    std::string sourceH; // contract .h source (dev-only, node-local, off-chain) for inter-contract callee resolution
 };
 static LiteDynSlot g_liteDynSlots[LITE_DYN_SLOT_COUNT];
 

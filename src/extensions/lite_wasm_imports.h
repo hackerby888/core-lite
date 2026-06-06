@@ -78,6 +78,8 @@ static int64_t  w_transferShares(wasm_exec_env_t e, uint64_t name, uint32_t iss,
 static uint32_t w_distributeDividends(wasm_exec_env_t e, int64_t a) { LWC; return g_liteHostServices.distributeDividends(cc->ctx, a); }
 static int32_t  w_liteCallFunction(wasm_exec_env_t e, uint32_t idx, uint32_t it, uint32_t in, uint32_t inSize, uint32_t out, uint32_t outSize) { LWC; return g_liteHostServices.liteCallFunction(cc->ctx, idx, (unsigned short)it, A2N(in), inSize, A2N(out), outSize); }
 static int32_t  w_liteInvokeProcedure(wasm_exec_env_t e, uint32_t idx, uint32_t it, uint32_t in, uint32_t inSize, uint32_t out, uint32_t outSize, int64_t reward) { LWC; return g_liteHostServices.liteInvokeProcedure(cc->ctx, idx, (unsigned short)it, A2N(in), inSize, A2N(out), outSize, reward); }
+static int32_t  w_liteSetShareholderProposal(wasm_exec_env_t e, uint32_t idx, uint32_t prop, int64_t reward) { LWC; return g_liteHostServices.setShareholderProposal(cc->ctx, idx, A2N(prop), reward); }
+static int32_t  w_liteSetShareholderVotes(wasm_exec_env_t e, uint32_t idx, uint32_t vote, uint32_t voteSize, int64_t reward) { LWC; return g_liteHostServices.setShareholderVotes(cc->ctx, idx, A2N(vote), voteSize, reward); }
 
 #undef LWC
 #undef A2N
@@ -126,6 +128,8 @@ static NativeSymbol g_liteWasmNatives[] = {
     { "distributeDividends",                (void*)w_distributeDividends,                "(I)i",    NULL },
     { "liteCallFunction",                   (void*)w_liteCallFunction,                   "(iiiiii)i",NULL },
     { "liteInvokeProcedure",                (void*)w_liteInvokeProcedure,                "(iiiiiiI)i",NULL },
+    { "liteSetShareholderProposal",         (void*)w_liteSetShareholderProposal,         "(iiI)i",   NULL },
+    { "liteSetShareholderVotes",            (void*)w_liteSetShareholderVotes,            "(iiiI)i",  NULL },
 };
 static const uint32_t g_liteWasmNativesCount = (uint32_t)(sizeof(g_liteWasmNatives) / sizeof(g_liteWasmNatives[0]));
 

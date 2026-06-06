@@ -59,6 +59,8 @@ LH_IMPORT(transferShareOwnershipAndPossession) long long lh_transferShares(unsig
 LH_IMPORT(distributeDividends) unsigned int lh_distributeDividends(long long amountPerShare);
 LH_IMPORT(liteCallFunction) int lh_liteCallFunction(unsigned int calleeIdx, unsigned int inputType, const void* in, unsigned int inSize, void* out, unsigned int outSize);
 LH_IMPORT(liteInvokeProcedure) int lh_liteInvokeProcedure(unsigned int calleeIdx, unsigned int inputType, const void* in, unsigned int inSize, void* out, unsigned int outSize, long long invocationReward);
+LH_IMPORT(liteSetShareholderProposal) unsigned int lh_liteSetShareholderProposal(unsigned int calleeIdx, const void* proposal1024, long long invocationReward);
+LH_IMPORT(liteSetShareholderVotes) unsigned int lh_liteSetShareholderVotes(unsigned int calleeIdx, const void* voteData, unsigned int voteSize, long long invocationReward);
 } // extern "C"
 
 // inter-contract helpers (called by the redefined CALL_OTHER_CONTRACT_* macros from contract code).
@@ -119,6 +121,8 @@ long long QPI::QpiContextFunctionCall::numberOfShares(const QPI::Asset& a, const
 long long QPI::QpiContextFunctionCall::numberOfPossessedShares(unsigned long long n, const m256i& iss, const m256i& ow, const m256i& po, unsigned short om, unsigned short pm) const { return lh_numberOfPossessedShares(n, &iss, &ow, &po, om, pm); }
 long long QPI::QpiContextProcedureCall::transferShareOwnershipAndPossession(unsigned long long n, const m256i& iss, const m256i& ow, const m256i& po, long long sh, const m256i& no) const { return lh_transferShares(n, &iss, &ow, &po, sh, &no); }
 bool QPI::QpiContextProcedureCall::distributeDividends(long long a) const { return lh_distributeDividends(a); }
+QPI::uint16 QPI::QpiContextProcedureCall::setShareholderProposal(QPI::uint16 idx, const QPI::Array<QPI::uint8, 1024>& proposalDataBuffer, QPI::sint64 reward) const { return (QPI::uint16)lh_liteSetShareholderProposal(idx, &proposalDataBuffer, reward); }
+bool QPI::QpiContextProcedureCall::setShareholderVotes(QPI::uint16 idx, const QPI::ProposalMultiVoteDataV1& voteData, QPI::sint64 reward) const { return lh_liteSetShareholderVotes(idx, &voteData, sizeof(voteData), reward) != 0; }
 
 // ---- registration capture (the contract's __registerUserFunctionsAndProcedures fills this) ----
 #ifndef LITE_MAX_USER_ENTRIES

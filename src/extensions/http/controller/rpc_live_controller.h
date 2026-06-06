@@ -36,6 +36,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
 #endif
 #if defined(TESTNET)
     ADD_METHOD_TO(RpcLiveController::devFundedSeed, "/live/v1/dev/funded-seed", Get);
+    ADD_METHOD_TO(RpcLiveController::devPutContractSource, "/live/v1/dev/contract-source", Post);
 #endif
 #endif
     METHOD_LIST_END
@@ -552,11 +553,30 @@ class RpcLiveController : public HttpController<RpcLiveController>
                 }
             c["functions"] = fns;
             c["procedures"] = procs;
+            c["source"] = s.sourceH;   // contract .h source (if submitted via /dev/contract-source) for callee resolution
             arr.append(c);
         }
         json["slotBase"] = (unsigned int)LITEDYN0_CONTRACT_INDEX;
         json["slotCount"] = (unsigned int)LITE_DYN_SLOT_COUNT;
         json["contracts"] = arr;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+
+    // Dev-only: store a deployed contract's .h source (node-local, off-chain) keyed by slot, so tooling can
+    // resolve inter-contract callees (types + slot via dyn-registry) without the caller passing --callee.
+    inline void devPutContractSource(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        Json::Value json;
+        int idx = std::atoi(req->getParameter("slot").c_str());
+        int local = idx - (int)LITEDYN0_CONTRACT_INDEX;
+        if (local < 0 || local >= (int)LITE_DYN_SLOT_COUNT)
+        {
+            json["ok"] = false; json["error"] = "bad slot";
+            cb(HttpResponse::newHttpJsonResponse(json));
+            return;
+        }
+        g_liteDynSlots[local].sourceH = std::string(req->getBody());
+        json["ok"] = true; json["slot"] = idx; json["len"] = (Json::UInt)g_liteDynSlots[local].sourceH.size();
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
