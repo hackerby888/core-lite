@@ -19,6 +19,7 @@ build/
 out/build/
 build-guard/
 build-lite/
+build-wasm/
 
 # Local Claude Code instructions
 CLAUDE.md
