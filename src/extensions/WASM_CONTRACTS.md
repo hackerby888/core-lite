@@ -451,3 +451,134 @@ build step + the test/node-build-target wiring.
 
 Tests: a `test/wasm_contracts.cpp` gtest that loads a fixture `.wasm`, dispatches each entry kind, and asserts
 the resulting `contractStates[idx]` byte-matches a native build of the same contract (the determinism contract).
+
+## 14. Step 6 plan — AOT + gas (2026-06-06)
+
+Steps 1–5 done; live on-chain deploy+call proven (read fn + write proc, state persisted) on a ticking node.
+This is the perf + DoS-safety layer. **Key constraint discovered in the vendored WAMR (2.4.3):
+`WASM_ENABLE_INSTRUCTION_METERING` is implemented in the *interpreters only* (`wasm_interp_classic.c`,
+`wasm_interp_fast.c`) — NOT in `aot/`.** So WAMR-native gas and AOT do **not** combine; that drives the phasing.
+
+### 14.1 Gas — Phase A (consensus-essential, do first): interp + WAMR instruction metering
+- Build with `WAMR_BUILD_INSTRUCTION_METERING=1` (interp stays our mode). Per dispatch, before calling the
+  contract: `wasm_runtime_set_instruction_count_limit(execEnv, budget)`. The interp counts instructions and
+  traps at the limit → deterministic out-of-gas (same wasm + same input ⇒ same instruction count ⇒ same trap
+  point on every node). Catch the trap in `liteWasmDispatch` → treat as `qpi.abort` (roll the call back).
+- **Compute gas** (the above) bounds infinite loops — the actual DoS fix. **Host-call gas**: each `lhost`
+  import also charges a fixed cost to a `gas` field in `LiteWasmCallCtx` (a `transfer`/`issueAsset` costs more
+  than a wasm add); abort when it underflows. Both schedules are consensus params.
+- This is exactly Soroban's posture (interp + metering for determinism; they ship no AOT). Determinism is free:
+  one fixed interp build, instruction counts identical network-wide.
+
+### 14.2 AOT — Phase B (perf, optional, later)
+AOT (`wamrc`/LLVM) or Fast JIT (`WAMR_BUILD_FAST_JIT=1`, no LLVM) gets near-native speed but **loses WAMR
+metering**. To keep gas under AOT, gas must live **in the bytecode**:
+- **Bytecode-injected gas**: at deploy, run a metering-injection pass on the contract.wasm (a `gas` global +
+  per-basic-block decrement + `if gas<0 trap`), THEN AOT-compile the injected module. Gas now survives AOT and
+  is runtime-agnostic (the CosmWasm/Substrate model). Needs an injector (`wasm-instrument`-style; vendor or
+  write a small C pass). The schedule is baked by the pass = consensus param.
+- **AOT placement**: AOT is **per-arch**, so it must run **on each node at deploy** (the deployed artifact stays
+  the portable `.wasm`; each node compiles + caches its own `.aot`). `wamrc` pulls LLVM (heavy, ~the clang.wasm
+  size) → prefer **Fast JIT** (no LLVM, ~2× interp, JIT-at-load) if the perf is enough; reserve `wamrc` AOT for
+  a real perf need. Cache `.aot`/JIT per slot+version; fall back to interp on compile failure.
+
+### 14.3 Determinism (the consensus gate for both)
+- WASM execution is deterministic across interp/JIT/AOT and arches **except** float NaN/rounding — already
+  banned by QPI. So nodes MAY run different modes and still agree on state. **Gas must also match across modes**
+  — trivially true in Phase A (one interp build); in Phase B the gas is in the bytecode so it matches too.
+- **Determinism harness (CI gate):** run a fixed tx stream against the same contract on (interp) and (Fast JIT /
+  AOT) on both x86-64 and arm64; assert identical `contractStates[idx]` digests **and** identical gas-used. Ship
+  as `test/wasm_determinism.cpp`. No green harness ⇒ AOT stays off in consensus builds.
+
+### 14.4 Engine integration points
+- `liteWasmDispatch`: set the instruction-count limit before the call; on the metering trap, return an
+  out-of-gas error that the tick path treats like `qpi.abort` (state rollback via the existing
+  `contractStates[idx]` snapshot). Charge host-call gas in the `lite_wasm_imports.h` natives via
+  `LiteWasmCallCtx.gas`.
+- Gas budget + per-host-call costs: new consensus params (pin them; wrong schedule = fork).
+- Phase B only: a deploy-time inject pass + per-node `.aot`/JIT cache keyed on `codeHash`+arch; engine prefers
+  the cached native module, else interp.
+
+### 14.5 Rollout
+1. `WAMR_BUILD_INSTRUCTION_METERING=1`; `liteWasmDispatch` sets the limit + handles the out-of-gas trap → abort.
+   A gtest: a contract with an unbounded loop traps out-of-gas instead of hanging.
+2. Host-call gas in `LiteWasmCallCtx` + the import natives; gas-used reported (RPC) for tooling.
+3. Pin the gas schedule as consensus params; `test/wasm_determinism.cpp` (interp, x86-64 vs arm64).
+4. (Perf, optional) Fast JIT + bytecode-injected gas; extend the determinism harness to JIT/AOT; per-node cache.
+
+**Verdict:** Phase A (interp + WAMR instruction metering + host-call gas) is the shippable consensus version —
+small, deterministic, DoS-safe, mirrors Soroban. AOT is a *later* perf upgrade gated on the injected-gas pass +
+the cross-mode/cross-arch determinism harness; default consensus builds stay interp until that harness is green.
+
+## 15. v2 plan — no-copy state (for big contracts, e.g. QX 593MB / QEARN 204MB)
+
+v1 (shipped) copies the whole contract state in+out of the wasm instance per call. Correct, but for QX that's
+~1.2GB memcpy/call — impractical at QX throughput. v2 removes the copy.
+
+### 15.1 Core idea
+A wasm contract's `StateData` already lives in its linear memory (`g_wasmState`, a static global). The contract's
+`state.get()/mut()` mutate it in place every call regardless. v1 then mirrors it to/from `contractStates[idx]`.
+**v2: make `contractStates[idx]` *point at* the wasm state region** — i.e.
+`contractStates[idx] = wasm_runtime_addr_app_to_native(inst, stateOff)`. Then `g_wasmState` *is*
+`contractStates[idx]` (same bytes); the contract mutates it in place; the node reads it directly. **Zero per-call
+copy.**
+
+### 15.2 What changes
+- **Load** (`liteWasmLoadFromBytes`): after instantiate, `contractStates[idx] = addr_app_to_native(inst, stateOff)`
+  and `contractDescriptions[idx].stateSize = s.stateSize` (so digest/save use the contract's real size, not the
+  1GB stub reserve). Drop reliance on the stub's `contractStates` buffer for wasm slots (it can be freed/unused).
+- **Dispatch** (`liteWasmDispatch`): delete the state copy-in/out (the `copyMem(st,statePtr,…)` / `copyMem(statePtr,
+  st,…)` lines). State already lives at `contractStates[idx]` = the contract's linear mem. Still copy input/output
+  (small) + still set the ctx + arena. `markDirty` stays.
+- **Digest** (`qubic.cpp:594` `KangarooTwelve(contractStates[i], stateSize, …)`) and **persist save**
+  (`:7088 save(…, stateSize, contractStates[i])`): **no change** — they read `contractStates[idx]`, which now
+  aliases the live wasm state. Zero core edits.
+
+### 15.3 Stable pointer (the one real constraint)
+The alias dangles if the instance's linear memory moves (`memory.grow` can realloc the base). Contracts have a
+static `StateData` + bounded scratch → no growth needed. Fix it at compile: `-Wl,--max-memory=<initial>` (or
+`-Wl,--no-growable-memory`) in qinit's wasm recipe so the linear memory is fixed and `addr_app_to_native(stateOff)`
+is stable for the instance's life. (Fallback: re-resolve the ptr before each node read — but that needs a core
+edit at the digest/save sites; fixing the memory avoids it.)
+
+### 15.4 Persistence load / restart
+On restart the instance is re-created, so the saved bytes must be written into the *new* state region:
+re-instantiate the wasm contract first, then `loadContractStateFiles` writes into `contractStates[idx]` (= the new
+linear mem). Order matters: re-deploy/instantiate before the state load. Restart-from-genesis is the norm
+([[project_node_restart_from_zero]]); restart-reload is the secondary path to wire here.
+
+### 15.5 Rollback
+No per-tick contract-state rollback exists (only `spectrumDataRollback` for the spectrum). So v2 needs nothing
+here. If contract rollback is ever added, snapshot/restore the wasm region at the boundary (not per call).
+
+### 15.6 Memory trade-off (the cost of v2)
+v1: state is the 1GB swap-backed stub reserve (disk, sparse) + a transient RAM copy per call. v2: state is
+**RAM-resident** in the WAMR-malloc'd linear memory (no swap). QX = 593MB RAM resident per loaded instance. So v2
+trades swap-for-disk-cheap-but-slow → RAM-resident-fast. Options: v2 for all wasm slots (simplest), or keep v1 for
+small contracts + v2 above a size threshold, or a per-deploy flag. Recommend v2 for all (the copy cost dominates
+once state is non-trivial; small contracts' resident RAM is negligible).
+
+### 15.7 Determinism
+Unchanged from v1: the state bytes are the contract's `StateData` in wasm32 layout either way; the digest hashes
+the same bytes. The §13.12 rule still holds — a contract runs as ONE engine network-wide (wasm32 layout vs the
+native x64 layout differ, so all nodes must run a given contract as wasm).
+
+### 15.8 Risks
+- **Dangling alias** if memory grows — mitigated by fixed linear memory (§15.3); assert no `memory.grow`.
+- **RAM pressure** — each big loaded contract is resident (§15.6); cap concurrent big contracts or threshold to v1.
+- **stateSize correctness** — `contractDescriptions[idx].stateSize` must be set to the contract's real size at load
+  (else the digest hashes the wrong span). Verify it equals `state_size` export.
+- **Restart ordering** — re-instantiate before state load (§15.4).
+
+### 15.9 Rollout
+1. Compile wasm contracts with fixed linear memory (`-Wl,--max-memory=`); assert no grow.
+2. `liteWasmLoadFromBytes`: alias `contractStates[idx]` to the state region + set `contractDescriptions[idx].stateSize`.
+3. `liteWasmDispatch`: drop the state copy-in/out.
+4. Verify: a contract's `contractStates[idx]` digest is **identical** under v1 and v2 (same bytes); and a hot
+   contract shows no per-call copy (perf). Reuse the determinism harness (§14.3) to confirm digests match v1.
+5. Wire restart-reload ordering (§15.4).
+
+**Verdict:** v2 is small in code (alias + drop copy + fixed-memory compile) but changes the memory model
+(RAM-resident state). It's the right path for QX/QEARN-scale; v1 stays correct for everything and is simpler for
+small contracts. The clean cut is: alias `contractStates[idx]` to the wasm state region, fix the linear memory so
+the alias is stable, and the existing digest/persist code "just works" over it.
