@@ -86,4 +86,31 @@ TEST(WasmContracts, RegistrationDispatchAndStateRoundTrip) {
     EXPECT_EQ(*(uint64_t*)w.nat(OUT), 3u) << "get_count after 3 increments";
 }
 
+TEST(WasmContracts, SystemProceduresMaskAndDispatch) {
+    WasmFixture w;
+    ASSERT_TRUE(w.load());
+    enum { KIND_SYSPROC = 2, SP_INITIALIZE = 0, SP_POST_INCOMING_TRANSFER = 9 };
+
+    uint32_t a[5] = { 0 };
+    // mask reports INITIALIZE + POST_INCOMING_TRANSFER; the input sysproc declares its 8-byte input size.
+    EXPECT_EQ(w.call("reg_sysproc_mask", a, 0), (1u << SP_INITIALIZE) | (1u << SP_POST_INCOMING_TRANSFER));
+    a[0] = SP_POST_INCOMING_TRANSFER; EXPECT_EQ(w.call("sysproc_in_size", a, 1), 8u);
+    a[0] = SP_INITIALIZE;             EXPECT_EQ(w.call("sysproc_in_size", a, 1), 0u);
+
+    a[0] = 0; uint32_t io = w.call("io_base", a, 0);
+    a[0] = 0; uint32_t st = w.call("state_addr", a, 0);
+    const uint32_t IN = io, OUT = io + 64, LOCALS = io + 128;
+
+    // INITIALIZE (kind=sysproc, sp 0): writes a sentinel into state.count
+    a[0] = KIND_SYSPROC; a[1] = SP_INITIALIZE; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
+    w.call("dispatch", a, 5);
+    EXPECT_EQ(((uint64_t*)w.nat(st))[0], 4242u) << "INITIALIZE sysproc ran via kind=2 dispatch";
+
+    // POST_INCOMING_TRANSFER (sp 9): the 8-byte input is marshalled in and stored into state.sum
+    *(uint64_t*)w.nat(IN) = 777;
+    a[0] = KIND_SYSPROC; a[1] = SP_POST_INCOMING_TRANSFER; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
+    w.call("dispatch", a, 5);
+    EXPECT_EQ(((uint64_t*)w.nat(st))[1], 777u) << "input sysproc read its marshalled input";
+}
+
 #endif // LITE_WASM_CONTRACTS
