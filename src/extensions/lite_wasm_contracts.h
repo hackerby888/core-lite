@@ -164,6 +164,18 @@ static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, v
                      *(const void**)args[0], *(void**)args[1], *(void**)args[2], *(void**)args[3], *(void**)args[4]);
 }
 
+// Release a slot's loaded instance + closures (before reloading the slot, so a redeploy doesn't leak the
+// instance's linear memory or the libffi trampolines).
+static void liteWasmSlotUnload(LiteWasmSlot& s)
+{
+    if (s.env)  { wasm_runtime_destroy_exec_env(s.env); s.env = nullptr; }
+    if (s.inst) { wasm_runtime_deinstantiate(s.inst);   s.inst = nullptr; }
+    if (s.mod)  { wasm_runtime_unload(s.mod);            s.mod = nullptr; }
+    for (uint32_t k = 0; k < s.entryCount; k++)        if (s.closures[k])    { ffi_closure_free(s.closures[k]);    s.closures[k] = nullptr; }
+    for (uint32_t sp = 0; sp < LITE_SP_COUNT; sp++)    if (s.sysClosures[sp]) { ffi_closure_free(s.sysClosures[sp]); s.sysClosures[sp] = nullptr; }
+    s.entryCount = 0;
+}
+
 // Load a contract.wasm into a slot: instantiate, read its registration (reg_count/reg_info) + state/io
 // exports, and patch the core dispatch tables with one libffi closure per entry. NOT consensus — local load.
 [[maybe_unused]] static bool liteWasmLoadFromBytes(unsigned int idx, const unsigned char* bytes, unsigned int len)
@@ -173,6 +185,7 @@ static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, v
     LiteWasmSlot& s = g_liteWasmSlots[local];
 
     liteWasmEnsureThreadEnv();   // load runs on a tick-processor thread (not main)
+    if (s.inst) liteWasmSlotUnload(s);   // redeploy into a live slot: free the prior instance first
 
     // WAMR modifies the load buffer in place and references it for the module's life -> own a mutable copy.
     if (s.wasmBuf) { free(s.wasmBuf); s.wasmBuf = nullptr; }
