@@ -68,6 +68,20 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(blosc2)
 include_directories(${blosc2_SOURCE_DIR}/include)
 
+# WAMR runtime for wasm contracts, fetched + SHA-pinned (= tag WAMR-2.4.3) so src/ and test/ build vmlib from
+# the same source. Consensus-critical: bump the SHA deliberately. SOURCE_SUBDIR -> a nonexistent dir makes
+# MakeAvailable download-only; vmlib is built via build-scripts/runtime_lib.cmake in src/ and test/.
+if(LITE_WASM_CONTRACTS)
+    FetchContent_Declare(
+            wamr
+            GIT_REPOSITORY https://github.com/bytecodealliance/wasm-micro-runtime.git
+            GIT_TAG        0e47872fb4e57833dbeccf7c312a406fa2dac2bc
+            SOURCE_SUBDIR  does-not-exist
+    )
+    FetchContent_MakeAvailable(wamr)
+    set(WAMR_ROOT_DIR ${wamr_SOURCE_DIR})
+endif()
+
 # Always include platform_common as it's needed for both application and tests
 add_subdirectory(lib/platform_common)
 

@@ -114,7 +114,7 @@ target_link_libraries(
 if(LITE_WASM_CONTRACTS)
     target_compile_definitions(qubic_core_tests PRIVATE LITE_WASM_CONTRACTS)
     target_sources(qubic_core_tests PRIVATE wasm_contracts.cpp)
-    set(WAMR_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../lib/wamr)
+    # WAMR_ROOT_DIR is set by the root CMakeLists (FetchContent, SHA-pinned).
     if(NOT TARGET vmlib)
         if(APPLE)
             set(WAMR_BUILD_PLATFORM "darwin")

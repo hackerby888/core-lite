@@ -188,8 +188,8 @@ if(LITE_WASM_CONTRACTS)
     target_compile_definitions(Qubic PRIVATE LITE_WASM_CONTRACTS)
     enable_language(C)   # WAMR runtime is C; the node project is C++/ASM only
 
-    # --- WAMR static runtime (fast-interp; AOT added later) ---
-    set(WAMR_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../lib/wamr)
+    # --- WAMR static runtime (fast-interp; AOT added later). WAMR_ROOT_DIR is set by the root CMakeLists
+    # (FetchContent, SHA-pinned). ---
     if(APPLE)
         set(WAMR_BUILD_PLATFORM "darwin")
     else()
