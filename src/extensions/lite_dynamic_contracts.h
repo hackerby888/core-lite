@@ -1,16 +1,14 @@
 #pragma once
 // Host-side runtime dynamic-contract deploy subsystem (testnet, LITE_DYNAMIC_CONTRACTS).
-// See extensions/DYNAMIC_CONTRACTS.md. Included by qubic.cpp AFTER the contract machinery
-// (contract_def.h + contract_exec.h). Owns the deploy registry + uploaded .so bytes as
-// EXTENSION state (never in contract StateData). Builds the LiteHostServices vtable, and
-// dlopens / registers / patches / constructs deployable slots.
+// See extensions/WASM_CONTRACTS.md. Included by qubic.cpp AFTER the contract machinery
+// (contract_def.h + contract_exec.h). Owns the deploy registry + uploaded wasm bytes as
+// EXTENSION state (never in contract StateData). Builds the LiteHostServices vtable, hands
+// the uploaded module to the wasm engine, then constructs the deployable slot.
 #ifdef LITE_DYNAMIC_CONTRACTS
 
-#include <dlfcn.h>
-#include <sys/stat.h> // mkdir for the .so cache dir
-#include "extensions/lite_dyn_abi.h" // shared ABI structs (no LITE_DYN_SO_BUILD here -> structs only)
+#include "extensions/lite_dyn_abi.h" // shared ABI structs (LiteHostServices vtable etc)
 
-// Upper bound on a deployable .so. Bytes live here (extension state), not in any StateData.
+// Upper bound on a deployable contract module. Bytes live here (extension state), not in any StateData.
 #ifndef LITE_DYN_MAX_SO
 #define LITE_DYN_MAX_SO (4u * 1024u * 1024u)
 #endif
@@ -22,9 +20,8 @@
 void logToConsole(const CHAR16* message);
 
 // ---------------------------------------------------------------------------
-// Host-services vtable — thin wrappers force emission of the host QPI surface so
-// the .so binds by pointer (not -rdynamic). Extend the method backends as deployed
-// contracts require (Counter needs none beyond the infra hooks).
+// Host-services vtable — the host's QPI surface. The wasm engine exposes these
+// to the module as "lhost" imports (lite_wasm_imports.h mirrors this table).
 // ---------------------------------------------------------------------------
 // Designated initializers (C++20): each lambda binds to its vtable member BY NAME, so the struct and this
 // table can never silently desync by order (a reorder/insert is a compile error, not a wrong-fn-at-runtime).
@@ -125,7 +122,6 @@ struct LiteDynSlot {
     unsigned char codeHash[32] = {};
     unsigned int activationTick = 0;
     unsigned int version = 0;
-    void* soHandle = nullptr;
     char name[32] = {}; // contract name from the deploy tx; lets tooling resolve name -> slot
     std::string sourceH; // contract .h source (dev-only, node-local, off-chain) for inter-contract callee resolution
 };
@@ -147,77 +143,6 @@ static inline unsigned int liteDynSlotBase() { return LITEDYN0_CONTRACT_INDEX; }
 static inline int liteDynSlotLocal(unsigned int contractIndex) {
     int i = (int)contractIndex - (int)LITEDYN0_CONTRACT_INDEX;
     return (i >= 0 && i < (int)LITE_DYN_SLOT_COUNT) ? i : -1;
-}
-
-// ---------------------------------------------------------------------------
-// Copy a .so registration into the host dispatch tables for one slot.
-// ---------------------------------------------------------------------------
-static void liteDynPatchSlot(unsigned int contractIndex, const LiteRegistration& reg) {
-    contractStateLock[contractIndex].acquireWrite();
-    setMem(contractStates[contractIndex], (unsigned long long)contractDescriptions[contractIndex].stateSize, 0);
-
-    for (unsigned int i = 0; i < contractSystemProcedureCount && i < LITE_SP_COUNT; i++) {
-        contractSystemProcedures[contractIndex][i] = (SYSTEM_PROCEDURE)reg.systemProcedures[i];
-        contractSystemProcedureLocalsSizes[contractIndex][i] = reg.systemProcedureLocalsSizes[i];
-    }
-    contractExpandProcedures[contractIndex] = (EXPAND_PROCEDURE)reg.expandProcedure;
-
-    for (unsigned int e = 0; e < reg.userEntryCount; e++) {
-        const LiteUserEntry& ue = reg.userEntries[e];
-        if (ue.kind == LITE_KIND_FUNCTION) {
-            contractUserFunctions[contractIndex][ue.inputType] = (USER_FUNCTION)ue.fn;
-            contractUserFunctionInputSizes[contractIndex][ue.inputType] = ue.inputSize;
-            contractUserFunctionOutputSizes[contractIndex][ue.inputType] = ue.outputSize;
-            contractUserFunctionLocalsSizes[contractIndex][ue.inputType] = (unsigned short)ue.localsSize;
-        } else {
-            contractUserProcedures[contractIndex][ue.inputType] = (USER_PROCEDURE)ue.fn;
-            contractUserProcedureInputSizes[contractIndex][ue.inputType] = ue.inputSize;
-            contractUserProcedureOutputSizes[contractIndex][ue.inputType] = ue.outputSize;
-            contractUserProcedureLocalsSizes[contractIndex][ue.inputType] = (unsigned short)ue.localsSize;
-        }
-    }
-    contractError[contractIndex] = NoContractError;
-    contractStateLock[contractIndex].releaseWrite();
-}
-
-// dlopen the .so bytes (written to a temp file), hand it the vtable, run its registration,
-// patch the slot's tables. Returns true on success. NOT consensus — local code load.
-[[maybe_unused]] static bool liteDynLoadAndPatch(unsigned int contractIndex, const unsigned char* bytes, unsigned int len) {
-    int local = liteDynSlotLocal(contractIndex);
-    unsigned int ver = (local >= 0) ? g_liteDynSlots[local].version : 0;
-
-    // Path: contracts_dyn/<slot>_<version>.so. The version suffix means a redeploy never overwrites a
-    // file still mmap'd by a prior dlopen (truncating a mapped image crashes the node on its next call).
-    char p[64]; int n = 0;
-    auto putUint = [&](unsigned int v) { char num[12]; int nn = 0; do { num[nn++] = (char)('0' + (v % 10)); v /= 10; } while (v); while (nn) p[n++] = num[--nn]; };
-    for (const char* c = "contracts_dyn/"; *c; ++c) p[n++] = *c;
-    putUint(contractIndex); p[n++] = '_'; putUint(ver);
-    for (const char* c = ".so"; *c; ++c) p[n++] = *c; p[n] = 0;
-
-    mkdir("contracts_dyn", 0755); // create cache dir; ignore EEXIST
-    FILE* f = fopen(p, "wb");
-    if (!f) { logToConsole(L"LITEDYN: ERROR cannot write .so (fopen failed)"); return false; }
-    fwrite(bytes, 1, len, f);
-    fclose(f);
-
-    void* h = dlopen(p, RTLD_NOW | RTLD_LOCAL);
-    if (!h) { logToConsole(L"LITEDYN: ERROR dlopen failed"); return false; }
-    auto setSvc = (void (*)(LiteHostServices*))dlsym(h, "liteSetHostServices");
-    auto reg = (void (*)(LiteRegistration*))dlsym(h, "liteContractRegister");
-    if (!setSvc || !reg) { logToConsole(L"LITEDYN: ERROR .so missing entry points"); dlclose(h); return false; }
-    setSvc(&g_liteHostServices);
-
-    static LiteRegistration registration; // large; keep static
-    setMem(&registration, sizeof(registration), 0);
-    reg(&registration);
-    liteDynPatchSlot(contractIndex, registration);
-
-    if (local >= 0) {
-        void* old = g_liteDynSlots[local].soHandle;
-        g_liteDynSlots[local].soHandle = h;
-        if (old && old != h) dlclose(old); // free prior mapping AFTER tables point to the new .so
-    }
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,21 +206,20 @@ static bool liteWasmIsWasm(unsigned int idx);
     s.constructed = false;
     s.version++;
     // Load the code now (node-local, non-consensus); construction (state init) is deferred to a framed tick
-    // step (liteDynConstructPending). Route by the uploaded artifact's magic: '\0asm' -> wasm engine,
-    // ELF/Mach-O -> native .so engine (WASM_CONTRACTS.md §13.9). qinit signals the engine by what it uploads.
-    bool loadOk;
-    const unsigned char* art = g_liteDynBuf;
+    // step (liteDynConstructPending). The uploaded artifact must be a wasm module ('\0asm' magic).
+    bool loadOk = false;
 #ifdef LITE_WASM_CONTRACTS
+    const unsigned char* art = g_liteDynBuf;
     if (g_liteDynUpload.totalSize >= 4 && art[0] == 0x00 && art[1] == 0x61 && art[2] == 0x73 && art[3] == 0x6d) {
         loadOk = liteWasmLoadFromBytes(targetSlot, g_liteDynBuf, g_liteDynUpload.totalSize);
         logToConsole(loadOk ? L"LITEDYN: wasm contract loaded" : L"LITEDYN: ERROR wasm load failed");
     } else
+        logToConsole(L"LITEDYN: ERROR upload is not a wasm module ('\\0asm' expected)");
+#else
+    logToConsole(L"LITEDYN: ERROR no contract engine built (enable LITE_WASM_CONTRACTS)");
 #endif
-    {
-        loadOk = liteDynLoadAndPatch(targetSlot, g_liteDynBuf, g_liteDynUpload.totalSize);
-    }
     if (!loadOk)
-        logToConsole(L"LITEDYN: ERROR load/patch failed - slot armed but not runnable");
+        logToConsole(L"LITEDYN: ERROR load failed - slot armed but not runnable");
     g_liteDynUpload.active = false;
 }
 
@@ -360,9 +284,9 @@ static bool liteDynPendingForTick(unsigned int /*tick*/) {
 // ---------------------------------------------------------------------------
 [[maybe_unused]] static void liteDynBootDeploy() {
     logToConsole(L"========================================================================");
-    logToConsole(L"  LITE_DYNAMIC_CONTRACTS ENABLED - runtime .so contract deploy active");
+    logToConsole(L"  LITE_DYNAMIC_CONTRACTS ENABLED - runtime wasm contract deploy active");
     logToConsole(L"  TESTNET DEV FEATURE ONLY - deploy address id(99999,0,0,0)");
-    logToConsole(L"  Loads native code at runtime. NEVER enable on mainnet.");
+    logToConsole(L"  Runs uploaded wasm in the embedded engine. NEVER enable on mainnet.");
     logToConsole(L"========================================================================");
     for (unsigned int i = 0; i < LITE_DYN_SLOT_COUNT; i++) {
         unsigned int contractIndex = LITEDYN0_CONTRACT_INDEX + i;

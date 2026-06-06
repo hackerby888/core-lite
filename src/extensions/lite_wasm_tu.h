@@ -1,6 +1,6 @@
 #pragma once
-// Contract-side wasm binding (compiled INTO contract.wasm by qinit's clang.wasm, NOT into the node).
-// The wasm analog of lite_dyn_abi.h's LITE_DYN_SO_BUILD block: the contract's qpi.X() calls resolve to wasm
+// Contract-side wasm binding (compiled INTO contract.wasm by qinit's wasi-sdk clang, NOT into the node).
+// The contract's qpi.X() calls resolve to wasm
 // IMPORTS from module "lhost" (matching lite_wasm_imports.h on the node); the contract's entry points become
 // wasm EXPORTS (dispatch / reg_count / reg_info / state_addr / state_size / io_base). Pointers cross as i32
 // linear-mem offsets; the import DROPS the QpiContext (host binds it out-of-band). See WASM_CONTRACTS.md §13.11.
