@@ -40,6 +40,7 @@ struct LiteWasmSlot {
     unsigned char*       wasmBuf = nullptr;       // owned mutable copy; WAMR writes into + references it for life
     uint32_t             stateOff = 0, stateSize = 0;
     uint32_t             ioBase = 0;
+    uint32_t             ctxOff = 0;       // contract-side QpiContext buffer; host copies the ctx base in per call
     uint32_t             entryCount = 0;
     LiteWasmEntryBind    binds[LITE_MAX_USER_ENTRIES] = {};
     ffi_closure*         closures[LITE_MAX_USER_ENTRIES] = {};
@@ -121,6 +122,11 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     cc.arenaBase = wArena; cc.arenaBump = wArena; cc.arenaEnd = wArena + LITE_WASM_ARENA_SZ;
     wasm_runtime_set_user_data(env, &cc);
 
+    // ctx base in: the contract's inline qpi.h accessors (invocationReward/invocator/originator/contractIndex)
+    // read these fields directly. QpiContext has no pointers/vtable + m256i is align-8 -> layout is identical
+    // wasm32/x64, so a raw copy of the base populates them.
+    if (ctx && s.ctxOff) copyMem(wasm_runtime_addr_app_to_native(s.inst, s.ctxOff), ctx, sizeof(QPI::QpiContext));
+
     // state in (v1: contractStates[idx] is canonical) + input in + zero output.
     void* st = wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
     if (s.stateSize) copyMem(st, statePtr, s.stateSize);
@@ -190,6 +196,7 @@ static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, v
     s.stateOff = liteWasmCallU32(env, f_state_addr);
     s.stateSize = liteWasmCallU32(env, f_state_size);
     s.ioBase = liteWasmCallU32(env, f_io_base);
+    { wasm_function_inst_t f_ctx = wasm_runtime_lookup_function(inst, "ctx_addr"); if (f_ctx) s.ctxOff = liteWasmCallU32(env, f_ctx); }
     s.entryCount = liteWasmCallU32(env, f_reg_count);
     if (s.entryCount > LITE_MAX_USER_ENTRIES) s.entryCount = LITE_MAX_USER_ENTRIES;
     logColorToScreen("INFO", "LITEWASM: loaded contract — " + std::to_string(s.entryCount) + " entries, stateSize=" + std::to_string(s.stateSize));
@@ -264,14 +271,12 @@ static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, v
         return false;
     }
 
-    // Static pool allocator (matches the proven spike). Alloc_With_System_Allocator returned null in the
-    // loader -> SIGSEGV in wasm_const_str_list_insert/b_memmove_s. Sized for the slot instances + metadata.
-    static char s_liteWasmHeap[32 * 1024 * 1024];
+    // System allocator: each instance mallocs its own linear memory, so big-state contracts (QX ~593MB,
+    // QEARN ~204MB) aren't capped by a fixed pool. (The earlier load crash was the const load buffer, since
+    // fixed; a static pool can't hold hundreds of MB.)
     RuntimeInitArgs args;
     setMem(&args, sizeof(args), 0);
-    args.mem_alloc_type = Alloc_With_Pool;
-    args.mem_alloc_option.pool.heap_buf = s_liteWasmHeap;
-    args.mem_alloc_option.pool.heap_size = sizeof(s_liteWasmHeap);
+    args.mem_alloc_type = Alloc_With_System_Allocator;
     args.native_module_name = "lhost";
     args.native_symbols = g_liteWasmNatives;
     args.n_native_symbols = (int)g_liteWasmNativesCount;

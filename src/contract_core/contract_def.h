@@ -347,8 +347,11 @@ constexpr unsigned short TESTEXD_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 
 // Reserved deployable slots for runtime dynamic contracts. See extensions/DYNAMIC_CONTRACTS.md.
 // Each include generates a distinct stub struct; the host patches a slot's tables at deploy.
+// Reserve enough state per dyn/wasm slot to hold ANY contract (QX ~593MB, QEARN ~204MB). Array<> needs a
+// power of 2; MAX_CONTRACT_STATE_SIZE is 2^30 (1GB), the node's per-contract max. USE_SWAP makes contractStates
+// disk-backed + sparse, so the reserve only costs disk for pages actually touched.
 #ifndef LITE_DYN_SLOT_STATE_SIZE
-#define LITE_DYN_SLOT_STATE_SIZE (1 * 1024 * 1024)
+#define LITE_DYN_SLOT_STATE_SIZE MAX_CONTRACT_STATE_SIZE
 #endif
 
 constexpr unsigned short LITEDYN0_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
