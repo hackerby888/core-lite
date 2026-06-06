@@ -331,15 +331,8 @@ static bool liteDynPendingForTick(unsigned int /*tick*/) {
         LiteDynSlot& s = g_liteDynSlots[i];
         if (!s.armed || s.constructed) continue;
         unsigned int contractIndex = LITEDYN0_CONTRACT_INDEX + i;
-#ifdef LITE_WASM_CONTRACTS
-        if (liteWasmIsWasm(contractIndex)) {
-            // wasm slot: user fn/proc dispatch is live; INITIALIZE (a system procedure) on wasm isn't wired
-            // yet, so state relies on zero-init. TODO: wasm system-procedure dispatch.
-            logToConsole(L"LITEDYN: wasm slot armed (INITIALIZE skipped; zero-init state)");
-            s.constructed = true;
-            continue;
-        }
-#endif
+        // wasm slots patch contractSystemProcedures[][INITIALIZE] with a closure at load (lite_wasm_contracts.h),
+        // so the normal path below runs INITIALIZE through the wasm engine — same as native.
         if (contractSystemProcedures[contractIndex][INITIALIZE]) {
             QpiContextSystemProcedureCall qpiContext(contractIndex, INITIALIZE);
             qpiContext.call();

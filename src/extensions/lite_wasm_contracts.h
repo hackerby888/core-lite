@@ -43,7 +43,10 @@ struct LiteWasmSlot {
     uint32_t             entryCount = 0;
     LiteWasmEntryBind    binds[LITE_MAX_USER_ENTRIES] = {};
     ffi_closure*         closures[LITE_MAX_USER_ENTRIES] = {};
+    LiteWasmEntryBind    sysBinds[LITE_SP_COUNT] = {};       // system procedures (lifecycle), kind=2, it=LITE_SP_*
+    ffi_closure*         sysClosures[LITE_SP_COUNT] = {};
 };
+#define LITE_WASM_KIND_SYSPROC 2
 static LiteWasmSlot g_liteWasmSlots[LITE_DYN_SLOT_COUNT];
 
 static inline int liteWasmSlotLocal(unsigned int idx) {
@@ -80,8 +83,10 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     LiteWasmSlot& s = g_liteWasmSlots[local];
     if (!s.loaded) return;
 
-    uint16_t inSize  = (kind == LITE_KIND_FUNCTION) ? contractUserFunctionInputSizes[idx][it]  : contractUserProcedureInputSizes[idx][it];
-    uint16_t outSize = (kind == LITE_KIND_FUNCTION) ? contractUserFunctionOutputSizes[idx][it] : contractUserProcedureOutputSizes[idx][it];
+    uint16_t inSize, outSize;
+    if (kind == LITE_KIND_FUNCTION)            { inSize = contractUserFunctionInputSizes[idx][it];  outSize = contractUserFunctionOutputSizes[idx][it]; }
+    else if (kind == LITE_WASM_KIND_SYSPROC)   { inSize = 0; outSize = 0; }   // lifecycle sysprocs: no user in/out
+    else                                       { inSize = contractUserProcedureInputSizes[idx][it]; outSize = contractUserProcedureOutputSizes[idx][it]; }
 
     // env selection: outermost uses the slot env; nested reuses the thread's current env + set_module_inst.
     wasm_exec_env_t env;
@@ -126,7 +131,7 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
 
     // output out + state out (procedures write; functions are read-only).
     if (outSize) copyMem(output, wasm_runtime_addr_app_to_native(s.inst, wOut), outSize);
-    if (kind == LITE_KIND_PROCEDURE && s.stateSize) {
+    if (kind != LITE_KIND_FUNCTION && s.stateSize) {   // procedures + system procedures write state
         copyMem(statePtr, st, s.stateSize);
         g_liteHostServices.markDirty(idx);
     }
@@ -217,8 +222,27 @@ static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, v
         }
     }
 
+    // system procedures (lifecycle): patch contractSystemProcedures[idx][sp] with a closure (kind=2) for each
+    // bit the contract reports. INITIALIZE then runs via the normal construct path; begin/end tick+epoch via processTick.
+    wasm_function_inst_t f_sysmask = wasm_runtime_lookup_function(inst, "reg_sysproc_mask");
+    wasm_function_inst_t f_syslocals = wasm_runtime_lookup_function(inst, "sysproc_locals_size");
+    if (f_sysmask) {
+        uint32_t mask = liteWasmCallU32(env, f_sysmask);
+        for (uint32_t sp = 0; sp < LITE_SP_COUNT; sp++) {
+            if (!(mask & (1u << sp))) continue;
+            s.sysBinds[sp] = { idx, (uint16_t)sp, (uint8_t)LITE_WASM_KIND_SYSPROC };
+            void* code = nullptr;
+            ffi_closure* cl = (ffi_closure*)ffi_closure_alloc(sizeof(ffi_closure), &code);
+            if (!cl || ffi_prep_closure_loc(cl, &g_liteWasmDispatchCif, liteWasmClosureHandler, &s.sysBinds[sp], code) != FFI_OK) continue;
+            s.sysClosures[sp] = cl;
+            contractSystemProcedures[idx][sp] = (SYSTEM_PROCEDURE)code;
+            uint32_t lz = 0; if (f_syslocals) { uint32_t a[1] = { sp }; wasm_runtime_call_wasm(env, f_syslocals, 1, a); lz = a[0]; }
+            contractSystemProcedureLocalsSizes[idx][sp] = (uint16_t)lz;
+        }
+    }
+
     s.loaded = true;
-    logToConsole(L"LITEWASM: slot loaded");
+    logColorToScreen("INFO", "LITEWASM: slot loaded (" + std::to_string(s.entryCount) + " user entries)");
     return true;
 }
 

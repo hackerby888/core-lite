@@ -174,11 +174,52 @@ void reg_info(unsigned int i, LiteWasmTuInfo* out) {
     out->inputType = e.it; out->kind = e.kind; out->inSize = e.inSize; out->outSize = e.outSize;
 }
 
+// Lifecycle system procedures (no user input/output). Bit i (= LITE_SP_* id) set if the contract defines it.
+// 0=INITIALIZE 1=BEGIN_EPOCH 2=END_EPOCH 3=BEGIN_TICK 4=END_TICK (matches lite_dyn_abi.h LITE_SP_*).
+LH_EXPORT(reg_sysproc_mask)
+unsigned int reg_sysproc_mask() {
+    unsigned int m = 0;
+    if (!CONTRACT_STATE_TYPE::__initializeEmpty) m |= (1u << 0);
+    if (!CONTRACT_STATE_TYPE::__beginEpochEmpty) m |= (1u << 1);
+    if (!CONTRACT_STATE_TYPE::__endEpochEmpty)   m |= (1u << 2);
+    if (!CONTRACT_STATE_TYPE::__beginTickEmpty)  m |= (1u << 3);
+    if (!CONTRACT_STATE_TYPE::__endTickEmpty)    m |= (1u << 4);
+    return m;
+}
+LH_EXPORT(sysproc_locals_size)
+unsigned int sysproc_locals_size(unsigned int sp) {
+    switch (sp) {
+        case 0: return (unsigned int)CONTRACT_STATE_TYPE::__initializeLocalsSize;
+        case 1: return (unsigned int)CONTRACT_STATE_TYPE::__beginEpochLocalsSize;
+        case 2: return (unsigned int)CONTRACT_STATE_TYPE::__endEpochLocalsSize;
+        case 3: return (unsigned int)CONTRACT_STATE_TYPE::__beginTickLocalsSize;
+        case 4: return (unsigned int)CONTRACT_STATE_TYPE::__endTickLocalsSize;
+    }
+    return 0;
+}
+
 // kind/it select the entry; in/out/locals are linear-mem offsets (== ptrs in wasm32). The host has already
 // copied state -> g_wasmState and the input bytes -> inOff, and populated the ctx header at ctx_addr.
 LH_EXPORT(dispatch)
 void dispatch(unsigned int kind, unsigned int it, unsigned int inOff, unsigned int outOff, unsigned int localsOff) {
     liteWasmTuEnsureRegistered();
+    void* in = (void*)(unsigned long)inOff; void* out = (void*)(unsigned long)outOff; void* lo = (void*)(unsigned long)localsOff;
+    if (kind == 2) {   // system procedure; it = LITE_SP_* id (lifecycle set)
+        // the generated __initialize/etc have typed signatures (ContractState&, varying arity); cast through
+        // void* to the uniform SYSTEM_PROCEDURE shape + call with 5 args, exactly as lite_dyn_abi.h's table does.
+        typedef void (*LiteWasmSysProc)(const QPI::QpiContextProcedureCall&, void*, void*, void*, void*);
+        auto& pctx = *reinterpret_cast<QPI::QpiContextProcedureCall*>(&g_wasmCtxBuf[0]);
+        #define LITE_WASM_SP_CALL(fn) ((LiteWasmSysProc)(void*)CONTRACT_STATE_TYPE::fn)(pctx, &g_wasmState, in, out, lo)
+        switch (it) {
+            case 0: LITE_WASM_SP_CALL(__initialize); break;
+            case 1: LITE_WASM_SP_CALL(__beginEpoch); break;
+            case 2: LITE_WASM_SP_CALL(__endEpoch);   break;
+            case 3: LITE_WASM_SP_CALL(__beginTick);  break;
+            case 4: LITE_WASM_SP_CALL(__endTick);    break;
+        }
+        #undef LITE_WASM_SP_CALL
+        return;
+    }
     auto& ctx = *reinterpret_cast<QPI::QpiContextFunctionCall*>(&g_wasmCtxBuf[0]);
     for (unsigned int i = 0; i < g_wasmTuEntryCount; i++) {
         const LiteWasmTuEntry& e = g_wasmTuEntries[i];
