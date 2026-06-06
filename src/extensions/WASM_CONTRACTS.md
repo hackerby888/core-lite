@@ -655,3 +655,29 @@ flush/stubStale + restart restore helper. Core (qubic.cpp, gated): save size+com
 size + restore hook (:6985-7033). digest already done (v2); reset site :2361 unreachable (verified). ~3 gated core
 sites. **Win:** 500MB contract = ~500MB RAM (was 1.5GB); 4×1GB dyn reserve reclaimed. Cost: restart-reload
 redesign + the dangling-alias care on redeploy. Ship behind LITE_WASM_CONTRACTS; v2 (stub mirror) is the fallback.
+
+## 17. No-sysroot / freestanding contract — feasibility verdict (investigated, NOT done)
+
+Goal: drop the wasi-sysroot (libc++) from the wasm contract build so a contract needs no full toolchain.
+Verdict: **feasible but invasive — not a clean win.** Investigated 2026-06-07; reverted (kept the sysroot).
+
+What's freestanding already: `qpi.h` + the impls (`qpi_collection/linked_list/hash_map_impl.h`, `pre_qpi_def.h`)
+have ZERO `#include` and ZERO `std::`, define their own `uint8..uint64`, and use `copyMemory` not `memcpy`.
+SIMDe is vendored (`lib/platform_common/simde`); `qstdint.h` gives freestanding stdint.
+
+Why `-nostdinc++` (drop libc++) does NOT just work: the contract **wrapper** (`genWrapper`) is not isolated from
+the node — it pulls node headers that use libc++:
+- `m256.h → qintrin.h → SIMDe` → `std::exp/sqrt/isnan/...` (and would-be `std::complex/vector`). **SOLVABLE:**
+  do NOT provide a `<cmath>` shim → `__has_include(<cmath>)` is false → SIMDe falls to `<math.h>` (C, global
+  names); all SIMDe `std::` errors cleared. (Mapping `<cstdint>/<cstddef>/<cstring>/<cstdlib>/<cfloat>/<cstdio>`
+  to the C headers via a tiny shim dir + `-nostdinc++` is the rest of the mechanism.)
+- `pre_qpi_def.h → network_messages/common_def.h` → `IPv4Address::fromString` uses `std::string/std::stoi`.
+- `extensions/utils.h` (pulled transitively) → `<codecvt>/<sstream>/<vector>/<iomanip>`.
+- `oracle_core/oracle_interfaces_def.h` + others — each `-nostdinc++` pass reveals the next node header.
+
+So the sysroot is needed because the TU compiles a *slice of the node*, not just `qpi.h`. To drop libc++:
+(a) **isolate the contract TU** — a minimal contract-facing header subset so the wrapper stops pulling
+`common_def`/`utils`/oracle node-glue (clean, but a header-layout refactor); or (b) gate each node header's
+libc++ bits under `#ifndef LITEDYN_CONTRACT_TU` (incremental whack-a-mole, several core files, re-breaks as new
+node headers enter the TU). Recommend keeping the sysroot until (a) is worth doing; the sysroot ships with the
+wasi-sdk clang anyway, so the cost is bundle size, not a missing tool.
