@@ -147,7 +147,7 @@ typedef void (*LiteWasmUserFn)(const QPI::QpiContextFunctionCall&, void*, void*,
 
 static CONTRACT_STATE_TYPE::StateData g_wasmState;   // resident state, copied in/out by the host per call
 alignas(16) static unsigned char     g_wasmCtxBuf[256];   // QpiContext scalar header; host populates per call
-alignas(16) static unsigned char     g_wasmIo[3 * 8192 + 16384];   // [in | out | locals | arena], host carves
+alignas(16) static unsigned char     g_wasmIo[3 * (32 * 1024) + 16 * 1024];   // [in|out|locals|arena]; slot/arena sizes MUST match LITE_WASM_IO_SLOT/ARENA_SZ in lite_wasm_contracts.h
 
 static bool g_wasmRegistered = false;
 static void liteWasmTuEnsureRegistered() {
@@ -174,28 +174,65 @@ void reg_info(unsigned int i, LiteWasmTuInfo* out) {
     out->inputType = e.it; out->kind = e.kind; out->inSize = e.inSize; out->outSize = e.outSize;
 }
 
-// Lifecycle system procedures (no user input/output). Bit i (= LITE_SP_* id) set if the contract defines it.
-// 0=INITIALIZE 1=BEGIN_EPOCH 2=END_EPOCH 3=BEGIN_TICK 4=END_TICK (matches lite_dyn_abi.h LITE_SP_*).
+// System procedures. Bit i (= LITE_SP_* id) set if the contract defines it. Order matches lite_dyn_abi.h:
+// 0 INITIALIZE, 1 BEGIN_EPOCH, 2 END_EPOCH, 3 BEGIN_TICK, 4 END_TICK, 5 PRE_RELEASE_SHARES,
+// 6 PRE_ACQUIRE_SHARES, 7 POST_RELEASE_SHARES, 8 POST_ACQUIRE_SHARES, 9 POST_INCOMING_TRANSFER,
+// 10 SET_SHAREHOLDER_PROPOSAL, 11 SET_SHAREHOLDER_VOTES.
 LH_EXPORT(reg_sysproc_mask)
 unsigned int reg_sysproc_mask() {
     unsigned int m = 0;
-    if (!CONTRACT_STATE_TYPE::__initializeEmpty) m |= (1u << 0);
-    if (!CONTRACT_STATE_TYPE::__beginEpochEmpty) m |= (1u << 1);
-    if (!CONTRACT_STATE_TYPE::__endEpochEmpty)   m |= (1u << 2);
-    if (!CONTRACT_STATE_TYPE::__beginTickEmpty)  m |= (1u << 3);
-    if (!CONTRACT_STATE_TYPE::__endTickEmpty)    m |= (1u << 4);
+    if (!CONTRACT_STATE_TYPE::__initializeEmpty)            m |= (1u << 0);
+    if (!CONTRACT_STATE_TYPE::__beginEpochEmpty)            m |= (1u << 1);
+    if (!CONTRACT_STATE_TYPE::__endEpochEmpty)              m |= (1u << 2);
+    if (!CONTRACT_STATE_TYPE::__beginTickEmpty)             m |= (1u << 3);
+    if (!CONTRACT_STATE_TYPE::__endTickEmpty)               m |= (1u << 4);
+    if (!CONTRACT_STATE_TYPE::__preReleaseSharesEmpty)      m |= (1u << 5);
+    if (!CONTRACT_STATE_TYPE::__preAcquireSharesEmpty)      m |= (1u << 6);
+    if (!CONTRACT_STATE_TYPE::__postReleaseSharesEmpty)     m |= (1u << 7);
+    if (!CONTRACT_STATE_TYPE::__postAcquireSharesEmpty)     m |= (1u << 8);
+    if (!CONTRACT_STATE_TYPE::__postIncomingTransferEmpty)  m |= (1u << 9);
+    if (!CONTRACT_STATE_TYPE::__setShareholderProposalEmpty)m |= (1u << 10);
+    if (!CONTRACT_STATE_TYPE::__setShareholderVotesEmpty)   m |= (1u << 11);
     return m;
 }
 LH_EXPORT(sysproc_locals_size)
 unsigned int sysproc_locals_size(unsigned int sp) {
     switch (sp) {
-        case 0: return (unsigned int)CONTRACT_STATE_TYPE::__initializeLocalsSize;
-        case 1: return (unsigned int)CONTRACT_STATE_TYPE::__beginEpochLocalsSize;
-        case 2: return (unsigned int)CONTRACT_STATE_TYPE::__endEpochLocalsSize;
-        case 3: return (unsigned int)CONTRACT_STATE_TYPE::__beginTickLocalsSize;
-        case 4: return (unsigned int)CONTRACT_STATE_TYPE::__endTickLocalsSize;
+        case 0:  return (unsigned int)CONTRACT_STATE_TYPE::__initializeLocalsSize;
+        case 1:  return (unsigned int)CONTRACT_STATE_TYPE::__beginEpochLocalsSize;
+        case 2:  return (unsigned int)CONTRACT_STATE_TYPE::__endEpochLocalsSize;
+        case 3:  return (unsigned int)CONTRACT_STATE_TYPE::__beginTickLocalsSize;
+        case 4:  return (unsigned int)CONTRACT_STATE_TYPE::__endTickLocalsSize;
+        case 5:  return (unsigned int)CONTRACT_STATE_TYPE::__preReleaseSharesLocalsSize;
+        case 6:  return (unsigned int)CONTRACT_STATE_TYPE::__preAcquireSharesLocalsSize;
+        case 7:  return (unsigned int)CONTRACT_STATE_TYPE::__postReleaseSharesLocalsSize;
+        case 8:  return (unsigned int)CONTRACT_STATE_TYPE::__postAcquireSharesLocalsSize;
+        case 9:  return (unsigned int)CONTRACT_STATE_TYPE::__postIncomingTransferLocalsSize;
+        case 10: return (unsigned int)CONTRACT_STATE_TYPE::__setShareholderProposalLocalsSize;
+        case 11: return (unsigned int)CONTRACT_STATE_TYPE::__setShareholderVotesLocalsSize;
     }
     return 0;
+}
+// QPI-defined input/output sizes for the share-management sysprocs (lifecycle ones = NoData).
+LH_EXPORT(sysproc_in_size)
+unsigned int sysproc_in_size(unsigned int sp) {
+    switch (sp) {
+        case 5: case 6: return (unsigned int)sizeof(QPI::PreManagementRightsTransfer_input);
+        case 7: case 8: return (unsigned int)sizeof(QPI::PostManagementRightsTransfer_input);
+        case 9:  return (unsigned int)sizeof(QPI::PostIncomingTransfer_input);
+        case 10: return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_PROPOSAL_input);
+        case 11: return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_VOTES_input);
+    }
+    return 0;
+}
+LH_EXPORT(sysproc_out_size)
+unsigned int sysproc_out_size(unsigned int sp) {
+    switch (sp) {
+        case 5: case 6: return (unsigned int)sizeof(QPI::PreManagementRightsTransfer_output);
+        case 10: return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_PROPOSAL_output);
+        case 11: return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_VOTES_output);
+    }
+    return 0;   // POST_* outputs are NoData
 }
 
 // kind/it select the entry; in/out/locals are linear-mem offsets (== ptrs in wasm32). The host has already
@@ -211,11 +248,18 @@ void dispatch(unsigned int kind, unsigned int it, unsigned int inOff, unsigned i
         auto& pctx = *reinterpret_cast<QPI::QpiContextProcedureCall*>(&g_wasmCtxBuf[0]);
         #define LITE_WASM_SP_CALL(fn) ((LiteWasmSysProc)(void*)CONTRACT_STATE_TYPE::fn)(pctx, &g_wasmState, in, out, lo)
         switch (it) {
-            case 0: LITE_WASM_SP_CALL(__initialize); break;
-            case 1: LITE_WASM_SP_CALL(__beginEpoch); break;
-            case 2: LITE_WASM_SP_CALL(__endEpoch);   break;
-            case 3: LITE_WASM_SP_CALL(__beginTick);  break;
-            case 4: LITE_WASM_SP_CALL(__endTick);    break;
+            case 0:  LITE_WASM_SP_CALL(__initialize);             break;
+            case 1:  LITE_WASM_SP_CALL(__beginEpoch);             break;
+            case 2:  LITE_WASM_SP_CALL(__endEpoch);               break;
+            case 3:  LITE_WASM_SP_CALL(__beginTick);              break;
+            case 4:  LITE_WASM_SP_CALL(__endTick);                break;
+            case 5:  LITE_WASM_SP_CALL(__preReleaseShares);       break;
+            case 6:  LITE_WASM_SP_CALL(__preAcquireShares);       break;
+            case 7:  LITE_WASM_SP_CALL(__postReleaseShares);      break;
+            case 8:  LITE_WASM_SP_CALL(__postAcquireShares);      break;
+            case 9:  LITE_WASM_SP_CALL(__postIncomingTransfer);   break;
+            case 10: LITE_WASM_SP_CALL(__setShareholderProposal); break;
+            case 11: LITE_WASM_SP_CALL(__setShareholderVotes);    break;
         }
         #undef LITE_WASM_SP_CALL
         return;
