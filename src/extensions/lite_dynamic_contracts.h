@@ -119,6 +119,7 @@ static LiteHostServices g_liteHostServices = {
 struct LiteDynSlot {
     bool armed = false;
     bool constructed = false;
+    bool everInitialized = false; // INITIALIZE has run at least once -> upgrades skip it (preserve state)
     unsigned char codeHash[32] = {};
     unsigned int activationTick = 0;
     unsigned int version = 0;
@@ -203,7 +204,7 @@ static bool liteWasmIsWasm(unsigned int idx);
     if (name) { copyMem(s.name, name, 32); s.name[31] = 0; }
     s.armed = true;
     logToConsole(L"LITEDYN: Deploy accepted, slot armed");
-    s.constructed = false;
+    s.constructed = s.everInitialized;   // first deploy -> run INITIALIZE; upgrade -> skip it (state preserved at load)
     s.version++;
     // Load the code now (node-local, non-consensus); construction (state init) is deferred to a framed tick
     // step (liteDynConstructPending). The uploaded artifact must be a wasm module ('\0asm' magic).
@@ -270,6 +271,7 @@ static bool liteDynPendingForTick(unsigned int /*tick*/) {
         if (contractSystemProcedures[contractIndex][INITIALIZE]) {
             QpiContextSystemProcedureCall qpiContext(contractIndex, INITIALIZE);
             qpiContext.call();
+            s.everInitialized = true;   // never re-run INITIALIZE for this slot (upgrades preserve state)
             logToConsole(L"LITEDYN: slot constructed (INITIALIZE ran)");
         } else {
             logToConsole(L"LITEDYN: ERROR construct skipped - tables unpatched (load failed)");

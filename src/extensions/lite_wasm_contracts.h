@@ -243,6 +243,14 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     LiteWasmSlot& s = g_liteWasmSlots[local];
 
     liteWasmEnsureThreadEnv();   // load runs on a tick-processor thread (not main)
+    // upgrade: the contract state lives in the instance's linear memory, which deinstantiate frees below.
+    // Snapshot it now and restore into the fresh instance, so a redeploy preserves state (INITIALIZE runs once).
+    unsigned char* prevState = nullptr; uint32_t prevStateSize = 0;
+    if (s.inst && s.stubFreed && s.stateSize && contractStates[idx]) {
+        prevStateSize = s.stateSize;
+        prevState = (unsigned char*)malloc(prevStateSize);
+        if (prevState) copyMem(prevState, contractStates[idx], prevStateSize);
+    }
     if (s.inst) liteWasmSlotUnload(s);   // redeploy into a live slot: free the prior instance first
 
     // WAMR modifies the load buffer in place and references it for the module's life -> own a mutable copy.
@@ -288,6 +296,12 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     // free the slot's 1GB reserve (once) and point contractStates[idx] AT the instance's resident state region.
     if (!s.stubFreed) { freePool(contractStates[idx]); s.stubFreed = true; }
     contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(inst, s.stateOff);
+    if (prevState) {   // upgrade: restore the snapshot (copy the overlap — a new layout may differ in size)
+        uint32_t n = prevStateSize < s.stateSize ? prevStateSize : s.stateSize;
+        copyMem(contractStates[idx], prevState, n);
+        free(prevState);
+        logColorToScreen("INFO", "LITEWASM: state preserved across upgrade — " + std::to_string(n) + " bytes");
+    }
     { wasm_function_inst_t f_ctx = wasm_runtime_lookup_function(inst, "ctx_addr"); if (f_ctx) s.ctxOff = liteWasmCallU32(env, f_ctx); }
     s.entryCount = liteWasmCallU32(env, f_reg_count);
     if (s.entryCount > LITE_MAX_USER_ENTRIES) s.entryCount = LITE_MAX_USER_ENTRIES;
