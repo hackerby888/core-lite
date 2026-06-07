@@ -12,8 +12,9 @@
 
 #include <ffi.h>
 #include <string>
+#include <chrono>
 #include "wasm_export.h"
-#include "extensions/lite_wasm_imports.h"   // g_liteWasmNatives[] + LiteWasmCallCtx -> g_liteHostServices
+#include "extensions/lite_wasm_imports.h"   // g_liteWasmNatives[] + LiteWasmCallCtx -> g_liteHostServices (+ debug trace)
 
 void logColorToScreen(std::string type, std::string msg);   // defined later in qubic.cpp (same TU)
 
@@ -149,6 +150,23 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     cc.arenaBase = wArena; cc.arenaBump = wArena; cc.arenaEnd = wArena + LITE_WASM_ARENA_SZ;
     wasm_runtime_set_user_data(env, &cc);
 
+    // debug trace (off by default; one atomic-bool check): capture input + state-before, bind the entry so
+    // effectful imports record host-calls, and time the call. Committed to the ring after the call.
+    LiteWasmTraceEntry te;
+    const bool dbg = liteWasmDebugEnabled();
+    std::chrono::steady_clock::time_point t0;
+    if (dbg) {
+        te.tick = g_liteHostServices.tick(ctx); te.idx = idx; te.it = it; te.kind = kind;
+        te.inSize = inSize; te.outSize = outSize; te.stateSize = s.stateSize;
+        te.stateTruncated = s.stateSize > LITE_WASM_TRACE_STATE;
+        if (inSize && input) copyMem(te.inHead, input, inSize < LITE_WASM_TRACE_HEAD ? inSize : LITE_WASM_TRACE_HEAD);
+        const unsigned char* st0 = (const unsigned char*)wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
+        if (st0) copyMem(te.stateBefore, st0, s.stateSize < LITE_WASM_TRACE_STATE ? s.stateSize : LITE_WASM_TRACE_STATE);
+        if (kind == LITE_KIND_PROCEDURE) { auto* pc = (const QPI::QpiContextProcedureCall*)ctx; te.invocator = pc->invocator(); te.invocationReward = pc->invocationReward(); }
+        cc.trace = &te;
+        t0 = std::chrono::steady_clock::now();
+    }
+
     // ctx base in: the contract's inline qpi.h accessors (invocationReward/invocator/originator/contractIndex)
     // read these fields directly. QpiContext has no pointers/vtable + m256i is align-8 -> layout is identical
     // wasm32/x64, so a raw copy of the base populates them.
@@ -175,6 +193,16 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     if (outSize) copyMem(output, wasm_runtime_addr_app_to_native(s.inst, wOut), outSize);
     contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
     if (kind != LITE_KIND_FUNCTION) g_liteHostServices.markDirty(idx);   // procedures + system procedures write state
+
+    if (dbg) {   // finish + publish the debug trace entry (output + state-after + timing + trap)
+        te.ok = s.lastTrap.empty(); te.trap = s.lastTrap;
+        te.execNs = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        if (outSize) copyMem(te.outHead, wasm_runtime_addr_app_to_native(s.inst, wOut), outSize < LITE_WASM_TRACE_HEAD ? outSize : LITE_WASM_TRACE_HEAD);
+        const unsigned char* st1 = (const unsigned char*)wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
+        if (st1) copyMem(te.stateAfter, st1, s.stateSize < LITE_WASM_TRACE_STATE ? s.stateSize : LITE_WASM_TRACE_STATE);
+        cc.trace = nullptr;
+        liteWasmTraceCommit(te);
+    }
 
     if (outer) { wasm_runtime_set_user_data(env, nullptr); wasm_runtime_destroy_exec_env(env); t_liteWasmCurEnv = nullptr; }
     else       { wasm_runtime_set_user_data(env, savedUD); wasm_runtime_set_module_inst(env, savedInst); }

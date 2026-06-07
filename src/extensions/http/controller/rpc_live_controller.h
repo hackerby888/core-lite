@@ -31,6 +31,11 @@ class RpcLiveController : public HttpController<RpcLiveController>
     ADD_METHOD_TO(RpcLiveController::dynRegistry, "/live/v1/dyn-registry", Get);
     ADD_METHOD_TO(RpcLiveController::dynUpload, "/live/v1/dyn-upload", Get);
     ADD_METHOD_TO(RpcLiveController::logStats, "/live/v1/log-stats", Get);
+#ifdef LITE_WASM_CONTRACTS
+    ADD_METHOD_TO(RpcLiveController::debugTrace, "/live/v1/debug-trace", Get);
+    ADD_METHOD_TO(RpcLiveController::devDebug, "/live/v1/dev/debug", Get);
+    ADD_METHOD_TO(RpcLiveController::devDebugClear, "/live/v1/dev/debug-clear", Get);
+#endif
 #if ADDON_TX_STATUS_REQUEST
     ADD_METHOD_TO(RpcLiveController::txStatus, "/live/v1/tx-status/{tick}/{tx}", Get);
 #endif
@@ -647,6 +652,58 @@ class RpcLiveController : public HttpController<RpcLiveController>
         json["recent"] = arr;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
+
+#ifdef LITE_WASM_CONTRACTS
+    // GET /live/v1/debug-trace?since=<seq>&limit=<n> — recent wasm contract-call traces (debug toggle).
+    inline void debugTrace(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        unsigned long long since = 0; unsigned int limit = 64;
+        try { auto s = req->getParameter("since"); if (!s.empty()) since = std::stoull(s); } catch (...) {}
+        try { auto s = req->getParameter("limit"); if (!s.empty()) limit = (unsigned int)std::stoul(s); } catch (...) {}
+        if (limit == 0 || limit > LITE_WASM_TRACE_RING) limit = LITE_WASM_TRACE_RING;
+        Json::Value json; json["enabled"] = liteWasmDebugEnabled();
+        Json::Value arr(Json::arrayValue);
+        for (const auto &t : liteWasmTraceSnapshot(since, limit))
+        {
+            Json::Value e;
+            e["seq"] = (Json::UInt64)t.seq; e["tick"] = t.tick; e["index"] = t.idx;
+            e["entry"] = (unsigned int)t.it; e["kind"] = (unsigned int)t.kind; e["ok"] = t.ok;
+            e["execNs"] = (Json::UInt64)t.execNs;
+            e["inSize"] = t.inSize; e["outSize"] = t.outSize; e["stateSize"] = t.stateSize; e["stateTruncated"] = t.stateTruncated;
+            e["invocator"] = liteWasmHex(&t.invocator, 32);
+            e["invocationReward"] = (Json::Int64)t.invocationReward;
+            unsigned int ih = t.inSize  < LITE_WASM_TRACE_HEAD ? t.inSize  : LITE_WASM_TRACE_HEAD;
+            unsigned int oh = t.outSize < LITE_WASM_TRACE_HEAD ? t.outSize : LITE_WASM_TRACE_HEAD;
+            unsigned int sc = t.stateSize < LITE_WASM_TRACE_STATE ? t.stateSize : LITE_WASM_TRACE_STATE;
+            e["inHex"] = liteWasmHex(t.inHead, ih);
+            e["outHex"] = liteWasmHex(t.outHead, oh);
+            e["stateBeforeHex"] = liteWasmHex(t.stateBefore, sc);
+            e["stateAfterHex"] = liteWasmHex(t.stateAfter, sc);
+            if (!t.trap.empty()) e["trap"] = t.trap;
+            Json::Value hc(Json::arrayValue);
+            for (const auto &h : t.hostCalls) { Json::Value x; x["name"] = h.name; x["detail"] = h.detail; hc.append(x); }
+            e["hostCalls"] = hc;
+            arr.append(e);
+        }
+        json["entries"] = arr;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+    // GET /live/v1/dev/debug?on=0|1 — toggle trace capture (off by default; on adds per-call overhead).
+    inline void devDebug(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        auto on = req->getParameter("on");
+        if (!on.empty()) g_liteWasmDebug.store(on == "1" || on == "true", std::memory_order_relaxed);
+        Json::Value json; json["enabled"] = liteWasmDebugEnabled();
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+    // GET /live/v1/dev/debug-clear — drop all captured traces.
+    inline void devDebugClear(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        (void)req; liteWasmTraceClear();
+        Json::Value json; json["cleared"] = true;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+#endif
 
 #if ADDON_TX_STATUS_REQUEST
     // Exact tx confirmation: is transaction <tx> (60-char id) included+processed in tick <tick>?

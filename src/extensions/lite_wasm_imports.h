@@ -6,14 +6,17 @@
 // offset, not a native ptr (ABI #2). Module name = "lhost"; the contract side (lite_wasm_tu.h) imports it.
 #ifdef LITE_WASM_CONTRACTS
 #include "wasm_export.h"
+#include "extensions/lite_wasm_debug.h"   // trace ring + liteWasmTraceHostCall (debug toggle, off by default)
 
 // Per-call binding, set by liteWasmDispatch (step 3) before entering the contract: the QpiContext the QPI
-// backends need, plus the contract's scratch arena (acquireScratch bump-allocates offsets within it).
+// backends need, the contract's scratch arena (acquireScratch bump-allocates offsets within it), and the
+// debug trace entry (non-null only while the debug toggle is on) so effectful imports record host-calls.
 struct LiteWasmCallCtx {
     const void* ctx;        // QPI::QpiContext* (g_liteHostServices casts it back)
     uint32_t arenaBase;     // linear-mem offset of the per-call scratch arena
     uint32_t arenaBump;
     uint32_t arenaEnd;
+    void* trace = nullptr;  // LiteWasmTraceEntry* for this call (debug); nullptr when debug off
 };
 
 static inline LiteWasmCallCtx* liteWasmCC(wasm_exec_env_t e) { return (LiteWasmCallCtx*)wasm_runtime_get_user_data(e); }
@@ -22,6 +25,8 @@ static inline void* liteWasmA2N(wasm_exec_env_t e, uint32_t off) {
 }
 #define LWC LiteWasmCallCtx* cc = liteWasmCC(e)
 #define A2N(off) liteWasmA2N(e, (off))
+// record a side-effect into the call's debug trace (no-op unless debug is on for this call)
+#define LWTRACE(nm, det) do { if (cc && cc->trace) liteWasmTraceHostCall((LiteWasmTraceEntry*)cc->trace, nm, det); } while (0)
 
 // --- infra (no ctx) ---
 static void     w_beginFn(wasm_exec_env_t e, uint32_t id) { (void)e; g_liteHostServices.beginFn(id); }
@@ -43,6 +48,7 @@ static uint32_t w_acquireScratch(wasm_exec_env_t e, uint64_t size, uint32_t init
 }
 static void     w_releaseScratch(wasm_exec_env_t e, uint32_t off) { (void)e; (void)off; } // bump arena freed per call
 static void     w_logBytes(wasm_exec_env_t e, uint32_t ci, uint32_t type, uint32_t msgOff, uint32_t size) {
+    LWC; LWTRACE("log", "type=" + std::to_string(type) + " " + std::to_string(size) + "B");
     g_liteHostServices.logBytes(ci, (unsigned char)type, A2N(msgOff), size);
 }
 static void     w_k12(wasm_exec_env_t e, uint32_t inOff, uint32_t len, uint32_t outOff) {
@@ -50,10 +56,10 @@ static void     w_k12(wasm_exec_env_t e, uint32_t inOff, uint32_t len, uint32_t 
 }
 
 // --- QPI backends (ctx bound via user_data) ---
-static int64_t  w_transfer(wasm_exec_env_t e, uint32_t d, int64_t a) { LWC; return g_liteHostServices.transfer(cc->ctx, A2N(d), a); }
-static int64_t  w_transferTyped(wasm_exec_env_t e, uint32_t d, int64_t a, uint32_t t) { LWC; return g_liteHostServices.transferTyped(cc->ctx, A2N(d), a, (unsigned char)t); }
-static void     w_abort(wasm_exec_env_t e, uint32_t code) { LWC; g_liteHostServices.abort(cc->ctx, code); }
-static int64_t  w_burn(wasm_exec_env_t e, int64_t a, uint32_t idx) { LWC; return g_liteHostServices.burn(cc->ctx, a, idx); }
+static int64_t  w_transfer(wasm_exec_env_t e, uint32_t d, int64_t a) { LWC; LWTRACE("transfer", liteWasmHex(A2N(d), 8) + ".. " + std::to_string(a)); return g_liteHostServices.transfer(cc->ctx, A2N(d), a); }
+static int64_t  w_transferTyped(wasm_exec_env_t e, uint32_t d, int64_t a, uint32_t t) { LWC; LWTRACE("transferTyped", liteWasmHex(A2N(d), 8) + ".. " + std::to_string(a) + " t=" + std::to_string(t)); return g_liteHostServices.transferTyped(cc->ctx, A2N(d), a, (unsigned char)t); }
+static void     w_abort(wasm_exec_env_t e, uint32_t code) { LWC; LWTRACE("abort", std::to_string(code)); g_liteHostServices.abort(cc->ctx, code); }
+static int64_t  w_burn(wasm_exec_env_t e, int64_t a, uint32_t idx) { LWC; LWTRACE("burn", std::to_string(a) + " for " + std::to_string(idx)); return g_liteHostServices.burn(cc->ctx, a, idx); }
 static uint32_t w_epoch(wasm_exec_env_t e) { LWC; return g_liteHostServices.epoch(cc->ctx); }
 static uint32_t w_tick(wasm_exec_env_t e) { LWC; return g_liteHostServices.tick(cc->ctx); }
 static int32_t  w_numTickTx(wasm_exec_env_t e) { LWC; return g_liteHostServices.numberOfTickTransactions(cc->ctx); }
@@ -76,15 +82,15 @@ static void     w_prevSpectrumDigest(wasm_exec_env_t e, uint32_t out) { LWC; g_l
 static void     w_prevUniverseDigest(wasm_exec_env_t e, uint32_t out) { LWC; g_liteHostServices.prevUniverseDigest(cc->ctx, A2N(out)); }
 static void     w_prevComputerDigest(wasm_exec_env_t e, uint32_t out) { LWC; g_liteHostServices.prevComputerDigest(cc->ctx, A2N(out)); }
 static uint32_t w_isAssetIssued(wasm_exec_env_t e, uint32_t iss, uint64_t name) { LWC; return g_liteHostServices.isAssetIssued(cc->ctx, A2N(iss), name); }
-static int64_t  w_issueAsset(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t dec, int64_t shares, uint64_t unit) { LWC; return g_liteHostServices.issueAsset(cc->ctx, name, A2N(iss), (signed char)dec, shares, unit); }
+static int64_t  w_issueAsset(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t dec, int64_t shares, uint64_t unit) { LWC; LWTRACE("issueAsset", "name=" + std::to_string(name) + " shares=" + std::to_string(shares)); return g_liteHostServices.issueAsset(cc->ctx, name, A2N(iss), (signed char)dec, shares, unit); }
 static int64_t  w_numberOfShares(wasm_exec_env_t e, uint32_t a, uint32_t o, uint32_t p) { LWC; return g_liteHostServices.numberOfShares(cc->ctx, A2N(a), A2N(o), A2N(p)); }
 static int64_t  w_numberOfPossessedShares(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t own, uint32_t pos, uint32_t om, uint32_t pm) { LWC; return g_liteHostServices.numberOfPossessedShares(cc->ctx, name, A2N(iss), A2N(own), A2N(pos), (unsigned short)om, (unsigned short)pm); }
-static int64_t  w_transferShares(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t own, uint32_t pos, int64_t shares, uint32_t no) { LWC; return g_liteHostServices.transferShareOwnershipAndPossession(cc->ctx, name, A2N(iss), A2N(own), A2N(pos), shares, A2N(no)); }
-static uint32_t w_distributeDividends(wasm_exec_env_t e, int64_t a) { LWC; return g_liteHostServices.distributeDividends(cc->ctx, a); }
-static int32_t  w_liteCallFunction(wasm_exec_env_t e, uint32_t idx, uint32_t it, uint32_t in, uint32_t inSize, uint32_t out, uint32_t outSize) { LWC; return g_liteHostServices.liteCallFunction(cc->ctx, idx, (unsigned short)it, A2N(in), inSize, A2N(out), outSize); }
-static int32_t  w_liteInvokeProcedure(wasm_exec_env_t e, uint32_t idx, uint32_t it, uint32_t in, uint32_t inSize, uint32_t out, uint32_t outSize, int64_t reward) { LWC; return g_liteHostServices.liteInvokeProcedure(cc->ctx, idx, (unsigned short)it, A2N(in), inSize, A2N(out), outSize, reward); }
-static int32_t  w_liteSetShareholderProposal(wasm_exec_env_t e, uint32_t idx, uint32_t prop, int64_t reward) { LWC; return g_liteHostServices.setShareholderProposal(cc->ctx, idx, A2N(prop), reward); }
-static int32_t  w_liteSetShareholderVotes(wasm_exec_env_t e, uint32_t idx, uint32_t vote, uint32_t voteSize, int64_t reward) { LWC; return g_liteHostServices.setShareholderVotes(cc->ctx, idx, A2N(vote), voteSize, reward); }
+static int64_t  w_transferShares(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t own, uint32_t pos, int64_t shares, uint32_t no) { LWC; LWTRACE("transferShares", "name=" + std::to_string(name) + " shares=" + std::to_string(shares)); return g_liteHostServices.transferShareOwnershipAndPossession(cc->ctx, name, A2N(iss), A2N(own), A2N(pos), shares, A2N(no)); }
+static uint32_t w_distributeDividends(wasm_exec_env_t e, int64_t a) { LWC; LWTRACE("distributeDividends", std::to_string(a)); return g_liteHostServices.distributeDividends(cc->ctx, a); }
+static int32_t  w_liteCallFunction(wasm_exec_env_t e, uint32_t idx, uint32_t it, uint32_t in, uint32_t inSize, uint32_t out, uint32_t outSize) { LWC; LWTRACE("callFunction", "-> " + std::to_string(idx) + "/" + std::to_string(it)); return g_liteHostServices.liteCallFunction(cc->ctx, idx, (unsigned short)it, A2N(in), inSize, A2N(out), outSize); }
+static int32_t  w_liteInvokeProcedure(wasm_exec_env_t e, uint32_t idx, uint32_t it, uint32_t in, uint32_t inSize, uint32_t out, uint32_t outSize, int64_t reward) { LWC; LWTRACE("invokeProcedure", "-> " + std::to_string(idx) + "/" + std::to_string(it) + " reward " + std::to_string(reward)); return g_liteHostServices.liteInvokeProcedure(cc->ctx, idx, (unsigned short)it, A2N(in), inSize, A2N(out), outSize, reward); }
+static int32_t  w_liteSetShareholderProposal(wasm_exec_env_t e, uint32_t idx, uint32_t prop, int64_t reward) { LWC; LWTRACE("setShareholderProposal", "-> " + std::to_string(idx)); return g_liteHostServices.setShareholderProposal(cc->ctx, idx, A2N(prop), reward); }
+static int32_t  w_liteSetShareholderVotes(wasm_exec_env_t e, uint32_t idx, uint32_t vote, uint32_t voteSize, int64_t reward) { LWC; LWTRACE("setShareholderVotes", "-> " + std::to_string(idx)); return g_liteHostServices.setShareholderVotes(cc->ctx, idx, A2N(vote), voteSize, reward); }
 
 #undef LWC
 #undef A2N
