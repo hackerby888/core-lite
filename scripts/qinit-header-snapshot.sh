@@ -59,6 +59,26 @@ copy() { local f="$1"; [ -f "$f" ] || return 0; local rel; rel="$(realpath --rel
 # clang -M => every header the compile touches; keep those under the repo.
 DEPS="$("$CLANG" -std=c++20 -fPIC -mavx2 -I"$CORE" -I"$CORE/src" -M "$TMP/Stub.wrapper.cpp" | tr ' \\' '\n\n' | grep "^$CORE/" || true)"
 for f in $DEPS; do copy "$f"; done
+
+# WASM closure: contracts are compiled TO wasm, which pulls headers the native (.so, -mavx2) wrapper never
+# references — lite_wasm_tu.h (swapped in for lite_dyn_abi.h), the force -include'd lite_wasm_intrinsics.h, and
+# the simde/x86 m256i headers the wasm path takes (native uses real SSE). Compute that closure with the real
+# wasm target+sysroot and add it, or the cached snapshot fails: 'lite_wasm_intrinsics.h file not found'.
+SHIM="$CORE/src/extensions/lite_wasm_intrinsics.h"
+sed -e 's|#define LITE_DYN_SO_BUILD|#define LITE_WASM_TU_BUILD|' \
+    -e 's|#include "extensions/lite_dyn_abi.h"|#include "extensions/lite_wasm_tu.h"|' \
+    "$TMP/Stub.wrapper.cpp" > "$TMP/Stub.wasm.wrapper.cpp"
+if [ -n "${WASM_CLANG:-}" ]; then
+  WDEPS="$("$WASM_CLANG" --target=wasm32-wasi -std=c++20 -fno-exceptions -fno-rtti \
+    ${WASI_SYSROOT:+--sysroot="$WASI_SYSROOT"} -include "$SHIM" -I"$CORE" -I"$CORE/src" \
+    -M "$TMP/Stub.wasm.wrapper.cpp" | tr ' \\' '\n\n' | grep "^$CORE/" || true)"
+  for f in $WDEPS; do copy "$f"; done
+else
+  echo "WARN: WASM_CLANG unset — wasm header closure (simde / lite_wasm_*) NOT captured; snapshot incomplete for wasm" >&2
+fi
+copy "$SHIM"                                       # -include'd by the wasm compile
+copy "$CORE/src/extensions/lite_wasm_tu.h"         # wasm TU binding (swapped in)
+
 # Inter-contract: every contract header (callee types), the index map, the call-macro header.
 for f in "$CORE"/src/contracts/*.h; do copy "$f"; done
 copy "$CORE/src/contract_core/contract_def.h"

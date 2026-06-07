@@ -215,9 +215,17 @@ jobs:
           sudo apt update -y
           wget https://apt.llvm.org/llvm.sh; chmod +x llvm.sh; sudo ./llvm.sh 18
           sudo apt install -y clang
+      - name: Fetch wasi-sdk-29 (for the wasm header closure)
+        run: |
+          curl -fsSL -o wasi-sdk.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-29/wasi-sdk-29.0-x86_64-linux.tar.gz
+          mkdir -p wasi-sdk && tar -xzf wasi-sdk.tar.gz -C wasi-sdk --strip-components=1
       - name: Build header snapshot
         run: |
-          CLANG=clang++-18 bash scripts/qinit-header-snapshot.sh "$PWD/snapshot-out"
+          CLANG=clang++-18 \
+          WASM_CLANG="$PWD/wasi-sdk/bin/clang++" \
+          WASI_SYSROOT="$PWD/wasi-sdk/share/wasi-sysroot" \
+            bash scripts/qinit-header-snapshot.sh "$PWD/snapshot-out"
           cp snapshot-out/core-headers.tar.gz ./core-headers.tar.gz
           cp snapshot-out/core-headers.sha256 ./core-headers.sha256
       - uses: actions/upload-artifact@v4
