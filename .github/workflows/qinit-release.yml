@@ -82,7 +82,9 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
             -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
-            -DLITE_DYNAMIC_CONTRACTS=ON -DTESTNET=ON
+            -DLITE_DYNAMIC_CONTRACTS=ON -DTESTNET=ON -DCMAKE_NO_USE_SWAP=ON
+          # NO_USE_SWAP: crypto gtests don't need SwapVM, and it stubs Blosc2 out of zipper.h so the test TU
+          # doesn't pull x86 <immintrin.h> on aarch64 (same fix as the node build).
           cmake --build build-tests -- -j"$J" qubic_core_tests
           ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:TestCoreK12*'
 
