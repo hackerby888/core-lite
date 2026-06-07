@@ -720,9 +720,17 @@ class RpcLiveController : public HttpController<RpcLiveController>
         int idx = std::atoi(req->getParameter("slot").c_str());
         unsigned long long off = strtoull(req->getParameter("off").c_str(), nullptr, 10);
         unsigned long long len = strtoull(req->getParameter("len").c_str(), nullptr, 10);
-        int local = idx - (int)LITEDYN0_CONTRACT_INDEX;
-        if (local < 0 || local >= (int)LITE_DYN_SLOT_COUNT || !liteWasmIsWasm(idx) || !contractStates[idx]) { json["error"] = "bad slot"; cb(HttpResponse::newHttpJsonResponse(json)); return; }
-        const unsigned long long ss = liteWasmEffectiveStateSize(idx, contractDescriptions[idx].stateSize);
+        // dynamic wasm slot (idx >= dyn base) -> resident wasm state; otherwise a native system contract (1..contractCount-1).
+        const int local = idx - (int)LITEDYN0_CONTRACT_INDEX;
+        bool ok; unsigned long long ss;
+        if (idx >= (int)LITEDYN0_CONTRACT_INDEX) {
+            ok = (local >= 0 && local < (int)LITE_DYN_SLOT_COUNT && liteWasmIsWasm(idx) && contractStates[idx]);
+            ss = ok ? liteWasmEffectiveStateSize(idx, contractDescriptions[idx].stateSize) : 0;
+        } else {
+            ok = (idx >= 1 && idx < (int)contractCount && contractStates[idx]);
+            ss = ok ? contractDescriptions[idx].stateSize : 0;
+        }
+        if (!ok) { json["error"] = "bad slot"; cb(HttpResponse::newHttpJsonResponse(json)); return; }
         if (off > ss) off = ss;
         if (len > 262144ull) len = 262144ull;     // cap response
         if (off + len > ss) len = ss - off;
