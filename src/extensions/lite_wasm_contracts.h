@@ -53,6 +53,7 @@ struct LiteWasmSlot {
     uint16_t             sysInSize[LITE_SP_COUNT] = {};      // QPI-defined in/out sizes per sysproc (share-mgmt)
     uint16_t             sysOutSize[LITE_SP_COUNT] = {};
     bool                 stubFreed = false;       // set once the slot's 1GB reserve is freed + contractStates[idx] aliased to the resident state
+    std::string          lastTrap;                // reason of the most recent dispatch trap (cleared on success); surfaced via dyn-registry
 };
 #define LITE_WASM_KIND_SYSPROC 2
 static LiteWasmSlot g_liteWasmSlots[LITE_DYN_SLOT_COUNT];
@@ -64,6 +65,11 @@ static inline int liteWasmSlotLocal(unsigned int idx) {
 static inline bool liteWasmIsWasm(unsigned int idx) {
     int l = liteWasmSlotLocal(idx);
     return l >= 0 && g_liteWasmSlots[l].loaded;
+}
+// Reason of the most recent dispatch trap on a wasm slot (empty if none / last call ok). For the dyn-registry RPC.
+static inline std::string liteWasmLastTrap(unsigned int idx) {
+    int l = liteWasmSlotLocal(idx);
+    return (l >= 0 && g_liteWasmSlots[l].loaded) ? g_liteWasmSlots[l].lastTrap : std::string();
 }
 static inline uint32_t liteWasmCallU32(wasm_exec_env_t env, wasm_function_inst_t fn) {
     uint32_t a[1] = { 0 }; wasm_runtime_call_wasm(env, fn, 0, a); return a[0];
@@ -156,9 +162,12 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     uint32_t argv[5] = { kind, it, wIn, wOut, wLocals };
     if (!wasm_runtime_call_wasm(env, s.dispatchFn, 5, argv)) {
         const char* ex = wasm_runtime_get_exception(s.inst);   // which contract/entry trapped + why
-        logColorToScreen("ERROR", "LITEWASM dispatch trap idx=" + std::to_string(idx) + " it=" + std::to_string(it)
-                         + " kind=" + std::to_string(kind) + (ex ? std::string(" — ") + ex : std::string()));
+        s.lastTrap = std::string("it=") + std::to_string(it) + " kind=" + std::to_string(kind)
+                   + (ex ? std::string(" — ") + ex : std::string(" — trap"));   // surfaced via dyn-registry (RPC) to tooling
+        logColorToScreen("ERROR", "LITEWASM dispatch trap idx=" + std::to_string(idx) + " " + s.lastTrap);
         wasm_runtime_clear_exception(s.inst);                  // clear so a later valid call on this slot still runs
+    } else {
+        s.lastTrap.clear();                                    // most-recent call succeeded
     }
 
     // output out; state is resident (nothing to copy out). Refresh contractStates[idx] in case the linear-mem

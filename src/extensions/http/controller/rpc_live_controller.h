@@ -554,6 +554,9 @@ class RpcLiveController : public HttpController<RpcLiveController>
             c["functions"] = fns;
             c["procedures"] = procs;
             c["source"] = s.sourceH;   // contract .h source (if submitted via /dev/contract-source) for callee resolution
+#ifdef LITE_WASM_CONTRACTS
+            c["lastError"] = liteWasmLastTrap(idx);   // most recent dispatch trap reason (empty if last call ok) — for tooling
+#endif
             arr.append(c);
         }
         json["slotBase"] = (unsigned int)LITEDYN0_CONTRACT_INDEX;
