@@ -60,6 +60,12 @@ include(FetchContent)
 set(BUILD_EXAMPLES OFF CACHE BOOL "Disable Blosc2 examples" FORCE)
 set(BUILD_TESTS_BLOSC OFF CACHE BOOL "Disable Blosc2 tests" FORCE)
 set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable Blosc2 benchmarks" FORCE)
+# Disable Blosc2's AVX2/AVX512 paths. On linux-arm64 Blosc2 leaks -mavx2 into the shared build, defining
+# __AVX2__ for qubic.cpp -> blosc2-common.h pulls x86 <immintrin.h> on aarch64 -> compile fails. The shuffle
+# SIMD is a perf optimization (and the qinit node is RAM-only / NO_USE_SWAP), so turning it off is safe on
+# every arch; x86 K12/score AVX is separate and unaffected.
+set(DEACTIVATE_AVX2 ON CACHE BOOL "Blosc2: no AVX2 (avoids the arm -mavx2 leak)" FORCE)
+set(DEACTIVATE_AVX512 ON CACHE BOOL "Blosc2: no AVX512" FORCE)
 FetchContent_Declare(
         blosc2
         GIT_REPOSITORY https://github.com/Blosc/c-blosc2.git
