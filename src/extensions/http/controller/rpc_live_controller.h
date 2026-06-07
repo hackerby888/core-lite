@@ -35,6 +35,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
     ADD_METHOD_TO(RpcLiveController::debugTrace, "/live/v1/debug-trace", Get);
     ADD_METHOD_TO(RpcLiveController::devDebug, "/live/v1/dev/debug", Get);
     ADD_METHOD_TO(RpcLiveController::devDebugClear, "/live/v1/dev/debug-clear", Get);
+    ADD_METHOD_TO(RpcLiveController::devStateRead, "/live/v1/dev/state-read", Get);
 #endif
 #if ADDON_TX_STATUS_REQUEST
     ADD_METHOD_TO(RpcLiveController::txStatus, "/live/v1/tx-status/{tick}/{tx}", Get);
@@ -701,6 +702,27 @@ class RpcLiveController : public HttpController<RpcLiveController>
     {
         (void)req; liteWasmTraceClear();
         Json::Value json; json["cleared"] = true;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+    // GET /live/v1/dev/state-read?slot=N&off=&len= — current contract state bytes (hex), for the debugger's
+    // logical container decode. Capped; reads the resident (aliased) state. Best-effort snapshot (no lock).
+    inline void devStateRead(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        Json::Value json;
+        int idx = std::atoi(req->getParameter("slot").c_str());
+        unsigned long long off = strtoull(req->getParameter("off").c_str(), nullptr, 10);
+        unsigned long long len = strtoull(req->getParameter("len").c_str(), nullptr, 10);
+        int local = idx - (int)LITEDYN0_CONTRACT_INDEX;
+        if (local < 0 || local >= (int)LITE_DYN_SLOT_COUNT || !liteWasmIsWasm(idx) || !contractStates[idx]) { json["error"] = "bad slot"; cb(HttpResponse::newHttpJsonResponse(json)); return; }
+        const unsigned long long ss = liteWasmEffectiveStateSize(idx, contractDescriptions[idx].stateSize);
+        if (off > ss) off = ss;
+        if (len > 262144ull) len = 262144ull;     // cap response
+        if (off + len > ss) len = ss - off;
+        const unsigned char *st = contractStates[idx];
+        static const char *h = "0123456789abcdef";
+        std::string hex; hex.reserve((size_t)len * 2);
+        for (unsigned long long i = 0; i < len; i++) { hex += h[st[off + i] >> 4]; hex += h[st[off + i] & 15]; }
+        json["off"] = (Json::UInt64)off; json["len"] = (Json::UInt64)len; json["stateSize"] = (Json::UInt64)ss; json["hex"] = hex;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 #endif
