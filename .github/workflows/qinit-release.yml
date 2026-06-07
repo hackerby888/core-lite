@@ -46,7 +46,7 @@ jobs:
           wget https://apt.llvm.org/llvm.sh; chmod +x llvm.sh; sudo ./llvm.sh 18
           sudo apt install -y clang cmake nasm \
             libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
-            zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev liblz4-dev libssl-dev
+            zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev liblz4-dev libssl-dev libffi-dev
 
       - name: Install toolchain (arm64 — apt clang-18)
         if: matrix.key == 'linux-arm64'
@@ -54,7 +54,7 @@ jobs:
           sudo apt update -y
           sudo apt install -y clang-18 cmake nasm \
             libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
-            zlib1g-dev libzstd-dev g++ libfmt-dev liblzo2-dev liblz4-dev libssl-dev
+            zlib1g-dev libzstd-dev g++ libfmt-dev liblzo2-dev liblz4-dev libssl-dev libffi-dev
 
       # Same config every platform; IS_ARM auto-detects aarch64 -> SIMDe + -fsigned-char;
       # IS_MACOS handles the Darwin link/backtrace differences.
@@ -66,7 +66,7 @@ jobs:
             -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
             -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF \
             -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
-            -DLITE_DYNAMIC_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON \
+            -DLITE_DYNAMIC_CONTRACTS=ON -DLITE_WASM_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON \
             -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
           cmake --build build-node -- -j"$J" Qubic
           cp build-node/src/Qubic "Qubic-${{ matrix.key }}"
@@ -107,7 +107,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain (brew)
-        run: brew install cmake nasm jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli || true
+        run: brew install cmake nasm jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi || true
       - name: Build node
         run: |
           set -o pipefail
@@ -117,13 +117,15 @@ jobs:
           # supports C++20; SIMDe + -fsigned-char (IS_ARM) handle the SIMD/char-signedness.
           CC=$(xcrun -f clang); CXX=$(xcrun -f clang++)
           ZR=$(brew --prefix zlib)        # macOS ships libz only as a .tbd stub CMake's FindZLIB misses
+          LF=$(brew --prefix libffi)      # keg-only -> hint the FFI find vars directly
           {
             cmake -S . -B build-node -DCMAKE_BUILD_TYPE=RelWithDebInfo \
               -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
               -DZLIB_ROOT="$ZR" -DZLIB_LIBRARY="$ZR/lib/libz.dylib" -DZLIB_INCLUDE_DIR="$ZR/include" \
+              -DFFI_LIB_SHARED="$LF/lib/libffi.dylib" -DFFI_INCLUDE_DIR="$LF/include" \
               -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF \
               -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
-              -DLITE_DYNAMIC_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
+              -DLITE_DYNAMIC_CONTRACTS=ON -DLITE_WASM_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
             cmake --build build-node -- -j"$J" Qubic
           } 2>&1 | tee "$GITHUB_WORKSPACE/macos-build.log"
           cp build-node/src/Qubic Qubic-darwin-arm64
