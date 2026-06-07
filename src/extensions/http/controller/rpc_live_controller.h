@@ -684,6 +684,9 @@ class RpcLiveController : public HttpController<RpcLiveController>
             Json::Value hc(Json::arrayValue);
             for (const auto &h : t.hostCalls) { Json::Value x; x["name"] = h.name; x["detail"] = h.detail; hc.append(x); }
             e["hostCalls"] = hc;
+            Json::Value lg(Json::arrayValue);   // contract LOG_* calls: severity type + raw struct bytes (hex)
+            for (const auto &l : t.logs) { Json::Value x; x["type"] = (unsigned int)l.type; x["size"] = l.size; x["hex"] = l.hex; lg.append(x); }
+            e["logs"] = lg;
             arr.append(e);
         }
         json["entries"] = arr;

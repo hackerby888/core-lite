@@ -34,6 +34,7 @@
 
 struct LiteWasmHostCall { const char* name; std::string detail; };           // a side-effect QPI call
 struct LiteWasmStateRegion { unsigned int off; std::string before, after; }; // a changed byte run in state
+struct LiteWasmLogRec { unsigned char type = 0; unsigned int size = 0; std::string hex; }; // a LOG_* call (numeric struct bytes)
 
 struct LiteWasmTraceEntry {
     unsigned long long seq = 0;
@@ -50,6 +51,7 @@ struct LiteWasmTraceEntry {
     std::string trap;
     std::vector<LiteWasmStateRegion> stateDiff;       // FULL-state diff: only the changed byte runs
     std::vector<LiteWasmHostCall> hostCalls;
+    std::vector<LiteWasmLogRec> logs;                 // contract LOG_* calls (raw struct bytes, hex)
 };
 
 static std::atomic<bool> g_liteWasmDebug{ false };
@@ -96,6 +98,13 @@ static inline std::string liteWasmHex(const void* p, unsigned int n) {
     const unsigned char* b = (const unsigned char*)p; std::string s; s.reserve(n * 2);
     for (unsigned int i = 0; i < n; i++) { s += h[b[i] >> 4]; s += h[b[i] & 15]; }
     return s;
+}
+
+// append a LOG_* call's bytes (capped) to the current trace entry; full size kept for client size-match.
+static inline void liteWasmTraceLog(LiteWasmTraceEntry* e, unsigned char type, const void* p, unsigned int n) {
+    if (!e) return;
+    unsigned int cap = n > LITE_WASM_TRACE_HEAD ? LITE_WASM_TRACE_HEAD : n;
+    e->logs.push_back(LiteWasmLogRec{ type, n, liteWasmHex(p, cap) });
 }
 
 // ---- dirty-page state tracking (write calls are single-threaded -> thread_local, lock-free) -------------

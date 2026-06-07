@@ -48,8 +48,9 @@ static uint32_t w_acquireScratch(wasm_exec_env_t e, uint64_t size, uint32_t init
 }
 static void     w_releaseScratch(wasm_exec_env_t e, uint32_t off) { (void)e; (void)off; } // bump arena freed per call
 static void     w_logBytes(wasm_exec_env_t e, uint32_t ci, uint32_t type, uint32_t msgOff, uint32_t size) {
-    LWC; LWTRACE("log", "type=" + std::to_string(type) + " " + std::to_string(size) + "B");
-    g_liteHostServices.logBytes(ci, (unsigned char)type, A2N(msgOff), size);
+    LWC; void* m = A2N(msgOff);
+    if (cc && cc->trace) liteWasmTraceLog((LiteWasmTraceEntry*)cc->trace, (unsigned char)type, m, size); // pre-ci-stamp bytes
+    g_liteHostServices.logBytes(ci, (unsigned char)type, m, size);
 }
 static void     w_k12(wasm_exec_env_t e, uint32_t inOff, uint32_t len, uint32_t outOff) {
     g_liteHostServices.k12(A2N(inOff), len, A2N(outOff));
