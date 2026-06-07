@@ -674,11 +674,11 @@ class RpcLiveController : public HttpController<RpcLiveController>
             e["invocationReward"] = (Json::Int64)t.invocationReward;
             unsigned int ih = t.inSize  < LITE_WASM_TRACE_HEAD ? t.inSize  : LITE_WASM_TRACE_HEAD;
             unsigned int oh = t.outSize < LITE_WASM_TRACE_HEAD ? t.outSize : LITE_WASM_TRACE_HEAD;
-            unsigned int sc = t.stateSize < LITE_WASM_TRACE_STATE ? t.stateSize : LITE_WASM_TRACE_STATE;
             e["inHex"] = liteWasmHex(t.inHead, ih);
             e["outHex"] = liteWasmHex(t.outHead, oh);
-            e["stateBeforeHex"] = liteWasmHex(t.stateBefore, sc);
-            e["stateAfterHex"] = liteWasmHex(t.stateAfter, sc);
+            Json::Value sd(Json::arrayValue);   // full-state diff: changed byte runs (offset within StateData)
+            for (const auto &r : t.stateDiff) { Json::Value x; x["off"] = r.off; x["before"] = r.before; x["after"] = r.after; sd.append(x); }
+            e["stateDiff"] = sd;
             if (!t.trap.empty()) e["trap"] = t.trap;
             Json::Value hc(Json::arrayValue);
             for (const auto &h : t.hostCalls) { Json::Value x; x["name"] = h.name; x["detail"] = h.detail; hc.append(x); }
@@ -692,7 +692,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
     inline void devDebug(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
     {
         auto on = req->getParameter("on");
-        if (!on.empty()) g_liteWasmDebug.store(on == "1" || on == "true", std::memory_order_relaxed);
+        if (!on.empty()) liteWasmDebugSetEnabled(on == "1" || on == "true");   // installs the SIGSEGV dirty-tracker on first enable
         Json::Value json; json["enabled"] = liteWasmDebugEnabled();
         cb(HttpResponse::newHttpJsonResponse(json));
     }

@@ -149,9 +149,11 @@ void QPI::QpiContextForInit::__registerUserProcedure(USER_PROCEDURE fn, unsigned
 #ifdef CONTRACT_STATE_TYPE
 typedef void (*LiteWasmUserFn)(const QPI::QpiContextFunctionCall&, void*, void*, void*, void*);
 
-static CONTRACT_STATE_TYPE::StateData g_wasmState;   // resident state, copied in/out by the host per call
-alignas(16) static unsigned char     g_wasmCtxBuf[256];   // QpiContext scalar header; host populates per call
-alignas(16) static unsigned char     g_wasmIo[(64 * 1024) + (64 * 1024) + (32 * 1024) + (1024 * 1024 * 1024)];   // [in 64K|out 64K|locals 32K|arena 1GB]; MUST match LITE_WASM_*_SZ in lite_wasm_contracts.h
+// 64K-page-aligned so each region sits on its own page(s): the debugger mprotect's the state region RO for
+// dirty-page diffing, so it must NOT share a page with ctx/io (64K covers any runtime page size incl. arm).
+alignas(65536) static CONTRACT_STATE_TYPE::StateData g_wasmState;   // resident state (= contractStates[idx])
+alignas(65536) static unsigned char     g_wasmCtxBuf[256];   // QpiContext scalar header; host populates per call
+alignas(65536) static unsigned char     g_wasmIo[(64 * 1024) + (64 * 1024) + (32 * 1024) + (1024 * 1024 * 1024)];   // [in 64K|out 64K|locals 32K|arena 1GB]; MUST match LITE_WASM_*_SZ in lite_wasm_contracts.h
 
 static bool g_wasmRegistered = false;
 static void liteWasmTuEnsureRegistered() {

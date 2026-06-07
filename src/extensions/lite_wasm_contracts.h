@@ -150,20 +150,21 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     cc.arenaBase = wArena; cc.arenaBump = wArena; cc.arenaEnd = wArena + LITE_WASM_ARENA_SZ;
     wasm_runtime_set_user_data(env, &cc);
 
-    // debug trace (off by default; one atomic-bool check): capture input + state-before, bind the entry so
-    // effectful imports record host-calls, and time the call. Committed to the ring after the call.
+    // debug trace (off by default; one atomic-bool check): capture input, bind the entry so effectful imports
+    // record host-calls, and time the call. State diff is via dirty-page tracking (write calls only); committed
+    // to the ring after the call.
     LiteWasmTraceEntry te;
     const bool dbg = liteWasmDebugEnabled();
+    const bool dbgWrite = dbg && kind != LITE_KIND_FUNCTION;   // only state-mutating calls get a state diff
+    unsigned char* dbgState = nullptr;
     std::chrono::steady_clock::time_point t0;
     if (dbg) {
         te.tick = g_liteHostServices.tick(ctx); te.idx = idx; te.it = it; te.kind = kind;
         te.inSize = inSize; te.outSize = outSize; te.stateSize = s.stateSize;
-        te.stateTruncated = s.stateSize > LITE_WASM_TRACE_STATE;
         if (inSize && input) copyMem(te.inHead, input, inSize < LITE_WASM_TRACE_HEAD ? inSize : LITE_WASM_TRACE_HEAD);
-        const unsigned char* st0 = (const unsigned char*)wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
-        if (st0) copyMem(te.stateBefore, st0, s.stateSize < LITE_WASM_TRACE_STATE ? s.stateSize : LITE_WASM_TRACE_STATE);
         if (kind == LITE_KIND_PROCEDURE) { auto* pc = (const QPI::QpiContextProcedureCall*)ctx; te.invocator = pc->invocator(); te.invocationReward = pc->invocationReward(); }
         cc.trace = &te;
+        dbgState = (unsigned char*)wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
         t0 = std::chrono::steady_clock::now();
     }
 
@@ -177,6 +178,9 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     if (inSize) copyMem(wasm_runtime_addr_app_to_native(s.inst, wIn), input, inSize);
     setMem(wasm_runtime_addr_app_to_native(s.inst, wOut), outSize ? outSize : 1, 0);
 
+    // protect the state region RO so the contract's writes fault -> dirty-page capture (write calls only).
+    if (dbgWrite && dbgState) liteWasmDirtyBegin(dbgState, s.stateSize);
+
     uint32_t argv[5] = { kind, it, wIn, wOut, wLocals };
     if (!wasm_runtime_call_wasm(env, s.dispatchFn, 5, argv)) {
         const char* ex = wasm_runtime_get_exception(s.inst);   // which contract/entry trapped + why
@@ -188,18 +192,19 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
         s.lastTrap.clear();                                    // most-recent call succeeded
     }
 
+    // restore state RW + build the changed-byte diff from the dirtied pages.
+    if (dbgWrite && dbgState) liteWasmDirtyEnd(te, dbgState, s.stateSize);
+
     // output out; state is resident (nothing to copy out). Refresh contractStates[idx] in case the linear-mem
     // base moved (memory.grow), then flag dirty so the digest re-hashes.
     if (outSize) copyMem(output, wasm_runtime_addr_app_to_native(s.inst, wOut), outSize);
     contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
     if (kind != LITE_KIND_FUNCTION) g_liteHostServices.markDirty(idx);   // procedures + system procedures write state
 
-    if (dbg) {   // finish + publish the debug trace entry (output + state-after + timing + trap)
+    if (dbg) {   // finish + publish the debug trace entry (output + timing + trap; state diff already built)
         te.ok = s.lastTrap.empty(); te.trap = s.lastTrap;
         te.execNs = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
         if (outSize) copyMem(te.outHead, wasm_runtime_addr_app_to_native(s.inst, wOut), outSize < LITE_WASM_TRACE_HEAD ? outSize : LITE_WASM_TRACE_HEAD);
-        const unsigned char* st1 = (const unsigned char*)wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
-        if (st1) copyMem(te.stateAfter, st1, s.stateSize < LITE_WASM_TRACE_STATE ? s.stateSize : LITE_WASM_TRACE_STATE);
         cc.trace = nullptr;
         liteWasmTraceCommit(te);
     }
