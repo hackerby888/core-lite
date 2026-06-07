@@ -42,6 +42,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
 #endif
 #if defined(TESTNET)
     ADD_METHOD_TO(RpcLiveController::devFundedSeed, "/live/v1/dev/funded-seed", Get);
+    ADD_METHOD_TO(RpcLiveController::devFundedSeeds, "/live/v1/dev/funded-seeds", Get);
     ADD_METHOD_TO(RpcLiveController::devPutContractSource, "/live/v1/dev/contract-source", Post);
 #endif
 #endif
@@ -792,6 +793,19 @@ class RpcLiveController : public HttpController<RpcLiveController>
         Json::Value json;
         if (std::size(broadcastedComputorSeeds) > 0)
             json["seed"] = std::string((const char *)broadcastedComputorSeeds[0]);
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+    // Testnet dev only: the funded-seed list (capped via ?limit, default 32) so tooling can let the user pick one.
+    inline void devFundedSeeds(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        const unsigned int total = (unsigned int)std::size(broadcastedComputorSeeds);
+        unsigned int limit = 32;
+        try { auto s = req->getParameter("limit"); if (!s.empty()) limit = (unsigned int)std::stoul(s); } catch (...) {}
+        if (limit == 0 || limit > total) limit = total;
+        Json::Value json, arr(Json::arrayValue);
+        for (unsigned int i = 0; i < limit; i++) arr.append(std::string((const char *)broadcastedComputorSeeds[i]));
+        json["seeds"] = arr;
+        json["count"] = total;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 #endif
