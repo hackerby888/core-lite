@@ -9,8 +9,8 @@
 #include "extensions/lite_dyn_abi.h" // shared ABI structs (LiteHostServices vtable etc)
 
 // Upper bound on a deployable contract module. Bytes live here (extension state), not in any StateData.
-#ifndef LITE_DYN_MAX_SO
-#define LITE_DYN_MAX_SO (4u * 1024u * 1024u)
+#ifndef LITE_DYN_MAX_MODULE
+#define LITE_DYN_MAX_MODULE (4u * 1024u * 1024u)
 #endif
 
 // Number of reserved deployable slots — must match the LITEDYN0..N block in contract_def.h.
@@ -136,8 +136,8 @@ struct LiteDynUpload {
     unsigned char finalHash[32] = {};
 };
 static LiteDynUpload g_liteDynUpload;
-static unsigned char g_liteDynBuf[LITE_DYN_MAX_SO];
-static unsigned char g_liteDynSeqSeen[(LITE_DYN_MAX_SO / 1008u) / 8u + 1u];
+static unsigned char g_liteDynBuf[LITE_DYN_MAX_MODULE];
+static unsigned char g_liteDynSeqSeen[(LITE_DYN_MAX_MODULE / 1008u) / 8u + 1u];
 
 static inline unsigned int liteDynSlotBase() { return LITEDYN0_CONTRACT_INDEX; }
 static inline int liteDynSlotLocal(unsigned int contractIndex) {
@@ -151,7 +151,7 @@ static inline int liteDynSlotLocal(unsigned int contractIndex) {
 // ---------------------------------------------------------------------------
 [[maybe_unused]] static void liteDynOnUploadBegin(unsigned long long sessionId, unsigned int totalSize,
         unsigned int chunkCount, const unsigned char* finalHash) {
-    if (totalSize > LITE_DYN_MAX_SO) return;
+    if (totalSize > LITE_DYN_MAX_MODULE) return;
     g_liteDynUpload.active = true;
     g_liteDynUpload.sessionId = sessionId;
     g_liteDynUpload.totalSize = totalSize;
@@ -166,7 +166,7 @@ static inline int liteDynSlotLocal(unsigned int contractIndex) {
         const unsigned char* data, unsigned int dataLen) {
     if (!g_liteDynUpload.active || sessionId != g_liteDynUpload.sessionId) return;
     unsigned long long off = (unsigned long long)seq * 1008ull;
-    if (off + dataLen > LITE_DYN_MAX_SO) return;
+    if (off + dataLen > LITE_DYN_MAX_MODULE) return;
     if (seq >= g_liteDynUpload.chunkCount) return;
     const unsigned int byteIdx = seq >> 3, bit = 1u << (seq & 7);
     if (!(g_liteDynSeqSeen[byteIdx] & bit)) {

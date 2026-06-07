@@ -1,7 +1,6 @@
 #pragma once
-// WASM-executed contracts (testnet, experimental). Second contract backend beside the native .so engine
-// (lite_dynamic_contracts.h); wasm is the default deploy target, native .so the opt-in escape hatch.
-// Embeds WAMR (one persistent instance per slot) + uses libffi closures to drop a per-(idx,it) trampoline
+// WASM-executed contracts (testnet) — the contract execution engine for the deploy framework
+// (lite_dynamic_contracts.h). Embeds WAMR (one persistent instance per slot) + uses libffi closures to drop a per-(idx,it) trampoline
 // into the core's contractUser{Functions,Procedures}[idx][it] tables, so core dispatch (contract_exec.h)
 // stays byte-identical to upstream. The contract's state lives in the wasm instance's linear memory; the node's
 // contractStates[idx] is pointed AT that region at load (the slot's 1GB reserve is freed). See WASM_CONTRACTS.md.
@@ -220,6 +219,16 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     s.stateOff = liteWasmCallU32(env, f_state_addr);
     s.stateSize = liteWasmCallU32(env, f_state_size);
     s.ioBase = liteWasmCallU32(env, f_io_base);
+
+    // The contract's io_base region [in|out|locals|arena] must hold the engine's carve (LITE_WASM_IO_TOTAL).
+    // io_size is exported so an engine/contract size mismatch fails loudly here, not as silent over-carve.
+    // (optional export: pre-io_size contracts skip the check and keep their matching layout.)
+    { wasm_function_inst_t f_io_size = wasm_runtime_lookup_function(inst, "io_size");
+      if (f_io_size && liteWasmCallU32(env, f_io_size) < LITE_WASM_IO_TOTAL) {
+          logToConsole(L"LITEWASM: contract io region too small for the engine carve (rebuild the contract)");
+          wasm_runtime_destroy_exec_env(env); wasm_runtime_deinstantiate(inst); wasm_runtime_unload(mod);
+          return false;
+      } }
 
     // free the slot's 1GB reserve (once) and point contractStates[idx] AT the instance's resident state region.
     if (!s.stubFreed) { freePool(contractStates[idx]); s.stubFreed = true; }

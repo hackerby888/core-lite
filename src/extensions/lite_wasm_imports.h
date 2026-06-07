@@ -1,6 +1,6 @@
 #pragma once
 // Node-side wasm import table (WASM_CONTRACTS.md §13.5): one wasm import per LiteHostServices member, each
-// forwarding to the SAME g_liteHostServices the native .so engine uses. ctx is bound per-call out-of-band
+// forwarding to the host's g_liteHostServices vtable. ctx is bound per-call out-of-band
 // (LiteWasmCallCtx via exec_env user_data, Stage-2 ABI #1); pointers cross as i32 linear-mem offsets,
 // converted with addr_app_to_native (the general marshalling pattern). acquireScratch returns a linear-mem
 // offset, not a native ptr (ABI #2). Module name = "lhost"; the contract side (lite_wasm_tu.h) imports it.
@@ -31,7 +31,12 @@ static void     w_pauseLog(wasm_exec_env_t e) { (void)e; g_liteHostServices.paus
 static void     w_resumeLog(wasm_exec_env_t e) { (void)e; g_liteHostServices.resumeLog(); }
 static uint32_t w_acquireScratch(wasm_exec_env_t e, uint64_t size, uint32_t initZero) {
     LWC; uint32_t n = (uint32_t)((size + 7) & ~7ull);
-    if (!cc || cc->arenaBump + n > cc->arenaEnd) return 0;   // OOM -> null offset
+    if (!cc || cc->arenaBump + n > cc->arenaEnd) {
+        // arena exhausted: trap loudly (caught + logged by the dispatch trap handler) rather than return
+        // offset 0, which the contract treats as a valid ptr and writes to — a silent, wrong result.
+        wasm_runtime_set_exception(wasm_runtime_get_module_inst(e), "lhost: scratch arena exhausted");
+        return 0;
+    }
     uint32_t off = cc->arenaBump; cc->arenaBump += n;
     if (initZero) setMem(A2N(off), n, 0);
     return off;                                              // offset == ptr in wasm32 (ABI #2)

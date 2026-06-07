@@ -73,6 +73,9 @@ Native: `StateData` lives in node memory. wasm: the contract's `StateData` lives
   tick, restore on disagreement. Linear memory snapshot is a clean `memcpy` — *easier* than the current
   spectrum-index rollback dance.
 
+> Shipped model: `contractStates[idx]` is **aliased** to the resident wasm state region at load (single copy,
+> no per-call mirror) — see §16. Restart-reload is the secondary path (DYNAMIC_CONTRACTS.md §9.3 "Next").
+
 ## 5. The hard concurrency problem (must solve)
 
 `tickProcessor()` runs `processTick()` on **MAX_NUMBER_OF_PROCESSORS** threads (6/32); a contract call can land
@@ -512,8 +515,12 @@ the cross-mode/cross-arch determinism harness; default consensus builds stay int
 
 ## 15. v2 plan — no-copy state (for big contracts, e.g. QX 593MB / QEARN 204MB)
 
-v1 (shipped) copies the whole contract state in+out of the wasm instance per call. Correct, but for QX that's
-~1.2GB memcpy/call — impractical at QX throughput. v2 removes the copy.
+> **SUPERSEDED by §16 (v3, shipped).** v2 as drafted here (alias + set `contractDescriptions[idx].stateSize`)
+> was not viable — `contractDescriptions` is `constexpr`. v2 actually shipped as lazy-flush-to-stub, then v3
+> (§16) replaced it with true aliasing — the current model. Kept for the design history.
+
+v1 (no longer shipped) copied the whole contract state in+out of the wasm instance per call. Correct, but for QX
+that's ~1.2GB memcpy/call — impractical at QX throughput. v2 removes the copy.
 
 ### 15.1 Core idea
 A wasm contract's `StateData` already lives in its linear memory (`g_wasmState`, a static global). The contract's
@@ -584,6 +591,12 @@ small contracts. The clean cut is: alias `contractStates[idx]` to the wasm state
 the alias is stable, and the existing digest/persist code "just works" over it.
 
 ## 16. v3 plan — aliasing (drop the stub, single state copy)
+
+> **SHIPPED — the current state model** (`lite_wasm_contracts.h`). At wasm load the engine frees the slot's 1GB
+> stub (`freePool(contractStates[idx])`, guarded by `stubFreed`) and aliases `contractStates[idx]` to the
+> resident wasm state region; it re-resolves the alias at the end of `liteWasmDispatch` (memory.grow safety) and
+> routes digest + save size through `liteWasmEffectiveStateSize`. No stub, no flush, single resident copy.
+> (Line numbers below are approximate — they drift; the symbol names are authoritative.)
 
 v2 keeps two RAM copies of a wasm contract's state: the resident wasm linear memory (canonical) + the node's
 stub `contractStates[idx]`. VERIFIED (2026-06-06): the stub is **committed RAM** — `qubic.cpp:7225-7232` allocs

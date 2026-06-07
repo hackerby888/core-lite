@@ -31,9 +31,9 @@ enum LiteSysProcId : uint32_t {
 
 enum LiteEntryKind : uint8_t { LITE_KIND_FUNCTION = 0, LITE_KIND_PROCEDURE = 1 };
 
-// Vtable the host fills and the .so calls through. Bind-by-pointer (not -rdynamic):
-// the single-TU host inlines most QpiContext methods away, so name-binding fails; the
-// host wraps each needed method in a thin free function that forces emission.
+// The QPI surface the host fills; the wasm engine exposes each member to the contract as an "lhost"
+// import (lite_wasm_imports.h). The host wraps each QpiContext method in a thin free function (the
+// single-TU host inlines the methods away, so a wrapper forces emission and gives a stable entry).
 struct LiteHostServices {
     uint32_t abiVersion;
 

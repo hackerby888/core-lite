@@ -165,6 +165,7 @@ extern "C" {
 LH_EXPORT(state_addr) unsigned int state_addr() { return (unsigned int)(unsigned long)&g_wasmState; }
 LH_EXPORT(state_size) unsigned int state_size() { return (unsigned int)sizeof(g_wasmState); }
 LH_EXPORT(io_base)    unsigned int io_base()    { return (unsigned int)(unsigned long)&g_wasmIo[0]; }
+LH_EXPORT(io_size)    unsigned int io_size()    { return (unsigned int)sizeof(g_wasmIo); } // engine asserts its carve fits
 LH_EXPORT(ctx_addr)   unsigned int ctx_addr()   { return (unsigned int)(unsigned long)&g_wasmCtxBuf[0]; }
 
 LH_EXPORT(reg_count)  unsigned int reg_count()  { liteWasmTuEnsureRegistered(); return g_wasmTuEntryCount; }
