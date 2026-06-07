@@ -18,9 +18,14 @@
 void logColorToScreen(std::string type, std::string msg);   // defined later in qubic.cpp (same TU)
 
 // Per-call scratch layout inside the contract's exported io_base region: [in | out | locals | arena].
-#define LITE_WASM_IO_SLOT   (32u * 1024u)   // in / out / locals each — >= MAX_SIZE_OF_CONTRACT_LOCALS (32K)
-#define LITE_WASM_ARENA_SZ  (16u * 1024u)   // acquireScratch bump arena
-#define LITE_WASM_IO_TOTAL  (3u * LITE_WASM_IO_SLOT + LITE_WASM_ARENA_SZ)
+// Sized to the core protocol caps: in/out = uint16 max (registered inputSize/outputSize); locals =
+// MAX_SIZE_OF_CONTRACT_LOCALS; arena = the native scratchpad (defaultCommonBuffersSize ~1GB) so any QPI
+// HashMap reorg fits. MUST match g_wasmIo in lite_wasm_tu.h.
+#define LITE_WASM_IN_SZ     (64u * 1024u)            // input  region (>= uint16 max 65535)
+#define LITE_WASM_OUT_SZ    (64u * 1024u)            // output region (>= uint16 max 65535)
+#define LITE_WASM_LOCALS_SZ (32u * 1024u)            // = MAX_SIZE_OF_CONTRACT_LOCALS
+#define LITE_WASM_ARENA_SZ  (1024u * 1024u * 1024u)  // acquireScratch bump arena (matches native scratchpad)
+#define LITE_WASM_IO_TOTAL  ((unsigned long long)LITE_WASM_IN_SZ + LITE_WASM_OUT_SZ + LITE_WASM_LOCALS_SZ + LITE_WASM_ARENA_SZ)
 
 static bool    g_liteWasmReady = false;
 static ffi_cif g_liteWasmDispatchCif;                 // shared 5-pointer->void CIF for every dispatch closure
@@ -99,6 +104,14 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     else if (kind == LITE_WASM_KIND_SYSPROC)   { inSize = s.sysInSize[it]; outSize = s.sysOutSize[it]; }   // QPI sysproc in/out
     else                                       { inSize = contractUserProcedureInputSizes[idx][it]; outSize = contractUserProcedureOutputSizes[idx][it]; }
 
+    // guard: input/output must fit their io regions before we copy into linear memory. Registered sizes are
+    // uint16 (<=65535 < 64K) so this never fires today — defense against a tighter region / wider size type.
+    if (inSize > LITE_WASM_IN_SZ || outSize > LITE_WASM_OUT_SZ) {
+        logColorToScreen("ERROR", "LITEWASM dispatch in/out exceeds io region idx=" + std::to_string(idx)
+                         + " in=" + std::to_string(inSize) + " out=" + std::to_string(outSize));
+        return;
+    }
+
     // env selection: outermost uses the slot env; nested reuses the thread's current env + set_module_inst.
     wasm_exec_env_t env;
     bool outer;
@@ -121,9 +134,9 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     }
 
     const uint32_t wIn     = s.ioBase;
-    const uint32_t wOut    = s.ioBase + LITE_WASM_IO_SLOT;
-    const uint32_t wLocals = s.ioBase + 2 * LITE_WASM_IO_SLOT;
-    const uint32_t wArena  = s.ioBase + 3 * LITE_WASM_IO_SLOT;
+    const uint32_t wOut    = s.ioBase + LITE_WASM_IN_SZ;
+    const uint32_t wLocals = s.ioBase + LITE_WASM_IN_SZ + LITE_WASM_OUT_SZ;
+    const uint32_t wArena  = s.ioBase + LITE_WASM_IN_SZ + LITE_WASM_OUT_SZ + LITE_WASM_LOCALS_SZ;
 
     LiteWasmCallCtx cc;
     cc.ctx = ctx;
