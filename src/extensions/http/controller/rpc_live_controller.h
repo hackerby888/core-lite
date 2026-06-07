@@ -44,6 +44,10 @@ class RpcLiveController : public HttpController<RpcLiveController>
     ADD_METHOD_TO(RpcLiveController::devFundedSeed, "/live/v1/dev/funded-seed", Get);
     ADD_METHOD_TO(RpcLiveController::devFundedSeeds, "/live/v1/dev/funded-seeds", Get);
     ADD_METHOD_TO(RpcLiveController::devPutContractSource, "/live/v1/dev/contract-source", Post);
+    ADD_METHOD_TO(RpcLiveController::devEpochInfo, "/live/v1/dev/epoch-info", Get);
+    ADD_METHOD_TO(RpcLiveController::devAdvanceTick, "/live/v1/dev/advance-tick", Get);
+    ADD_METHOD_TO(RpcLiveController::devAdvanceToLast, "/live/v1/dev/advance-to-last", Get);
+    ADD_METHOD_TO(RpcLiveController::devAdvanceEpoch, "/live/v1/dev/advance-epoch", Get);
 #endif
 #endif
     METHOD_LIST_END
@@ -806,6 +810,101 @@ class RpcLiveController : public HttpController<RpcLiveController>
         for (unsigned int i = 0; i < limit; i++) arr.append(std::string((const char *)broadcastedComputorSeeds[i]));
         json["seeds"] = arr;
         json["count"] = total;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+
+    // Last processable tick of the current epoch (the transition fires at initialTick + duration).
+    inline unsigned int liteDevEpochLastTick() const { return system.initialTick + (unsigned int)TESTNET_EPOCH_DURATION - 1; }
+
+    // Fast-forward: temporarily zero the per-tick delay (the same tickDelay the ticking loop honors) until
+    // system.tick reaches target, then restore it. Bounded by a wall-clock timeout so the worker never hangs.
+    inline unsigned int liteDevFastForwardTo(unsigned int target, unsigned int timeoutMs)
+    {
+        if (system.tick >= target) return system.tick;
+        const unsigned long long saved = tickDelay;
+        tickDelay = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        while (system.tick < target)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() > (long long)timeoutMs) break;
+        }
+        tickDelay = saved;
+        return system.tick;
+    }
+
+    // Testnet dev only: current-epoch tick window (so tooling can show "last tick of epoch" + ticks left).
+    inline void devEpochInfo(const HttpRequestPtr &, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        const unsigned int last = liteDevEpochLastTick();
+        Json::Value json;
+        json["epoch"] = (unsigned int)system.epoch;
+        json["tick"] = system.tick;
+        json["initialTick"] = system.initialTick;
+        json["epochLastTick"] = last;
+        json["ticksLeft"] = (system.tick <= last) ? (last - system.tick) : 0u;
+        json["duration"] = (unsigned int)TESTNET_EPOCH_DURATION;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+
+    // Testnet dev only: advance the chain by n ticks (default 1). Capped at the epoch's last tick — crossing the
+    // boundary needs the epoch-transition path (advance-epoch), so plain tick-advance never triggers it.
+    inline void devAdvanceTick(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        unsigned int n = 1;
+        try { auto s = req->getParameter("n"); if (!s.empty()) n = (unsigned int)std::stoul(s); } catch (...) {}
+        if (!n) n = 1;
+        const unsigned int from = system.tick, last = liteDevEpochLastTick();
+        unsigned int target = from + n;
+        const bool capped = target > last;
+        if (capped) target = last;
+        const unsigned int reached = liteDevFastForwardTo(target, 12000);   // bounded: may return < target, caller re-calls
+        Json::Value json;
+        json["from"] = from; json["requested"] = n; json["target"] = target; json["reached"] = reached;
+        json["epochLastTick"] = last; json["cappedAtEpochEnd"] = capped;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+
+    // Testnet dev only: advance to (epochLastTick - gap), default gap 3 — the safe pre-transition resting point.
+    inline void devAdvanceToLast(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        unsigned int gap = 3;
+        try { auto s = req->getParameter("gap"); if (!s.empty()) gap = (unsigned int)std::stoul(s); } catch (...) {}
+        const unsigned int from = system.tick, last = liteDevEpochLastTick();
+        const unsigned int target = (last > gap) ? (last - gap) : last;
+        const unsigned int reached = liteDevFastForwardTo(target, 12000);   // bounded: may return < target, caller re-calls
+        Json::Value json;
+        json["from"] = from; json["target"] = target; json["reached"] = reached;
+        json["epochLastTick"] = last; json["epoch"] = (unsigned int)system.epoch;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+
+    // Testnet dev only: advance to the next epoch via the node's own seamless transition. Fast-tick to the epoch
+    // boundary (forceSwitchEpoch makes the transition tick suit on a single node), then drive the clean-memory
+    // flag the way F10 / SPECIAL_COMMAND_CONTINUE_SWITCH_EPOCH does so beginEpoch proceeds. No manual epoch forcing.
+    inline void devAdvanceEpoch(const HttpRequestPtr &, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        const unsigned int startEpoch = (unsigned int)system.epoch, fromTick = system.tick;
+        const unsigned long long saved = tickDelay;
+        tickDelay = 0;
+        forceSwitchEpoch = true;
+        const auto t0 = std::chrono::steady_clock::now();
+        while ((unsigned int)system.epoch == startEpoch)
+        {
+            // Hold the clean-memory flag high (exactly what F10 / SPECIAL_COMMAND_CONTINUE_SWITCH_EPOCH do). beginEpoch
+            // zeroes epochTransitionState *before* its clean-memory WAIT_WHILE, so this must be unconditional, not gated.
+            epochTransitionCleanMemoryFlag = 1;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            // bounded: drive only the final ticks + transition. Callers fast-tick to the boundary first (advance-tick),
+            // so this completes quickly; if called far from the boundary it returns switched:false and the caller re-advances.
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() > 25000) break;
+        }
+        tickDelay = saved;
+        if ((unsigned int)system.epoch == startEpoch) forceSwitchEpoch = false;   // failed/timeout: don't leave it armed
+        Json::Value json;
+        json["fromEpoch"] = startEpoch; json["toEpoch"] = (unsigned int)system.epoch;
+        json["fromTick"] = fromTick; json["tick"] = system.tick; json["initialTick"] = system.initialTick;
+        json["switched"] = ((unsigned int)system.epoch != startEpoch);
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 #endif
