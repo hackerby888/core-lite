@@ -2,6 +2,10 @@
 
 #ifdef __linux__
 
+// SwapVM page compression (Blosc2) is unused on RAM-only builds (CMAKE_NO_USE_SWAP). Blosc2's headers pull the
+// x86-only <immintrin.h>, which breaks the aarch64 node compile, so skip Blosc2 entirely when swap is off.
+#if !defined(CMAKE_NO_USE_SWAP)
+
 #include <blosc2.h>
 #include <stdexcept>
 #include <thread>
@@ -75,5 +79,19 @@ public:
         return decompressed_out;
     }
 };
+
+#else  // CMAKE_NO_USE_SWAP — no Blosc2; stub keeps the API for the (never-taken) swap call sites.
+#include <vector>
+#include <stdexcept>
+#include <cstddef>
+
+class Zipper
+{
+public:
+    static std::vector<unsigned char> zip(unsigned char*, size_t, int = 0) { throw std::runtime_error("Zipper: NO_USE_SWAP build"); }
+    static std::vector<unsigned char> unzip(unsigned char*, size_t, int = 0) { throw std::runtime_error("Zipper: NO_USE_SWAP build"); }
+};
+
+#endif // CMAKE_NO_USE_SWAP
 
 #endif // __linux__
