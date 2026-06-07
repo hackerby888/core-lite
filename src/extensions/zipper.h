@@ -2,9 +2,10 @@
 
 #ifdef __linux__
 
-// SwapVM page compression (Blosc2) is unused on RAM-only builds (CMAKE_NO_USE_SWAP). Blosc2's headers pull the
-// x86-only <immintrin.h>, which breaks the aarch64 node compile, so skip Blosc2 entirely when swap is off.
-#if !defined(CMAKE_NO_USE_SWAP)
+// Skip Blosc2 (SwapVM page compression) when it isn't usable/needed: its headers pull the x86-only
+// <immintrin.h>, which breaks the aarch64 build (node AND tests), and RAM-only builds (CMAKE_NO_USE_SWAP)
+// don't use swap at all. Gate by arch too — CMAKE_NO_USE_SWAP only reaches the Qubic target, not the test target.
+#if !defined(CMAKE_NO_USE_SWAP) && !defined(__aarch64__)
 
 #include <blosc2.h>
 #include <stdexcept>
