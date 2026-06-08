@@ -186,6 +186,12 @@ elseif(IS_CLANG OR IS_GCC)
     set(OS_CXX_FLAGS "${OS_C_FLAGS}" CACHE INTERNAL "OS-specific C++ compiler flags" FORCE)
 endif()
 
+# GCC: disable strict aliasing — this codebase type-puns pervasively and TBAA can miscompile it at -O2.
+if(IS_GCC)
+    set(COMMON_C_FLAGS "${COMMON_C_FLAGS} -fno-strict-aliasing" CACHE INTERNAL "Common C compiler flags" FORCE)
+    set(COMMON_CXX_FLAGS "${COMMON_CXX_FLAGS} -fno-strict-aliasing" CACHE INTERNAL "Common C++ compiler flags" FORCE)
+endif()
+
 # --- CPU Instruction Set Flags ---
 
 # Allow the user to enable AVX-512

@@ -45,17 +45,31 @@ static const unsigned char oracleMachineIPs[][4] = {
 #define ENABLE_QUBIC_LOGGING_EVENT 0
 #endif
 
-// Virtual memory settings for logging
+// Logging VM page sizes — #ifndef-guarded for uniform -D override; sizes bake into the VM template type, all TUs must agree or layouts conflict (ODR).
 #if defined(TESTNET) && defined(TESTNET_LITE_RAM)
+#ifndef LOG_BUFFER_PAGE_SIZE
 #define LOG_BUFFER_PAGE_SIZE (16000000ULL)   // 16 MB page — LITE testnet
+#endif
+#ifndef PMAP_LOG_PAGE_SIZE
 #define PMAP_LOG_PAGE_SIZE   (3000000ULL)    // 3 MB page — LITE testnet
+#endif
+#ifndef IMAP_LOG_PAGE_SIZE
 #define IMAP_LOG_PAGE_SIZE   500ULL          // 500 tick-blob entries/page — LITE testnet
+#endif
 #else
+#ifndef LOG_BUFFER_PAGE_SIZE
 #define LOG_BUFFER_PAGE_SIZE (300000000ULL / 2)
+#endif
+#ifndef PMAP_LOG_PAGE_SIZE
 #define PMAP_LOG_PAGE_SIZE (30000000ULL / 2)
+#endif
+#ifndef IMAP_LOG_PAGE_SIZE
 #define IMAP_LOG_PAGE_SIZE 10000ULL
 #endif
+#endif
+#ifndef VM_NUM_CACHE_PAGE
 #define VM_NUM_CACHE_PAGE 4
+#endif
 
 #if ENABLE_QUBIC_LOGGING_EVENT
 // DO NOT MODIFY THIS AREA UNLESS YOU ARE DEVELOPING LOGGING FEATURES

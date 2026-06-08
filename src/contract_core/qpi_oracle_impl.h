@@ -135,7 +135,7 @@ inline QPI::sint32 QPI::QpiContextProcedureCall::__qpiSubscribeOracle(
 		QPI::sint32 subscriptionId = oracleEngine.startContractSubscription(
 			contractIndex, OracleInterface::oracleInterfaceIndex,
 			&query, sizeof(query), notificationPeriodInMilliseconds,
-			notificationProcId, offsetof(OracleInterface::OracleQuery, timestamp));
+			notificationProcId, offsetof(typename OracleInterface::OracleQuery, timestamp));
 		if (subscriptionId >= 0)
 		{
 			// success

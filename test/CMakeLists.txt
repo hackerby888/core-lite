@@ -81,6 +81,15 @@ add_executable(
 		oracle_engine.cpp
 )
 
+# Define logging VM page sizes uniformly for every test TU — they bake into the logging-buffer template type,
+# so divergent values across TUs cause conflicting layouts (ODR -> heap corruption at teardown).
+target_compile_definitions(qubic_core_tests PRIVATE
+    LOG_BUFFER_PAGE_SIZE=10000000ULL
+    PMAP_LOG_PAGE_SIZE=1000000ULL
+    IMAP_LOG_PAGE_SIZE=300ULL
+    VM_NUM_CACHE_PAGE=1
+)
+
 # Apply test-specific compiler flags from the centralized detection module
 apply_test_compiler_flags(qubic_core_tests)
 

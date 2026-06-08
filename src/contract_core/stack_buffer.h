@@ -7,12 +7,13 @@
 // Supports unwinding for analyzing stack in error handling and tagging blocks as "special" (for example those
 // with infos about locks that need to be released).
 // #define TRACK_MAX_STACK_BUFFER_SIZE to collect info on how much stack is used.
-template <typename StackBufferSizeType, StackBufferSizeType bufferSize>
+template <typename StackBufferSizeType, StackBufferSizeType bufferSize, StackBufferSizeType alignment = 1>
 struct StackBuffer
 {
     // Data type used for size and index.
     typedef StackBufferSizeType SizeType;
     static_assert(SizeType(-1) > 0, "Signed StackBufferSizeType is not supported!");
+    static_assert(alignment != 0 && (alignment & (alignment - 1)) == 0, "alignment must be a power of two!");
 
     // Constructor (disabled because not called without MS CRT, you need to call init() to init)
     //StackBuffer()
@@ -59,8 +60,11 @@ struct StackBuffer
     {
         ASSERT(_allocatedSize <= bufferSize);
 
-        // allocate fails of size after allocating overflows buffer size or the used size type
+        // round size up to 'alignment' so every block start stays aligned (size footer in last sizeof(SizeType) bytes).
         StackBufferSizeType newSize = _allocatedSize + size + sizeof(SizeType);
+        newSize = (newSize + (alignment - 1)) & ~StackBufferSizeType(alignment - 1);
+
+        // allocate fails if size after allocating overflows buffer size or the used size type
         if (newSize > bufferSize || newSize <= _allocatedSize)
         {
 #ifdef TRACK_MAX_STACK_BUFFER_SIZE
@@ -85,11 +89,11 @@ struct StackBuffer
             return nullptr;
         }
 
-        // get pointer to return
+        // get pointer to return (aligned by the _allocatedSize invariant)
         char* allocatedBuffer = _buffer + _allocatedSize;
 
-        // store size from before allocating buffer
-        SizeType* sizeBeforeAlloc = reinterpret_cast<SizeType*>(allocatedBuffer + size);
+        // store size from before allocating buffer in the last sizeof(SizeType) bytes of the (padded) block
+        SizeType* sizeBeforeAlloc = reinterpret_cast<SizeType*>(_buffer + newSize - sizeof(SizeType));
         *sizeBeforeAlloc = _allocatedSize;
         if (specialBlock)
             *sizeBeforeAlloc |= specialBlockFlag;
@@ -191,7 +195,7 @@ struct StackBuffer
 protected:
     // structure of buffer content: [ allocated buffer 1 | size before allocating buffer 1 | allocated buffer 2 | size before buffer 2 | ... | alloc. buf. n | size bef. buf. n ]
     // "size before allocating buffer" may have specialBlockFlag set.
-    char _buffer[bufferSize];
+    alignas(alignment) char _buffer[bufferSize];
 
     // number of bytes used in buffer
     SizeType _allocatedSize;

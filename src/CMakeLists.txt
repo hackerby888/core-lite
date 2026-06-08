@@ -242,7 +242,7 @@ set_source_files_properties(platform/custom_stack.nasm PROPERTIES
 )
 
 # Add additional compiler-specific flags for the main application
-if(IS_CLANG AND IS_ARM)
+if((IS_CLANG OR IS_GCC) AND IS_ARM)
     # arm: -mrdrnd/-mbmi/-mlzcnt are x86-only (provided via SIMDe + qintrin shims); -fsigned-char needed.
     target_compile_options(Qubic PRIVATE
         -D_CONSOLE
@@ -251,8 +251,8 @@ if(IS_CLANG AND IS_ARM)
         -fshort-wchar
         -w
     )
-elseif(IS_CLANG)
-    # Clang-specific flags
+elseif(IS_CLANG OR IS_GCC)
+    # Clang/GCC x86 flags (GCC requires the -m feature flag to emit rdrand/bmi/lzcnt intrinsics)
     target_compile_options(Qubic PRIVATE
         -D_CONSOLE
         $<$<CONFIG:Release>:-DNDEBUG>

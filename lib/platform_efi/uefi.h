@@ -1,5 +1,15 @@
 #pragma once
 
+// GCC lacks the __cdecl/__stdcall MSVC keywords (clang accepts them); define empty so EFI fn-ptr typedefs parse.
+#if defined(__GNUC__) && !defined(__clang__)
+  #ifndef __cdecl
+    #define __cdecl
+  #endif
+  #ifndef __stdcall
+    #define __stdcall
+  #endif
+#endif
+
 /********* UEFI *********/
 
 #define FALSE ((BOOLEAN)0)
