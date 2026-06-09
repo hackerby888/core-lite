@@ -169,9 +169,9 @@ jobs:
   # on-chain deploy + read + write (Counter: Get -> Inc -> Get) through the wasm engine, not a tick-only
   # check. A crash / deploy-fail / test-fail turns the job red, so a node change that breaks the
   # deploy-exec pipeline is caught. Does NOT gate the release (publish needs [node, headers]) — advisory.
-  # macOS leg is best-effort (soft): the contract-state RAM trims drop the node to ~1.9 GB so it now fits
-  # the 7 GB macos-14 runner, but it depends on node-macos (continue-on-error) + brew runtime libs, so a
-  # macOS hiccup never blocks the linux smoke. Flip it to gating by dropping `soft` + the continue-on-error.
+  # All three legs GATE (a failure fails the run): the contract-state RAM trims drop the macOS node to
+  # ~1.9 GB so it fits the 7 GB macos-14 runner. Caveat: macOS smoke `needs` node-macos (continue-on-error
+  # for brew flakiness) — if that build flakes its artifact is absent and this leg goes red on download.
   smoke:
     needs: [node, node-macos]
     strategy:
@@ -180,9 +180,8 @@ jobs:
         include:
           - { runner: ubuntu-22.04,     key: linux-x64,    artifact: node-linux-x64 }
           - { runner: ubuntu-24.04-arm, key: linux-arm64,  artifact: node-linux-arm64 }
-          - { runner: macos-14,         key: darwin-arm64, artifact: node-darwin-arm64, soft: true }
+          - { runner: macos-14,         key: darwin-arm64, artifact: node-darwin-arm64 }
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.soft || false }}
     timeout-minutes: 30
     steps:
       - name: Checkout core-lite (--core, wasm contract headers)
