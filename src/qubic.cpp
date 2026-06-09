@@ -186,6 +186,10 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
+#if defined(__linux__) && defined(LITE_DYNAMIC_CONTRACTS)
+#include "extensions/k12_engine.h"
+#endif
+#include "extensions/lite_sc_engine_adapter.h"
 #include "extensions/lite_dynamic_contracts.h"
 #include "extensions/lite_wasm_contracts.h"
 #include "extensions/test_invalid_solution.h"
@@ -597,7 +601,7 @@ static void getComputerDigest(m256i& digest)
 
                 // wasm slots: contractStates[idx] aliases the resident state, hashed at `size` (its real span).
                 const unsigned long long startTime = __rdtsc();
-                KangarooTwelve(contractStates[digestIndex], (unsigned int)size, &contractStateDigests[digestIndex], 32);
+                liteSCDigest(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
                 const unsigned long long executionTime = __rdtsc() - startTime;
 
                 contractStateLock[digestIndex].releaseRead();
@@ -6927,6 +6931,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 }
             }
         }
+        liteSCEvictTick(); // LRU-evict cold contract-state chunks down to the RAM cap (no-op under cap / engine off)
         tickerLoopNumerator += __rdtsc() - curTimeTick;
         tickerLoopDenominator++;
     }
@@ -7226,23 +7231,28 @@ static bool initialize()
         for (unsigned int contractIndex = 0; contractIndex < contractCount; contractIndex++)
         {
             unsigned long long size = contractDescriptions[contractIndex].stateSize;
-            if (!allocPoolWithErrorLog(L"contractStates",  size, (void**)&contractStates[contractIndex], __LINE__))
+            if (!liteSCAlloc(contractIndex, size))
             {
                 return false;
             }
         }
 
-        if (!allocPoolWithErrorLog(L"score", sizeof(*score), (void**)&score, __LINE__))
+        // demand-zero (useVirtualMem): the score struct holds a ~1GB random2 pool that SC-dev low-RAM
+        // never fills (see ScoreFunction::initMiningData). Lazy commit -> RSS tracks actual use.
+        if (!allocPoolWithErrorLog(L"score", sizeof(*score), (void**)&score, __LINE__, true, true))
         {
             return false;
         }
+        if (!allocPoolWithErrorLog(L"score", sizeof(*score_qpi), (void**)&score_qpi, __LINE__, true, true))
+        {
+            return false;
+        }
+#if !(defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS))
+        // eager-zero on mainnet/normal testnet (full mining); only the testnet dynamic-contract node
+        // skips it and lets the mmap zero-fill lazily (no 2GB commit).
         setMem(score, sizeof(*score), 0);
-
-        if (!allocPoolWithErrorLog(L"score", sizeof(*score_qpi), (void**)&score_qpi, __LINE__))
-        {
-            return false;
-        }
         setMem(score_qpi, sizeof(*score_qpi), 0);
+#endif
 
         setMem(&solutionThreshold[0][0], sizeof(int) * MAX_NUMBER_EPOCH * score_engine::AlgoType::MaxAlgoCount, 0);
         if (!allocPoolWithErrorLog(L"minserSolutionFlag", NUMBER_OF_MINER_SOLUTION_FLAGS / 8, (void**)&minerSolutionFlags, __LINE__))
@@ -8673,7 +8683,13 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             mpServicesProtocol->GetProcessorInfo(mpServicesProtocol, i, &processorInformation);
             if (processorInformation.StatusFlag == (PROCESSOR_ENABLED_BIT | PROCESSOR_HEALTH_STATUS_BIT))
             {
+                // testnet dynamic-contract: demand-zero the per-processor network buffer (low local traffic
+                // never fills 32MB); mainnet/normal keep eager commit. Capacity unchanged either way.
+#if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
+                if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__, true, true))
+#else
                 if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))
+#endif
                 {
                     numberOfProcessors = 0;
 
@@ -9458,8 +9474,21 @@ void processArgs(int argc, const char* argv[]) {
         ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
         ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
-        ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"));
+        ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
+        ("sc-evict-mode", "Contract-state engine eviction backend: 'compress' (in-RAM zstd, fast spawn; default) or 'disk' (per-contract file, lowest RAM, persistent). Testnet dynamic-contract only.", cxxopts::value<std::string>()->default_value("compress"))
+        ("max-sc-mem", "Contract-state RAM cap in GB (testnet dynamic-contract); engine evicts cold chunks to stay under it.", cxxopts::value<unsigned long long>()->default_value("1"));
     auto result = options.parse(argc, argv);
+
+#ifdef LITE_SC_ENGINE
+    if (result.count("sc-evict-mode")) {
+        std::string m = result["sc-evict-mode"].as<std::string>();
+        ContractStateEngine::evictMode = (m == "disk") ? ContractStateEngine::EvictMode::Disk : ContractStateEngine::EvictMode::Compress;
+        logColorToScreen("INFO", "Contract-state evict mode: " + m);
+    }
+    if (result.count("max-sc-mem")) {
+        ContractStateEngine::MAX_RAM_USEAGE = result["max-sc-mem"].as<unsigned long long>() * 1024ULL * 1024 * 1024;
+    }
+#endif
 
 #ifdef __linux__
     if (result.count("swap-compression")) {

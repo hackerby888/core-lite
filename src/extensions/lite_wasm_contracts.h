@@ -293,8 +293,13 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
           return false;
       } }
 
-    // free the slot's 1GB reserve (once) and point contractStates[idx] AT the instance's resident state region.
+    // release the slot's 1GB reserve (once) and point contractStates[idx] AT the instance's resident state region.
+#ifdef LITE_SC_ENGINE
+    // engine-backed slot: abandon (flush, never free — the engine owns the memfd). See the adapter.
+    if (!s.stubFreed) { liteSCOnWasmTakeover(idx); s.stubFreed = true; }
+#else
     if (!s.stubFreed) { freePool(contractStates[idx]); s.stubFreed = true; }
+#endif
     contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(inst, s.stateOff);
     if (prevState) {   // upgrade: restore the snapshot (copy the overlap — a new layout may differ in size)
         uint32_t n = prevStateSize < s.stateSize ? prevStateSize : s.stateSize;

@@ -3,13 +3,22 @@
 // Helper functions for wchar_t strings in linux (linux expects 32-bit wchar_t, while we use 16-bit wchar_t everywhere else)
 #include "lib/platform_efi/uefi.h"
 #include <codecvt>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <stdarg.h>
 #include <vector>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #ifdef _MSC_VER
 #pragma warning(disable: 4996)
+#endif
+
+// Page size used by the contract-state engine. Windows variant added with the cross-platform port.
+#ifndef _WIN32
+#define SYSTEM_PAGE_SIZE sysconf(_SC_PAGESIZE)
 #endif
 static std::string wchar_to_string(const wchar_t* wstr) {
     if (!wstr)
@@ -184,3 +193,12 @@ static inline std::vector<uint8_t> base64_decode(const std::string &in) {
 
     return out;
 }
+
+#ifndef _WIN32
+// Round up to a multiple of the system page size (contract-state engine).
+static size_t alignToPageSize(size_t address)
+{
+    size_t page_size = SYSTEM_PAGE_SIZE;
+    return (address + page_size - 1) & ~(page_size - 1);
+}
+#endif

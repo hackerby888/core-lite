@@ -66,7 +66,15 @@ public:
         const unsigned long long lockSize = count * sizeof(subBufferLock[0]);
         const unsigned long long bufSize = count * size;
 
-        if (!allocPoolWithErrorLog(L"commonBuffers", ptrSize + lockSize + bufSize, (void**)&buffer, __LINE__))
+        // testnet dynamic-contract (SC-dev) only: demand-zero the reorg arena (lazy commit, full capacity
+        // kept) so RSS tracks actual use — an idle node never fills the MAX_CONTRACT_STATE_SIZE-sized arena.
+        // Mainnet/normal testnet keep eager commit so the arena is guaranteed resident (no late OOM mid-reorg).
+#if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
+        bool ok = allocPoolWithErrorLog(L"commonBuffers", ptrSize + lockSize + bufSize, (void**)&buffer, __LINE__, true, true);
+#else
+        bool ok = allocPoolWithErrorLog(L"commonBuffers", ptrSize + lockSize + bufSize, (void**)&buffer, __LINE__);
+#endif
+        if (!ok)
         {
             return false;
         }
