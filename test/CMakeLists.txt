@@ -118,6 +118,13 @@ target_link_libraries(
   Blosc2::blosc2_static
 )
 
+# Contract-state engine digest-equivalence test (consensus invariant). k12_engine.h is Linux-only
+# (userfaultfd) and the test uses rdrand, so x86-Linux only; needs zstd (the engine's compress mode).
+if(NOT WIN32 AND NOT APPLE AND NOT IS_ARM)
+    target_sources(qubic_core_tests PRIVATE k12_engine.cpp)
+    target_link_libraries(qubic_core_tests PRIVATE zstd)
+endif()
+
 # WASM-executed contracts: build the dispatch/reg/state ABI regression test against the WAMR runtime.
 # Reuses the Qubic target's vmlib if present (BUILD_BINARY), else builds its own. See extensions/WASM_CONTRACTS.md.
 if(LITE_WASM_CONTRACTS)
