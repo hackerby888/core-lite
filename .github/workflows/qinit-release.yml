@@ -225,10 +225,13 @@ jobs:
           mkdir -p proj/contracts
           cp qinit/fixtures/Counter.h proj/contracts/Counter.h
           cd proj
+          # --skip-verify: the contractverify qpi-lint gate is x64-only + auto-downloaded; it crashes on
+          # the runner (exit!=0, no parsed errors) and fails the build spuriously. The node deploy/exec
+          # smoke doesn't lint qpi rules (qinit's own corpus job does); the fixture is known-good.
           bun "$GITHUB_WORKSPACE/qinit/packages/cli/src/index.tsx" test \
             --bin "$GITHUB_WORKSPACE/Qubic" \
             --core "$GITHUB_WORKSPACE/core" \
-            --contract contracts/Counter.h --name Counter \
+            --contract contracts/Counter.h --name Counter --skip-verify \
             --wait 150 --timeout 90000
       # qinit test swallows the contract-build stderr (it only surfaces "compile failed"); rebuild the
       # contract directly to print the real clang/wasm error when a leg goes red.
