@@ -165,47 +165,57 @@ jobs:
             Qubic-darwin-arm64.sha256
           if-no-files-found: error
 
-  # Readable runtime smoke per platform: boot the built node, confirm the tick advances via RPC.
-  # Does NOT gate the release (publish needs [node, headers]) — but its conclusion is authoritative:
-  # a crash / no-tick FAILS this job, so the result is visible (incl. OOM on a small runner).
-  # linux-only: the darwin node needs ~26 GB (TESTNET_LITE_RAM, no-swap) but the free macos-14
-  # runner has only 7 GB -> jetsam-kills it at genesis (same RAM ceiling as the arm qemu OOM, not a
-  # code defect). macOS native execution was confirmed once via the smoke log (boots, RPC up, network
-  # checkin, mach_absolute_time TSC, no crash); real Macs (>=16 GB) tick. Build + crypto KATs gate macOS.
+  # Per-platform deploy smoke: boot the freshly-built node and run `qinit test` against it — a REAL
+  # on-chain deploy + read + write (Counter: Get -> Inc -> Get) through the wasm engine, not a tick-only
+  # check. A crash / deploy-fail / test-fail turns the job red, so a node change that breaks the
+  # deploy-exec pipeline is caught. Does NOT gate the release (publish needs [node, headers]) — advisory.
+  # macOS leg is best-effort (soft): the contract-state RAM trims drop the node to ~1.9 GB so it now fits
+  # the 7 GB macos-14 runner, but it depends on node-macos (continue-on-error) + brew runtime libs, so a
+  # macOS hiccup never blocks the linux smoke. Flip it to gating by dropping `soft` + the continue-on-error.
   smoke:
-    needs: node
+    needs: [node, node-macos]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-22.04,     key: linux-x64 }
-          - { runner: ubuntu-24.04-arm, key: linux-arm64 }
+          - { runner: ubuntu-22.04,     key: linux-x64,    artifact: node-linux-x64 }
+          - { runner: ubuntu-24.04-arm, key: linux-arm64,  artifact: node-linux-arm64 }
+          - { runner: macos-14,         key: darwin-arm64, artifact: node-darwin-arm64, soft: true }
     runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.soft || false }}
+    timeout-minutes: 30
     steps:
+      - name: Checkout core-lite (--core, wasm contract headers)
+        uses: actions/checkout@v4
+        with: { path: core }
+      - name: Checkout qinit (the test runner)
+        uses: actions/checkout@v4
+        with: { repository: hackerby888/qinit, ref: main, path: qinit }
+      - uses: oven-sh/setup-bun@v2
+      - name: Install qinit deps
+        run: cd qinit && bun install
+      # The darwin node links keg-only brew dylibs (jsoncpp/fmt/ffi/…); a fresh runner lacks them.
+      - name: Install macOS runtime libs
+        if: matrix.key == 'darwin-arm64'
+        run: brew install jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi || true
       - uses: actions/download-artifact@v4
         with:
-          name: node-${{ matrix.key }}
-      - name: Boot + tick
+          name: ${{ matrix.artifact }}
+      - name: qinit test (deploy + read + write)
         run: |
-          chmod +x "Qubic-${{ matrix.key }}"
-          free -h || true
-          mkdir run && cd run
-          nohup "../Qubic-${{ matrix.key }}" --peers 127.0.0.1 --node-mode 3 --ticking-delay 1000 > node.log 2>&1 &
-          PID=$!
-          ok=0; T0=""
-          for i in $(seq 1 40); do
-            sleep 3
-            if ! kill -0 $PID 2>/dev/null; then echo "node process exited early"; break; fi
-            t=$(curl -s http://127.0.0.1:41841/tick-info 2>/dev/null | grep -oE '"tick"[^0-9]*[0-9]+' | grep -oE '[0-9]+$')
-            [ -z "$t" ] && continue
-            if [ -z "$T0" ]; then T0=$t; echo "first tick=$T0"; continue; fi
-            if [ "$t" -gt "$T0" ]; then ok=1; echo "TICKING: $T0 -> $t"; break; fi
-          done
-          kill $PID 2>/dev/null || true; sleep 1
-          echo "=== crash markers ==="; grep -ciE "segmentation|signal 11|abort|bad_alloc|out of memory" node.log || true
-          echo "=== log tail ==="; tail -15 node.log
-          if [ "$ok" != "1" ]; then echo "RESULT: node did NOT tick on ${{ matrix.key }}"; exit 1; fi
-          echo "RESULT: node TICKED on ${{ matrix.key }}"
+          # Run the node as plain "Qubic" so qinit's `pkill/pgrep -x Qubic` manages its lifecycle.
+          cp "Qubic-${{ matrix.key }}" Qubic && chmod +x Qubic
+          mkdir -p proj/contracts
+          cp qinit/fixtures/Counter.h proj/contracts/Counter.h
+          cd proj
+          bun "$GITHUB_WORKSPACE/qinit/packages/cli/src/index.tsx" test \
+            --bin "$GITHUB_WORKSPACE/Qubic" \
+            --core "$GITHUB_WORKSPACE/core" \
+            --contract contracts/Counter.h --name Counter \
+            --wait 150 --timeout 90000
+      - name: Node log tail (on failure)
+        if: failure()
+        run: tail -120 "$HOME/.cache/qinit/run/node.log" 2>/dev/null || true
 
   headers:
     needs: resolve
