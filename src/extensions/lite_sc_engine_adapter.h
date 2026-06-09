@@ -116,6 +116,19 @@ inline void liteSCOnWasmTakeover(unsigned int idx)
 #endif
 }
 
+// Free contract idx's state at shutdown, matching how liteSCAlloc allocated it. On engine/contract-level
+// builds every slot is a memfd/mmap (or WAMR linear mem for wasm-owned slots) the OS reclaims at process
+// exit — never freePool those (free() on a non-malloc pointer aborts on macOS). Only the plain committed
+// pool is malloc'd, so only it is freePool'd. The alloc strategy is build-wide, so the macro gate suffices.
+inline void liteSCFree(unsigned int idx)
+{
+#if defined(LITE_SC_ENGINE) || defined(LITE_SC_CONTRACT_LEVEL)
+    (void)idx;
+#else
+    if (contractStates[idx]) freePool(contractStates[idx]);
+#endif
+}
+
 // Resident contract-state RAM across all engines (for logging / cap checks).
 inline unsigned long long liteSCRamUsage()
 {

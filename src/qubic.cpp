@@ -7678,7 +7678,7 @@ static void deinitialize()
     {
         if (contractStates[contractIndex])
         {
-            freePool(contractStates[contractIndex]);
+            liteSCFree(contractIndex); // engine/demand-zero builds: OS reclaims memfd/mmap at exit (no freePool -> no darwin abort)
         }
     }
 
