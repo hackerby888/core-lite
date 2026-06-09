@@ -245,7 +245,10 @@ public:
     // Compress-mode backend: chunkIndex -> zstd-compressed chunk bytes (used instead of the disk file).
     std::unordered_map<unsigned int, std::vector<unsigned char>> compressedChunks;
     std::vector<unsigned char> compressScratch; // reused compress destination; stored blobs are sized exactly
-    unsigned char tmpBuffer[K12_chunkSize];
+    unsigned char tmpBuffer[K12_chunkSize];   // SAVE path (evict/flush) only — guarded by ioLocks[contractIndex]
+    unsigned char loadBuffer[K12_chunkSize];  // fault-handler LOAD path only (one handler thread per contract);
+                                              // separate from tmpBuffer so a concurrent evict can't corrupt the
+                                              // bytes between loadChunkFromDisk() and the UFFDIO_COPY that reads them
 
     // Thread-local handoff for the memfd fd allocated inside allocateState().
     // The base K12Engine ctor receives only the buffer pointer, so we stash
@@ -620,7 +623,7 @@ public:
                             bool loadOk = false;
                             do
                             {
-                                loadOk = loadChunkFromDisk(chunkIndex, tmpBuffer, lenRange);
+                                loadOk = loadChunkFromDisk(chunkIndex, loadBuffer, lenRange);
                                 if (!loadOk)
                                 {
                                     std::cout << "Critical error: Contract " << contractIndex
@@ -636,7 +639,7 @@ public:
 
                             // copy data into the page
                             uffdio_copy uc{};
-                            uc.src = (uint64_t)tmpBuffer;
+                            uc.src = (uint64_t)loadBuffer;
                             uc.dst = startRange;
                             uc.len = lenRange;
                             uc.mode = UFFDIO_CONTINUE_MODE_WP;

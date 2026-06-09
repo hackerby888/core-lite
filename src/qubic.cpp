@@ -7688,36 +7688,36 @@ static void deinitialize()
 
     if (score)
     {
-        freePool(score);
+        freePoolOrVirtual(score); // score is demand-zero (qVirtualAlloc) on the low-RAM build -> not freePool-able
     }
     if (minerSolutionFlags)
     {
-        freePool(minerSolutionFlags);
+        freePoolOrVirtual(minerSolutionFlags);
     }
 
     if (dejavu0)
     {
-        freePool((void*)dejavu0);
+        freePoolOrVirtual((void*)dejavu0);
     }
     if (dejavu1)
     {
-        freePool((void*)dejavu1);
+        freePoolOrVirtual((void*)dejavu1);
     }
 
     if (requestQueueBuffer)
     {
-        freePool(requestQueueBuffer);
+        freePoolOrVirtual(requestQueueBuffer);
     }
     if (responseQueueBuffer)
     {
-        freePool(responseQueueBuffer);
+        freePoolOrVirtual(responseQueueBuffer);
     }
 
     for (unsigned int processorIndex = 0; processorIndex < MAX_NUMBER_OF_PROCESSORS; processorIndex++)
     {
         if (processors[processorIndex].buffer)
         {
-            freePool(processors[processorIndex].buffer);
+            freePoolOrVirtual(processors[processorIndex].buffer); // demand-zero (qVirtualAlloc)
         }
     }
 
@@ -7725,15 +7725,15 @@ static void deinitialize()
     {
         if (peers[i].receiveBuffer)
         {
-            freePool(peers[i].receiveBuffer);
+            freePoolOrVirtual(peers[i].receiveBuffer); // peer buffers are demand-zero (qVirtualAlloc)
         }
         if (peers[i].transmitData.FragmentTable[0].FragmentBuffer)
         {
-            freePool(peers[i].transmitData.FragmentTable[0].FragmentBuffer);
+            freePoolOrVirtual(peers[i].transmitData.FragmentTable[0].FragmentBuffer);
         }
         if (peers[i].dataToTransmit)
         {
-            freePool(peers[i].dataToTransmit);
+            freePoolOrVirtual(peers[i].dataToTransmit);
 
             closeEvent(peers[i].connectAcceptToken.CompletionToken.Event);
             closeEvent(peers[i].receiveToken.CompletionToken.Event);

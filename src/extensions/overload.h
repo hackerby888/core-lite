@@ -269,6 +269,17 @@ inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size
 
 #endif
 
+// Free a buffer that may be from qVirtualAlloc (mmap/VirtualAlloc) OR the pool (malloc/AllocatePool).
+// freePool (= free) on a qVirtualAlloc'd pointer ABORTS on macOS (libsystem_malloc invalid free) and is UB
+// elsewhere; qVirtualAlloc records its addresses in commitMemMap, so route by that. Shutdown-only use: the OS
+// reclaims the virtual mapping at process exit, so just drop the record (no size is tracked to munmap exactly).
+inline void freePoolOrVirtual(void* p) {
+    if (!p) return;
+    auto it = commitMemMap.find((unsigned long long)p);
+    if (it != commitMemMap.end()) { commitMemMap.erase(it); return; }
+    freePool(p);
+}
+
 void updateTime() {
     std::time_t t = std::time(nullptr);
     std::tm* tm = std::gmtime(&t);
