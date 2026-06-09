@@ -195,9 +195,22 @@ jobs:
       - name: Install qinit deps
         run: cd qinit && bun install
       # The wasm contract compiler (wasi-sdk) is normally fetched by `qinit up`; a cold CI runner has no
-      # cache, so the contract build falls back to plain clang++ and fails. Fetch the per-host sdk here.
+      # cache, so the contract build would fall back to plain clang++ and fail. Fetch the per-host sdk,
+      # then PIN WASM_CLANG/WASI_SYSROOT so the build never silently falls back; verify the clang runs.
       - name: Fetch wasi-sdk (wasm contract compiler)
-        run: cd qinit && bun -e 'const {fetchWasiSdk}=await import("./packages/core/src/index.ts"); const r=await fetchWasiSdk(); console.log("wasi-sdk:",r.dir);'
+        run: |
+          cd qinit
+          bun -e '
+            const c = await import("./packages/core/src/index.ts");
+            await c.fetchWasiSdk();
+            const p = c.wasiSdkPaths();
+            if (!p) { console.error("FATAL: wasi-sdk incomplete (no clang++/wasi-sysroot under the cache after fetch)"); process.exit(1); }
+            console.log("WASM_CLANG=" + p.clang);
+            console.log("WASI_SYSROOT=" + p.sysroot);
+          ' > wasienv 2> wasierr || { echo "wasi-sdk fetch/resolve failed:"; cat wasierr; exit 1; }
+          cat wasienv >> "$GITHUB_ENV"; cat wasienv
+          CLANG="$(sed -n 's/^WASM_CLANG=//p' wasienv)"
+          echo "--- wasi clang ---"; "$CLANG" --version | head -2
       # The darwin node links keg-only brew dylibs (jsoncpp/fmt/ffi/…); a fresh runner lacks them.
       - name: Install macOS runtime libs
         if: matrix.key == 'darwin-arm64'
@@ -217,6 +230,20 @@ jobs:
             --core "$GITHUB_WORKSPACE/core" \
             --contract contracts/Counter.h --name Counter \
             --wait 150 --timeout 90000
+      # qinit test swallows the contract-build stderr (it only surfaces "compile failed"); rebuild the
+      # contract directly to print the real clang/wasm error when a leg goes red.
+      - name: Diagnose contract build (on failure)
+        if: failure()
+        run: |
+          cd qinit
+          echo "WASM_CLANG=${WASM_CLANG:-<unset>}  WASI_SYSROOT=${WASI_SYSROOT:-<unset>}"
+          "${WASM_CLANG:-clang++}" --version | head -2 || true
+          bun -e '
+            const { buildContract } = await import("./packages/build/src/index.ts");
+            const b = await buildContract({ contractPath: process.env.GITHUB_WORKSPACE + "/qinit/fixtures/Counter.h", name: "Counter", slot: 28, corePath: process.env.GITHUB_WORKSPACE + "/core", outDir: "/tmp/diag" });
+            console.log("build.ok =", b.ok, " hash =", b.hash, " so =", b.so);
+            if (!b.ok) { console.log("=== build stderr ==="); console.log(b.stderr || "(none)"); }
+          ' || true
       - name: Node log tail (on failure)
         if: failure()
         run: tail -120 "$HOME/.cache/qinit/run/node.log" 2>/dev/null || true
