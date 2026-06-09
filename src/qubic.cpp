@@ -51,7 +51,7 @@
 // #define TESTNET
 // #define TESTNET_PREFILL_QUS
 // #define TESTNET_LITE_RAM
-#define LITE_DYNAMIC_CONTRACTS
+// #define LITE_DYNAMIC_CONTRACTS   // testnet-only (contract_def.h); node build enables via -DLITE_DYNAMIC_CONTRACTS
 #define USE_SWAP
 
 // ============================================================================
