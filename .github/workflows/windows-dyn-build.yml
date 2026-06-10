@@ -52,6 +52,10 @@ jobs:
       - name: Configure (MSVC, dynamic + wasm)
         shell: pwsh
         run: |
+          # windows-latest ships nasm via Strawberry Perl; with it on PATH at configure, CMake bakes nasm
+          # -fwin32 into the .asm vcxproj (EDK2 + WAMR invokeNative_em64 are MASM syntax -> MSB3721). Drop any
+          # PATH dir containing nasm.exe so .asm route to ml64 (MASM). blosc2 uses C intrinsics (no nasm need).
+          $env:PATH = ($env:PATH.Split(';') | Where-Object { $_ -and -not (Test-Path (Join-Path $_ 'nasm.exe')) }) -join ';'
           $vcpkg = "$env:VCPKG_INSTALLATION_ROOT"
           $inst  = "$vcpkg/installed/x64-windows-rel"
           cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64 `
