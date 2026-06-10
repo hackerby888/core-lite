@@ -65,7 +65,11 @@ jobs:
             -DFFI_LIB_SHARED="$inst/lib/ffi.lib" -DFFI_INCLUDE_DIR="$inst/include"
 
       - name: Build Qubic
-        run: cmake --build build-win --config Release --target Qubic -- /m
+        run: |
+          # Serial (no /m) so the failing target's error is unambiguous — parallel /m interleaves output and
+          # buries it under drogon's. Build WAMR (vmlib, the prime Windows-port suspect) first to fail fast.
+          cmake --build build-win --config Release --target vmlib
+          cmake --build build-win --config Release --target Qubic
 
       - name: Upload binary
         if: success()
