@@ -1246,6 +1246,16 @@ struct Overload {
         // transmit loops actually sleeps ~15.6ms — throughput drops ~15x vs Linux and the tick stalls
         // waiting for quorum votes (tx=?). 1ms resolution restores Linux-like pacing process-wide.
         timeBeginPeriod(1);
+        // Windows 11 power-throttles timer-resolution requests of processes it deems background —
+        // e.g. spawned detached with redirected stdio (qinit's launch), or with an occluded console.
+        // The 1ms request above is then silently ignored and the node stalls again (request rate
+        // drops back to ~256/s). Opt out so the request is always honored regardless of window state.
+        PROCESS_POWER_THROTTLING_STATE pt;
+        memset(&pt, 0, sizeof(pt));
+        pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        pt.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        pt.StateMask = 0;   // 0 = always honor timer-resolution requests
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
         #endif
 
         ih = new EFI_HANDLE;

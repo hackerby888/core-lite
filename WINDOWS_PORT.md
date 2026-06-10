@@ -89,6 +89,8 @@ on Windows — Phase 2 needs it); the leftover `SUFFIX ".efi"` removed (OS port 
 |---|---|---|
 | node boots, ticks 2-3×, then stalls at `tx=?` with the vote counter crawling (~25 votes/s; quorum needs 451) | **Windows default timer resolution is ~15.6ms** — every `sleep_for(1ms)` in the request/vote/transmit loops slept 15.6ms → throughput ~15× below Linux | `timeBeginPeriod(1)` in `initializeUefi()` (overload.h, `_MSC_VER`) + winmm |
 | (belt-and-braces, same pass) | Nagle + delayed-ACK on the many small per-vote loopback sends | `TCP_NODELAY` on accepted + outgoing sockets (`_MSC_VER`) |
+| stalls kept recurring ANYWAY — randomly at boot ("warm-up") or mid-run under tx load, request rate back at the ~256/s signature; interactive-console runs eventually recovered, qinit-spawned (detached, stdio→file) nodes never did | **Windows 11 power-throttles timer-resolution requests of "background" processes** (detached/occluded-console), silently ignoring `timeBeginPeriod` — the stall came and went with window state, which is why it looked nondeterministic | `SetProcessInformation(ProcessPowerThrottling, IGNORE_TIMER_RESOLUTION, StateMask=0)` right after `timeBeginPeriod(1)` — the request is then always honored. Node now ticks ~1/s (Linux parity) with no warm-up stall, even spawned by qinit |
+| working set ~11.5 GB (target ~1.9 GB) | Windows has **no shared zero page** for committed private memory: the per-tick digest's READS of never-written state pages each fault in a unique physical zero page — the first full sweep (change flags boot 0xFF) pinned every contract state's whole reserve (wsmap: 4×1GB dyn reserves + QX 593MB + ... ≈ 11 GB, all 100% resident; linux/mac mmap reads hit the shared zero page) | `VirtualUnlock(state, size)` after the K12 in `liteSCDigest` — documented way to drop pages from the working set WITHOUT invalidating them (readers soft-fault back; clean zero pages reclaimed outright; digest unchanged). Working set now **~1.7 GB**, contract regions 0-resident (`tools/wsmap.c` measures per-region residency) |
 
 Boot: `run\..\build-win\src\Release\Qubic.exe --peers 127.0.0.1 --node-mode 3 --ticking-delay 1000`,
 then `GET http://127.0.0.1:41841/live/v1/tick-info` advances (vcpkg applocal copies ffi-8/openssl/...
@@ -102,13 +104,12 @@ pgrep elsewhere), `Qubic.exe` binary name, no chmod; `test.tsx`/`verify.ts` `Bun
 spawning `sh`; `deploy-ops.ts` tick-wait 90s → 300s (cold-node warm-up stall, below).
 
 ## Known issues (Windows, non-blocking)
-- **Warm-up stall**: first ~2-4 min after boot the tick processor sits at tick +2..3 (initial-epoch
-  work) before settling to ~2-4 s/tick. Linux warms up in seconds. Root cause not yet profiled
-  (no debugger on the dev box) — suspect residual sleep-granularity/page-fault costs. qinit's
-  300s deploy tick-wait absorbs it.
-- **Steady-state tick rate** ~2-4 s/tick vs ~1 s on Linux (same --ticking-delay 1000).
-- **RAM**: working set ~11.5 GB (vs ~1.9 GB target) — the demand-zero VirtualAlloc path commits
-  on first touch like mmap, but something touches far more pages than on Linux/macOS. Profile later.
+- **Commit charge** ~16.7 GB (unchanged by the working-set fix): every contract reserve is
+  MEM_COMMITted up front, which counts against RAM+pagefile. Linux relies on overcommit. Only a
+  real lazy-commit scheme (VEH commit-on-write) would shrink it; pagefile-backed, so not RAM.
+  (The earlier "warm-up stall" and "2-4s tick rate" entries were the timer-resolution throttling
+  above — gone since the opt-out; ticks run ~1/s from the first tick. qinit's longer deploy
+  budgets, added while diagnosing, were kept as general slow-node robustness.)
 
 ## Phase 3b — consensus proof (next)
 - Add **`windows-x64`** to the qinit-release smoke + **digest-equivalence** matrix

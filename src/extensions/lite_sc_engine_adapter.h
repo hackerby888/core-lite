@@ -59,6 +59,16 @@ inline void liteSCDigest(unsigned int idx, unsigned char* out, unsigned long lon
     else
     {
         KangarooTwelve(contractStates[idx], (unsigned int)effectiveSize, out, 32);
+#ifdef _WIN32
+        // Windows has no shared zero page for committed private memory: the digest's READS of
+        // never-written pages each fault in their own physical zero page, so the first full sweep
+        // (change flags boot at 0xFF) pins every contract state's whole reserve in RAM (~11 GB
+        // measured: 4x1GB dyn-slot reserves + QX 593MB + ...; linux/macOS read the shared zero
+        // page and stay ~1.9 GB). VirtualUnlock on an unlocked range is the documented way to
+        // drop pages from the working set WITHOUT invalidating them: concurrent readers just
+        // soft-fault them back, clean zero pages are reclaimed outright, the digest is unchanged.
+        VirtualUnlock(contractStates[idx], (SIZE_T)effectiveSize);
+#endif
     }
 }
 
