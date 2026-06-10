@@ -24,6 +24,13 @@ set(C_SOURCES
 set(ASM_OBJECT_LIBS "") # Store object libraries generated from assembly
 
 if(IS_WINDOWS AND ASM_LANG STREQUAL ASM_MASM)
+    # Force MASM (ml64) for the EDK2 X64 .asm. A FetchContent dep (blosc2, when nasm is on PATH) also enables
+    # ASM_NASM, and CMake would otherwise route these .asm to nasm with -fwin32 (wrong object format for x64).
+    set_source_files_properties(
+        edk2_mdepkg/Library/BaseLib/X64/LongJump.asm
+        edk2_mdepkg/Library/BaseLib/X64/SetJump.asm
+        PROPERTIES LANGUAGE ASM_MASM
+    )
     # Add MASM files directly if using MSVC
     add_library(platform_common_asm STATIC
         edk2_mdepkg/Library/BaseLib/X64/LongJump.asm
