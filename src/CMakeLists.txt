@@ -86,9 +86,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fmt)
 
-# libbacktrace is the boost::stacktrace backend on Linux. macOS uses boost's default (execinfo)
-# backend instead, so skip building/linking it there. (NOT APPLE => Linux/x86 unchanged.)
-if(NOT APPLE)
+# libbacktrace is the boost::stacktrace backend on Linux. macOS uses boost's execinfo backend and Windows
+# uses the windbg/dbghelp backend, so skip the autotools (./configure + make) libbacktrace build on both.
+if(NOT APPLE AND NOT WIN32)
 set(LIBBACKTRACE_PREFIX ${CMAKE_BINARY_DIR}/libbacktrace)
 set(LIBBACKTRACE_BINARY_DIR ${LIBBACKTRACE_PREFIX}/src/libbacktrace_project-build)
 set(LIBBACKTRACE_STATIC_LIB ${LIBBACKTRACE_BINARY_DIR}/.libs/libbacktrace.a)
@@ -121,7 +121,7 @@ set_target_properties(backtrace_static PROPERTIES
 )
 add_dependencies(backtrace_static libbacktrace_project)
 include_directories(SYSTEM ${LIBBACKTRACE_INCLUDE_DIR})
-endif() # NOT APPLE (libbacktrace)
+endif() # NOT APPLE AND NOT WIN32 (libbacktrace)
 
 # Define the shared library (matches Visual Studio DynamicLibrary configuration)
 add_executable(
@@ -288,6 +288,15 @@ if(APPLE)
             zstd
             m
     )
+elseif(WIN32)
+# MSVC: no GNU-ld -Bstatic/-Bdynamic, no unix dl/rt/z/zstd/m, no libbacktrace (windbg backend). The
+# FetchContent targets are the same; zstd is bundled inside blosc2. vmlib + ffi are linked in the wasm block.
+target_link_libraries(Qubic
+        platform_common
+        platform_efi
+        jsoncpp_static drogon fmt::fmt Blosc2::blosc2_static
+        Threads::Threads
+)
 else()
 target_link_libraries(Qubic
         platform_common
