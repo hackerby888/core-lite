@@ -175,7 +175,7 @@ jobs:
           if-no-files-found: error
 
   # Per-platform deploy smoke: boot the freshly-built node and run `qinit test` against it — a REAL
-  # on-chain deploy + read + write (Counter: Get -> Inc -> Get) through the wasm engine, not a tick-only
+  # on-chain deploy + read + write (DigestProbe: Get -> Inc -> Get) through the wasm engine, not a tick-only
   # check. A crash / deploy-fail / test-fail turns the job red, so a node change that breaks the
   # deploy-exec pipeline is caught. Does NOT gate the release (publish needs [node, headers]) — advisory.
   # All three legs GATE (a failure fails the run): the contract-state RAM trims drop the macOS node to
@@ -231,7 +231,7 @@ jobs:
           # Run the node as plain "Qubic" so qinit's `pkill/pgrep -x Qubic` manages its lifecycle.
           cp "Qubic-${{ matrix.key }}" Qubic && chmod +x Qubic
           mkdir -p proj/contracts
-          cp qinit/fixtures/Counter.h proj/contracts/Counter.h
+          cp qinit/fixtures/DigestProbe.h proj/contracts/DigestProbe.h
           cd proj
           # --skip-verify: the contractverify qpi-lint gate is x64-only + auto-downloaded; it crashes on
           # the runner (exit!=0, no parsed errors) and fails the build spuriously. The node deploy/exec
@@ -239,7 +239,7 @@ jobs:
           bun "$GITHUB_WORKSPACE/qinit/packages/cli/src/index.tsx" test \
             --bin "$GITHUB_WORKSPACE/Qubic" \
             --core "$GITHUB_WORKSPACE/core" \
-            --contract contracts/Counter.h --name Counter --skip-verify \
+            --contract contracts/DigestProbe.h --name DigestProbe --skip-verify \
             --wait 150 --timeout 90000 --keep
           # node kept alive (--keep): read the deployed contract's canonical state digest (K12 of the full
           # effective state). It must be byte-identical across platforms — a cross-arch consensus check a
@@ -253,7 +253,7 @@ jobs:
           pkill -x Qubic || true
           [ -n "$D" ] || { echo "no state digest from node"; exit 1; }
           echo "$D" > "$GITHUB_WORKSPACE/digest-${{ matrix.key }}.txt"
-          echo "::notice::${{ matrix.key }} Counter state digest = $D"
+          echo "::notice::${{ matrix.key }} DigestProbe state digest = $D"
       - name: Upload state digest
         uses: actions/upload-artifact@v4
         with:
@@ -270,7 +270,7 @@ jobs:
           "${WASM_CLANG:-clang++}" --version | head -2 || true
           bun -e '
             const { buildContract } = await import("./packages/build/src/index.ts");
-            const b = await buildContract({ contractPath: process.env.GITHUB_WORKSPACE + "/qinit/fixtures/Counter.h", name: "Counter", slot: 28, corePath: process.env.GITHUB_WORKSPACE + "/core", outDir: "/tmp/diag" });
+            const b = await buildContract({ contractPath: process.env.GITHUB_WORKSPACE + "/qinit/fixtures/DigestProbe.h", name: "DigestProbe", slot: 28, corePath: process.env.GITHUB_WORKSPACE + "/core", outDir: "/tmp/diag" });
             console.log("build.ok =", b.ok, " hash =", b.hash, " so =", b.so);
             if (!b.ok) { console.log("=== build stderr ==="); console.log(b.stderr || "(none)"); }
           ' || true
@@ -293,13 +293,13 @@ jobs:
       - name: State digests must match across platforms
         run: |
           cd digests
-          echo "=== per-platform Counter state digest ==="
+          echo "=== per-platform DigestProbe state digest ==="
           for f in digest-*.txt; do echo "$f -> $(cat "$f")"; done
           n=$(ls digest-*.txt | wc -l)
           [ "$n" -ge 2 ] || { echo "need >=2 platform digests, got $n"; exit 1; }
           u=$(cat digest-*.txt | sort -u | wc -l)
           [ "$u" -eq 1 ] || { echo "::error::DIVERGENCE — contract state digest differs across platforms"; exit 1; }
-          echo "OK: all $n platforms agree on the Counter state digest -> $(cat digest-*.txt | head -1)"
+          echo "OK: all $n platforms agree on the DigestProbe state digest -> $(cat digest-*.txt | head -1)"
 
   headers:
     # release-only: a branch push runs build + smoke, not headers/publish
