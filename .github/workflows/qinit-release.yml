@@ -174,15 +174,64 @@ jobs:
             Qubic-darwin-arm64.sha256
           if-no-files-found: error
 
+  # Windows (MSVC) node — the 4th digest-equivalence leg (WINDOWS_PORT.md Phase 3b). Same cmake recipe
+  # as windows-dyn-build.yml (keep in sync). Advisory like macOS (continue-on-error): a Windows runner
+  # hiccup never blocks the linux release; the digest-check degrades to the legs that uploaded.
+  node-windows:
+    needs: resolve
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: vcpkg-x64-win-rel-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-x64-win-rel-
+      - name: Release-only vcpkg triplet
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force triplets-overlay | Out-Null
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x64)',
+            'set(VCPKG_CRT_LINKAGE dynamic)',
+            'set(VCPKG_LIBRARY_LINKAGE dynamic)',
+            'set(VCPKG_BUILD_TYPE release)'
+          ) | Set-Content -Encoding ascii triplets-overlay/x64-windows-rel.cmake
+      - name: Configure (MSVC, dynamic + wasm)
+        shell: pwsh
+        run: |
+          $vcpkg = "$env:VCPKG_INSTALLATION_ROOT"
+          $inst  = "$PWD/build-win/vcpkg_installed/x64-windows-rel"
+          cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_OVERLAY_TRIPLETS="$PWD/triplets-overlay" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-rel `
+            -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF `
+            -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON `
+            -DLITE_DYNAMIC_CONTRACTS=ON -DLITE_WASM_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON `
+            -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF `
+            -DFFI_LIB_SHARED="$inst/lib/ffi.lib" -DFFI_INCLUDE_DIR="$inst/include"
+      - name: Build Qubic
+        run: cmake --build build-win --config Release --target Qubic --parallel 4
+      - name: Upload node artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-windows-x64
+          # the whole dir: vcpkg applocal puts the runtime DLLs (ffi-8/openssl/...) next to Qubic.exe
+          path: build-win/src/Release/
+          if-no-files-found: error
+
   # Per-platform deploy smoke: boot the freshly-built node and run `qinit test` against it — a REAL
   # on-chain deploy + read + write (DigestProbe: Get -> Inc -> Get) through the wasm engine, not a tick-only
   # check. A crash / deploy-fail / test-fail turns the job red, so a node change that breaks the
   # deploy-exec pipeline is caught. Does NOT gate the release (publish needs [node, headers]) — advisory.
-  # All three legs GATE (a failure fails the run): the contract-state RAM trims drop the macOS node to
-  # ~1.9 GB so it fits the 7 GB macos-14 runner. Caveat: macOS smoke `needs` node-macos (continue-on-error
-  # for brew flakiness) — if that build flakes its artifact is absent and this leg goes red on download.
+  # All legs GATE (a failure fails the run): the contract-state RAM trims drop the macOS node to
+  # ~1.9 GB so it fits the 7 GB macos-14 runner. Caveat: macOS/Windows smoke `needs` builds that are
+  # continue-on-error — if one flakes its artifact is absent and that leg goes red on download.
   smoke:
-    needs: [node, node-macos]
+    needs: [node, node-macos, node-windows]
     strategy:
       fail-fast: false
       matrix:
@@ -190,6 +239,7 @@ jobs:
           - { runner: ubuntu-22.04,     key: linux-x64,    artifact: node-linux-x64 }
           - { runner: ubuntu-24.04-arm, key: linux-arm64,  artifact: node-linux-arm64 }
           - { runner: macos-14,         key: darwin-arm64, artifact: node-darwin-arm64 }
+          - { runner: windows-latest,   key: windows-x64,  artifact: node-windows-x64 }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -201,11 +251,13 @@ jobs:
         with: { repository: hackerby888/qinit, ref: main, path: qinit }
       - uses: oven-sh/setup-bun@v2
       - name: Install qinit deps
+        shell: bash
         run: cd qinit && bun install
       # The wasm contract compiler (wasi-sdk) is normally fetched by `qinit up`; a cold CI runner has no
       # cache, so the contract build would fall back to plain clang++ and fail. Fetch the per-host sdk,
       # then PIN WASM_CLANG/WASI_SYSROOT so the build never silently falls back; verify the clang runs.
       - name: Fetch wasi-sdk (wasm contract compiler)
+        shell: bash
         run: |
           cd qinit
           bun -e '
@@ -227,9 +279,17 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
       - name: qinit test (deploy + read + write)
+        shell: bash   # Git Bash on the windows runner — same script for all four legs
         run: |
-          # Run the node as plain "Qubic" so qinit's `pkill/pgrep -x Qubic` manages its lifecycle.
-          cp "Qubic-${{ matrix.key }}" Qubic && chmod +x Qubic
+          # Run the node as plain "Qubic" so qinit's node-ops (pkill/pgrep, taskkill/tasklist on
+          # Windows — image name Qubic.exe) manage its lifecycle. The windows artifact is a directory
+          # (Qubic.exe + its vcpkg-applocal DLLs), already correctly named.
+          if [ "${{ matrix.key }}" = "windows-x64" ]; then
+            BIN="$GITHUB_WORKSPACE/Qubic.exe"
+          else
+            cp "Qubic-${{ matrix.key }}" Qubic && chmod +x Qubic
+            BIN="$GITHUB_WORKSPACE/Qubic"
+          fi
           mkdir -p proj/contracts
           cp qinit/fixtures/DigestProbe.h proj/contracts/DigestProbe.h
           cd proj
@@ -237,7 +297,7 @@ jobs:
           # the runner (exit!=0, no parsed errors) and fails the build spuriously. The node deploy/exec
           # smoke doesn't lint qpi rules (qinit's own corpus job does); the fixture is known-good.
           bun "$GITHUB_WORKSPACE/qinit/packages/cli/src/index.tsx" test \
-            --bin "$GITHUB_WORKSPACE/Qubic" \
+            --bin "$BIN" \
             --core "$GITHUB_WORKSPACE/core" \
             --contract contracts/DigestProbe.h --name DigestProbe --skip-verify \
             --wait 150 --timeout 90000 --keep
@@ -250,7 +310,7 @@ jobs:
             D=$(curl -s "http://127.0.0.1:41841/live/v1/dev/contract-digest?slot=$SLOT" | jq -r '.digest // empty')
             [ -n "$D" ] && break; sleep 2
           done
-          pkill -x Qubic || true
+          if [ "${{ matrix.key }}" = "windows-x64" ]; then taskkill -f -im Qubic.exe || true; else pkill -x Qubic || true; fi
           [ -n "$D" ] || { echo "no state digest from node"; exit 1; }
           echo "$D" > "$GITHUB_WORKSPACE/digest-${{ matrix.key }}.txt"
           echo "::notice::${{ matrix.key }} DigestProbe state digest = $D"
@@ -264,6 +324,7 @@ jobs:
       # contract directly to print the real clang/wasm error when a leg goes red.
       - name: Diagnose contract build (on failure)
         if: failure()
+        shell: bash
         run: |
           cd qinit
           echo "WASM_CLANG=${WASM_CLANG:-<unset>}  WASI_SYSROOT=${WASI_SYSROOT:-<unset>}"
@@ -276,6 +337,7 @@ jobs:
           ' || true
       - name: Node log tail (on failure)
         if: failure()
+        shell: bash
         run: tail -120 "$HOME/.cache/qinit/run/node.log" 2>/dev/null || true
 
   # Cross-platform consensus check: the deployed contract's state digest must be byte-identical on every
