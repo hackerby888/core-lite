@@ -12,7 +12,16 @@ on:
         required: true
         default: "qinit-dev"
   push:
+    # qinit-v* tag => full pipeline incl publish. A push to the dev branch (code paths only) => build +
+    # 3-platform deploy smoke ONLY (headers/publish are tag/dispatch-gated below), so the smoke guards the
+    # branch without cutting a release. workflow_dispatch is the unfiltered release / escape hatch.
+    branches: [feat/dynamic-contracts]
     tags: ["qinit-v*"]
+    paths:
+      - 'src/**'
+      - 'lib/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/qinit-release.yml'
 
 permissions:
   contents: write   # create releases + upload assets
@@ -251,6 +260,8 @@ jobs:
         run: tail -120 "$HOME/.cache/qinit/run/node.log" 2>/dev/null || true
 
   headers:
+    # release-only: a branch push runs build + smoke, not headers/publish
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: resolve
     runs-on: ubuntu-22.04
     steps:
@@ -277,6 +288,8 @@ jobs:
         with: { name: headers, path: "core-headers.*", if-no-files-found: error }
 
   publish:
+    # release-only: never publish on a branch push (build + smoke only)
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: [resolve, node, node-macos, headers]
     runs-on: ubuntu-22.04
     env:
