@@ -6,7 +6,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Force static libraries" FORCE)
-set(CMAKE_FIND_LIBRARY_SUFFIXES ".a") # Only look for static archives
+if(NOT WIN32)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a") # Only look for static archives (unix); Windows uses .lib/.dll
+endif()
 
 # Enable FetchContent module
 include(FetchContent)
@@ -192,6 +194,8 @@ if(LITE_WASM_CONTRACTS)
     # (FetchContent, SHA-pinned). ---
     if(APPLE)
         set(WAMR_BUILD_PLATFORM "darwin")
+    elseif(WIN32)
+        set(WAMR_BUILD_PLATFORM "windows")
     else()
         set(WAMR_BUILD_PLATFORM "linux")
     endif()

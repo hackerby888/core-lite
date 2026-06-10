@@ -1,0 +1,56 @@
+# Phase 1 of the Windows dynamic-contract port: does the TESTNET + LITE_DYNAMIC_CONTRACTS + LITE_WASM_CONTRACTS
+# node BUILD under MSVC? Uses cmake + the Visual Studio generator so it reuses the dynamic/WAMR/libffi wiring
+# the mainnet Qubic.sln lacks (k12_engine is Linux-only -> Windows falls to the demand-zero VirtualAlloc path).
+# This is a porting probe — expect iteration: read the MSVC errors, fix, repeat. Gates nothing yet.
+# Run on the fork (hackerby888/core-lite), NEVER qubic upstream.
+name: windows-dyn-build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/dynamic-contracts]
+    paths:
+      - 'src/**'
+      - 'lib/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/windows-dyn-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nasm
+        run: choco install nasm -y --no-progress
+
+      - name: Install libffi (vcpkg static)
+        shell: pwsh
+        run: vcpkg install libffi:x64-windows-static
+
+      # Same dynamic-node config as the linux/macos node builds. ONLY_LOGGING=OFF uses the committed
+      # public-testnet src/private_settings.h (ON collides with TESTNET on the broadcastedComputorSeeds shim).
+      - name: Configure (MSVC, dynamic + wasm)
+        shell: pwsh
+        run: |
+          $ffi = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows-static"
+          cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64 `
+            -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF `
+            -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON `
+            -DLITE_DYNAMIC_CONTRACTS=ON -DLITE_WASM_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON `
+            -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF `
+            -DFFI_LIB_SHARED="$ffi/lib/ffi.lib" -DFFI_INCLUDE_DIR="$ffi/include"
+
+      - name: Build Qubic
+        run: cmake --build build-win --config Release --target Qubic -- /m
+
+      - name: Upload binary
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Qubic-windows-x64
+          path: build-win/src/Release/Qubic.exe
+          if-no-files-found: warn
