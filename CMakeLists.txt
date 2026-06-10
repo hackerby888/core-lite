@@ -68,6 +68,14 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(blosc2)
 include_directories(${blosc2_SOURCE_DIR}/include)
 
+# Windows: blosc2's project() enables ASM_NASM (so nasm must exist), but our .asm files (EDK2 BaseLib
+# SetJump/LongJump, WAMR invokeNative_em64) are MASM syntax. Both ASM_NASM and ASM_MASM claim the .asm
+# extension and NASM (enabled later) wins -> nasm -fwin32 -> MSB3721. Drop "asm" from NASM's extensions so
+# .asm route to ml64 (MASM); blosc2 has no .asm sources (its SSE4.2 CRC is inline C).
+if(WIN32)
+    list(REMOVE_ITEM CMAKE_ASM_NASM_SOURCE_FILE_EXTENSIONS asm)
+endif()
+
 # WAMR runtime for wasm contracts, fetched + SHA-pinned (= tag WAMR-2.4.3) so src/ and test/ build vmlib from
 # the same source. Consensus-critical: bump the SHA deliberately. SOURCE_SUBDIR -> a nonexistent dir makes
 # MakeAvailable download-only; vmlib is built via build-scripts/runtime_lib.cmake in src/ and test/.
