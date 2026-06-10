@@ -332,7 +332,10 @@ jobs:
   publish:
     # release-only: never publish on a branch push (build + smoke only)
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: [resolve, node, node-macos, headers]
+    # gate the release on the deploy smoke + cross-platform digest-equivalence: never publish a node that
+    # can't deploy/run a contract, or whose exec diverges across platforms. (A macOS infra flake then blocks
+    # the release until re-dispatch — acceptable: correctness > convenience for a published node.)
+    needs: [resolve, node, node-macos, headers, smoke, digest-check]
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ github.token }}
