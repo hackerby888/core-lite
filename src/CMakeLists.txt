@@ -35,6 +35,10 @@ if(IS_ARM)
     # arm and link a never-called stub symbol. Also expose the x86 <cpuid.h> shim for arm.
     include_directories(${CMAKE_SOURCE_DIR}/lib/platform_common/arm_shims)
     set(CUSTOM_STACK_OBJ ${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack_arm_stub.cpp)
+elseif(WIN32)
+    # custom_stack.nasm is x86-64 ELF asm + deadcode on the OS port (setjmp is used). MSVC has no nasm and
+    # -f elf64 is Linux-only; link the same never-called no-op stub (name says arm, but it's generic).
+    set(CUSTOM_STACK_OBJ ${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack_arm_stub.cpp)
 else()
     set(ASM_FILE "${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack.nasm")
     set(ASM_OBJ "${CMAKE_CURRENT_BINARY_DIR}/custom_stack.obj")
