@@ -24,9 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install nasm
-        run: choco install nasm -y --no-progress
-
+      # NOTE: nasm intentionally NOT installed. With nasm on PATH, CMake routes the MASM-syntax .asm files
+      # (EDK2 SetJump/LongJump, WAMR invokeNative_em64) to nasm -fwin32 -> error. Without it, all .asm use
+      # MASM (ml64). blosc2 uses C intrinsics (no nasm); WAMR's Windows asm is MASM.
       # Cache the vcpkg binary archives so drogon/jsoncpp/fmt/libffi rebuild only on the first run (keyed on
       # the manifest + triplet); later iterations of this porting loop restore them in seconds.
       - name: Cache vcpkg binaries
