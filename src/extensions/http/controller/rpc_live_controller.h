@@ -36,6 +36,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
     ADD_METHOD_TO(RpcLiveController::devDebug, "/live/v1/dev/debug", Get);
     ADD_METHOD_TO(RpcLiveController::devDebugClear, "/live/v1/dev/debug-clear", Get);
     ADD_METHOD_TO(RpcLiveController::devStateRead, "/live/v1/dev/state-read", Get);
+    ADD_METHOD_TO(RpcLiveController::devContractDigest, "/live/v1/dev/contract-digest", Get);
 #endif
 #if ADDON_TX_STATUS_REQUEST
     ADD_METHOD_TO(RpcLiveController::txStatus, "/live/v1/tx-status/{tick}/{tx}", Get);
@@ -739,6 +740,31 @@ class RpcLiveController : public HttpController<RpcLiveController>
         std::string hex; hex.reserve((size_t)len * 2);
         for (unsigned long long i = 0; i < len; i++) { hex += h[st[off + i] >> 4]; hex += h[st[off + i] & 15]; }
         json["off"] = (Json::UInt64)off; json["len"] = (Json::UInt64)len; json["stateSize"] = (Json::UInt64)ss; json["hex"] = hex;
+        cb(HttpResponse::newHttpJsonResponse(json));
+    }
+    // GET /live/v1/dev/contract-digest?slot=N — K12 digest of the contract's full effective state (the
+    // consensus contract-state digest). Cross-platform determinism check: identical exec => identical digest,
+    // regardless of arch/OS. Catches a state-byte/layout divergence that a value read (Get==1) would miss.
+    inline void devContractDigest(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        Json::Value json;
+        int idx = std::atoi(req->getParameter("slot").c_str());
+        const int local = idx - (int)LITEDYN0_CONTRACT_INDEX;
+        bool ok; unsigned long long ss;
+        if (idx >= (int)LITEDYN0_CONTRACT_INDEX) {
+            ok = (local >= 0 && local < (int)LITE_DYN_SLOT_COUNT && liteWasmIsWasm(idx) && contractStates[idx]);
+            ss = ok ? liteWasmEffectiveStateSize(idx, contractDescriptions[idx].stateSize) : 0;
+        } else {
+            ok = (idx >= 1 && idx < (int)contractCount && contractStates[idx]);
+            ss = ok ? contractDescriptions[idx].stateSize : 0;
+        }
+        if (!ok) { json["error"] = "bad slot"; cb(HttpResponse::newHttpJsonResponse(json)); return; }
+        unsigned char d[32];
+        KangarooTwelve(contractStates[idx], (unsigned int)ss, d, 32);
+        static const char *hx = "0123456789abcdef";
+        std::string hex; hex.reserve(64);
+        for (int i = 0; i < 32; i++) { hex += hx[d[i] >> 4]; hex += hx[d[i] & 15]; }
+        json["slot"] = idx; json["stateSize"] = (Json::UInt64)ss; json["digest"] = hex;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 #endif

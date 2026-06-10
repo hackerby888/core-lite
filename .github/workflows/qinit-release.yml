@@ -222,7 +222,7 @@ jobs:
       # The darwin node links keg-only brew dylibs (jsoncpp/fmt/ffi/…); a fresh runner lacks them.
       - name: Install macOS runtime libs
         if: matrix.key == 'darwin-arm64'
-        run: brew install jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi || true
+        run: brew install jq jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi || true
       - uses: actions/download-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -240,7 +240,26 @@ jobs:
             --bin "$GITHUB_WORKSPACE/Qubic" \
             --core "$GITHUB_WORKSPACE/core" \
             --contract contracts/Counter.h --name Counter --skip-verify \
-            --wait 150 --timeout 90000
+            --wait 150 --timeout 90000 --keep
+          # node kept alive (--keep): read the deployed contract's canonical state digest (K12 of the full
+          # effective state). It must be byte-identical across platforms — a cross-arch consensus check a
+          # value read (Get==1, canonicalized by RPC) can't make. The digest-check job compares the legs.
+          SLOT=$(jq -r 'keys[0]' qinit.idl.json)
+          echo "deployed slot=$SLOT"
+          D=""; for i in $(seq 1 12); do
+            D=$(curl -s "http://127.0.0.1:41841/live/v1/dev/contract-digest?slot=$SLOT" | jq -r '.digest // empty')
+            [ -n "$D" ] && break; sleep 2
+          done
+          pkill -x Qubic || true
+          [ -n "$D" ] || { echo "no state digest from node"; exit 1; }
+          echo "$D" > "$GITHUB_WORKSPACE/digest-${{ matrix.key }}.txt"
+          echo "::notice::${{ matrix.key }} Counter state digest = $D"
+      - name: Upload state digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.key }}
+          path: digest-${{ matrix.key }}.txt
+          if-no-files-found: error
       # qinit test swallows the contract-build stderr (it only surfaces "compile failed"); rebuild the
       # contract directly to print the real clang/wasm error when a leg goes red.
       - name: Diagnose contract build (on failure)
@@ -258,6 +277,29 @@ jobs:
       - name: Node log tail (on failure)
         if: failure()
         run: tail -120 "$HOME/.cache/qinit/run/node.log" 2>/dev/null || true
+
+  # Cross-platform consensus check: the deployed contract's state digest must be byte-identical on every
+  # platform (same wasm exec => same state bytes => same K12). Catches an arch/OS layout/endianness
+  # divergence a value read (Get==1) would miss. needs: smoke => runs only when all legs uploaded a digest.
+  digest-check:
+    needs: smoke
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: 'digest-*'
+          path: digests
+          merge-multiple: true
+      - name: State digests must match across platforms
+        run: |
+          cd digests
+          echo "=== per-platform Counter state digest ==="
+          for f in digest-*.txt; do echo "$f -> $(cat "$f")"; done
+          n=$(ls digest-*.txt | wc -l)
+          [ "$n" -ge 2 ] || { echo "need >=2 platform digests, got $n"; exit 1; }
+          u=$(cat digest-*.txt | sort -u | wc -l)
+          [ "$u" -eq 1 ] || { echo "::error::DIVERGENCE — contract state digest differs across platforms"; exit 1; }
+          echo "OK: all $n platforms agree on the Counter state digest -> $(cat digest-*.txt | head -1)"
 
   headers:
     # release-only: a branch push runs build + smoke, not headers/publish
