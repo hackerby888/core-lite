@@ -215,6 +215,16 @@ if(LITE_WASM_CONTRACTS)
     set(WAMR_DISABLE_HW_BOUND_CHECK 1) # SW bounds checks -> no per-thread SIGSEGV handler (we run wasm on the node's tick/RPC threads)
     include(${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
     add_library(vmlib STATIC ${WAMR_RUNTIME_LIB_SOURCE})
+    if(WIN32)
+        # WAMR's invokeNative_em64.asm is MASM syntax (the MSVC variant). ASM_NASM (enabled for blosc2's
+        # project()) otherwise claims the .asm extension and assembles it as nasm -fwin32 -> MSB3721. Pin
+        # WAMR's .asm sources to ml64 (MASM) here, in vmlib's own directory scope.
+        foreach(_wsrc ${WAMR_RUNTIME_LIB_SOURCE})
+            if(_wsrc MATCHES "\\.asm$")
+                set_source_files_properties(${_wsrc} PROPERTIES LANGUAGE ASM_MASM)
+            endif()
+        endforeach()
+    endif()
     target_include_directories(Qubic PRIVATE ${WAMR_ROOT_DIR}/core/iwasm/include)
 
     # --- libffi (host-side node dep; prefer the static archive for distribution) ---
