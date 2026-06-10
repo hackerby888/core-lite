@@ -4,6 +4,7 @@
   "dependencies": [
     "fmt",
     "jsoncpp",
-    "drogon"
+    "drogon",
+    "libffi"
   ]
 }

@@ -27,22 +27,23 @@ jobs:
       - name: Install nasm
         run: choco install nasm -y --no-progress
 
-      - name: Install libffi (vcpkg static)
-        shell: pwsh
-        run: vcpkg install libffi:x64-windows-static
-
-      # Same dynamic-node config as the linux/macos node builds. ONLY_LOGGING=OFF uses the committed
-      # public-testnet src/private_settings.h (ON collides with TESTNET on the broadcastedComputorSeeds shim).
+      # vcpkg is MANIFEST mode here (root vcpkg.json: fmt/jsoncpp/drogon/libffi — the node's RPC + ffi deps).
+      # The vcpkg toolchain file auto-installs them at configure; WAMR is FetchContent (no vcpkg). Default
+      # x64-windows triplet (dynamic CRT /MD) for the probe. ONLY_LOGGING=OFF uses the committed testnet
+      # private_settings.h (ON collides with TESTNET on the broadcastedComputorSeeds shim).
       - name: Configure (MSVC, dynamic + wasm)
         shell: pwsh
         run: |
-          $ffi = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows-static"
+          $vcpkg = "$env:VCPKG_INSTALLATION_ROOT"
+          $inst  = "$vcpkg/installed/x64-windows"
           cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF `
             -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON `
             -DLITE_DYNAMIC_CONTRACTS=ON -DLITE_WASM_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON `
             -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF `
-            -DFFI_LIB_SHARED="$ffi/lib/ffi.lib" -DFFI_INCLUDE_DIR="$ffi/include"
+            -DFFI_LIB_SHARED="$inst/lib/ffi.lib" -DFFI_INCLUDE_DIR="$inst/include"
 
       - name: Build Qubic
         run: cmake --build build-win --config Release --target Qubic -- /m
