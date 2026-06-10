@@ -8,6 +8,12 @@
 
 #include "extensions/lite_dyn_abi.h" // shared ABI structs (LiteHostServices vtable etc)
 
+#ifdef _MSC_VER
+// The Windows SDK's specstrings.h (pulled in by <windows.h> via overload.h) defines a function-like
+// SAL macro `__transfer(formal)` that mangles the QPI __transfer member calls below. We never use SAL.
+#undef __transfer
+#endif
+
 // Upper bound on a deployable contract module. Bytes live here (extension state), not in any StateData.
 #ifndef LITE_DYN_MAX_MODULE
 #define LITE_DYN_MAX_MODULE (4u * 1024u * 1024u)

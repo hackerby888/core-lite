@@ -2,7 +2,7 @@
 
 static unsigned long long httpPasscodes[4] = {};
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 
 #include <drogon/drogon.h>
 

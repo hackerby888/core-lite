@@ -9725,7 +9725,7 @@ void processArgs(int argc, const char* argv[]) {
     }
 }
 
-#if (defined(__linux__) || defined(__APPLE__)) && !defined(NO_RPC)
+#if !defined(NO_RPC)   // all OS ports (linux/macOS/windows): drogon is cross-platform
 void watchAndCheckin()
 {
     // start watch thread
@@ -9843,7 +9843,7 @@ int main(int argc, const char* argv[]) {
     logColorToScreen("INFO", "================== ~~~~~~~~~~~~~~~ ==================\n");
 
     Overload::initializeUefi();
-#if (defined(__linux__) || defined(__APPLE__)) && !defined(NO_RPC)
+#if !defined(NO_RPC)   // all OS ports (linux/macOS/windows): drogon is cross-platform
     QubicHttpServer::start(httpPort);
     watchAndCheckin();
 #endif

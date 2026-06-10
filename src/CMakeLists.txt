@@ -150,6 +150,22 @@ if(NOT WIN32)
     )
     add_custom_target(explorer_assets_gen DEPENDS ${EXPLORER_ASSETS_OUT})
     add_dependencies(Qubic explorer_assets_gen)
+else()
+    # Windows: no bash — regen.cmake produces the identical header via `cmake -P`.
+    set(EXPLORER_ASSETS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extensions/http/static/explorer)
+    set(EXPLORER_ASSETS_OUT ${CMAKE_CURRENT_SOURCE_DIR}/extensions/http/controller/explorer_assets.generated.h)
+    add_custom_command(
+        OUTPUT  ${EXPLORER_ASSETS_OUT}
+        DEPENDS ${EXPLORER_ASSETS_DIR}/index.html
+                ${EXPLORER_ASSETS_DIR}/style.css
+                ${EXPLORER_ASSETS_DIR}/app.js
+                ${EXPLORER_ASSETS_DIR}/regen.cmake
+        COMMAND ${CMAKE_COMMAND} -DSRC=${EXPLORER_ASSETS_DIR} -DOUT=${EXPLORER_ASSETS_OUT} -P ${EXPLORER_ASSETS_DIR}/regen.cmake
+        COMMENT "Regenerating explorer embedded assets header (cmake -P)"
+        VERBATIM
+    )
+    add_custom_target(explorer_assets_gen DEPENDS ${EXPLORER_ASSETS_OUT})
+    add_dependencies(Qubic explorer_assets_gen)
 endif()
 
 if(TESTNET)
@@ -281,9 +297,14 @@ elseif(IS_CLANG OR IS_GCC)
         -w
     )
 elseif(IS_MSVC)
-    # MSVC-specific flags
+    # MSVC-specific flags. /Zc:wchar_t- = wchar_t is unsigned short (= CHAR16), same as the mainnet
+    # Qubic.sln — L"..." literals are CHAR16* everywhere. Deps are unaffected (their APIs are
+    # std::string-based; <filesystem>'s wchar_t internals are extern "C", so no mangling to clash).
+    # NOMINMAX: <windows.h> (overload.h) min/max macros break the std::min/std::max call sites.
     target_compile_options(Qubic PRIVATE
        /D_CONSOLE
+       /DNOMINMAX
+       /Zc:wchar_t-
        $<$<CONFIG:Release>:/DNDEBUG>
     )
 endif()
@@ -329,9 +350,8 @@ endif()
 
 # Configure linker settings based on compiler
 if(IS_MSVC)
-    # MSVC-specific linker settings
-    set_target_properties(Qubic PROPERTIES SUFFIX ".efi")
-    
+    # OS-process node (qubic.cpp defines NO_UEFI unconditionally): keep the default .exe suffix.
+    # (The old SUFFIX .efi predates the OS port; the EFI binary builds via Qubic.sln, not CMake.)
 elseif(IS_CLANG)
     # Use default linker settings for Clang
 endif()

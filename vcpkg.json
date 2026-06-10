@@ -2,9 +2,10 @@
   "name": "qubic-core-lite",
   "version-string": "0.1.0",
   "dependencies": [
-    "fmt",
-    "jsoncpp",
-    "drogon",
-    "libffi"
+    "libffi",
+    "openssl",
+    "c-ares",
+    "zlib",
+    "brotli"
   ]
 }

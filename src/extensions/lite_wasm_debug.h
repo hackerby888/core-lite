@@ -18,9 +18,13 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#ifdef _WIN32
+#include <windows.h>   // VirtualProtect + AddVectoredExceptionHandler replace mprotect + sigaction
+#else
 #include <signal.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#endif
 
 #ifndef LITE_WASM_TRACE_RING
 #define LITE_WASM_TRACE_RING  256u           // entries kept
@@ -62,8 +66,13 @@ static volatile long      g_liteWasmTraceLock = 0;
 static unsigned int       g_liteWasmTraceHead = 0;
 static unsigned long long g_liteWasmTraceSeq  = 0;
 
+#ifdef _MSC_VER
+static inline void liteWasmTraceAcquire() { while (_InterlockedExchange(&g_liteWasmTraceLock, 1)) {} }
+static inline void liteWasmTraceRelease() { _InterlockedExchange(&g_liteWasmTraceLock, 0); }
+#else
 static inline void liteWasmTraceAcquire() { while (__sync_lock_test_and_set(&g_liteWasmTraceLock, 1)) {} }
 static inline void liteWasmTraceRelease() { __sync_lock_release(&g_liteWasmTraceLock); }
+#endif
 
 static inline void liteWasmTraceHostCall(LiteWasmTraceEntry* e, const char* name, const std::string& detail) {
     if (e && e->hostCalls.size() < 64) e->hostCalls.push_back({ name, detail });
@@ -109,7 +118,9 @@ static inline void liteWasmTraceLog(LiteWasmTraceEntry* e, unsigned char type, c
 
 // ---- dirty-page state tracking (write calls are single-threaded -> thread_local, lock-free) -------------
 static long g_liteWasmPageSize = 4096;
+#ifndef _WIN32
 static struct sigaction g_liteWasmOldSegv;
+#endif
 static bool g_liteWasmSegvInstalled = false;
 static thread_local bool           t_liteWasmDirtyActive = false;
 static thread_local unsigned char* t_liteWasmProtLo = nullptr;
@@ -119,6 +130,26 @@ static thread_local unsigned char* t_liteWasmDirtyPages[LITE_WASM_DIRTY_MAX];
 static thread_local unsigned int   t_liteWasmDirtyCount = 0;
 static thread_local bool           t_liteWasmDirtyTrunc = false;
 
+#ifdef _WIN32
+// Windows: a vectored exception handler plays the SIGSEGV role — first-chance access violations on the
+// RO-protected state region save the page's pre-write bytes, re-arm it RW and resume; anything else
+// continues the normal search (boost windbg / WER).
+static LONG WINAPI liteWasmVeh(EXCEPTION_POINTERS* xp) {
+    if (xp->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    unsigned char* fa = (unsigned char*)xp->ExceptionRecord->ExceptionInformation[1];
+    if (t_liteWasmDirtyActive && fa >= t_liteWasmProtLo && fa < t_liteWasmProtHi) {
+        unsigned char* page = (unsigned char*)((uintptr_t)fa & ~(uintptr_t)(g_liteWasmPageSize - 1));
+        if (t_liteWasmDirtyCount < LITE_WASM_DIRTY_MAX && t_liteWasmDirtyBefore) {   // save pre-write bytes once
+            memcpy(t_liteWasmDirtyBefore + (size_t)t_liteWasmDirtyCount * g_liteWasmPageSize, page, g_liteWasmPageSize);
+            t_liteWasmDirtyPages[t_liteWasmDirtyCount++] = page;
+        } else t_liteWasmDirtyTrunc = true;
+        DWORD oldProt;
+        VirtualProtect(page, (SIZE_T)g_liteWasmPageSize, PAGE_READWRITE, &oldProt);  // let the write proceed
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#else
 static void liteWasmSegv(int sig, siginfo_t* info, void* uc) {
     unsigned char* fa = (unsigned char*)info->si_addr;
     if (t_liteWasmDirtyActive && fa >= t_liteWasmProtLo && fa < t_liteWasmProtHi) {
@@ -135,14 +166,21 @@ static void liteWasmSegv(int sig, siginfo_t* info, void* uc) {
     if (g_liteWasmOldSegv.sa_handler && g_liteWasmOldSegv.sa_handler != SIG_DFL && g_liteWasmOldSegv.sa_handler != SIG_IGN) { g_liteWasmOldSegv.sa_handler(sig); return; }
     signal(sig, SIG_DFL); raise(sig);
 }
+#endif
 
 // install once on first enable (save the boot-time handler); never uninstalled (inert when not tracking).
 static inline void liteWasmDebugSetEnabled(bool on) {
     if (on && !g_liteWasmSegvInstalled) {
+#ifdef _WIN32
+        SYSTEM_INFO si; GetSystemInfo(&si);
+        g_liteWasmPageSize = si.dwPageSize ? (long)si.dwPageSize : 4096;
+        AddVectoredExceptionHandler(1 /*first*/, liteWasmVeh);
+#else
         g_liteWasmPageSize = sysconf(_SC_PAGESIZE); if (g_liteWasmPageSize <= 0) g_liteWasmPageSize = 4096;
         struct sigaction sa; memset(&sa, 0, sizeof(sa));
         sa.sa_sigaction = liteWasmSegv; sa.sa_flags = SA_SIGINFO | SA_RESTART; sigemptyset(&sa.sa_mask);
         sigaction(SIGSEGV, &sa, &g_liteWasmOldSegv);
+#endif
         g_liteWasmSegvInstalled = true;
     }
     g_liteWasmDebug.store(on, std::memory_order_relaxed);
@@ -155,14 +193,23 @@ static inline void liteWasmDirtyBegin(unsigned char* stateStart, unsigned int st
     t_liteWasmDirtyCount = 0; t_liteWasmDirtyTrunc = false;
     t_liteWasmProtLo = stateStart;   // page-aligned (g_wasmState is alignas(page) in lite_wasm_tu.h)
     t_liteWasmProtHi = (unsigned char*)(((uintptr_t)(stateStart + stateSize) + g_liteWasmPageSize - 1) & ~(uintptr_t)(g_liteWasmPageSize - 1));
+#ifdef _WIN32
+    DWORD oldProt;
+    if (VirtualProtect(t_liteWasmProtLo, (SIZE_T)(t_liteWasmProtHi - t_liteWasmProtLo), PAGE_READONLY, &oldProt)) t_liteWasmDirtyActive = true;
+#else
     if (mprotect(t_liteWasmProtLo, t_liteWasmProtHi - t_liteWasmProtLo, PROT_READ) == 0) t_liteWasmDirtyActive = true;
+#endif
 }
 
 // after the call: restore RW + build the changed-byte diff (clipped to the real state range) into the entry.
 static inline void liteWasmDirtyEnd(LiteWasmTraceEntry& te, unsigned char* stateStart, unsigned int stateSize) {
     if (!t_liteWasmDirtyActive) return;
     t_liteWasmDirtyActive = false;
+#ifdef _WIN32
+    { DWORD oldProt; VirtualProtect(t_liteWasmProtLo, (SIZE_T)(t_liteWasmProtHi - t_liteWasmProtLo), PAGE_READWRITE, &oldProt); }
+#else
     mprotect(t_liteWasmProtLo, t_liteWasmProtHi - t_liteWasmProtLo, PROT_READ | PROT_WRITE);
+#endif
     te.stateTruncated = t_liteWasmDirtyTrunc;
     unsigned char* sEnd = stateStart + stateSize;
     for (unsigned int i = 0; i < t_liteWasmDirtyCount && te.stateDiff.size() < 256; i++) {

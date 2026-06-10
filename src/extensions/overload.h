@@ -9,6 +9,8 @@
 #include <ws2tcpip.h>
 #include <Windows.h>
 #include <conio.h>
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")   // timeBeginPeriod
 #define MSG_DONTWAIT 0
 #define MSG_NOSIGNAL 0
 #elif defined(__linux__) || defined(__APPLE__)
@@ -52,7 +54,7 @@ static std::string nodeAlias = "My Qubic Lite Node";
 static const auto liteNodeStartTime = std::chrono::system_clock::now();
 
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 #include <json/config.h>
 #include <json/value.h>
 #include <json/writer.h>
@@ -1005,6 +1007,12 @@ struct Overload {
             int buf_size = 16 * 1024 * 1024; // 16MB
             setsockopt(clientSocket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
             setsockopt(clientSocket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
+#ifdef _MSC_VER
+            // Nagle + delayed-ACK throttles the many small per-vote sends to ~5-25 msgs/s on Windows
+            // loopback — quorum (451 votes/tick) then takes minutes and the tick stalls at tx=?.
+            int nodelay = 1;
+            setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+#endif
 
             bool isLocal = false;
             if (peer)
@@ -1096,6 +1104,8 @@ struct Overload {
 #ifdef _MSC_VER
                 u_long mode = 1;
                 ioctlsocket(tcpData->socket, FIONBIO, &mode);
+                int nodelay = 1; // see Accept: Nagle stalls the per-vote sends on Windows loopback
+                setsockopt(tcpData->socket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
 #endif
             }
 
@@ -1232,6 +1242,10 @@ struct Overload {
 		// NOTE: In MSVC Release Mode, so the scheduler often just keeps the main thread on one CPU core (the best core), dont need to set affinity because it will slow down the main thread performance
         HANDLE hThread = GetCurrentThread();
         SetThreadAffinityMask(hThread, 1ULL << lastCpu);
+        // Default Windows timer resolution is ~15.6ms, so every sleep_for(1ms) in the request/vote/
+        // transmit loops actually sleeps ~15.6ms — throughput drops ~15x vs Linux and the tick stalls
+        // waiting for quorum votes (tx=?). 1ms resolution restores Linux-like pacing process-wide.
+        timeBeginPeriod(1);
         #endif
 
         ih = new EFI_HANDLE;
