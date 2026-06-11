@@ -173,6 +173,8 @@ namespace tickRollback
 
     static inline bool isArmed() { return gArmed.load(std::memory_order_acquire); }
     static inline bool overflowed() { return gOverflow.load(std::memory_order_acquire); }
+    static inline unsigned long long savedPageCount() { return gSavedCount.load(std::memory_order_acquire); }
+    static inline int regionCount() { return gNumRegions; }
 
     // Restore every dirtied page to its pre-tick content. Caller restores small/medium state separately.
     static inline void rollback()

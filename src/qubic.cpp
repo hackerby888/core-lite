@@ -6641,6 +6641,10 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                 // Roll the whole tick back to its pre-tick state and re-run it with full score
                                 // verification. A clean verified re-run reproduces the exact quorum state, fixing any
                                 // cascade (sender balance, contract getEntity, system procedures) with no assumptions.
+                                setText(message, L"  COW rollback: ");
+                                appendNumber(message, tickRollback::savedPageCount(), TRUE);
+                                appendText(message, L" dirty pages saved; re-running tick fully verified");
+                                logToConsole(message);
                                 tickRollback::rollback();
                                 restoreSmallStateForReRun();
                                 processTick(processorNumber, /*reRun=*/true); // recomputes etalonTick.saltedSpectrumDigest
@@ -6648,6 +6652,10 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                             else
 #endif
                             {
+#ifdef __linux__
+                            if (tickRollback::overflowed())
+                                logToConsole(L"  COW arena overflowed this tick; falling back to surgical reprocess");
+#endif
                             // Fallback when COW rollback is unavailable/overflowed: surgical reprocess + merkle recompute.
                             resourceTestingDigest = resourceTestingDigestRollback;
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
@@ -7469,6 +7477,14 @@ static bool initialize()
             tickRollback::registerRegion(minerSolutionFlags, NUMBER_OF_MINER_SOLUTION_FLAGS / 8);
             for (unsigned int ci = 0; ci < contractCount; ci++)
                 if (contractStates[ci]) tickRollback::registerRegion(contractStates[ci], contractDescriptions[ci].stateSize);
+            setText(message, L"Tick rollback (copy-on-write): ENABLED, ");
+            appendNumber(message, tickRollback::regionCount(), FALSE);
+            appendText(message, L" regions registered");
+            logToConsole(message);
+        }
+        else
+        {
+            logToConsole(L"Tick rollback (copy-on-write): DISABLED (no uffd-WP/WP_UNPOPULATED) - using permanent solution verification");
         }
 #endif
 
