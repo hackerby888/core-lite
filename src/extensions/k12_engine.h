@@ -270,7 +270,9 @@ public:
             close(fd);
             throw std::runtime_error("Error: mmap failed | Line: " + std::to_string(__LINE__));
         }
-        memset(buf, 0, size);
+        // Compress mode demand-zero-fills missing chunks on fault and the memfd is already zero, so skip the eager memset (keeps state demand-zero). Disk mode can't zero-fill a never-saved chunk, so it needs pages resident before uffd registration.
+        if (evictMode != EvictMode::Compress)
+            memset(buf, 0, size);
         lastMemfdFd = fd; // keep the fd open; derived ctor grabs it for copy_file_range
         return buf;
     }
@@ -375,6 +377,27 @@ public:
         return freed;
     }
 
+    // Zero-chunk leaf intermediate seeded into every chunk; mirrors _KangarooTwelve_Update's leaf path so the cached zero-state digest is bit-identical to a full hash.
+    void seedZeroStateCache()
+    {
+        const int securityLevel = 128;
+        const int capacityInBytes = 2 * securityLevel / 8;
+        static const unsigned char zeroChunk[K12_chunkSize] = {};
+        Intermediate zeroInter;
+        std::memset(zeroInter.intermediate, 0, maxCapacityInBytes);
+        XKCP::TurboSHAKE_Instance q;
+        XKCP::TurboSHAKE_Initialize(&q, securityLevel);
+        XKCP::TurboSHAKE_Absorb(&q, zeroChunk, K12_chunkSize);
+        XKCP::TurboSHAKE_AbsorbDomainSeparationByte(&q, K12_suffixLeaf);
+        XKCP::TurboSHAKE_Squeeze(&q, zeroInter.intermediate, capacityInBytes);
+        for (unsigned int i = 0; i < maxChunks; i++)
+        {
+            intermediateMap[i] = zeroInter;
+            isChunkChangedMap[i] = false;
+        }
+        _lastOutputSize = 0; // first getHash recomputes from the seeded leaves (cache hit, no state read)
+    }
+
     ContractStateEngine(unsigned char **state, size_t stateSize, unsigned int contractIndex)
         : K12Engine((unsigned char*)allocateState(stateSize), stateSize)
     {
@@ -385,10 +408,15 @@ public:
         this->nonPaddedSize = stateSize;
         this->paddedSize = alignToPageSize(stateSize);
         this->isChunkLoadedInMemoryMap.resize(maxChunks);
+        // Compress mode is demand-zero (no memset): nothing resident until a chunk first faults in. Disk mode memset's every page resident.
+        const bool bootResident = (evictMode != EvictMode::Compress);
         for (unsigned int i = 0; i < maxChunks; i++)
         {
-            isChunkLoadedInMemoryMap[i] = true; // memset in allocateState so all pages are in memory
+            isChunkLoadedInMemoryMap[i] = bootResident;
         }
+
+        // Seed the clean zero-state digest cache so the first per-tick hash skips reading (faulting in) the state.
+        seedZeroStateCache();
 
         // Disk-mode only: open a sparse backing file per contract (chunk IO via pread/pwrite).
         // Compress mode skips this entirely -> no per-contract file create/ftruncate -> faster spawn.
