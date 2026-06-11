@@ -239,6 +239,14 @@ static int misalignedState = 0;
 static bool forceVerifySolutions = false;
 // true while re-running a rolled-back tick (or permanently when COW rollback is unavailable): forces real score verification.
 static bool gTickForceVerify = false;
+// Debug-only: when set, a re-run uses identical (optimistic) scoring instead of forcing verification, so it must
+// reproduce the optimistic pass exactly -- the snapshot-completeness self-check.
+static bool gReRunIdentical = false;
+// Set to 1 (or -DVERIFY_RERUN_SNAPSHOT=1) to enable the runtime self-check: on every matched solution tick, roll
+// back and re-run identically; the digests must match exactly, else a consensus buffer is missing from the snapshot.
+#ifndef VERIFY_RERUN_SNAPSHOT
+#define VERIFY_RERUN_SNAPSHOT 0
+#endif
 static bool forceBroadcastInvalidSolution = false;
 
 static volatile unsigned char epochTransitionState = 0;
@@ -351,68 +359,12 @@ static CustomMiningSharesCounter gDogeMiningSharesCounter;
 
 static CustomQubicMiningStorage customQubicMiningStorage;
 
-#ifdef __linux__
-// Pre-tick snapshot of the scalar/medium state the tx-loop + system procedures mutate but COW page-tracking does
-// not cover. Captured at arm(), restored at rollback() so a re-run does not double-apply. miner arrays +
-// resourceTestingDigest reuse the existing *Rollback copies taken in the backup loop.
-static struct ReRunSmallState
-{
-    System sys;
-    unsigned int numberOfTransactions;
-    int solutionPublicationTicks[MAX_NUMBER_OF_SOLUTIONS];
-    m256i competitorPublicKeys[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
-    unsigned int competitorScores[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
-    bool competitorComputorStatuses[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
-    unsigned int minimumComputorScore, minimumCandidateScore;
-    unsigned char dogeData[CustomMiningSharesCounter::_customMiningSolutionCounterDataSize];
-    MultiDimRevenue revenue; // revenueOnTick() accumulates windowSum + txScore -> must not double-apply on re-run
-#if ENABLED_LOGGING
-    qLogger::RerunLogState loggerState; // tooling log append-cursor, so a re-run does not double the tick's events
-#endif
-} gReRunSmallState;
-
-static void snapshotSmallStateForReRun()
-{
-    copyMem(&gReRunSmallState.sys, &system, sizeof(System));
-    gReRunSmallState.numberOfTransactions = numberOfTransactions;
-    copyMem(gReRunSmallState.solutionPublicationTicks, solutionPublicationTicks, sizeof(solutionPublicationTicks));
-    copyMem(gReRunSmallState.competitorPublicKeys, competitorPublicKeys, sizeof(competitorPublicKeys));
-    copyMem(gReRunSmallState.competitorScores, competitorScores, sizeof(competitorScores));
-    copyMem(gReRunSmallState.competitorComputorStatuses, competitorComputorStatuses, sizeof(competitorComputorStatuses));
-    gReRunSmallState.minimumComputorScore = minimumComputorScore;
-    gReRunSmallState.minimumCandidateScore = minimumCandidateScore;
-    gDogeMiningSharesCounter.saveAllDataToArray(gReRunSmallState.dogeData);
-    copyMem(&gReRunSmallState.revenue, &gMultiDimRevenue, sizeof(MultiDimRevenue));
-#if ENABLED_LOGGING
-    logger.saveRerunState(gReRunSmallState.loggerState);
-#endif
-}
-
-static void restoreSmallStateForReRun()
-{
-    copyMem((void*)minerPublicKeys, (void*)minerPublicKeysRollback, sizeof(minerPublicKeys));
-    copyMem((void*)minerScores, (void*)minerScoresRollback, sizeof(minerScores));
-    numberOfMiners = numberOfMinersRollback;
-    resourceTestingDigest = resourceTestingDigestRollback;
-    copyMem(&system, &gReRunSmallState.sys, sizeof(System));
-    numberOfTransactions = gReRunSmallState.numberOfTransactions;
-    copyMem(solutionPublicationTicks, gReRunSmallState.solutionPublicationTicks, sizeof(solutionPublicationTicks));
-    copyMem(competitorPublicKeys, gReRunSmallState.competitorPublicKeys, sizeof(competitorPublicKeys));
-    copyMem(competitorScores, gReRunSmallState.competitorScores, sizeof(competitorScores));
-    copyMem(competitorComputorStatuses, gReRunSmallState.competitorComputorStatuses, sizeof(competitorComputorStatuses));
-    minimumComputorScore = gReRunSmallState.minimumComputorScore;
-    minimumCandidateScore = gReRunSmallState.minimumCandidateScore;
-    gDogeMiningSharesCounter.loadAllDataFromArray(gReRunSmallState.dogeData);
-    copyMem(&gMultiDimRevenue, &gReRunSmallState.revenue, sizeof(MultiDimRevenue));
-#if ENABLED_LOGGING
-    logger.restoreRerunState(gReRunSmallState.loggerState);
-#endif
-}
-#endif // __linux__
+// Tick re-run snapshot (gReRunNodeState + snapshot/restoreNodeStateForReRun) is defined just after the
+// NodeMiningStateBuffer struct below, so it can reuse that type and the shared captureMiningState().
 
 #if TICK_STORAGE_AUTOSAVE_MODE
 static unsigned int nextPersistingNodeStateTick = 0;
-struct
+struct NodeMiningStateBuffer
 {
     Tick etalonTick;
     m256i minerPublicKeys[MAX_NUMBER_OF_MINERS + 1];
@@ -431,6 +383,99 @@ struct
     unsigned char dogeMiningSharesCounterData[CustomMiningSharesCounter::_customMiningSolutionCounterDataSize];
 } nodeStateBuffer;
 #endif
+
+#if defined(__linux__) && TICK_STORAGE_AUTOSAVE_MODE
+// === Tick re-run snapshot, tied to the node's save/restore set ===
+// captureMiningState/restoreMiningState are the single capture/apply for the mining-state buffer. saveAllNodeStates
+// captures into the global nodeStateBuffer (then writes it to disk); the COW re-run path captures into its own copy
+// and restores from it on rollback. A field added here for snapshot persistence is therefore automatically also
+// covered by the re-run snapshot. The remaining scalar globals the save set persists (system, gEpochRevenueData,
+// gMultiDimRevenue) are copied alongside. Completeness is checked at runtime by the re-run self-check (debug) and a
+// missed component stalls loud in production (all etalon digests compared to quorum).
+
+// globals -> dst (shared by saveAllNodeStates and the re-run snapshot)
+static void captureMiningState(NodeMiningStateBuffer& dst)
+{
+    copyMem(&dst.etalonTick, &etalonTick, sizeof(etalonTick));
+    copyMem(dst.minerPublicKeys, (void*)minerPublicKeys, sizeof(minerPublicKeys));
+    copyMem(dst.minerScores, (void*)minerScores, sizeof(minerScores));
+    copyMem(dst.competitorPublicKeys, (void*)competitorPublicKeys, sizeof(competitorPublicKeys));
+    copyMem(dst.competitorScores, (void*)competitorScores, sizeof(competitorScores));
+    copyMem(dst.competitorComputorStatuses, (void*)competitorComputorStatuses, sizeof(competitorComputorStatuses));
+    copyMem(dst.solutionPublicationTicks, (void*)solutionPublicationTicks, sizeof(solutionPublicationTicks));
+    copyMem(dst.faultyComputorFlags, (void*)faultyComputorFlags, sizeof(faultyComputorFlags));
+    copyMem(&dst.broadcastedComputors, (void*)&broadcastedComputors, sizeof(broadcastedComputors));
+    dst.resourceTestingDigest = resourceTestingDigest;
+    dst.currentRandomSeed = score->currentRandomSeed;
+    dst.numberOfMiners = numberOfMiners;
+    dst.numberOfTransactions = numberOfTransactions;
+    voteCounter.saveAllDataToArray(dst.voteCounterData);
+    gDogeMiningSharesCounter.saveAllDataToArray(dst.dogeMiningSharesCounterData);
+}
+
+// src -> globals (mid-run re-run apply; restores the mining seed directly, unlike the restart load path which defers it)
+static void restoreMiningState(const NodeMiningStateBuffer& src)
+{
+    copyMem(&etalonTick, &src.etalonTick, sizeof(etalonTick));
+    copyMem((void*)minerPublicKeys, src.minerPublicKeys, sizeof(minerPublicKeys));
+    copyMem((void*)minerScores, src.minerScores, sizeof(minerScores));
+    copyMem((void*)competitorPublicKeys, src.competitorPublicKeys, sizeof(competitorPublicKeys));
+    copyMem((void*)competitorScores, src.competitorScores, sizeof(competitorScores));
+    copyMem((void*)competitorComputorStatuses, src.competitorComputorStatuses, sizeof(competitorComputorStatuses));
+    copyMem((void*)solutionPublicationTicks, src.solutionPublicationTicks, sizeof(solutionPublicationTicks));
+    copyMem((void*)faultyComputorFlags, src.faultyComputorFlags, sizeof(faultyComputorFlags));
+    copyMem((void*)&broadcastedComputors, &src.broadcastedComputors, sizeof(broadcastedComputors));
+    resourceTestingDigest = src.resourceTestingDigest;
+    score->currentRandomSeed = src.currentRandomSeed;
+    numberOfMiners = src.numberOfMiners;
+    numberOfTransactions = src.numberOfTransactions;
+    voteCounter.loadAllDataFromArray(src.voteCounterData);
+    gDogeMiningSharesCounter.loadAllDataFromArray(src.dogeMiningSharesCounterData);
+}
+
+// Full pre-tick image of the non-COW consensus state the save set persists: the mining buffer + the separately-saved
+// scalar globals (system, epoch revenue, multidim revenue). Snapshot at arm, restored on rollback so a verified
+// re-run starts from the exact pre-tick state. (Big arrays — spectrum/assets/contracts/minerSolutionFlags — are
+// rolled back by COW page-tracking, not copied here. minimum*Score are transient election scratch, kept for safety.)
+static struct ReRunNodeState
+{
+    NodeMiningStateBuffer mining;
+    System sys;
+    EpochRevenueData epochRevenue;
+    MultiDimRevenue multiDimRevenue;
+    unsigned int minimumComputorScore, minimumCandidateScore;
+#if ENABLED_LOGGING
+    qLogger::RerunLogState loggerState;
+#endif
+} gReRunNodeState;
+
+static void snapshotNodeStateForReRun()
+{
+    captureMiningState(gReRunNodeState.mining);
+    copyMem(&gReRunNodeState.sys, &system, sizeof(System));
+    copyMem(&gReRunNodeState.epochRevenue, &gEpochRevenueData, sizeof(gEpochRevenueData));
+    copyMem(&gReRunNodeState.multiDimRevenue, &gMultiDimRevenue, sizeof(gMultiDimRevenue));
+    gReRunNodeState.minimumComputorScore = minimumComputorScore;
+    gReRunNodeState.minimumCandidateScore = minimumCandidateScore;
+#if ENABLED_LOGGING
+    logger.saveRerunState(gReRunNodeState.loggerState);
+#endif
+}
+
+static void restoreNodeStateForReRun()
+{
+    restoreMiningState(gReRunNodeState.mining);
+    copyMem(&system, &gReRunNodeState.sys, sizeof(System));
+    copyMem(&gEpochRevenueData, &gReRunNodeState.epochRevenue, sizeof(gEpochRevenueData));
+    copyMem(&gMultiDimRevenue, &gReRunNodeState.multiDimRevenue, sizeof(gMultiDimRevenue));
+    minimumComputorScore = gReRunNodeState.minimumComputorScore;
+    minimumCandidateScore = gReRunNodeState.minimumCandidateScore;
+#if ENABLED_LOGGING
+    logger.restoreRerunState(gReRunNodeState.loggerState);
+#endif
+}
+#endif // __linux__ && TICK_STORAGE_AUTOSAVE_MODE
+
 static bool saveContractStateFiles(CHAR16* directory = NULL);
 static bool saveContractExecFeeFiles(CHAR16* directory = NULL, bool saveAccumulatedTime = false);
 static bool saveSystem(CHAR16* directory = NULL);
@@ -3458,10 +3503,11 @@ static void processTick(unsigned long long processorNumber, bool reRun = false)
     // Force real score verification on a re-run, when COW rollback is unavailable (so correctness never depends on
     // uffd), and when the oracle engine has in-flight work (it is not in the rollback snapshot, so a re-run would
     // double-apply it) -- verifying means no optimistic mismatch and hence no re-run on those ticks.
+    // A recovery re-run verifies; the debug snapshot-completeness self-check re-runs with identical (optimistic) scoring.
 #ifdef __linux__
-    gTickForceVerify = reRun || !tickRollback::gAvailable || oracleEngine.hasActiveState();
+    gTickForceVerify = reRun ? !gReRunIdentical : (!tickRollback::gAvailable || oracleEngine.hasActiveState());
 #else
-    gTickForceVerify = reRun || oracleEngine.hasActiveState();
+    gTickForceVerify = reRun ? !gReRunIdentical : oracleEngine.hasActiveState();
 #endif
     unsigned long long solutionProcessStartTick = __rdtsc(); // for tracking the time processing solutions
     if (nextTickData.epoch == system.epoch)
@@ -3611,7 +3657,7 @@ static void processTick(unsigned long long processorNumber, bool reRun = false)
             && !isMainMode() && !isTestnet() && !isLastTickInEpoch()
             && !gTickForceVerify && !tickHasOracleTx)
         {
-            snapshotSmallStateForReRun();
+            snapshotNodeStateForReRun();
             tickRollback::arm();
         }
 #endif
@@ -4913,6 +4959,11 @@ static bool saveAllNodeStates()
     
     score->saveScoreCache(system.epoch, directory);
     
+    // Single source of truth for the mining-state buffer (also used by the COW tick re-run snapshot, so a field
+    // added here for persistence is automatically covered by the re-run rollback).
+#if defined(__linux__)
+    captureMiningState(nodeStateBuffer);
+#else
     copyMem(&nodeStateBuffer.etalonTick, &etalonTick, sizeof(etalonTick));
     copyMem(nodeStateBuffer.minerPublicKeys, (void*)minerPublicKeys, sizeof(minerPublicKeys));
     copyMem(nodeStateBuffer.minerScores, (void*)minerScores, sizeof(minerScores));
@@ -4925,9 +4976,10 @@ static bool saveAllNodeStates()
     copyMem(&nodeStateBuffer.resourceTestingDigest, &resourceTestingDigest, sizeof(resourceTestingDigest));
     nodeStateBuffer.currentRandomSeed = score->currentRandomSeed;
     nodeStateBuffer.numberOfMiners = numberOfMiners;
-    nodeStateBuffer.numberOfTransactions = numberOfTransactions;    
+    nodeStateBuffer.numberOfTransactions = numberOfTransactions;
     voteCounter.saveAllDataToArray(nodeStateBuffer.voteCounterData);
     gDogeMiningSharesCounter.saveAllDataToArray(nodeStateBuffer.dogeMiningSharesCounterData);
+#endif
 
     CHAR16 NODE_STATE_FILE_NAME[] = L"snapshotNodeMiningState";
     savedSize = save(NODE_STATE_FILE_NAME, sizeof(nodeStateBuffer), (unsigned char*)&nodeStateBuffer, directory);
@@ -6646,7 +6698,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                 appendText(message, L" dirty pages saved; re-running tick fully verified");
                                 logToConsole(message);
                                 tickRollback::rollback();
-                                restoreSmallStateForReRun();
+                                restoreNodeStateForReRun();
                                 processTick(processorNumber, /*reRun=*/true); // recomputes etalonTick.saltedSpectrumDigest
                             }
                             else
@@ -6709,6 +6761,31 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                         {
                             resourceTestingDigest = resourceTestingDigestFromQuorum;
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
+#if VERIFY_RERUN_SNAPSHOT && defined(__linux__)
+                            // Snapshot-completeness self-check: an identical-scoring re-run from the rolled-back state
+                            // must reproduce this tick's digests exactly. If not, some consensus buffer the tick
+                            // mutates is missing from the snapshot/COW set -- stall loud so the gap is found, not shipped.
+                            if (tickRollback::gAvailable && tickRollback::isArmed() && !tickRollback::overflowed())
+                            {
+                                Tick selfCheckEtalon = etalonTick;
+                                tickRollback::rollback();
+                                restoreNodeStateForReRun();
+                                gReRunIdentical = true;
+                                processTick(processorNumber, /*reRun=*/true);
+                                gReRunIdentical = false;
+                                if (etalonTick.saltedSpectrumDigest != selfCheckEtalon.saltedSpectrumDigest
+                                    || etalonTick.saltedUniverseDigest != selfCheckEtalon.saltedUniverseDigest
+                                    || etalonTick.saltedComputerDigest != selfCheckEtalon.saltedComputerDigest
+                                    || etalonTick.saltedTransactionBodyDigest != selfCheckEtalon.saltedTransactionBodyDigest)
+                                {
+                                    while (true)
+                                    {
+                                        logToConsole(L"FATAL: re-run snapshot INCOMPLETE - identical re-run diverged; a consensus buffer is not in the snapshot/COW set");
+                                        bs->Stall(1'000'000);
+                                    }
+                                }
+                            }
+#endif
                         }
 #ifdef __linux__
                         // Accept the tick: release COW tracking (rollback already disarmed on the mismatch path).
