@@ -169,6 +169,7 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
 #include "extensions/test_invalid_solution.h"
+#include "extensions/tick_state_rollback.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
 #ifdef _WIN32
@@ -236,6 +237,8 @@ static volatile bool systemMustBeSaved = false, spectrumMustBeSaved = false, uni
 static int misalignedState = 0;
 
 static bool forceVerifySolutions = false;
+// true while re-running a rolled-back tick (or permanently when COW rollback is unavailable): forces real score verification.
+static bool gTickForceVerify = false;
 static bool forceBroadcastInvalidSolution = false;
 
 static volatile unsigned char epochTransitionState = 0;
@@ -347,6 +350,53 @@ static unsigned int gDogeMiningSharesCount[NUMBER_OF_COMPUTORS] = { 0 };
 static CustomMiningSharesCounter gDogeMiningSharesCounter;
 
 static CustomQubicMiningStorage customQubicMiningStorage;
+
+#ifdef __linux__
+// Pre-tick snapshot of the scalar/medium state the tx-loop + system procedures mutate but COW page-tracking does
+// not cover. Captured at arm(), restored at rollback() so a re-run does not double-apply. miner arrays +
+// resourceTestingDigest reuse the existing *Rollback copies taken in the backup loop.
+static struct ReRunSmallState
+{
+    System sys;
+    unsigned int numberOfTransactions;
+    int solutionPublicationTicks[MAX_NUMBER_OF_SOLUTIONS];
+    m256i competitorPublicKeys[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
+    unsigned int competitorScores[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
+    bool competitorComputorStatuses[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
+    unsigned int minimumComputorScore, minimumCandidateScore;
+    unsigned char dogeData[CustomMiningSharesCounter::_customMiningSolutionCounterDataSize];
+} gReRunSmallState;
+
+static void snapshotSmallStateForReRun()
+{
+    copyMem(&gReRunSmallState.sys, &system, sizeof(System));
+    gReRunSmallState.numberOfTransactions = numberOfTransactions;
+    copyMem(gReRunSmallState.solutionPublicationTicks, solutionPublicationTicks, sizeof(solutionPublicationTicks));
+    copyMem(gReRunSmallState.competitorPublicKeys, competitorPublicKeys, sizeof(competitorPublicKeys));
+    copyMem(gReRunSmallState.competitorScores, competitorScores, sizeof(competitorScores));
+    copyMem(gReRunSmallState.competitorComputorStatuses, competitorComputorStatuses, sizeof(competitorComputorStatuses));
+    gReRunSmallState.minimumComputorScore = minimumComputorScore;
+    gReRunSmallState.minimumCandidateScore = minimumCandidateScore;
+    gDogeMiningSharesCounter.saveAllDataToArray(gReRunSmallState.dogeData);
+}
+
+static void restoreSmallStateForReRun()
+{
+    copyMem((void*)minerPublicKeys, (void*)minerPublicKeysRollback, sizeof(minerPublicKeys));
+    copyMem((void*)minerScores, (void*)minerScoresRollback, sizeof(minerScores));
+    numberOfMiners = numberOfMinersRollback;
+    resourceTestingDigest = resourceTestingDigestRollback;
+    copyMem(&system, &gReRunSmallState.sys, sizeof(System));
+    numberOfTransactions = gReRunSmallState.numberOfTransactions;
+    copyMem(solutionPublicationTicks, gReRunSmallState.solutionPublicationTicks, sizeof(solutionPublicationTicks));
+    copyMem(competitorPublicKeys, gReRunSmallState.competitorPublicKeys, sizeof(competitorPublicKeys));
+    copyMem(competitorScores, gReRunSmallState.competitorScores, sizeof(competitorScores));
+    copyMem(competitorComputorStatuses, gReRunSmallState.competitorComputorStatuses, sizeof(competitorComputorStatuses));
+    minimumComputorScore = gReRunSmallState.minimumComputorScore;
+    minimumCandidateScore = gReRunSmallState.minimumCandidateScore;
+    gDogeMiningSharesCounter.loadAllDataFromArray(gReRunSmallState.dogeData);
+}
+#endif // __linux__
 
 #if TICK_STORAGE_AUTOSAVE_MODE
 static unsigned int nextPersistingNodeStateTick = 0;
@@ -2693,7 +2743,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
             threshold = HYPERIDENTITY_SOLUTION_THRESHOLD_PRE_ACTIVATION;
         }
         unsigned int solutionScore;
-        if (isMainMode() || isRevalidation || isLastTickInEpoch() || forceVerifySolutions)
+        if (isMainMode() || isRevalidation || isLastTickInEpoch() || forceVerifySolutions || gTickForceVerify)
         {
             solutionScore = (*::score)(processorNumber, transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce);
         } else
@@ -3294,10 +3344,15 @@ static bool makeAndBroadcastExecutionFeeTransaction(int i, BroadcastFutureTickDa
     return true;
 }
 
-static void processTick(unsigned long long processorNumber)
+static void processTick(unsigned long long processorNumber, bool reRun = false)
 {
     PROFILE_SCOPE();
     TickBench::Scope _btTotal(TickBench::TICK_TOTAL);
+
+#ifdef __linux__
+    // Safety net: release any COW arm left over from a prior tick (e.g. a status==2 skip path that never committed).
+    if (!reRun && tickRollback::isArmed()) tickRollback::commit();
+#endif
 
 #ifdef TESTNET
     if (tickDelay > 0) {
@@ -3305,6 +3360,10 @@ static void processTick(unsigned long long processorNumber)
     }
 #endif
 
+    // On a re-run the prologue (prev-digest capture + INITIALIZE/BEGIN_EPOCH/BEGIN_TICK system procedures) already
+    // ran in the optimistic pass and is solution-independent; skip it so only the tx-loop + END_TICK + digest re-run.
+    if (!reRun)
+    {
     if (system.tick > system.initialTick)
     {
         etalonTick.prevResourceTestingDigest = resourceTestingDigest;
@@ -3375,6 +3434,7 @@ static void processTick(unsigned long long processorNumber)
     WAIT_WHILE(contractProcessorState);
     TickBench::add(TickBench::BEGIN_TICK, _btBeginTickStart, __rdtsc());
     PROFILE_SCOPE_END();
+    } // end if (!reRun) tick prologue
 
     latestIncomingTransferTickPreservePubkeys.clear();
 
@@ -3383,6 +3443,12 @@ static void processTick(unsigned long long processorNumber)
     ts.tickData.acquireLock();
     copyMem(&nextTickData, &ts.tickData[tickIndex], sizeof(TickData));
     ts.tickData.releaseLock();
+    // Force real score verification on a re-run, and permanently when COW rollback is unavailable (so correctness never depends on uffd).
+#ifdef __linux__
+    gTickForceVerify = reRun || !tickRollback::gAvailable;
+#else
+    gTickForceVerify = reRun;
+#endif
     unsigned long long solutionProcessStartTick = __rdtsc(); // for tracking the time processing solutions
     if (nextTickData.epoch == system.epoch)
     {
@@ -3392,7 +3458,7 @@ static void processTick(unsigned long long processorNumber)
 #endif
 
         // Only apply skipping compute solution when in Mainnet with Aux node (except for last tick)
-        if (isMainMode() || isTestnet() || isLastTickInEpoch()) {
+        if (isMainMode() || isTestnet() || isLastTickInEpoch() || gTickForceVerify) {
             PROFILE_NAMED_SCOPE_BEGIN("processTick(): pre-scan solutions");
             unsigned long long _bPrescanStart = __rdtsc();
             // reset solution task queue
@@ -3512,6 +3578,19 @@ static void processTick(unsigned long long processorNumber)
                 }
             }
         }
+
+#ifdef __linux__
+        // Arm copy-on-write tick rollback before any tx mutates state. On a solution tick the optimistic (AUX) pass
+        // may accept solutions the quorum later rejects; if so we roll the whole tick back to here and re-run verified.
+        // (BEGIN_TICK already ran above and is solution-independent, so it stays as the rollback baseline.)
+        // Arm only when this pass is actually optimistic (scores skipped); a fully-verified pass never mismatches.
+        if (!reRun && tickRollback::gAvailable && isThisTickHasSolution
+            && !isMainMode() && !isTestnet() && !isLastTickInEpoch())
+        {
+            snapshotSmallStateForReRun();
+            tickRollback::arm();
+        }
+#endif
 
         for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
         {
@@ -6530,8 +6609,22 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                             appendText(message, localDigestChars);
                             appendText(message, L" quorum=");
                             appendText(message, quorumDigestChars);
-                            appendText(message, L". Reprocessing solutions...");
+                            appendText(message, L". Rolling back + re-running verified...");
                             logToConsole(message);
+#ifdef __linux__
+                            if (tickRollback::gAvailable && tickRollback::isArmed() && !tickRollback::overflowed())
+                            {
+                                // Roll the whole tick back to its pre-tick state and re-run it with full score
+                                // verification. A clean verified re-run reproduces the exact quorum state, fixing any
+                                // cascade (sender balance, contract getEntity, system procedures) with no assumptions.
+                                tickRollback::rollback();
+                                restoreSmallStateForReRun();
+                                processTick(processorNumber, /*reRun=*/true); // recomputes etalonTick.saltedSpectrumDigest
+                            }
+                            else
+#endif
+                            {
+                            // Fallback when COW rollback is unavailable/overflowed: surgical reprocess + merkle recompute.
                             resourceTestingDigest = resourceTestingDigestRollback;
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
                             reprocessSolutionTransaction(processorNumber);
@@ -6569,6 +6662,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
 
                             etalonTick.saltedSpectrumDigest = spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1];
                             RELEASE(spectrumLock);
+                            } // end fallback (surgical reprocess)
 
                             if (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum)
                             {
@@ -6584,6 +6678,10 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                             resourceTestingDigest = resourceTestingDigestFromQuorum;
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
                         }
+#ifdef __linux__
+                        // Accept the tick: release COW tracking (rollback already disarmed on the mismatch path).
+                        if (tickRollback::isArmed()) tickRollback::commit();
+#endif
                     }
                     else if (status == 2)
                     {
@@ -7314,7 +7412,7 @@ static bool initialize()
         for (unsigned int contractIndex = 0; contractIndex < contractCount; contractIndex++)
         {
             unsigned long long size = contractDescriptions[contractIndex].stateSize;
-            if (!allocPoolWithErrorLog(L"contractStates",  size, (void**)&contractStates[contractIndex], __LINE__))
+            if (!allocPoolWithErrorLog(L"contractStates",  size, (void**)&contractStates[contractIndex], __LINE__, true, true))
             {
                 return false;
             }
@@ -7333,10 +7431,22 @@ static bool initialize()
         setMem(score_qpi, sizeof(*score_qpi), 0);
 
         setMem(&solutionThreshold[0][0], sizeof(int) * MAX_NUMBER_EPOCH * score_engine::AlgoType::MaxAlgoCount, 0);
-        if (!allocPoolWithErrorLog(L"minserSolutionFlag", NUMBER_OF_MINER_SOLUTION_FLAGS / 8, (void**)&minerSolutionFlags, __LINE__))
+        if (!allocPoolWithErrorLog(L"minserSolutionFlag", NUMBER_OF_MINER_SOLUTION_FLAGS / 8, (void**)&minerSolutionFlags, __LINE__, true, true))
         {
             return false;
         }
+
+#ifdef __linux__
+        // Register the large consensus arrays for copy-on-write tick rollback (no-op if uffd unavailable).
+        if (tickRollback::init())
+        {
+            tickRollback::registerRegion(spectrum, spectrumSizeInBytes);
+            tickRollback::registerRegion(assets, ASSETS_CAPACITY * sizeof(AssetRecord));
+            tickRollback::registerRegion(minerSolutionFlags, NUMBER_OF_MINER_SOLUTION_FLAGS / 8);
+            for (unsigned int ci = 0; ci < contractCount; ci++)
+                if (contractStates[ci]) tickRollback::registerRegion(contractStates[ci], contractDescriptions[ci].stateSize);
+        }
+#endif
 
         if (!customQubicMiningStorage.init())
         {

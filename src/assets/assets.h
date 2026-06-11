@@ -166,7 +166,7 @@ static unsigned int issuanceIndex(const m256i& issuer, unsigned long long assetN
 
 static bool initAssets()
 {
-    if (!allocPoolWithErrorLog(L"assets", ASSETS_CAPACITY * sizeof(AssetRecord), (void**)&assets, __LINE__)
+    if (!allocPoolWithErrorLog(L"assets", ASSETS_CAPACITY * sizeof(AssetRecord), (void**)&assets, __LINE__, true, true)
         || !allocPoolWithErrorLog(L"assetDigets", assetDigestsSizeInBytes, (void**)&assetDigests, __LINE__)
         || !allocPoolWithErrorLog(L"assetChangeFlags", ASSETS_CAPACITY / 8, (void**)&assetChangeFlags, __LINE__))
     {
