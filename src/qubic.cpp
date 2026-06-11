@@ -365,6 +365,10 @@ static struct ReRunSmallState
     bool competitorComputorStatuses[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
     unsigned int minimumComputorScore, minimumCandidateScore;
     unsigned char dogeData[CustomMiningSharesCounter::_customMiningSolutionCounterDataSize];
+    MultiDimRevenue revenue; // revenueOnTick() accumulates windowSum + txScore -> must not double-apply on re-run
+#if ENABLED_LOGGING
+    qLogger::RerunLogState loggerState; // tooling log append-cursor, so a re-run does not double the tick's events
+#endif
 } gReRunSmallState;
 
 static void snapshotSmallStateForReRun()
@@ -378,6 +382,10 @@ static void snapshotSmallStateForReRun()
     gReRunSmallState.minimumComputorScore = minimumComputorScore;
     gReRunSmallState.minimumCandidateScore = minimumCandidateScore;
     gDogeMiningSharesCounter.saveAllDataToArray(gReRunSmallState.dogeData);
+    copyMem(&gReRunSmallState.revenue, &gMultiDimRevenue, sizeof(MultiDimRevenue));
+#if ENABLED_LOGGING
+    logger.saveRerunState(gReRunSmallState.loggerState);
+#endif
 }
 
 static void restoreSmallStateForReRun()
@@ -395,6 +403,10 @@ static void restoreSmallStateForReRun()
     minimumComputorScore = gReRunSmallState.minimumComputorScore;
     minimumCandidateScore = gReRunSmallState.minimumCandidateScore;
     gDogeMiningSharesCounter.loadAllDataFromArray(gReRunSmallState.dogeData);
+    copyMem(&gMultiDimRevenue, &gReRunSmallState.revenue, sizeof(MultiDimRevenue));
+#if ENABLED_LOGGING
+    logger.restoreRerunState(gReRunSmallState.loggerState);
+#endif
 }
 #endif // __linux__
 
@@ -3443,11 +3455,13 @@ static void processTick(unsigned long long processorNumber, bool reRun = false)
     ts.tickData.acquireLock();
     copyMem(&nextTickData, &ts.tickData[tickIndex], sizeof(TickData));
     ts.tickData.releaseLock();
-    // Force real score verification on a re-run, and permanently when COW rollback is unavailable (so correctness never depends on uffd).
+    // Force real score verification on a re-run, when COW rollback is unavailable (so correctness never depends on
+    // uffd), and when the oracle engine has in-flight work (it is not in the rollback snapshot, so a re-run would
+    // double-apply it) -- verifying means no optimistic mismatch and hence no re-run on those ticks.
 #ifdef __linux__
-    gTickForceVerify = reRun || !tickRollback::gAvailable;
+    gTickForceVerify = reRun || !tickRollback::gAvailable || oracleEngine.hasActiveState();
 #else
-    gTickForceVerify = reRun;
+    gTickForceVerify = reRun || oracleEngine.hasActiveState();
 #endif
     unsigned long long solutionProcessStartTick = __rdtsc(); // for tracking the time processing solutions
     if (nextTickData.epoch == system.epoch)
@@ -3536,6 +3550,9 @@ static void processTick(unsigned long long processorNumber, bool reRun = false)
         const m256i& tickLeaderKey = broadcastedComputors.computors.publicKeys[system.tick % NUMBER_OF_COMPUTORS];
 
         bool isThisTickHasSolution = false;
+        // True if this tick carries an oracle tx. Such a tick must not arm the COW re-run path (the oracle engine is
+        // not in the rollback snapshot); it falls back to the surgical reprocess, which does not re-run the oracle.
+        bool tickHasOracleTx = false;
 
         // Sources of solution txs in this tick (deduped). Only these addresses can be
         // affected by the rollback inside reprocessSolutionTransaction(), so they are
@@ -3575,6 +3592,12 @@ static void processTick(unsigned long long processorNumber, bool reRun = false)
                             solutionTxSourcePubKeys[numSolutionTxSources++] = transaction->sourcePublicKey;
                         }
                     }
+                    else if (transaction->inputType == OracleReplyCommitTransactionPrefix::transactionType()
+                        || transaction->inputType == OracleReplyRevealTransactionPrefix::transactionType()
+                        || transaction->inputType == OracleUserQueryTransactionPrefix::transactionType())
+                    {
+                        tickHasOracleTx = true;
+                    }
                 }
             }
         }
@@ -3585,7 +3608,8 @@ static void processTick(unsigned long long processorNumber, bool reRun = false)
         // (BEGIN_TICK already ran above and is solution-independent, so it stays as the rollback baseline.)
         // Arm only when this pass is actually optimistic (scores skipped); a fully-verified pass never mismatches.
         if (!reRun && tickRollback::gAvailable && isThisTickHasSolution
-            && !isMainMode() && !isTestnet() && !isLastTickInEpoch())
+            && !isMainMode() && !isTestnet() && !isLastTickInEpoch()
+            && !gTickForceVerify && !tickHasOracleTx)
         {
             snapshotSmallStateForReRun();
             tickRollback::arm();

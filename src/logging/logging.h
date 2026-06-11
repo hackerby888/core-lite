@@ -326,6 +326,29 @@ public:
     inline static unsigned long long currentTickStartLogId;
     inline static bool isPausing;
 
+#if ENABLED_LOGGING
+    // Per-tick append cursor saved at arm() and restored on a tick rollback, so re-running the tick re-emits its
+    // log over the same logId range (overwrite) instead of doubling it. Not consensus state; keeps tooling logs sane.
+    struct RerunLogState
+    {
+        unsigned long long logBufferTail, logId, currentTickStartLogId;
+        unsigned int lastUpdatedTick, currentTxId, currentTick;
+        TickBlobInfo currentTickTxToId;
+    };
+    static void saveRerunState(RerunLogState& s)
+    {
+        s.logBufferTail = logBufferTail; s.logId = logId; s.currentTickStartLogId = currentTickStartLogId;
+        s.lastUpdatedTick = lastUpdatedTick; s.currentTxId = currentTxId; s.currentTick = currentTick;
+        s.currentTickTxToId = currentTickTxToId;
+    }
+    static void restoreRerunState(const RerunLogState& s)
+    {
+        logBufferTail = s.logBufferTail; logId = s.logId; currentTickStartLogId = s.currentTickStartLogId;
+        lastUpdatedTick = s.lastUpdatedTick; currentTxId = s.currentTxId; currentTick = s.currentTick;
+        currentTickTxToId = s.currentTickTxToId;
+    }
+#endif
+
     static unsigned long long getLogId(const char* ptr)
     {
         // first 10 bytes are: epoch(2) + tick(4)+ size/type(4)

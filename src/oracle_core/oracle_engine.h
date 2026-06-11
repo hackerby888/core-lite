@@ -521,6 +521,20 @@ protected:
     }
 
 public:
+    /// True if the engine holds any non-quiescent state that a tick could drain or mutate even without an incoming
+    /// oracle tx (pending queries time out, subscriptions generate queries, finished/notification queues get drained).
+    /// Used to keep any tick that touches the oracle off the optimistic/copy-on-write re-run path, since the oracle
+    /// engine is not part of the rollback snapshot; such ticks are fully verified instead, so they never re-run.
+    bool hasActiveState()
+    {
+        return pendingQueryIndices.numValues > 0
+            || usedSubscriptionSlots > 0
+            || usedSubscriberSlots > 0
+            || notificationQueryIndexQueue.size() > 0
+            || finishedUserQueryIndexQueue.size() > 0
+            || nextSubscriptionIdQueue.size() > 0;
+    }
+
     /// Initialize object, passing array of computor public keys
     bool init(const m256i* computorPublicKeys)
     {
