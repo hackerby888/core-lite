@@ -44,9 +44,26 @@ bool allocatePool(unsigned long long size, void** buffer)
     return false;
 }
 
+// Maps a qVirtualAlloc'd address to its size so freePool() releases it with munmap/VirtualFree, not free().
+inline std::map<unsigned long long, unsigned long long> qVirtualSizeMap;
+
 void freePool(void* buffer)
 {
-    free(buffer);
+    if (!buffer) return;
+    auto it = qVirtualSizeMap.find((unsigned long long)buffer);
+    if (it != qVirtualSizeMap.end())
+    {
+#ifdef _MSC_VER
+        VirtualFree(buffer, 0, MEM_RELEASE);
+#else
+        munmap(buffer, it->second);
+#endif
+        qVirtualSizeMap.erase(it);
+    }
+    else
+    {
+        free(buffer);
+    }
 }
 
 void updateTime()
@@ -79,6 +96,7 @@ void* qVirtualAlloc(const unsigned long long size, bool commitMem = false) {
     if (addr != nullptr)
     {
         commitMemMap[(unsigned long long)addr] = commitMem;
+        qVirtualSizeMap[(unsigned long long)addr] = size;
         return addr;
     }
     printf("CRITIAL: VirtualAlloc failed in qVirtualAlloc");
@@ -104,6 +122,7 @@ void* qVirtualAlloc(const unsigned long long size, bool commitMem = false) {
     if (addr != MAP_FAILED)
     {
         commitMemMap[(unsigned long long)addr] = commitMem;
+        qVirtualSizeMap[(unsigned long long)addr] = size;
         return addr;
     }
 

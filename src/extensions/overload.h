@@ -209,6 +209,8 @@ std::vector<unsigned char> readInput() {
 #endif
 
 inline std::map<unsigned long long, bool> commitMemMap;
+// Maps a qVirtualAlloc'd address to its size so freePool() can release it with munmap/VirtualFree instead of free().
+inline std::map<unsigned long long, unsigned long long> qVirtualSizeMap;
 
 #ifdef _MSC_VER
 inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false) {
@@ -216,6 +218,7 @@ inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false
     if (addr != nullptr)
     {
         commitMemMap[(unsigned long long)addr] = commitMem;
+        qVirtualSizeMap[(unsigned long long)addr] = size;
         return addr;
     }
     logToConsole(L"CRITIAL: VirtualAlloc failed in qVirtualAlloc");
@@ -241,6 +244,7 @@ inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false
     if (addr != MAP_FAILED)
     {
         commitMemMap[(unsigned long long)addr] = commitMem;
+        qVirtualSizeMap[(unsigned long long)addr] = size;
         return addr;
     }
 
@@ -313,10 +317,25 @@ bool allocatePool(unsigned long long size, void** buffer)
 
 void freePool(void* buffer)
 {
-    if (buffer) {
+    if (!buffer) return;
+    auto it = qVirtualSizeMap.find((unsigned long long)buffer);
+    if (it != qVirtualSizeMap.end())
+    {
+        // Allocated via qVirtualAlloc (mmap / VirtualAlloc) -> must be released the same way, never free().
+#ifdef _MSC_VER
+        VirtualFree(buffer, 0, MEM_RELEASE);
+#else
+        munmap(buffer, it->second);
+#endif
+        commitMemMap.erase((unsigned long long)buffer);
+        qVirtualSizeMap.erase(it);
+    }
+    else
+    {
         free(buffer);
     }
 }
+
 
 inline void closeEvent(EFI_EVENT Event)
 {
