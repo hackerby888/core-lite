@@ -346,6 +346,21 @@ public:
         logBufferTail = s.logBufferTail; logId = s.logId; currentTickStartLogId = s.currentTickStartLogId;
         lastUpdatedTick = s.lastUpdatedTick; currentTxId = s.currentTxId; currentTick = s.currentTick;
         currentTickTxToId = s.currentTickTxToId;
+        // Drop the optimistic pass's staged log entries for this tick (logId >= the restored cursor) so the re-run
+        // re-stages them from scratch. Leaving them stale leaks the char* and desyncs _commit -> the committed log
+        // buffer is corrupted (qlogging reports "malformed header"). Entries below the cursor (BEGIN_TICK, prior
+        // ticks) are kept. The temp maps only hold this tick's not-yet-committed entries at this point.
+        for (auto it = tmpLogBuffer.begin(); it != tmpLogBuffer.end(); )
+        {
+            if (it->first >= s.logId) { delete[] it->second; it = tmpLogBuffer.erase(it); }
+            else ++it;
+        }
+        for (auto it = tmpLogSize.begin(); it != tmpLogSize.end(); )
+            it = (it->first >= s.logId) ? tmpLogSize.erase(it) : std::next(it);
+        for (auto it = blobInfoTmp.begin(); it != blobInfoTmp.end(); )
+            it = (it->first >= s.logId) ? blobInfoTmp.erase(it) : std::next(it);
+        for (auto it = logIdToTxIdMap.begin(); it != logIdToTxIdMap.end(); )
+            it = (it->first >= s.logId) ? logIdToTxIdMap.erase(it) : std::next(it);
     }
 #endif
 
