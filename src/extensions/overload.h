@@ -1170,7 +1170,9 @@ struct Overload {
         while (true)
         {
             ReceiveRequest request = receiveQueue.pop();
-            auto n = recv(request.socket, (char *)request.token->Packet.RxData->FragmentTable[0].FragmentBuffer, BUFFER_SIZE, MSG_DONTWAIT);
+            // Receive only into the space the caller left in the buffer (FragmentLength), not a full
+            // BUFFER_SIZE: the unparsed remainder can already occupy part of it, so BUFFER_SIZE overruns.
+            auto n = recv(request.socket, (char *)request.token->Packet.RxData->FragmentTable[0].FragmentBuffer, request.token->Packet.RxData->FragmentTable[0].FragmentLength, MSG_DONTWAIT);
             if (n > 0)
             {
                 request.token->Packet.RxData->DataLength = n;

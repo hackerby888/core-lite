@@ -33,6 +33,28 @@ static constexpr unsigned long long spectrumDigestsSizeInByte = (SPECTRUM_CAPACI
 
 GLOBAL_VAR_DECL unsigned long long spectrumReorgTotalExecutionTicks GLOBAL_VAR_INIT(0);
 
+// Dirty leaves for the per-tick Merkle digest. spectrumChangeFlags marks changed leaves and is reused
+// in-place as the propagation bitset by the digest walk. spectrumDirtyIndices lists the leaves touched
+// this tick so the digest re-hashes only those instead of scanning all SPECTRUM_CAPACITY entries.
+static unsigned long long spectrumChangeFlags[SPECTRUM_CAPACITY / (sizeof(unsigned long long) * 8)];
+#define SPECTRUM_DIRTY_CAP (1ULL << 20)
+static unsigned int spectrumDirtyIndices[SPECTRUM_DIRTY_CAP];
+static unsigned int spectrumDirtyCount = 0;
+static bool spectrumDirtyOverflow = false; // set if more than SPECTRUM_DIRTY_CAP distinct leaves change: digest falls back to a full scan
+
+// Record a spectrum leaf changed this tick. Caller holds spectrumLock. Dedup via the leaf flag so a hot index is listed once.
+static inline void markSpectrumDirty(unsigned int index)
+{
+    if (!(spectrumChangeFlags[index >> 6] & (1ULL << (index & 63))))
+    {
+        spectrumChangeFlags[index >> 6] |= (1ULL << (index & 63));
+        if (spectrumDirtyCount < SPECTRUM_DIRTY_CAP)
+            spectrumDirtyIndices[spectrumDirtyCount++] = index;
+        else
+            spectrumDirtyOverflow = true;
+    }
+}
+
 
 // Update SpectrumInfo data (exensive, because it iterates the whole spectrum), acquire no lock
 static void updateSpectrumInfo(SpectrumInfo& si = spectrumInfo)
@@ -201,6 +223,12 @@ static void reorganizeSpectrum()
         numberOfLeafs >>= 1;
     }
 
+    // Full rebuild above made the whole tree consistent and moved every entry to a new index, so any
+    // dirty leaves recorded before the reorg are stale: drop them. Leaves touched after this re-list.
+    setMem(spectrumChangeFlags, sizeof(spectrumChangeFlags), 0);
+    spectrumDirtyCount = 0;
+    spectrumDirtyOverflow = false;
+
     updateSpectrumInfo();
 
     spectrumReorgTotalExecutionTicks += __rdtsc() - spectrumReorgStartTick;
@@ -344,6 +372,7 @@ static void increaseEnergy(const m256i& publicKey, long long amount, bool isGene
             spectrum[index].incomingAmount += amount;
             spectrum[index].numberOfIncomingTransfers++;
             spectrum[index].latestIncomingTransferTick = system.tick;
+            markSpectrumDirty(index);
 
             spectrumInfo.totalAmount += amount;
         }
@@ -355,6 +384,7 @@ static void increaseEnergy(const m256i& publicKey, long long amount, bool isGene
                 spectrum[index].incomingAmount = amount;
                 spectrum[index].numberOfIncomingTransfers = 1;
                 spectrum[index].latestIncomingTransferTick = system.tick;
+                markSpectrumDirty(index);
 
                 spectrumInfo.numberOfEntities++;
                 spectrumInfo.totalAmount += amount;
@@ -396,6 +426,7 @@ static bool decreaseEnergy(const int index, long long amount)
             spectrum[index].outgoingAmount += amount;
             spectrum[index].numberOfOutgoingTransfers++;
             spectrum[index].latestOutgoingTransferTick = system.tick;
+            markSpectrumDirty(index);
 
             spectrumInfo.totalAmount -= amount;
 
