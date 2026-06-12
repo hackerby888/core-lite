@@ -478,8 +478,8 @@ static void pushToFullNodes(RequestResponseHeader* requestResponseHeader, int nu
 // mainnet tick sizes the old 5-way fan-out made ~80% of the multi-Mbit/s prefetch intake duplicate
 // (each tick's votes+txs fetched 5x, 4 discarded) — far from "negligible". One slow peer just costs
 // a 500ms re-poll, paid by the pipeline depth, not bandwidth.
-static constexpr int CATCHUP_FANOUT_ANY      = 1;
-static constexpr int CATCHUP_FANOUT_FULLNODE = 1;
+static constexpr int CATCHUP_FANOUT_ANY      = 3;
+static constexpr int CATCHUP_FANOUT_FULLNODE = 2;
 static constexpr int CATCHUP_FANOUT_TOTAL    = CATCHUP_FANOUT_ANY + CATCHUP_FANOUT_FULLNODE;
 
 // Fan out a "fetch missing data" request to several random peers plus several
