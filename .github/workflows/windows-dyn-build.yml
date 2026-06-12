@@ -56,7 +56,8 @@ jobs:
           # manifest mode installs into the build dir, NOT $vcpkg/installed. The paths don't exist
           # until the configure's vcpkg-install step runs — fine, they're only dereferenced at link.
           $inst  = "$PWD/build-win/vcpkg_installed/x64-windows-rel"
-          cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64 `
+          # No -G: CMake auto-picks the newest installed VS generator (a pinned major fails when the runner bumps VS).
+          cmake -S . -B build-win -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_OVERLAY_TRIPLETS="$PWD/triplets-overlay" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-rel `

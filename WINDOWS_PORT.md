@@ -20,7 +20,7 @@ Prereqs: Visual Studio 2022 (Desktop C++ workload → MSVC `cl`, `ml64`, CMake),
 optional (the `.asm` are pinned to ml64; blosc2's ASM_NASM probe tolerates no nasm — CI runs without it).
 
 ```bat
-cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64 ^
+cmake -S . -B build-win -A x64 ^
   -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
   -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF ^
   -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON ^

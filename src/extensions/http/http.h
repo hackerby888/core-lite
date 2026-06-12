@@ -2,7 +2,8 @@
 
 static unsigned long long httpPasscodes[4] = {};
 
-#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
+// Windows: only the cmake build links drogon/jsoncpp; the legacy Qubic.sln sets NO_RPC to opt out.
+#if defined(__linux__) || defined(__APPLE__) || (defined(_WIN32) && !defined(NO_RPC))
 
 #include <drogon/drogon.h>
 

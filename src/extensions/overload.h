@@ -54,7 +54,8 @@ static std::string nodeAlias = "My Qubic Lite Node";
 static const auto liteNodeStartTime = std::chrono::system_clock::now();
 
 
-#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
+// Windows: only the cmake build links drogon/jsoncpp; the legacy Qubic.sln sets NO_RPC to opt out.
+#if defined(__linux__) || defined(__APPLE__) || (defined(_WIN32) && !defined(NO_RPC))
 #include <json/config.h>
 #include <json/value.h>
 #include <json/writer.h>
