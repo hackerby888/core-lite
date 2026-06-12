@@ -9105,7 +9105,8 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     unsigned short numberOfSuitablePeers = 0;
                     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
                     {
-                        if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing)
+                        // Don't cull handshaked (productive) peers — only rotate unproductive ones.
+                        if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing && !peers[i].exchangedPublicPeers)
                         {
                             // Skip FullNode and OM nodes
                             if (!peers[i].isFullNode() && !peers[i].isOMNode)
