@@ -329,7 +329,7 @@ static bool          gActive       = false;
 static unsigned int  gReqFrontier  = 0;             // watermark: next tick to request (advances by BULK_SPAN at dispatch)
 static unsigned int  gReqDejavu    = 0;
 static unsigned long long gLastProbeTsc = 0;
-constexpr unsigned int BULK_PREFETCH_WINDOW = 128;  // request at most this many ticks ahead of system.tick
+constexpr unsigned int BULK_PREFETCH_WINDOW = 512;  // request at most this many ticks ahead of system.tick
 constexpr unsigned int BULK_SPAN      = 8;          // ticks per request; small enough that a span ~always fits the byte cap
 constexpr unsigned long long PROBE_INTERVAL_SECS = 2;
 
@@ -341,7 +341,8 @@ static int gCapableCount = 0;
 static unsigned int gRrCursor = 0;
 
 // Concurrent in-flight chunk requests so the responder pool(s) serve them in parallel + the RTT amortizes.
-constexpr int BULK_INFLIGHT = 8;
+// = BULK_PREFETCH_WINDOW / BULK_SPAN, so the whole window can be outstanding at once.
+constexpr int BULK_INFLIGHT = 64;
 struct ReqSlot { bool active; unsigned int startTick; unsigned int endTick; unsigned long long tsc; };
 static ReqSlot gSlots[BULK_INFLIGHT];
 static volatile char gSlotsLock = 0;
