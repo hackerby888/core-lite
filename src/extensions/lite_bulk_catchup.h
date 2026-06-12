@@ -94,20 +94,29 @@ static inline void appendSubFrame(char* buf, unsigned int& cursor, unsigned char
 
 // Append every stored sub-frame for tick t (tickData, then votes, then txs) into buf.
 // Returns false (and leaves cursor untouched) if t is not in storage at all.
-static bool appendTick(char* buf, unsigned int& cursor, unsigned int t, unsigned int dejavu)
+// Returns 0 = tick not in storage; 1 = tick fully appended; 2 = tick does not fit in the
+// remaining cap (everything appended for it is rolled back, so a partial tick is never shipped).
+static int appendTick(char* buf, unsigned int& cursor, unsigned int t, unsigned int dejavu, unsigned int cap)
 {
     unsigned short epoch = 0;
     bool current = false;
     if (ts.tickInCurrentEpochStorage(t)) { epoch = system.epoch; current = true; }
     else if (ts.tickInPreviousEpochStorage(t)) { epoch = system.epoch - 1; current = false; }
-    else return false;
+    else return 0;
+
+    const unsigned int tickStart = cursor;
+    // Each sub-frame is header + payload; refuse to write past cap (gChunkBuf has one extra max frame of headroom).
+    #define BULK_FITS(sz) (cursor + sizeof(RequestResponseHeader) + (unsigned int)(sz) <= cap)
 
     // tickData
     ts.tickData.acquireLock();
     const TickData* td = current ? &ts.tickData.getByTickInCurrentEpoch(t)
                                  : &ts.tickData.getByTickInPreviousEpoch(t);
     if (td->epoch == epoch)
+    {
+        if (!BULK_FITS(sizeof(TickData))) { ts.tickData.releaseLock(); cursor = tickStart; return 2; }
         appendSubFrame(buf, cursor, BroadcastFutureTickData::type(), dejavu, td, sizeof(TickData));
+    }
     ts.tickData.releaseLock();
 
     // votes (one Tick per computor that voted)
@@ -117,6 +126,7 @@ static bool appendTick(char* buf, unsigned int& cursor, unsigned int t, unsigned
     {
         if (tsTicks[ci].epoch == epoch)
         {
+            if (!BULK_FITS(sizeof(Tick))) { cursor = tickStart; return 2; }
             ts.ticks.acquireLock(ci);
             if (tsTicks[ci].epoch == epoch)
                 appendSubFrame(buf, cursor, BroadcastTick::type(), dejavu, &tsTicks[ci], sizeof(Tick));
@@ -134,10 +144,15 @@ static bool appendTick(char* buf, unsigned int& cursor, unsigned int t, unsigned
         {
             const Transaction* tx = ts.tickTransactions(off);
             if (tx->tick == t && tx->checkValidity())
-                appendSubFrame(buf, cursor, BROADCAST_TRANSACTION, dejavu, tx, tx->totalSize());
+            {
+                const unsigned int sz = tx->totalSize();
+                if (!BULK_FITS(sz)) { cursor = tickStart; return 2; }
+                appendSubFrame(buf, cursor, BROADCAST_TRANSACTION, dejavu, tx, sz);
+            }
         }
     }
-    return true;
+    #undef BULK_FITS
+    return 1;
 }
 
 static void processRequest(Peer* peer, RequestResponseHeader* header, unsigned long long processorNumber)
@@ -163,14 +178,8 @@ static void processRequest(Peer* peer, RequestResponseHeader* header, unsigned l
 
     for (unsigned int t = startTick; t < startTick + REQUEST_SPAN; t++)
     {
-        const unsigned int before = cursor;
-        if (!appendTick(buf, cursor, t, dejavu))
-            break;                       // responder has no more ticks from here
-        if (cursor > cap)                // this tick overflowed the chunk
-        {
-            cursor = before;             // roll it back; never ship a partial tick
-            break;
-        }
+        const int r = appendTick(buf, cursor, t, dejavu, cap);
+        if (r != 1) break;               // 0 = no more ticks in storage; 2 = won't fit (already rolled back)
         endIncluded = t;
     }
 
