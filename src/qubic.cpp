@@ -7922,6 +7922,11 @@ static void logInfo()
     appendText(message, L" ?");
     appendNumber(message, numberOfSkippedBroadcasts - prevNumberOfSkippedBroadcasts, TRUE);
     appendText(message, L"] ");
+    appendText(message, L"bulk=");
+    appendNumber(message, LiteBulkCatchup::gChunksReceived, TRUE);
+    appendText(message, L"/");
+    appendNumber(message, LiteBulkCatchup::gChunksServed, TRUE);
+    appendText(message, L" ");
 
     unsigned int numberOfConnectingSlots = 0, numberOfConnectedSlots = 0, numberOfHandshakedSlots = 0;
     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
