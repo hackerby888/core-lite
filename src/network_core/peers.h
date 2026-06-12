@@ -473,12 +473,13 @@ static void pushToFullNodes(RequestResponseHeader* requestResponseHeader, int nu
     }
 }
 
-// Fan-out widths for catch-up "fetch missing data" requests.  Each upstream
-// pushToAny + pushToAnyFullNode pair sends to only 2 peers; if either is slow
-// the whole 500 ms tick-request poll is wasted.  Sending to a few more peers
-// in parallel shortens the average wait at negligible bandwidth cost.
-static constexpr int CATCHUP_FANOUT_ANY      = 3;
-static constexpr int CATCHUP_FANOUT_FULLNODE = 2;
+// Fan-out widths for catch-up "fetch missing data" requests. pushPreferringAtOrAbove already targets
+// peers that provably HAVE the tick, so 1 fullnode + 1 random is enough for a slow-peer hedge. At
+// mainnet tick sizes the old 5-way fan-out made ~80% of the multi-Mbit/s prefetch intake duplicate
+// (each tick's votes+txs fetched 5x, 4 discarded) — far from "negligible". One slow peer just costs
+// a 500ms re-poll, paid by the pipeline depth, not bandwidth.
+static constexpr int CATCHUP_FANOUT_ANY      = 1;
+static constexpr int CATCHUP_FANOUT_FULLNODE = 1;
 static constexpr int CATCHUP_FANOUT_TOTAL    = CATCHUP_FANOUT_ANY + CATCHUP_FANOUT_FULLNODE;
 
 // Fan out a "fetch missing data" request to several random peers plus several
