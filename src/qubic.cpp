@@ -2034,7 +2034,6 @@ static void updateNumberOfTickTransactions()
 // In this test, the processors calling requestProcessor() were stuck before entering the function.
 // Probably, this was caused by a bug in the optimizer, because disabling the optimizer solved the
 // problem.
-
 // OPTIMIZE_OFF()
 static void requestProcessor(void* ProcedureArgument, unsigned long long processorNumber)
 {
@@ -9179,10 +9178,6 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     futureTickRequestingIndicator = gFutureTickTotalNumberOfComputors;
 
 #if USE_FUTURE_TICK_PREFETCH
-                    // Prefetch always runs at full depth: it is the baseline catch-up path (clean
-                    // data straight from the network). Bulk runs alongside as a bonus when a capable
-                    // peer has the range; gating prefetch on bulk being "active" starves the node
-                    // whenever the bulk peer underdelivers (e.g. serves void/auto-flushed ticks).
                     const unsigned int prefetchDepth = opt_future_tick_prefetch::computePrefetchDepth();
 #endif
 
@@ -9618,7 +9613,8 @@ void processArgs(int argc, const char* argv[]) {
         ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
         ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
-        ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"));
+        ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"))
+        ("max-inbound-per-ip", "Max inbound connection slots from a single IP (0 = unlimited, default). Stops one peer flooding many slots.", cxxopts::value<int>()->default_value("0"));
     auto result = options.parse(argc, argv);
 
 #ifdef __linux__
@@ -9683,6 +9679,13 @@ void processArgs(int argc, const char* argv[]) {
         if (mi >= 0) {
             maxInboundAccepts = mi > NUMBER_OF_INCOMING_CONNECTIONS ? NUMBER_OF_INCOMING_CONNECTIONS : mi;
             logColorToScreen("INFO", "Max inbound accepts capped at " + std::to_string(maxInboundAccepts));
+        }
+    }
+    {
+        int mp = result["max-inbound-per-ip"].as<int>();
+        if (mp > 0) {
+            maxIncomingConnectionsPerIp = mp;
+            logColorToScreen("INFO", "Max inbound per IP capped at " + std::to_string(maxIncomingConnectionsPerIp));
         }
     }
     if (result.count("auto-flush-stuck-seconds")) {

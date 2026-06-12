@@ -180,6 +180,8 @@ static volatile long long numberOfTransmittedBytes = 0, prevNumberOfTransmittedB
 static int numberOfAcceptedIncommingConnection = 0;
 // Max incoming slots allowed to arm Accept() (--max-inbound / /set-max-inbound); default = all.
 static int maxInboundAccepts = NUMBER_OF_INCOMING_CONNECTIONS;
+// Max incoming slots per single IP (--max-inbound-per-ip); 0 = unlimited (default).
+static int maxIncomingConnectionsPerIp = 0;
 
 static volatile char publicPeersLock = 0;
 static unsigned int numberOfPublicPeers = 0;
@@ -961,6 +963,24 @@ static bool peerConnectionNewlyEstablished(unsigned int i)
         {
             if (peers[i].isIncommingConnection)
             {
+                // Cap incoming slots per IP if configured (--max-inbound-per-ip; 0 = unlimited; loopback
+                // exempt): one peer can't flood many slots (wastes slots + redundant sends -> churn).
+                if (maxIncomingConnectionsPerIp > 0 && peers[i].address.u8[0] != 127 && peers[i].address.u32 != 0)
+                {
+                    unsigned int sameIp = 0;
+                    for (unsigned int k = 0; k < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; k++)
+                    {
+                        if (k != i && (unsigned long long)peers[k].tcp4Protocol > 1 && peers[k].isIncommingConnection
+                            && peers[k].isConnectedAccepted && !peers[k].isClosing && peers[k].address == peers[i].address)
+                        {
+                            if (++sameIp >= (unsigned int)maxIncomingConnectionsPerIp)
+                            {
+                                closePeer(&peers[i]);
+                                return false;
+                            }
+                        }
+                    }
+                }
                 numberOfAcceptedIncommingConnection++;
                 ASSERT(numberOfAcceptedIncommingConnection <= NUMBER_OF_INCOMING_CONNECTIONS);
             }
