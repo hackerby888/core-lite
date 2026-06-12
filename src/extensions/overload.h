@@ -1254,8 +1254,16 @@ struct Overload {
         PROCESS_POWER_THROTTLING_STATE pt;
         memset(&pt, 0, sizeof(pt));
         pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        pt.StateMask = 0;   // 0 = throttling OFF for whichever ControlMask bit is set
+        // EcoQoS EXECUTION-SPEED throttling (Win10 1709+/Win11) is a SEPARATE mechanism: a background
+        // process (detached + window-hidden — exactly how qinit launches the node) gets down-clocked, so
+        // the tick loop bodies stay fast (~20us) but the chain crawls to ~136s/tick. This — not timer
+        // resolution — is the CI tick-stall. Force full speed. Set as its OWN call so the Win11-only
+        // timer-resolution flag below can't fail the whole request on Win10.
+        pt.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
+        // Win11: also stop it dropping the 1ms timeBeginPeriod request when backgrounded.
         pt.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
-        pt.StateMask = 0;   // 0 = always honor timer-resolution requests
         SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
         #endif
 
