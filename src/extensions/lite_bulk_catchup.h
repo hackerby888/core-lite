@@ -312,15 +312,31 @@ static void storeBulkTransaction(const Transaction* request)
 // request-pacing cap.) Runs only on AUX while far behind.
 // =====================================================================
 static bool          gActive       = false;
-static int           gOutstanding  = -1;            // peer index of the in-flight request, or -1
-static unsigned int  gReqStartTick = 0;             // startTick of the in-flight request
-static unsigned int  gReqFrontier  = 0;             // next tick to request (advances per response, gap-free)
-static unsigned long long gReqTsc  = 0;
-constexpr unsigned int BULK_MAX_AHEAD = 4000;       // don't fetch more than this far past system.tick
+static unsigned int  gReqFrontier  = 0;             // next tick to request
 static unsigned int  gReqDejavu    = 0;
-static unsigned int  gCapableAddr  = 0;             // address.u32 of a peer that answered a chunk (0 = none yet)
+static unsigned int  gAvgChunkTicks = 32;           // running estimate of ticks delivered per chunk
 static unsigned long long gLastProbeTsc = 0;
+constexpr unsigned int BULK_MAX_AHEAD = 8000;       // don't fetch more than this far past system.tick
 constexpr unsigned long long PROBE_INTERVAL_SECS = 2;
+
+// Capable peers (run the 240/241 protocol); striped across so a behind node pulls from several
+// archives and the responders' pools serve in parallel.
+constexpr int BULK_MAX_CAPABLE = 16;
+static unsigned int gCapablePeers[BULK_MAX_CAPABLE];
+static int gCapableCount = 0;
+static unsigned int gRrCursor = 0;
+
+// Concurrent in-flight chunk requests so the responder pool(s) serve them in parallel.
+constexpr int BULK_INFLIGHT = 8;
+struct ReqSlot { bool active; unsigned int startTick; unsigned long long tsc; };
+static ReqSlot gSlots[BULK_INFLIGHT];
+static volatile char gSlotsLock = 0;
+
+static void addCapablePeer(unsigned int addr)
+{
+    for (int i = 0; i < gCapableCount; i++) if (gCapablePeers[i] == addr) return;
+    if (gCapableCount < BULK_MAX_CAPABLE) gCapablePeers[gCapableCount++] = addr;
+}
 
 // Highest tick any connected peer reports (network tip estimate).
 static unsigned int networkTip()
@@ -362,23 +378,38 @@ static void probeAllPeers(unsigned long long nowTsc)
     gLastProbeTsc = nowTsc;
 }
 
-// Issue one chunk request at the frontier to the capable peer. Continuous delivery: each response
-// chains the next. Backpressure on the work queue + a cap on how far ahead of system.tick we fetch.
-static void issueChunkRequest(int pi, unsigned long long nowTsc)
+// Top up the in-flight slots with consecutive tick ranges, round-robined across capable peers, so
+// several chunks are served in parallel. gReqFrontier advances by the running chunk-size estimate;
+// small gaps/overlaps are corrected by each response's actual end tick + the normal prefetch backstop.
+static void fillSlots(unsigned long long nowTsc, unsigned long long freq)
 {
+    if (gCapableCount == 0) return;
     const unsigned int queued = (gBulkElemHead - gBulkElemTail) & (BULK_QUEUE_ELEMS - 1);
-    if (queued > BULK_QUEUE_ELEMS / 2) return;          // queue half full: let the pool drain it
-    if (gReqFrontier > system.tick + BULK_MAX_AHEAD) return;
-    RequestTickRangeChunk req;
-    req.version = VERSION;
-    req.startTick = gReqFrontier;
-    req.maxBytes = CHUNK_BYTES_MAX;
-    _rdrand32_step(&gReqDejavu);
-    if (!gReqDejavu) gReqDejavu = 1;
-    enqueueResponse(&peers[pi], sizeof(req), REQUEST_TYPE, gReqDejavu, &req);
-    gOutstanding = pi;
-    gReqStartTick = gReqFrontier;
-    gReqTsc = nowTsc;
+    ACQUIRE(gSlotsLock);
+    for (int s = 0; s < BULK_INFLIGHT; s++)
+    {
+        if (gSlots[s].active && (nowTsc - gSlots[s].tsc) > CHUNK_TIMEOUT_SECS * freq)
+            gSlots[s].active = false;                       // timed out
+        if (gSlots[s].active) continue;
+        if (queued > BULK_QUEUE_ELEMS * 3 / 4) break;       // work queue nearly full
+        if (gReqFrontier > system.tick + BULK_MAX_AHEAD) break;
+        int pi = -1;
+        for (int tries = 0; tries < gCapableCount && pi < 0; tries++)
+            pi = peerIndexForAddr(gCapablePeers[(gRrCursor++) % gCapableCount]);
+        if (pi < 0) { gCapableCount = 0; break; }           // all capable peers gone; re-discover
+        RequestTickRangeChunk req;
+        req.version = VERSION;
+        req.startTick = gReqFrontier;
+        req.maxBytes = CHUNK_BYTES_MAX;
+        _rdrand32_step(&gReqDejavu);
+        if (!gReqDejavu) gReqDejavu = 1;
+        enqueueResponse(&peers[pi], sizeof(req), REQUEST_TYPE, gReqDejavu, &req);
+        gSlots[s].active = true;
+        gSlots[s].startTick = gReqFrontier;
+        gSlots[s].tsc = nowTsc;
+        gReqFrontier += gAvgChunkTicks;                     // optimistic stride
+    }
+    RELEASE(gSlotsLock);
 }
 
 // Receive a chunk: advance the frontier + chain the next request (continuous delivery), then copy
@@ -386,21 +417,27 @@ static void issueChunkRequest(int pi, unsigned long long nowTsc)
 static void onRespondChunk(Peer* peer, RequestResponseHeader* header, unsigned long long processorNumber)
 {
     _InterlockedIncrement64(&gChunksReceived);
-    gCapableAddr = peer->address.u32;    // this peer speaks the bulk protocol; lock onto it
-    gOutstanding = -1;
+    addCapablePeer(peer->address.u32);   // this peer speaks the bulk protocol
     const unsigned int total = header->size();
     if (total < sizeof(RequestResponseHeader) + sizeof(RespondTickRangeChunkHeader))
         return;
     char* base = (char*)header->getPayload<char>();
     const unsigned int payloadSize = total - sizeof(RequestResponseHeader);
 
+    // Free the slot that owned this range, update the chunk-size estimate, keep the frontier honest.
     const RespondTickRangeChunkHeader* rh = (const RespondTickRangeChunkHeader*)base;
-    if (rh->endTickFullyIncluded >= rh->startTick && rh->endTickFullyIncluded + 1 > gReqFrontier)
-        gReqFrontier = rh->endTickFullyIncluded + 1;     // gap-free advance
+    ACQUIRE(gSlotsLock);
+    for (int s = 0; s < BULK_INFLIGHT; s++)
+        if (gSlots[s].active && gSlots[s].startTick == rh->startTick) { gSlots[s].active = false; break; }
+    if (rh->endTickFullyIncluded >= rh->startTick)
     {
-        const int pi = peerIndexForAddr(gCapableAddr);
-        if (pi >= 0) issueChunkRequest(pi, __rdtsc());   // chain next while this chunk is applied
+        const unsigned int got = rh->endTickFullyIncluded - rh->startTick + 1;
+        gAvgChunkTicks = (gAvgChunkTicks * 3 + got) / 4;            // smooth the stride estimate
+        if (rh->endTickFullyIncluded + 1 > gReqFrontier) gReqFrontier = rh->endTickFullyIncluded + 1;
     }
+    RELEASE(gSlotsLock);
+
+    fillSlots(__rdtsc(), frequency);     // refill in parallel (continuous, multi-peer delivery)
 
     unsigned int cursor = sizeof(RespondTickRangeChunkHeader);
     while (cursor + sizeof(RequestResponseHeader) <= payloadSize)
@@ -418,16 +455,16 @@ static void onRespondChunk(Peer* peer, RequestResponseHeader* header, unsigned l
 // single in-flight request. `nowTsc` and `freq` are __rdtsc()/frequency from the caller.
 static void kicker(unsigned long long nowTsc, unsigned long long freq)
 {
-    if (isMainMode()) { gActive = false; gOutstanding = -1; return; }
+    if (isMainMode()) { gActive = false; return; }
 
     const unsigned int tip = networkTip();
     const unsigned int behind = tip > system.tick ? (tip - system.tick) : 0;
     if (!gActive && behind >= ACTIVATE_BEHIND) gActive = true;
-    else if (gActive && behind <= DEACTIVATE_BEHIND) { gActive = false; gOutstanding = -1; return; }
+    else if (gActive && behind <= DEACTIVATE_BEHIND) { gActive = false; return; }
     if (!gActive) return;
 
-    // No known bulk peer yet: probe everyone periodically until one answers.
-    if (gCapableAddr == 0)
+    // No capable bulk peer yet: probe everyone periodically until one answers.
+    if (gCapableCount == 0)
     {
         if (nowTsc - gLastProbeTsc > PROBE_INTERVAL_SECS * freq)
             probeAllPeers(nowTsc);
@@ -437,12 +474,7 @@ static void kicker(unsigned long long nowTsc, unsigned long long freq)
     // Keep the frontier at/ahead of where we've ticked to (recovers if it stalled or fell behind).
     if (gReqFrontier <= system.tick) gReqFrontier = system.tick + 1;
 
-    const int pi = peerIndexForAddr(gCapableAddr);
-    if (pi < 0) { gCapableAddr = 0; return; }       // capable peer gone; re-discover
-
-    // Kickstart / recover: if nothing is in flight (or it timed out), re-issue at the frontier.
-    if (gOutstanding < 0 || (nowTsc - gReqTsc) > CHUNK_TIMEOUT_SECS * freq)
-        issueChunkRequest(pi, nowTsc);
+    fillSlots(nowTsc, freq);            // kickstart / recover / top up the in-flight slots
 }
 
 } // namespace LiteBulkCatchup
