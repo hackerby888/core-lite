@@ -2034,6 +2034,8 @@ static void updateNumberOfTickTransactions()
 // In this test, the processors calling requestProcessor() were stuck before entering the function.
 // Probably, this was caused by a bug in the optimizer, because disabling the optimizer solved the
 // problem.
+#include "extensions/lite_bulk_catchup.h"
+
 // OPTIMIZE_OFF()
 static void requestProcessor(void* ProcedureArgument, unsigned long long processorNumber)
 {
@@ -2330,6 +2332,19 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
                 case LiteCheckin::RequestLiteCheckin::type():
                 {
                     LiteCheckin::processRequest(peer, header);
+                }
+                break;
+
+                /* lite-extension: bulk catch-up range request/response (240/241) */
+                case LiteBulkCatchup::RequestTickRangeChunk::type():
+                {
+                    LiteBulkCatchup::processRequest(peer, header, processorNumber);
+                }
+                break;
+
+                case LiteBulkCatchup::RespondTickRangeChunkHeader::type():
+                {
+                    LiteBulkCatchup::onRespondChunk(peer, header, processorNumber);
                 }
                 break;
 
@@ -7340,6 +7355,9 @@ static bool initialize()
         if (!fastTxWindow.init())
             return false;
 
+        if (!LiteBulkCatchup::init())
+            return false;
+
         setMem(spectrumChangeFlags, sizeof(spectrumChangeFlags), 0);
 
         if (!initSpectrum())
@@ -9125,6 +9143,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                 {
                     // Request ticks
                     tickRequestingTick = curTimeTick;
+
+                    // Bulk catch-up: when far behind, pull whole tick ranges in one request.
+                    LiteBulkCatchup::kicker(curTimeTick, frequency);
 #if TICK_STORAGE_AUTOSAVE_MODE
                     const bool isNewTick = system.tick >= ts.getPreloadTick();
                     const bool isNewTickPlus1 = system.tick + 1 >= ts.getPreloadTick();
