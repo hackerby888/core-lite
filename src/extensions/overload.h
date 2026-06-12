@@ -909,6 +909,19 @@ struct Overload {
     static EFI_STATUS Configure(IN void* This, IN EFI_TCP4_CONFIG_DATA* TcpConfigData OPTIONAL) {
         static bool isGlobalSocketInitialized = false;
         if (!TcpConfigData) {
+            // Teardown via Configure(NULL): shutdown socket so in-flight send/recv abort and
+            // isTransmitting can clear (else slot stuck isClosing). fd closed in DestroyChild.
+            auto it = tcpDataMap.find((unsigned long long)This);
+            if (it != tcpDataMap.end()) {
+                it->second.connectStatus = ConnectStatus::Disconnected;
+                if (it->second.socket != INVALID_SOCKET) {
+#ifdef _MSC_VER
+                    shutdown(it->second.socket, SD_BOTH);
+#else
+                    shutdown(it->second.socket, SHUT_RDWR);
+#endif
+                }
+            }
             return EFI_SUCCESS;
         }
 
