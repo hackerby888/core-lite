@@ -2097,7 +2097,11 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
         
         if (requestQueueElementTail == requestQueueElementHead)
         {
-            _mm_pause();
+            // No normal request pending: drain queued bulk catch-up sub-frames so the whole
+            // request pool applies them in parallel (else the work queue never empties and the
+            // ticker starves on the gated prefetch). Falls through to pause when nothing queued.
+            if (!LiteBulkCatchup::bulkProcessOne((char*)processor->buffer))
+                _mm_pause();
         }
         else
         {
