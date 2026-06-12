@@ -186,6 +186,10 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
         const char* ex = wasm_runtime_get_exception(s.inst);   // which contract/entry trapped + why
         s.lastTrap = std::string("it=") + std::to_string(it) + " kind=" + std::to_string(kind)
                    + (ex ? std::string(" — ") + ex : std::string(" — trap"));   // surfaced via dyn-registry (RPC) to tooling
+        // Built with LITE_WASM_TRAP_BACKTRACE (classic interp + DUMP_CALL_STACK), WAMR auto-prints the
+        // backtrace (#NN: 0xOFF - name) to stdout during the trap; it lands in node.log next to this line.
+        // qinit maps those offsets to source via the DWARF sidecar (the frames unwind before we regain control,
+        // and copy_callstack carries no offset, so the node can't capture them structurally).
         logColorToScreen("ERROR", "LITEWASM dispatch trap idx=" + std::to_string(idx) + " " + s.lastTrap);
         wasm_runtime_clear_exception(s.inst);                  // clear so a later valid call on this slot still runs
     } else {

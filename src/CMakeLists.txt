@@ -225,7 +225,16 @@ if(LITE_WASM_CONTRACTS)
         set(WAMR_BUILD_TARGET "X86_64")
     endif()
     set(WAMR_BUILD_INTERP 1)
-    set(WAMR_BUILD_FAST_INTERP 1)
+    # Dev: classic interp + call-stack capture -> source-mapped trap backtraces. Slower; prod keeps fast interp.
+    option(LITE_WASM_TRAP_BACKTRACE "WAMR classic interp + call-stack capture for source-mapped trap backtraces (dev)" OFF)
+    if(LITE_WASM_TRAP_BACKTRACE)
+        # Classic interp keeps trap offsets as original-wasm bytes; DUMP_CALL_STACK makes WAMR print the
+        # backtrace (#NN: 0xOFF - name) to stdout on trap -> node.log -> qinit maps it to source (DWARF sidecar).
+        set(WAMR_BUILD_FAST_INTERP 0)
+        set(WAMR_BUILD_DUMP_CALL_STACK 1)
+    else()
+        set(WAMR_BUILD_FAST_INTERP 1)
+    endif()
     set(WAMR_BUILD_AOT 0)
     set(WAMR_BUILD_JIT 0)
     set(WAMR_BUILD_LIBC_BUILTIN 0)   # contracts use our host imports, not libc

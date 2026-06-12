@@ -113,4 +113,58 @@ TEST(WasmContracts, SystemProceduresMaskAndDispatch) {
     EXPECT_EQ(((uint64_t*)w.nat(st))[1], 777u) << "input sysproc read its marshalled input";
 }
 
+#ifdef LITE_WASM_TRAP_BACKTRACE
+#include "wasm_trap_fixture.h"
+#include <unistd.h>
+#include <cstdio>
+#include <string>
+// Classic interp + DUMP_CALL_STACK: on a contract trap WAMR auto-prints a backtrace ("#NN: 0xOFF - name")
+// whose offsets are original-wasm bytes -> source file:line via the DWARF sidecar (qinit side). The node
+// can't capture it structurally (copy_callstack carries no offset + the frames unwind before we regain
+// control), so it flows stdout -> node.log -> qinit. This locks that the auto-dump fires with a byte offset
+// under the dev build. Only runs with -DLITE_WASM_TRAP_BACKTRACE=ON (fast-interp offsets are unmappable).
+TEST(WasmContracts, TrapAutoDumpHasMappableOffset) {
+    static char heap[8 * 1024 * 1024];
+    RuntimeInitArgs ia; memset(&ia, 0, sizeof ia);
+    ia.mem_alloc_type = Alloc_With_Pool;
+    ia.mem_alloc_option.pool.heap_buf = heap;
+    ia.mem_alloc_option.pool.heap_size = sizeof heap;
+    ASSERT_TRUE(wasm_runtime_full_init(&ia));
+    unsigned char buf[8192]; ASSERT_LE(g_wasmTrapFixtureLen, sizeof buf);
+    memcpy(buf, g_wasmTrapFixture, g_wasmTrapFixtureLen);
+    char err[192];
+    wasm_module_t mod = wasm_runtime_load(buf, g_wasmTrapFixtureLen, err, sizeof err);
+    ASSERT_NE(mod, nullptr) << err;
+    wasm_module_inst_t inst = wasm_runtime_instantiate(mod, 64 * 1024, 1024 * 1024, err, sizeof err);
+    ASSERT_NE(inst, nullptr) << err;
+    wasm_exec_env_t env = wasm_runtime_create_exec_env(inst, 64 * 1024);
+    ASSERT_NE(env, nullptr);
+    wasm_function_inst_t f = wasm_runtime_lookup_function(inst, "dispatch");
+    ASSERT_NE(f, nullptr);
+
+    // capture stdout (WAMR auto-dumps the backtrace there during the trap); single-threaded test -> safe.
+    int saved = dup(fileno(stdout));
+    int pfd[2]; ASSERT_EQ(pipe(pfd), 0);
+    fflush(stdout); dup2(pfd[1], fileno(stdout)); close(pfd[1]);
+
+    uint32_t a[5] = { 0, 0, 0, 0, 0 };   // it=0 -> do_div(7,0) -> divide-by-zero trap
+    bool ok = wasm_runtime_call_wasm(env, f, 5, a);
+
+    fflush(stdout); dup2(saved, fileno(stdout)); close(saved);
+    char cap[8192]; ssize_t n = read(pfd[0], cap, sizeof(cap) - 1); close(pfd[0]);
+    cap[n > 0 ? n : 0] = '\0';
+    printf("--- captured WAMR auto-dump ---\n%s\n-------------------------------\n", cap);
+
+    EXPECT_FALSE(ok) << "dispatch must trap (divide by zero)";
+    std::string out(cap);
+    EXPECT_NE(out.find("#0"), std::string::npos) << "WAMR backtrace frame markers present in the auto-dump";
+    EXPECT_NE(out.find("0x"), std::string::npos) << "the backtrace carries a (DWARF-mappable) byte offset";
+
+    wasm_runtime_destroy_exec_env(env);
+    wasm_runtime_deinstantiate(inst);
+    wasm_runtime_unload(mod);
+    wasm_runtime_destroy();
+}
+#endif // LITE_WASM_TRAP_BACKTRACE
+
 #endif // LITE_WASM_CONTRACTS
