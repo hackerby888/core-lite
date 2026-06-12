@@ -20,7 +20,7 @@
 
 namespace opt_future_tick_prefetch {
 
-constexpr unsigned int CATCHUP_MAX_PREFETCH = 512;
+constexpr unsigned int CATCHUP_MAX_PREFETCH = 32;
 
 // Returns the highest tick number any connected peer has reported via
 // votes/tickData (i.e. an estimate of the network tip).

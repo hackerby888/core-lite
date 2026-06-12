@@ -33,7 +33,7 @@ constexpr unsigned int  CHUNK_BYTES_MAX = 4u * 1024 * 1024;
 constexpr unsigned int  ACTIVATE_BEHIND   = 100;
 constexpr unsigned int  DEACTIVATE_BEHIND = 30;
 // How far ahead of system.tick a single request may span (bounded so storage stays sane).
-constexpr unsigned int  REQUEST_SPAN      = 512;
+constexpr unsigned int  REQUEST_SPAN      = 128;
 // Resend an unanswered chunk request after this long (seconds * frequency applied by caller).
 constexpr unsigned long long CHUNK_TIMEOUT_SECS = 8;
 
