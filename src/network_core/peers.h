@@ -715,7 +715,22 @@ static bool isAddressInKnownPublicPeers(const IPv4Address& address)
 }
 
 
-// Forget public peer (no matter if verified or not) if we have more than the minium number of peers
+// Inactive pool: forgotten (bad/unresponsive) peers are parked here instead of dropped, then
+// recycled into candidates when active peers fall to the keep-floor.
+static IPv4Address inactivePublicPeers[MAX_NUMBER_OF_PUBLIC_PEERS];
+static unsigned int numberOfInactivePublicPeers = 0;
+
+// Park an address in the inactive pool (dedup, bounded). Caller holds publicPeersLock.
+static void pushInactivePublicPeer(const IPv4Address& address)
+{
+    for (unsigned int i = 0; i < numberOfInactivePublicPeers; i++)
+        if (inactivePublicPeers[i] == address)
+            return;
+    if (numberOfInactivePublicPeers < MAX_NUMBER_OF_PUBLIC_PEERS)
+        inactivePublicPeers[numberOfInactivePublicPeers++] = address;
+}
+
+// Forget a peer: park it in the inactive pool and drop it from active candidates.
 static void forgetPublicPeer(const IPv4Address& address)
 {
     // if address is one of our initial peers we don't forget it
@@ -731,10 +746,11 @@ static void forgetPublicPeer(const IPv4Address& address)
 
     ACQUIRE(publicPeersLock);
 
-    for (unsigned int i = 0; numberOfPublicPeers > NUMBER_OF_PUBLIC_PEERS_TO_KEEP && i < numberOfPublicPeers; i++)
+    for (unsigned int i = 0; i < numberOfPublicPeers; i++)
     {
         if (publicPeers[i].address == address)
         {
+            pushInactivePublicPeer(address); // park for recycling, don't drop
             if (i != --numberOfPublicPeers)
             {
                 copyMem(&publicPeers[i], &publicPeers[numberOfPublicPeers], sizeof(PublicPeer));
@@ -818,6 +834,22 @@ static void addPublicPeer(const IPv4Address& address)
     }
 
     RELEASE(publicPeersLock);
+}
+
+// Recycle the inactive pool back into candidates when active peers hit the keep-floor.
+static void refillPublicPeersFromInactive()
+{
+    if (listOfPeersIsStatic || numberOfPublicPeers > NUMBER_OF_PUBLIC_PEERS_TO_KEEP || numberOfInactivePublicPeers == 0)
+        return;
+    IPv4Address recycled[MAX_NUMBER_OF_PUBLIC_PEERS];
+    ACQUIRE(publicPeersLock);
+    unsigned int n = numberOfInactivePublicPeers;
+    for (unsigned int i = 0; i < n; i++)
+        recycled[i] = inactivePublicPeers[i];
+    numberOfInactivePublicPeers = 0;
+    RELEASE(publicPeersLock);
+    for (unsigned int i = 0; i < n; i++)
+        addPublicPeer(recycled[i]); // re-add as fresh candidates (dedups internally)
 }
 
 static bool peerConnectionNewlyEstablished(unsigned int i)
@@ -1276,6 +1308,7 @@ static void peerReconnectIfInactive(unsigned int i, unsigned short port)
                 // yet have an outgoing connection to it. Guard the empty case:
                 // random(0) is a modulo-by-zero (SIGFPE) — a node started with no
                 // public peers (e.g. only a self/loopback --peers entry) hits it.
+                refillPublicPeersFromInactive();
                 if (numberOfPublicPeers)
                     peers[i].address = publicPeers[random(numberOfPublicPeers)].address;
             }

@@ -1088,8 +1088,8 @@ struct Overload {
         serverAddr.sin_addr.s_addr = *((unsigned int*)tcpData->configData.AccessPoint.RemoteAddress.Addr);
         #endif
 
-        // 5s-bounded connect: a dead/firewalled peer can't pin the slot for the OS SYN timeout (~127s);
-        // the reaper expects it gone by ~5s, and Configure(NULL)'s shutdown wakes the poll early.
+        // 4s-bounded connect (< 5s reaper so it self-resolves first): a dead peer can't pin the slot
+        // for the OS SYN timeout (~127s); Configure(NULL)'s shutdown wakes the poll early.
         std::thread connectThread([tcpData, serverAddr, ConnectionToken, sock]() {
             tcpData->connectStatus = ConnectStatus::Connecting;
             bool ok = false;
@@ -1099,11 +1099,11 @@ struct Overload {
 #ifdef _MSC_VER
                 bool inProgress = (WSAGetLastError() == WSAEWOULDBLOCK);
                 WSAPOLLFD pfd{}; pfd.fd = sock; pfd.events = POLLOUT;
-                int pr = inProgress ? WSAPoll(&pfd, 1, 5000) : -1;
+                int pr = inProgress ? WSAPoll(&pfd, 1, 4000) : -1;
 #else
                 bool inProgress = (errno == EINPROGRESS);
                 pollfd pfd{}; pfd.fd = sock; pfd.events = POLLOUT;
-                int pr = inProgress ? poll(&pfd, 1, 5000) : -1;
+                int pr = inProgress ? poll(&pfd, 1, 4000) : -1;
 #endif
                 if (pr > 0 && (pfd.revents & POLLOUT) && !(pfd.revents & (POLLERR | POLLHUP))) {
                     int soerr = 0; socklen_t len = sizeof(soerr);
