@@ -23,7 +23,7 @@ namespace LiteBulkCatchup
 {
 constexpr unsigned char REQUEST_TYPE = 240;
 constexpr unsigned char RESPOND_TYPE = 241;
-constexpr unsigned int  VERSION       = 1;
+constexpr unsigned int  VERSION       = 2;   // v2 adds maxTicks (pipelined fixed-span requests)
 
 // Responder clamp. <= RequestResponseHeader::max_size (16MB-1); bounds the
 // per-peer transmit-buffer copy and the receive-side compaction cost.
@@ -44,8 +44,9 @@ struct RequestTickRangeChunk
     unsigned char  version;
     unsigned int   startTick;
     unsigned int   maxBytes;
+    unsigned int   maxTicks;   // serve exactly this many ticks (capped by maxBytes); lets the requester stride contiguously to pipeline
 };
-static_assert(sizeof(RequestTickRangeChunk) == 9, "RequestTickRangeChunk layout drifted");
+static_assert(sizeof(RequestTickRangeChunk) == 13, "RequestTickRangeChunk layout drifted");
 
 struct RespondTickRangeChunkHeader
 {
@@ -249,7 +250,11 @@ static void processRequest(Peer* peer, RequestResponseHeader* header, unsigned l
     const unsigned int startTick = req->startTick;
     unsigned int endIncluded = startTick - 1;
 
-    for (unsigned int t = startTick; t < startTick + REQUEST_SPAN; t++)
+    // Serve up to the requester's requested span (clamped to REQUEST_SPAN), or until a tick won't
+    // fit the byte cap (partial: the requester re-requests the remainder as a hole).
+    unsigned int span = req->maxTicks ? req->maxTicks : REQUEST_SPAN;
+    if (span > REQUEST_SPAN) span = REQUEST_SPAN;
+    for (unsigned int t = startTick; t < startTick + span; t++)
     {
         const int r = appendTick(buf, cursor, t, dejavu, cap);
         if (r != 1) break;               // 0 = no more ticks in storage; 2 = won't fit (already rolled back)
@@ -307,16 +312,17 @@ static void storeBulkTransaction(const Transaction* request)
 }
 
 // =====================================================================
-// Requester. Sequential single-outstanding-chunk pull from one capable peer.
-// (Striping across peers is a later optimization; this already removes the
-// request-pacing cap.) Runs only on AUX while far behind.
+// Requester. Pipelined fixed-span pull: N in-flight requests, each for an exact BULK_SPAN-tick range
+// strided contiguously, so the link stays full across the RTT (single-outstanding is RTT-bound). A
+// partial response (a range that overflowed the byte cap) leaves a hole, re-requested with priority.
+// Runs only on AUX while far behind.
 // =====================================================================
 static bool          gActive       = false;
-static unsigned int  gReqFrontier  = 0;             // next tick to request
+static unsigned int  gReqFrontier  = 0;             // watermark: next NEW tick to request (advances by BULK_SPAN at dispatch)
 static unsigned int  gReqDejavu    = 0;
-static unsigned int  gAvgChunkTicks = 32;           // running estimate of ticks delivered per chunk
 static unsigned long long gLastProbeTsc = 0;
 constexpr unsigned int BULK_MAX_AHEAD = 8000;       // don't fetch more than this far past system.tick
+constexpr unsigned int BULK_SPAN      = 8;          // ticks per request; small enough that a span ~always fits the byte cap
 constexpr unsigned long long PROBE_INTERVAL_SECS = 2;
 
 // Capable peers (run the 240/241 protocol); striped across so a behind node pulls from several
@@ -326,11 +332,23 @@ static unsigned int gCapablePeers[BULK_MAX_CAPABLE];
 static int gCapableCount = 0;
 static unsigned int gRrCursor = 0;
 
-// Concurrent in-flight chunk requests so the responder pool(s) serve them in parallel.
+// Concurrent in-flight chunk requests so the responder pool(s) serve them in parallel + the RTT amortizes.
 constexpr int BULK_INFLIGHT = 8;
-struct ReqSlot { bool active; unsigned int startTick; unsigned long long tsc; };
+struct ReqSlot { bool active; unsigned int startTick; unsigned int endTick; unsigned long long tsc; };
 static ReqSlot gSlots[BULK_INFLIGHT];
 static volatile char gSlotsLock = 0;
+
+// Holes left by partial responses, re-requested with priority so the contiguous range never stalls.
+constexpr int BULK_MAX_HOLES = 256;
+static unsigned int gHoleStart[BULK_MAX_HOLES], gHoleEnd[BULK_MAX_HOLES];
+static int gHoleHead = 0, gHoleTail = 0;            // ring [tail, head)
+static inline bool holesEmpty() { return gHoleHead == gHoleTail; }
+static inline void pushHole(unsigned int s, unsigned int e)
+{
+    const int nh = (gHoleHead + 1) % BULK_MAX_HOLES;
+    if (nh == gHoleTail) return;                    // ring full: drop (prefetch backstop covers it once in range)
+    gHoleStart[gHoleHead] = s; gHoleEnd[gHoleHead] = e; gHoleHead = nh;
+}
 
 static void addCapablePeer(unsigned int addr)
 {
@@ -371,6 +389,7 @@ static void probeAllPeers(unsigned long long nowTsc)
     req.version = VERSION;
     req.startTick = system.tick + 1;
     req.maxBytes = 64 * 1024;
+    req.maxTicks = 1;
     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
         if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing
             && (i < NUMBER_OF_OUTGOING_CONNECTIONS || peers[i].exchangedPublicPeers))
@@ -378,39 +397,56 @@ static void probeAllPeers(unsigned long long nowTsc)
     gLastProbeTsc = nowTsc;
 }
 
-// Single-outstanding contiguous pull: one request in flight, frontier advances ONLY by each
-// response's confirmed end tick. An optimistic multi-slot stride is unusable here because tick
-// size varies ~100x (empty/void vs full-tx ticks) so a guessed stride overshoots dense regions
-// and leaves gaps the ticker stalls on. 4MB/chunk per RTT is ample bandwidth for the target rate;
-// provider-side parallelism, if needed, must come from gap-free fixed-count requests, not a guess.
+// Pipelined fill: keep every slot busy. Each free slot takes a hole (priority) or the next
+// BULK_SPAN-tick range from the watermark, requesting an EXACT span (maxTicks) so ranges stay
+// contiguous and predictable — no density-dependent guessing. N in-flight requests keep the link
+// full across the RTT; a partial response is re-requested as a hole so nothing is skipped.
 static void fillSlots(unsigned long long nowTsc, unsigned long long freq)
 {
     if (gCapableCount == 0) return;
     const unsigned int queued = (gBulkElemHead - gBulkElemTail) & (BULK_QUEUE_ELEMS - 1);
     ACQUIRE(gSlotsLock);
-    if (gSlots[0].active && (nowTsc - gSlots[0].tsc) > CHUNK_TIMEOUT_SECS * freq)
-        gSlots[0].active = false;                           // timed out -> reissue
-    if (!gSlots[0].active
-        && queued <= BULK_QUEUE_ELEMS * 3 / 4               // work queue has room
-        && gReqFrontier <= system.tick + BULK_MAX_AHEAD)    // don't run too far ahead of the ticker
+    for (int s = 0; s < BULK_INFLIGHT; s++)
     {
+        if (gSlots[s].active && (nowTsc - gSlots[s].tsc) > CHUNK_TIMEOUT_SECS * freq)
+        {
+            pushHole(gSlots[s].startTick, gSlots[s].endTick);   // timed out -> re-request the whole range
+            gSlots[s].active = false;
+        }
+        if (gSlots[s].active) continue;
+        if (queued > BULK_QUEUE_ELEMS * 3 / 4) break;           // work queue nearly full: stop requesting
+        unsigned int rs, re;
+        if (!holesEmpty())
+        {
+            rs = gHoleStart[gHoleTail];
+            const unsigned int he = gHoleEnd[gHoleTail];
+            gHoleTail = (gHoleTail + 1) % BULK_MAX_HOLES;
+            re = (he - rs + 1 > BULK_SPAN) ? rs + BULK_SPAN - 1 : he;
+            if (re < he) pushHole(re + 1, he);                  // split an oversized hole, requeue its tail
+        }
+        else
+        {
+            if (gReqFrontier > system.tick + BULK_MAX_AHEAD) break;  // don't run too far ahead of the ticker
+            rs = gReqFrontier;
+            re = rs + BULK_SPAN - 1;
+            gReqFrontier = re + 1;
+        }
         int pi = -1;
         for (int tries = 0; tries < gCapableCount && pi < 0; tries++)
             pi = peerIndexForAddr(gCapablePeers[(gRrCursor++) % gCapableCount]);
-        if (pi < 0) gCapableCount = 0;                      // all capable peers gone; re-discover
-        else
-        {
-            RequestTickRangeChunk req;
-            req.version = VERSION;
-            req.startTick = gReqFrontier;
-            req.maxBytes = CHUNK_BYTES_MAX;
-            _rdrand32_step(&gReqDejavu);
-            if (!gReqDejavu) gReqDejavu = 1;
-            enqueueResponse(&peers[pi], sizeof(req), REQUEST_TYPE, gReqDejavu, &req);
-            gSlots[0].active = true;
-            gSlots[0].startTick = gReqFrontier;
-            gSlots[0].tsc = nowTsc;
-        }
+        if (pi < 0) { gCapableCount = 0; break; }               // all capable peers gone; re-discover
+        RequestTickRangeChunk req;
+        req.version = VERSION;
+        req.startTick = rs;
+        req.maxBytes = CHUNK_BYTES_MAX;
+        req.maxTicks = re - rs + 1;
+        _rdrand32_step(&gReqDejavu);
+        if (!gReqDejavu) gReqDejavu = 1;
+        enqueueResponse(&peers[pi], sizeof(req), REQUEST_TYPE, gReqDejavu, &req);
+        gSlots[s].active = true;
+        gSlots[s].startTick = rs;
+        gSlots[s].endTick = re;
+        gSlots[s].tsc = nowTsc;
     }
     RELEASE(gSlotsLock);
 }
@@ -427,20 +463,25 @@ static void onRespondChunk(Peer* peer, RequestResponseHeader* header, unsigned l
     char* base = (char*)header->getPayload<char>();
     const unsigned int payloadSize = total - sizeof(RequestResponseHeader);
 
-    // Free the slot that owned this range, update the chunk-size estimate, keep the frontier honest.
+    // Free the slot that owned this range; if the response was partial (a tick overflowed the byte
+    // cap, or the peer lacked the tail), re-request the missing tail as a hole so nothing is skipped.
     const RespondTickRangeChunkHeader* rh = (const RespondTickRangeChunkHeader*)base;
     ACQUIRE(gSlotsLock);
     for (int s = 0; s < BULK_INFLIGHT; s++)
-        if (gSlots[s].active && gSlots[s].startTick == rh->startTick) { gSlots[s].active = false; break; }
-    if (rh->endTickFullyIncluded >= rh->startTick)
-    {
-        const unsigned int got = rh->endTickFullyIncluded - rh->startTick + 1;
-        gAvgChunkTicks = (gAvgChunkTicks * 3 + got) / 4;            // smooth the stride estimate
-        if (rh->endTickFullyIncluded + 1 > gReqFrontier) gReqFrontier = rh->endTickFullyIncluded + 1;
-    }
+        if (gSlots[s].active && gSlots[s].startTick == rh->startTick)
+        {
+            if (rh->endTickFullyIncluded < gSlots[s].endTick)
+            {
+                const unsigned int from = (rh->endTickFullyIncluded >= rh->startTick)
+                    ? rh->endTickFullyIncluded + 1 : rh->startTick;
+                pushHole(from, gSlots[s].endTick);
+            }
+            gSlots[s].active = false;
+            break;
+        }
     RELEASE(gSlotsLock);
 
-    fillSlots(__rdtsc(), frequency);     // refill in parallel (continuous, multi-peer delivery)
+    fillSlots(__rdtsc(), frequency);     // refill immediately to keep the pipeline full
 
     unsigned int cursor = sizeof(RespondTickRangeChunkHeader);
     while (cursor + sizeof(RequestResponseHeader) <= payloadSize)
@@ -474,8 +515,16 @@ static void kicker(unsigned long long nowTsc, unsigned long long freq)
         return;
     }
 
-    // Keep the frontier at/ahead of where we've ticked to (recovers if it stalled or fell behind).
-    if (gReqFrontier <= system.tick) gReqFrontier = system.tick + 1;
+    // Keep the watermark at/ahead of where we've ticked to (recovers if it stalled or fell behind).
+    // If the ticker (via prefetch) overran the watermark, the outstanding holes are now behind
+    // system.tick and stale — drop them so we don't waste requests on already-ticked ranges.
+    ACQUIRE(gSlotsLock);
+    if (gReqFrontier <= system.tick)
+    {
+        gReqFrontier = system.tick + 1;
+        gHoleHead = gHoleTail = 0;
+    }
+    RELEASE(gSlotsLock);
 
     fillSlots(nowTsc, freq);            // kickstart / recover / top up the in-flight slots
 }
