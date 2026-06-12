@@ -308,7 +308,8 @@ jobs:
           SLOT=$(jq -r 'keys[0]' qinit.idl.json)
           echo "deployed slot=$SLOT"
           D=""; for i in $(seq 1 12); do
-            D=$(curl -s "http://127.0.0.1:41841/live/v1/dev/contract-digest?slot=$SLOT" | jq -r '.digest // empty')
+            # || true: a transient curl/jq miss must not abort under `-e -o pipefail` — let the loop retry.
+            D=$(curl -s "http://127.0.0.1:41841/live/v1/dev/contract-digest?slot=$SLOT" | jq -r '.digest // empty' || true)
             [ -n "$D" ] && break; sleep 2
           done
           if [ "${{ matrix.key }}" = "windows-x64" ]; then taskkill -f -im Qubic.exe || true; else pkill -x Qubic || true; fi
