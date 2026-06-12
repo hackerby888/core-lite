@@ -1056,7 +1056,6 @@ struct Overload {
     }
 
     static EFI_STATUS Connect(IN void* This, IN EFI_TCP4_CONNECTION_TOKEN* ConnectionToken) {
-        static std::map<int, long long> latestConnectTimestampMap; // map of <ip, timestamp>
         TcpData* tcpData = nullptr;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
@@ -1066,7 +1065,13 @@ struct Overload {
             logToConsole(L"No Tcp Data For This Connect!");
             return EFI_UNSUPPORTED;
         }
+        // Non-blocking socket so connect() returns immediately (EINPROGRESS) and we can bound the wait.
+#ifdef _MSC_VER
         SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock != INVALID_SOCKET) { u_long nb = 1; ioctlsocket(sock, FIONBIO, &nb); }
+#else
+        SOCKET sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, IPPROTO_TCP);
+#endif
         if (sock == INVALID_SOCKET) {
             logToConsole(L"Socket creation failed!!");
 
@@ -1083,29 +1088,36 @@ struct Overload {
         serverAddr.sin_addr.s_addr = *((unsigned int*)tcpData->configData.AccessPoint.RemoteAddress.Addr);
         #endif
 
-        unsigned int ipInNumber = *(unsigned int*)tcpData->configData.AccessPoint.RemoteAddress.Addr;
-        // connect in a thread
-        std::thread connectThread([tcpData, serverAddr, ConnectionToken, ipInNumber]() {
-            auto now = std::chrono::system_clock::now();
-            long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-            if (ms - latestConnectTimestampMap[ipInNumber] < 2'000) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
+        // 5s-bounded connect: a dead/firewalled peer can't pin the slot for the OS SYN timeout (~127s);
+        // the reaper expects it gone by ~5s, and Configure(NULL)'s shutdown wakes the poll early.
+        std::thread connectThread([tcpData, serverAddr, ConnectionToken, sock]() {
             tcpData->connectStatus = ConnectStatus::Connecting;
-            if (connect(tcpData->socket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+            bool ok = false;
+            if (connect(sock, (const sockaddr*)&serverAddr, sizeof(serverAddr)) == 0) {
+                ok = true;
+            } else {
+#ifdef _MSC_VER
+                bool inProgress = (WSAGetLastError() == WSAEWOULDBLOCK);
+                WSAPOLLFD pfd{}; pfd.fd = sock; pfd.events = POLLOUT;
+                int pr = inProgress ? WSAPoll(&pfd, 1, 5000) : -1;
+#else
+                bool inProgress = (errno == EINPROGRESS);
+                pollfd pfd{}; pfd.fd = sock; pfd.events = POLLOUT;
+                int pr = inProgress ? poll(&pfd, 1, 5000) : -1;
+#endif
+                if (pr > 0 && (pfd.revents & POLLOUT) && !(pfd.revents & (POLLERR | POLLHUP))) {
+                    int soerr = 0; socklen_t len = sizeof(soerr);
+                    getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&soerr, &len);
+                    ok = (soerr == 0);
+                }
+            }
+            if (ok) {
+                tcpData->connectStatus = ConnectStatus::Connected;
+                ConnectionToken->CompletionToken.Status = EFI_SUCCESS;
+            } else {
                 tcpData->connectStatus = ConnectStatus::Error;
                 ConnectionToken->CompletionToken.Status = EFI_ABORTED;
             }
-            else {
-                tcpData->connectStatus = ConnectStatus::Connected;
-                ConnectionToken->CompletionToken.Status = EFI_SUCCESS;
-#ifdef _MSC_VER
-                u_long mode = 1;
-                ioctlsocket(tcpData->socket, FIONBIO, &mode);
-#endif
-            }
-
-            latestConnectTimestampMap[ipInNumber] = ms;
             });
         connectThread.detach();
 
