@@ -9205,7 +9205,11 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     futureTickRequestingIndicator = gFutureTickTotalNumberOfComputors;
 
 #if USE_FUTURE_TICK_PREFETCH
-                    const unsigned int prefetchDepth = opt_future_tick_prefetch::computePrefetchDepth();
+                    // When bulk catch-up is active it delivers the whole range from a capable peer;
+                    // drop the per-tick prefetch to a +1/+2 safety net so it neither floods (duplicate
+                    // fan-out) nor competes with bulk, and the bulk peer connection stays hot.
+                    const unsigned int prefetchDepth = LiteBulkCatchup::gActive
+                        ? 2u : opt_future_tick_prefetch::computePrefetchDepth();
 #endif
 
                     ts.tickData.acquireLock();
