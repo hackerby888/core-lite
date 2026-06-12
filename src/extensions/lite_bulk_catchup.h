@@ -378,36 +378,39 @@ static void probeAllPeers(unsigned long long nowTsc)
     gLastProbeTsc = nowTsc;
 }
 
-// Top up the in-flight slots with consecutive tick ranges, round-robined across capable peers, so
-// several chunks are served in parallel. gReqFrontier advances by the running chunk-size estimate;
-// small gaps/overlaps are corrected by each response's actual end tick + the normal prefetch backstop.
+// Single-outstanding contiguous pull: one request in flight, frontier advances ONLY by each
+// response's confirmed end tick. An optimistic multi-slot stride is unusable here because tick
+// size varies ~100x (empty/void vs full-tx ticks) so a guessed stride overshoots dense regions
+// and leaves gaps the ticker stalls on. 4MB/chunk per RTT is ample bandwidth for the target rate;
+// provider-side parallelism, if needed, must come from gap-free fixed-count requests, not a guess.
 static void fillSlots(unsigned long long nowTsc, unsigned long long freq)
 {
     if (gCapableCount == 0) return;
     const unsigned int queued = (gBulkElemHead - gBulkElemTail) & (BULK_QUEUE_ELEMS - 1);
     ACQUIRE(gSlotsLock);
-    for (int s = 0; s < BULK_INFLIGHT; s++)
+    if (gSlots[0].active && (nowTsc - gSlots[0].tsc) > CHUNK_TIMEOUT_SECS * freq)
+        gSlots[0].active = false;                           // timed out -> reissue
+    if (!gSlots[0].active
+        && queued <= BULK_QUEUE_ELEMS * 3 / 4               // work queue has room
+        && gReqFrontier <= system.tick + BULK_MAX_AHEAD)    // don't run too far ahead of the ticker
     {
-        if (gSlots[s].active && (nowTsc - gSlots[s].tsc) > CHUNK_TIMEOUT_SECS * freq)
-            gSlots[s].active = false;                       // timed out
-        if (gSlots[s].active) continue;
-        if (queued > BULK_QUEUE_ELEMS * 3 / 4) break;       // work queue nearly full
-        if (gReqFrontier > system.tick + BULK_MAX_AHEAD) break;
         int pi = -1;
         for (int tries = 0; tries < gCapableCount && pi < 0; tries++)
             pi = peerIndexForAddr(gCapablePeers[(gRrCursor++) % gCapableCount]);
-        if (pi < 0) { gCapableCount = 0; break; }           // all capable peers gone; re-discover
-        RequestTickRangeChunk req;
-        req.version = VERSION;
-        req.startTick = gReqFrontier;
-        req.maxBytes = CHUNK_BYTES_MAX;
-        _rdrand32_step(&gReqDejavu);
-        if (!gReqDejavu) gReqDejavu = 1;
-        enqueueResponse(&peers[pi], sizeof(req), REQUEST_TYPE, gReqDejavu, &req);
-        gSlots[s].active = true;
-        gSlots[s].startTick = gReqFrontier;
-        gSlots[s].tsc = nowTsc;
-        gReqFrontier += gAvgChunkTicks;                     // optimistic stride
+        if (pi < 0) gCapableCount = 0;                      // all capable peers gone; re-discover
+        else
+        {
+            RequestTickRangeChunk req;
+            req.version = VERSION;
+            req.startTick = gReqFrontier;
+            req.maxBytes = CHUNK_BYTES_MAX;
+            _rdrand32_step(&gReqDejavu);
+            if (!gReqDejavu) gReqDejavu = 1;
+            enqueueResponse(&peers[pi], sizeof(req), REQUEST_TYPE, gReqDejavu, &req);
+            gSlots[0].active = true;
+            gSlots[0].startTick = gReqFrontier;
+            gSlots[0].tsc = nowTsc;
+        }
     }
     RELEASE(gSlotsLock);
 }
