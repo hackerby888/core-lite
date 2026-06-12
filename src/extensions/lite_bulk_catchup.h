@@ -234,6 +234,9 @@ static int           gOutstanding  = -1;            // peer index of the in-flig
 static unsigned int  gReqStartTick = 0;             // startTick of the in-flight request
 static unsigned long long gReqTsc  = 0;
 static unsigned int  gReqDejavu    = 0;
+static unsigned int  gCapableAddr  = 0;             // address.u32 of a peer that answered a chunk (0 = none yet)
+static unsigned long long gLastProbeTsc = 0;
+constexpr unsigned long long PROBE_INTERVAL_SECS = 2;
 
 // Highest tick any connected peer reports (network tip estimate).
 static unsigned int networkTip()
@@ -248,18 +251,31 @@ static unsigned int networkTip()
     return tip;
 }
 
-static int pickPeer()
+// Find a connected peer with the given address.u32, or -1.
+static int peerIndexForAddr(unsigned int addr)
 {
-    int candidates[NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS];
-    int n = 0;
     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
-    {
+        if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing
+            && peers[i].address.u32 == addr)
+            return (int)i;
+    return -1;
+}
+
+// Send a tiny bulk request to every connected peer to discover which ones run the protocol.
+// A non-lite peer has no 240 handler and silently drops it; the first 241 reply marks the peer capable.
+static void probeAllPeers(unsigned long long nowTsc)
+{
+    _rdrand32_step(&gReqDejavu);
+    if (!gReqDejavu) gReqDejavu = 1;
+    RequestTickRangeChunk req;
+    req.version = VERSION;
+    req.startTick = system.tick + 1;
+    req.maxBytes = 64 * 1024;
+    for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
         if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing
             && (i < NUMBER_OF_OUTGOING_CONNECTIONS || peers[i].exchangedPublicPeers))
-            candidates[n++] = (int)i;
-    }
-    if (!n) return -1;
-    return candidates[random(n)];
+            enqueueResponse(&peers[i], sizeof(req), REQUEST_TYPE, gReqDejavu, &req);
+    gLastProbeTsc = nowTsc;
 }
 
 // Apply one received chunk: walk its sub-frames and feed each to the existing
@@ -267,6 +283,7 @@ static int pickPeer()
 static void onRespondChunk(Peer* peer, RequestResponseHeader* header, unsigned long long processorNumber)
 {
     _InterlockedIncrement64(&gChunksReceived);
+    gCapableAddr = peer->address.u32;    // this peer speaks the bulk protocol; lock onto it
     const unsigned int total = header->size();
     if (total < sizeof(RequestResponseHeader) + sizeof(RespondTickRangeChunkHeader))
     {
@@ -319,14 +336,22 @@ static void kicker(unsigned long long nowTsc, unsigned long long freq)
     else if (gActive && behind <= DEACTIVATE_BEHIND) { gActive = false; gOutstanding = -1; return; }
     if (!gActive) return;
 
+    // No known bulk peer yet: probe everyone periodically until one answers.
+    if (gCapableAddr == 0)
+    {
+        if (nowTsc - gLastProbeTsc > PROBE_INTERVAL_SECS * freq)
+            probeAllPeers(nowTsc);
+        return;
+    }
+
     // Time out a stuck request.
     if (gOutstanding >= 0 && (nowTsc - gReqTsc) > CHUNK_TIMEOUT_SECS * freq)
         gOutstanding = -1;
 
     if (gOutstanding < 0)
     {
-        const int pi = pickPeer();
-        if (pi < 0) return;
+        const int pi = peerIndexForAddr(gCapableAddr);
+        if (pi < 0) { gCapableAddr = 0; return; }   // capable peer gone; re-discover
         RequestTickRangeChunk req;
         req.version = VERSION;
         req.startTick = system.tick + 1;
