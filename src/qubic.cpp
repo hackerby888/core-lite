@@ -2034,7 +2034,6 @@ static void updateNumberOfTickTransactions()
 // In this test, the processors calling requestProcessor() were stuck before entering the function.
 // Probably, this was caused by a bug in the optimizer, because disabling the optimizer solved the
 // problem.
-#include "extensions/lite_bulk_catchup.h"
 
 // OPTIMIZE_OFF()
 static void requestProcessor(void* ProcedureArgument, unsigned long long processorNumber)
@@ -2062,8 +2061,6 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
                     if (requestQueueElementTail == requestQueueElementHead)
                     {
                         RELEASE(requestQueueTailLock);
-                        // No normal request pending: help apply queued bulk catch-up sub-frames in parallel.
-                        LiteBulkCatchup::bulkProcessOne((char*)processor->buffer);
                     }
                     else
                     {
@@ -2097,11 +2094,7 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
         
         if (requestQueueElementTail == requestQueueElementHead)
         {
-            // No normal request pending: drain queued bulk catch-up sub-frames so the whole
-            // request pool applies them in parallel (else the work queue never empties and the
-            // ticker starves on the gated prefetch). Falls through to pause when nothing queued.
-            if (!LiteBulkCatchup::bulkProcessOne((char*)processor->buffer))
-                _mm_pause();
+            _mm_pause();
         }
         else
         {
@@ -2338,19 +2331,6 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
                 case LiteCheckin::RequestLiteCheckin::type():
                 {
                     LiteCheckin::processRequest(peer, header);
-                }
-                break;
-
-                /* lite-extension: bulk catch-up range request/response (240/241) */
-                case LiteBulkCatchup::RequestTickRangeChunk::type():
-                {
-                    LiteBulkCatchup::processRequest(peer, header, processorNumber);
-                }
-                break;
-
-                case LiteBulkCatchup::RespondTickRangeChunkHeader::type():
-                {
-                    LiteBulkCatchup::onRespondChunk(peer, header, processorNumber);
                 }
                 break;
 
@@ -7365,9 +7345,6 @@ static bool initialize()
         if (!fastTxWindow.init())
             return false;
 
-        if (!LiteBulkCatchup::init())
-            return false;
-
         setMem(spectrumChangeFlags, sizeof(spectrumChangeFlags), 0);
 
         if (!initSpectrum())
@@ -7932,19 +7909,6 @@ static void logInfo()
     appendText(message, L" ?");
     appendNumber(message, numberOfSkippedBroadcasts - prevNumberOfSkippedBroadcasts, TRUE);
     appendText(message, L"] ");
-    appendText(message, L"bulk=");
-    appendNumber(message, LiteBulkCatchup::gChunksReceived, TRUE);
-    appendText(message, L"/");
-    appendNumber(message, LiteBulkCatchup::gChunksServed, TRUE);
-    appendText(message, L" ap=");
-    appendNumber(message, LiteBulkCatchup::gBulkTicksApplied, TRUE);
-    appendText(message, L" qd=");
-    appendNumber(message, (LiteBulkCatchup::gBulkElemHead - LiteBulkCatchup::gBulkElemTail) & (BULK_QUEUE_ELEMS - 1), FALSE);
-    appendText(message, L" fr=");
-    appendNumber(message, LiteBulkCatchup::gReqFrontier > system.tick ? LiteBulkCatchup::gReqFrontier - system.tick : 0, FALSE);
-    appendText(message, L" fv=");
-    appendNumber(message, gFutureTickTotalNumberOfComputors, FALSE);
-    appendText(message, L" ");
 
     unsigned int numberOfConnectingSlots = 0, numberOfConnectedSlots = 0, numberOfHandshakedSlots = 0;
     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
@@ -9167,8 +9131,6 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     // Request ticks
                     tickRequestingTick = curTimeTick;
 
-                    // Bulk catch-up: when far behind, pull whole tick ranges in one request.
-                    LiteBulkCatchup::kicker(curTimeTick, frequency);
 #if TICK_STORAGE_AUTOSAVE_MODE
                     const bool isNewTick = system.tick >= ts.getPreloadTick();
                     const bool isNewTickPlus1 = system.tick + 1 >= ts.getPreloadTick();
