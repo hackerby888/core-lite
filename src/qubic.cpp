@@ -7936,6 +7936,14 @@ static void logInfo()
     appendNumber(message, LiteBulkCatchup::gChunksReceived, TRUE);
     appendText(message, L"/");
     appendNumber(message, LiteBulkCatchup::gChunksServed, TRUE);
+    appendText(message, L" ap=");
+    appendNumber(message, LiteBulkCatchup::gBulkTicksApplied, TRUE);
+    appendText(message, L" qd=");
+    appendNumber(message, (LiteBulkCatchup::gBulkElemHead - LiteBulkCatchup::gBulkElemTail) & (BULK_QUEUE_ELEMS - 1), FALSE);
+    appendText(message, L" fr=");
+    appendNumber(message, LiteBulkCatchup::gReqFrontier > system.tick ? LiteBulkCatchup::gReqFrontier - system.tick : 0, FALSE);
+    appendText(message, L" fv=");
+    appendNumber(message, gFutureTickTotalNumberOfComputors, FALSE);
     appendText(message, L" ");
 
     unsigned int numberOfConnectingSlots = 0, numberOfConnectedSlots = 0, numberOfHandshakedSlots = 0;
