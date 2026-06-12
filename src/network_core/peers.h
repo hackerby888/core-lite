@@ -1273,8 +1273,11 @@ static void peerReconnectIfInactive(unsigned int i, unsigned short port)
             {
                 peers[i].isOMNode = FALSE;
                 // randomly select public peer and try to connect if we do not
-                // yet have an outgoing connection to it
-                peers[i].address = publicPeers[random(numberOfPublicPeers)].address;
+                // yet have an outgoing connection to it. Guard the empty case:
+                // random(0) is a modulo-by-zero (SIGFPE) — a node started with no
+                // public peers (e.g. only a self/loopback --peers entry) hits it.
+                if (numberOfPublicPeers)
+                    peers[i].address = publicPeers[random(numberOfPublicPeers)].address;
             }
 
             if (peers[i].address.u32 != 0)
