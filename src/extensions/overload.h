@@ -40,6 +40,28 @@ static volatile bool listOfPeersIsStaticLiteNode = false;
 #define CreateEvent CreateEvent
 #include "platform/console_logging.h"
 
+// High-resolution sleep. The default Windows Sleep/sleep_for granularity is ~15.6ms (and stays coarse
+// when the process is backgrounded/power-throttled even with timeBeginPeriod), so the tick's socket-drain
+// and vote loops — which sleep 1ms and retry — actually pace at 15.6ms and stall ticks to tens of seconds.
+// A per-thread CREATE_WAITABLE_TIMER_HIGH_RESOLUTION timer (Win10 1803+/Win11) sleeps precisely regardless
+// of timer resolution or EcoQoS; pre-1803 falls back to sleep_for. Non-Windows nanosleep is already precise.
+#ifdef _MSC_VER
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002   // Win10 1803+; define defensively for older SDK headers
+#endif
+static inline void preciseSleepMicros(long long us) {
+    if (us <= 0) return;
+    static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (timer) {
+        LARGE_INTEGER due; due.QuadPart = -(us * 10);   // 100ns units; negative = relative
+        if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) { WaitForSingleObject(timer, INFINITE); return; }
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(us));   // pre-1803 fallback
+}
+#else
+static inline void preciseSleepMicros(long long us) { if (us > 0) std::this_thread::sleep_for(std::chrono::microseconds(us)); }
+#endif
+
 //////////// Custom Data \\\\\\\\\\\
 
 static std::string mySeed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -457,7 +479,7 @@ struct Overload {
         if (TimeoutInMicroseconds > 0) {
             while (!isThreadFinished && TimeoutInMicroseconds > 0) {
                 // Sleep for a short duration to avoid busy waiting
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                preciseSleepMicros(100);
                 TimeoutInMicroseconds -= 100;
             }
 
@@ -506,7 +528,7 @@ struct Overload {
 
     static EFI_STATUS Stall(IN unsigned long long Microseconds) {
         // Simulate a stall by doing nothing for the specified time
-        std::this_thread::sleep_for(std::chrono::microseconds(Microseconds));
+        preciseSleepMicros((long long)Microseconds);
         return EFI_SUCCESS;
     }
 
@@ -1151,7 +1173,7 @@ struct Overload {
 					int err = WSAGetLastError();
                     if (err == WSAEWOULDBLOCK)
                     {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        preciseSleepMicros(1000);   // 1ms — precise (default Windows sleep would be ~15.6ms)
                         continue;
                     }
                     else
