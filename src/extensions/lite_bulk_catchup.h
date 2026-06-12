@@ -226,6 +226,11 @@ static int appendTick(char* buf, unsigned int& cursor, unsigned int t, unsigned 
         }
     }
     #undef BULK_FITS
+    // tickEnd spans the WHOLE epoch (not the tip), so an unproduced tick passes the in-storage
+    // guard above yet has no tickData/votes/txs. Appending nothing for it would make the responder
+    // serve empty frames for ticks past its tip and the requester race its frontier over them.
+    // No content => treat as "not here yet" so the chunk stops at the real tip.
+    if (cursor == tickStart) return 0;
     return 1;
 }
 
@@ -379,6 +384,22 @@ static int peerIndexForAddr(unsigned int addr)
     return -1;
 }
 
+// Highest tick the capable (bulk-speaking) peers report. Bounds how far ahead we may request:
+// a tick storage spans the whole epoch, so a responder happily serves EMPTY frames for ticks it
+// hasn't produced yet — requesting past a provider's tip just races the frontier over nothing.
+static unsigned int capableTip()
+{
+    unsigned int tip = 0;
+    for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
+    {
+        if (!peers[i].tcp4Protocol || !peers[i].isConnectedAccepted || peers[i].isClosing) continue;
+        for (int c = 0; c < gCapableCount; c++)
+            if (peers[i].address.u32 == gCapablePeers[c] && peers[i].peerReportedTick > tip)
+                tip = peers[i].peerReportedTick;
+    }
+    return tip;
+}
+
 // Send a tiny bulk request to every connected peer to discover which ones run the protocol.
 // A non-lite peer has no 240 handler and silently drops it; the first 241 reply marks the peer capable.
 static void probeAllPeers(unsigned long long nowTsc)
@@ -405,6 +426,7 @@ static void fillSlots(unsigned long long nowTsc, unsigned long long freq)
 {
     if (gCapableCount == 0) return;
     const unsigned int queued = (gBulkElemHead - gBulkElemTail) & (BULK_QUEUE_ELEMS - 1);
+    const unsigned int tip = capableTip();                      // 0 if no capable peer reported a tick yet
     ACQUIRE(gSlotsLock);
     for (int s = 0; s < BULK_INFLIGHT; s++)
     {
@@ -423,14 +445,19 @@ static void fillSlots(unsigned long long nowTsc, unsigned long long freq)
             gHoleTail = (gHoleTail + 1) % BULK_MAX_HOLES;
             re = (he - rs + 1 > BULK_SPAN) ? rs + BULK_SPAN - 1 : he;
             if (re < he) pushHole(re + 1, he);                  // split an oversized hole, requeue its tail
+            if (tip && rs > tip) continue;                      // hole is past the provider's tip now: drop it
         }
         else
         {
+            // Don't request past the provider's tip: storage spans the whole epoch, so it would
+            // just serve empty frames for unproduced ticks. Stop here when caught up to the tip.
+            if (tip && gReqFrontier > tip) break;
             if (gReqFrontier > system.tick + BULK_MAX_AHEAD) break;  // don't run too far ahead of the ticker
             rs = gReqFrontier;
             re = rs + BULK_SPAN - 1;
             gReqFrontier = re + 1;
         }
+        if (tip && re > tip) re = tip;                          // clamp the range to what's actually produced
         int pi = -1;
         for (int tries = 0; tries < gCapableCount && pi < 0; tries++)
             pi = peerIndexForAddr(gCapablePeers[(gRrCursor++) % gCapableCount]);
@@ -463,18 +490,21 @@ static void onRespondChunk(Peer* peer, RequestResponseHeader* header, unsigned l
     char* base = (char*)header->getPayload<char>();
     const unsigned int payloadSize = total - sizeof(RequestResponseHeader);
 
-    // Free the slot that owned this range; if the response was partial (a tick overflowed the byte
-    // cap, or the peer lacked the tail), re-request the missing tail as a hole so nothing is skipped.
     const RespondTickRangeChunkHeader* rh = (const RespondTickRangeChunkHeader*)base;
     ACQUIRE(gSlotsLock);
     for (int s = 0; s < BULK_INFLIGHT; s++)
         if (gSlots[s].active && gSlots[s].startTick == rh->startTick)
         {
-            if (rh->endTickFullyIncluded < gSlots[s].endTick)
+            if (rh->endTickFullyIncluded < rh->startTick)
             {
-                const unsigned int from = (rh->endTickFullyIncluded >= rh->startTick)
-                    ? rh->endTickFullyIncluded + 1 : rh->startTick;
-                pushHole(from, gSlots[s].endTick);
+                // Provider has nothing from startTick (we requested past its tip). Don't churn a
+                // hole; pull the frontier back to here so we re-poll the tip as the provider advances.
+                if (rh->startTick < gReqFrontier) gReqFrontier = rh->startTick;
+            }
+            else if (rh->endTickFullyIncluded < gSlots[s].endTick)
+            {
+                // Real partial (a tick overflowed the byte cap): re-request the unserved tail.
+                pushHole(rh->endTickFullyIncluded + 1, gSlots[s].endTick);
             }
             gSlots[s].active = false;
             break;
