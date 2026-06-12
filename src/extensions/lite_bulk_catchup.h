@@ -61,6 +61,21 @@ static_assert(sizeof(RespondTickRangeChunkHeader) == 12, "RespondTickRangeChunkH
 // ---- counters (printed on the status line) ----
 static volatile long long gChunksServed = 0, gChunksReceived = 0, gBulkTicksApplied = 0;
 
+// ---- bulk sub-frame work queue ----
+// onRespondChunk copies a received chunk's sub-frames here (fast); the requestProcessor pool drains
+// and verifies them in parallel, so a chunk's ~thousands of vote/tx signature checks don't serialize
+// on the single thread that received the chunk. Variable-size byte ring, mirrors requestQueueBuffer.
+#define BULK_QUEUE_BUF_BYTES (256u * 1024 * 1024)
+#define BULK_QUEUE_HEADROOM  (MAX_MESSAGE_PAYLOAD_SIZE + (unsigned int)sizeof(RequestResponseHeader))
+#define BULK_QUEUE_ELEMS     (1u << 16)
+static char*        gBulkQueueBuf = nullptr;
+static unsigned int gBulkElemOffset[BULK_QUEUE_ELEMS];
+static volatile unsigned int gBulkElemHead = 0, gBulkElemTail = 0;
+static volatile unsigned int gBulkBufHead = 0, gBulkBufTail = 0;
+static volatile char gBulkProducerLock = 0, gBulkConsumerLock = 0;
+static Peer gBulkDummyPeer;   // sub-frames applied from a chunk have no originating request peer
+static void storeBulkTransaction(const Transaction* request);  // defined below
+
 // =====================================================================
 // Responder (stateless). One scratch buffer per request processor so concurrent
 // serves don't collide. Sized for the header + cap + one oversized sub-frame.
@@ -76,6 +91,64 @@ static bool init()
                 (void**)&gChunkBuf[i], __LINE__))
             return false;
     }
+    if (!allocPoolWithErrorLog(L"LiteBulkCatchup::bulkQueueBuf", BULK_QUEUE_BUF_BYTES, (void**)&gBulkQueueBuf, __LINE__))
+        return false;
+    setMem(&gBulkDummyPeer, sizeof(gBulkDummyPeer), 0);
+    return true;
+}
+
+// Copy one sub-frame into the work queue (called by onRespondChunk; multi-producer safe). Drops on full.
+static void bulkEnqueue(const RequestResponseHeader* sub)
+{
+    const unsigned int sz = sub->size();
+    if (sz < sizeof(RequestResponseHeader) || sz > BULK_QUEUE_HEADROOM) return;
+    ACQUIRE(gBulkProducerLock);
+    if ((gBulkBufHead >= gBulkBufTail || gBulkBufHead + sz < gBulkBufTail)
+        && ((gBulkElemHead + 1) & (BULK_QUEUE_ELEMS - 1)) != gBulkElemTail)
+    {
+        gBulkElemOffset[gBulkElemHead] = gBulkBufHead;
+        copyMem(gBulkQueueBuf + gBulkBufHead, sub, sz);
+        gBulkBufHead += sz;
+        if (gBulkBufHead > BULK_QUEUE_BUF_BYTES - BULK_QUEUE_HEADROOM) gBulkBufHead = 0;
+        gBulkElemHead = (gBulkElemHead + 1) & (BULK_QUEUE_ELEMS - 1);
+    }
+    RELEASE(gBulkProducerLock);
+}
+
+// Drain + apply one sub-frame (called by the requestProcessor pool; multi-consumer safe). `scratch`
+// is a per-processor buffer >= one sub-frame. Returns false if the queue is empty.
+static bool bulkProcessOne(char* scratch)
+{
+    ACQUIRE(gBulkConsumerLock);
+    if (gBulkElemTail == gBulkElemHead) { RELEASE(gBulkConsumerLock); return false; }
+    const RequestResponseHeader* sub = (const RequestResponseHeader*)(gBulkQueueBuf + gBulkElemOffset[gBulkElemTail]);
+    const unsigned int sz = sub->size();
+    copyMem(scratch, sub, sz);                // copy out so the dispatch runs unlocked
+    gBulkBufTail += sz;
+    if (gBulkBufTail > BULK_QUEUE_BUF_BYTES - BULK_QUEUE_HEADROOM) gBulkBufTail = 0;
+    gBulkElemTail = (gBulkElemTail + 1) & (BULK_QUEUE_ELEMS - 1);
+    RELEASE(gBulkConsumerLock);
+
+    RequestResponseHeader* h = (RequestResponseHeader*)scratch;
+    switch (h->type())
+    {
+    case BroadcastFutureTickData::type(): processBroadcastFutureTickData(&gBulkDummyPeer, h); break;
+    case BroadcastTick::type():           processBroadcastTick(&gBulkDummyPeer, h);           break;
+    case BROADCAST_TRANSACTION:
+    {
+        Transaction* tx = h->getPayload<Transaction>();
+        if (tx->checkValidity() && tx->totalSize() == h->size() - sizeof(RequestResponseHeader))
+        {
+            unsigned char d[32];
+            KangarooTwelve(tx, tx->totalSize() - SIGNATURE_SIZE, d, sizeof(d));
+            if (verify(tx->sourcePublicKey.m256i_u8, d, tx->signaturePtr()))
+                storeBulkTransaction(tx);
+        }
+        break;
+    }
+    default: break;
+    }
+    _InterlockedIncrement64(&gBulkTicksApplied);
     return true;
 }
 
@@ -241,7 +314,9 @@ static void storeBulkTransaction(const Transaction* request)
 static bool          gActive       = false;
 static int           gOutstanding  = -1;            // peer index of the in-flight request, or -1
 static unsigned int  gReqStartTick = 0;             // startTick of the in-flight request
+static unsigned int  gReqFrontier  = 0;             // next tick to request (advances per response, gap-free)
 static unsigned long long gReqTsc  = 0;
+constexpr unsigned int BULK_MAX_AHEAD = 4000;       // don't fetch more than this far past system.tick
 static unsigned int  gReqDejavu    = 0;
 static unsigned int  gCapableAddr  = 0;             // address.u32 of a peer that answered a chunk (0 = none yet)
 static unsigned long long gLastProbeTsc = 0;
@@ -287,20 +362,45 @@ static void probeAllPeers(unsigned long long nowTsc)
     gLastProbeTsc = nowTsc;
 }
 
-// Apply one received chunk: walk its sub-frames and feed each to the existing
-// verifying handler. Bounds every sub-frame against the payload before use.
+// Issue one chunk request at the frontier to the capable peer. Continuous delivery: each response
+// chains the next. Backpressure on the work queue + a cap on how far ahead of system.tick we fetch.
+static void issueChunkRequest(int pi, unsigned long long nowTsc)
+{
+    const unsigned int queued = (gBulkElemHead - gBulkElemTail) & (BULK_QUEUE_ELEMS - 1);
+    if (queued > BULK_QUEUE_ELEMS / 2) return;          // queue half full: let the pool drain it
+    if (gReqFrontier > system.tick + BULK_MAX_AHEAD) return;
+    RequestTickRangeChunk req;
+    req.version = VERSION;
+    req.startTick = gReqFrontier;
+    req.maxBytes = CHUNK_BYTES_MAX;
+    _rdrand32_step(&gReqDejavu);
+    if (!gReqDejavu) gReqDejavu = 1;
+    enqueueResponse(&peers[pi], sizeof(req), REQUEST_TYPE, gReqDejavu, &req);
+    gOutstanding = pi;
+    gReqStartTick = gReqFrontier;
+    gReqTsc = nowTsc;
+}
+
+// Receive a chunk: advance the frontier + chain the next request (continuous delivery), then copy
+// the sub-frames into the work queue for the requestProcessor pool to verify + store in parallel.
 static void onRespondChunk(Peer* peer, RequestResponseHeader* header, unsigned long long processorNumber)
 {
     _InterlockedIncrement64(&gChunksReceived);
     gCapableAddr = peer->address.u32;    // this peer speaks the bulk protocol; lock onto it
+    gOutstanding = -1;
     const unsigned int total = header->size();
     if (total < sizeof(RequestResponseHeader) + sizeof(RespondTickRangeChunkHeader))
-    {
-        gOutstanding = -1;
         return;
-    }
     char* base = (char*)header->getPayload<char>();
     const unsigned int payloadSize = total - sizeof(RequestResponseHeader);
+
+    const RespondTickRangeChunkHeader* rh = (const RespondTickRangeChunkHeader*)base;
+    if (rh->endTickFullyIncluded >= rh->startTick && rh->endTickFullyIncluded + 1 > gReqFrontier)
+        gReqFrontier = rh->endTickFullyIncluded + 1;     // gap-free advance
+    {
+        const int pi = peerIndexForAddr(gCapableAddr);
+        if (pi >= 0) issueChunkRequest(pi, __rdtsc());   // chain next while this chunk is applied
+    }
 
     unsigned int cursor = sizeof(RespondTickRangeChunkHeader);
     while (cursor + sizeof(RequestResponseHeader) <= payloadSize)
@@ -309,28 +409,9 @@ static void onRespondChunk(Peer* peer, RequestResponseHeader* header, unsigned l
         const unsigned int subSize = sub->size();
         if (subSize < sizeof(RequestResponseHeader) || cursor + subSize > payloadSize)
             break;                       // truncated/garbage tail: stop
-        switch (sub->type())
-        {
-        case BroadcastFutureTickData::type(): processBroadcastFutureTickData(peer, sub); break;
-        case BroadcastTick::type():           processBroadcastTick(peer, sub);           break;
-        case BROADCAST_TRANSACTION:
-        {
-            Transaction* tx = sub->getPayload<Transaction>();
-            if (tx->checkValidity() && tx->totalSize() == subSize - sizeof(RequestResponseHeader))
-            {
-                unsigned char d[32];
-                KangarooTwelve(tx, tx->totalSize() - SIGNATURE_SIZE, d, sizeof(d));
-                if (verify(tx->sourcePublicKey.m256i_u8, d, tx->signaturePtr()))
-                    storeBulkTransaction(tx);
-            }
-            break;
-        }
-        default: break;                  // ignore unknown sub-frames
-        }
+        bulkEnqueue(sub);                // verified + stored later by the pool (bulkProcessOne)
         cursor += subSize;
-        _InterlockedIncrement64(&gBulkTicksApplied);
     }
-    gOutstanding = -1;                    // free the slot to request the next range
 }
 
 // Called from the main loop's request block (~2x/sec). Drives activation and the
@@ -353,25 +434,15 @@ static void kicker(unsigned long long nowTsc, unsigned long long freq)
         return;
     }
 
-    // Time out a stuck request.
-    if (gOutstanding >= 0 && (nowTsc - gReqTsc) > CHUNK_TIMEOUT_SECS * freq)
-        gOutstanding = -1;
+    // Keep the frontier at/ahead of where we've ticked to (recovers if it stalled or fell behind).
+    if (gReqFrontier <= system.tick) gReqFrontier = system.tick + 1;
 
-    if (gOutstanding < 0)
-    {
-        const int pi = peerIndexForAddr(gCapableAddr);
-        if (pi < 0) { gCapableAddr = 0; return; }   // capable peer gone; re-discover
-        RequestTickRangeChunk req;
-        req.version = VERSION;
-        req.startTick = system.tick + 1;
-        req.maxBytes = CHUNK_BYTES_MAX;
-        _rdrand32_step(&gReqDejavu);
-        if (!gReqDejavu) gReqDejavu = 1;
-        enqueueResponse(&peers[pi], sizeof(req), REQUEST_TYPE, gReqDejavu, &req);
-        gOutstanding = pi;
-        gReqStartTick = req.startTick;
-        gReqTsc = nowTsc;
-    }
+    const int pi = peerIndexForAddr(gCapableAddr);
+    if (pi < 0) { gCapableAddr = 0; return; }       // capable peer gone; re-discover
+
+    // Kickstart / recover: if nothing is in flight (or it timed out), re-issue at the frontier.
+    if (gOutstanding < 0 || (nowTsc - gReqTsc) > CHUNK_TIMEOUT_SECS * freq)
+        issueChunkRequest(pi, nowTsc);
 }
 
 } // namespace LiteBulkCatchup

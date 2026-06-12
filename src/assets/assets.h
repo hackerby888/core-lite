@@ -721,29 +721,34 @@ static void getUniverseDigest(m256i& digest)
 {
     PROFILE_SCOPE();
 
+    // Track 1b: skip whole clean 64-bit flag words so the leaf scan + Merkle walk are ~O(dirty)
+    // instead of O(ASSETS_CAPACITY); parent write index computed from i (decoupled from a counter).
     unsigned int digestIndex;
     for (digestIndex = 0; digestIndex < ASSETS_CAPACITY; digestIndex++)
     {
+        if ((digestIndex & 63) == 0 && assetChangeFlags[digestIndex >> 6] == 0) { digestIndex += 63; continue; }
         if (assetChangeFlags[digestIndex >> 6] & (1ULL << (digestIndex & 63)))
         {
             KangarooTwelve(&assets[digestIndex], sizeof(AssetRecord), &assetDigests[digestIndex], 32);
         }
     }
     unsigned int previousLevelBeginning = 0;
+    unsigned int writeBase = ASSETS_CAPACITY;
     unsigned int numberOfLeafs = ASSETS_CAPACITY;
     while (numberOfLeafs > 1)
     {
         for (unsigned int i = 0; i < numberOfLeafs; i += 2)
         {
+            if ((i & 63) == 0 && assetChangeFlags[i >> 6] == 0) { i += 62; continue; } // skip 32 clean pairs
             if (assetChangeFlags[i >> 6] & (3ULL << (i & 63)))
             {
-                KangarooTwelve64To32(&assetDigests[previousLevelBeginning + i], &assetDigests[digestIndex]);
+                KangarooTwelve64To32(&assetDigests[previousLevelBeginning + i], &assetDigests[writeBase + (i >> 1)]);
                 assetChangeFlags[i >> 6] &= ~(3ULL << (i & 63));
                 assetChangeFlags[i >> 7] |= (1ULL << ((i >> 1) & 63));
             }
-            digestIndex++;
         }
         previousLevelBeginning += numberOfLeafs;
+        writeBase += (numberOfLeafs >> 1);
         numberOfLeafs >>= 1;
     }
     assetChangeFlags[0] = 0;

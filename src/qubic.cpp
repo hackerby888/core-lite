@@ -2062,6 +2062,8 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
                     if (requestQueueElementTail == requestQueueElementHead)
                     {
                         RELEASE(requestQueueTailLock);
+                        // No normal request pending: help apply queued bulk catch-up sub-frames in parallel.
+                        LiteBulkCatchup::bulkProcessOne((char*)processor->buffer);
                     }
                     else
                     {
@@ -3869,22 +3871,26 @@ static void processTick(unsigned long long processorNumber)
             KangarooTwelve64To32(&spectrum[idx], &spectrumDigests[idx]);
         }
     }
-    digestIndex = SPECTRUM_CAPACITY; // Merkle walk writes parent nodes starting at this index
+    // Track 1b: parent write index is computed from i (writeBase + i/2), decoupled from a running
+    // counter, so a whole clean 64-bit flag word (32 pairs) can be skipped at once — the per-tick
+    // dirty set is tiny, so the Merkle walk becomes ~O(dirty) instead of O(SPECTRUM_CAPACITY).
     unsigned int previousLevelBeginning = 0;
+    unsigned int writeBase = SPECTRUM_CAPACITY; // Merkle walk writes parent nodes starting at this index
     unsigned int numberOfLeafs = SPECTRUM_CAPACITY;
     while (numberOfLeafs > 1)
     {
         for (unsigned int i = 0; i < numberOfLeafs; i += 2)
         {
+            if ((i & 63) == 0 && spectrumChangeFlags[i >> 6] == 0) { i += 62; continue; } // skip 32 clean pairs
             if (spectrumChangeFlags[i >> 6] & (3ULL << (i & 63)))
             {
-                KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[digestIndex]);
+                KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[writeBase + (i >> 1)]);
                 spectrumChangeFlags[i >> 6] &= ~(3ULL << (i & 63));
                 spectrumChangeFlags[i >> 7] |= (1ULL << ((i >> 1) & 63));
             }
-            digestIndex++;
         }
         previousLevelBeginning += numberOfLeafs;
+        writeBase += (numberOfLeafs >> 1);
         numberOfLeafs >>= 1;
     }
     spectrumChangeFlags[0] = 0;
