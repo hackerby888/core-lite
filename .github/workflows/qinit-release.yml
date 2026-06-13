@@ -223,6 +223,24 @@ jobs:
           # the whole dir: vcpkg applocal puts the runtime DLLs (ffi-8/openssl/...) next to Qubic.exe
           path: build-win/src/Release/
           if-no-files-found: error
+      # Release bundle: unlike linux/macOS (a bare binary), the Windows node needs its applocal DLLs beside
+      # Qubic.exe to launch, so it ships as a tar.gz of the whole Release dir. qinit's fetchNodeBin extracts
+      # it (extractTarGz) instead of writing a single file. tar.gz (not zip) so the same gzip path works on
+      # every host. (Tar entries are flat — Qubic.exe + *.dll at the archive root.)
+      - name: Package node bundle (exe + applocal DLLs) for release
+        shell: pwsh
+        run: |
+          tar -czf Qubic-windows-x64.tar.gz -C build-win/src/Release .
+          (Get-FileHash -Algorithm SHA256 Qubic-windows-x64.tar.gz).Hash.ToLower() |
+            Set-Content -NoNewline -Encoding ascii Qubic-windows-x64.tar.gz.sha256
+      - name: Upload windows release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-windows-release
+          path: |
+            Qubic-windows-x64.tar.gz
+            Qubic-windows-x64.tar.gz.sha256
+          if-no-files-found: error
 
   # Per-platform deploy smoke: boot the freshly-built node and run `qinit test` against it — a REAL
   # on-chain deploy + read + write (DigestProbe: Get -> Inc -> Get) through the wasm engine, not a tick-only
@@ -338,7 +356,17 @@ jobs:
       - name: Node log tail (on failure)
         if: failure()
         shell: bash
-        run: tail -120 "$HOME/.cache/qinit/run/node.log" 2>/dev/null || true
+        run: tail -400 "$HOME/.cache/qinit/run/node.log" 2>/dev/null || true
+      # Full node.log as an artifact: the tail above can't show the tick-rate progression from boot, which is
+      # what's needed to diagnose the windows-latest slow-tick / deploy-timeout (a throughput issue, distinct
+      # from the now-fixed commit charge — the node boots + ticks but crawls at tens of s/tick on the CI VM).
+      - name: Upload full node log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodelog-${{ matrix.key }}
+          path: ~/.cache/qinit/run/node.log
+          if-no-files-found: ignore
 
   # Cross-platform consensus check: the deployed contract's state digest must be byte-identical on every
   # platform (same wasm exec => same state bytes => same K12). Catches an arch/OS layout/endianness
@@ -397,7 +425,7 @@ jobs:
     # gate the release on the deploy smoke + cross-platform digest-equivalence: never publish a node that
     # can't deploy/run a contract, or whose exec diverges across platforms. (A macOS infra flake then blocks
     # the release until re-dispatch — acceptable: correctness > convenience for a published node.)
-    needs: [resolve, node, node-macos, headers, smoke, digest-check]
+    needs: [resolve, node, node-macos, node-windows, headers, smoke, digest-check]
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ github.token }}
@@ -422,13 +450,21 @@ jobs:
             DARWIN_ENTRY=",
               \"darwin-arm64\": { \"url\": \"$BASE/Qubic-darwin-arm64\", \"sha256\": \"$dsha\" }"
           fi
+          # windows-x64 is best-effort too (node-windows is continue-on-error). It's a tar.gz bundle
+          # (exe + applocal DLLs); qinit's fetchNodeBin extracts archive node assets.
+          WINDOWS_ENTRY=""
+          if [ -f Qubic-windows-x64.tar.gz.sha256 ]; then
+            wsha=$(cat Qubic-windows-x64.tar.gz.sha256)
+            WINDOWS_ENTRY=",
+              \"windows-x64\": { \"url\": \"$BASE/Qubic-windows-x64.tar.gz\", \"sha256\": \"$wsha\" }"
+          fi
           cat > qinit-manifest.json <<EOF
           {
             "version": "$TAG",
             "node":    { "url": "$BASE/Qubic-linux-x64", "sha256": "$x64sha" },
             "nodes": {
               "linux-x64":   { "url": "$BASE/Qubic-linux-x64",   "sha256": "$x64sha" },
-              "linux-arm64": { "url": "$BASE/Qubic-linux-arm64", "sha256": "$armsha" }$DARWIN_ENTRY
+              "linux-arm64": { "url": "$BASE/Qubic-linux-arm64", "sha256": "$armsha" }$DARWIN_ENTRY$WINDOWS_ENTRY
             },
             "headers": { "url": "$BASE/core-headers.tar.gz", "sha256": "$hsha" }
           }
@@ -442,6 +478,10 @@ jobs:
           if [ -f Qubic-darwin-arm64 ]; then
             FILES="$FILES Qubic-darwin-arm64"
             PLATFORMS="$PLATFORMS + darwin-arm64"
+          fi
+          if [ -f Qubic-windows-x64.tar.gz ]; then
+            FILES="$FILES Qubic-windows-x64.tar.gz"
+            PLATFORMS="$PLATFORMS + windows-x64"
           fi
           gh release create "$TAG" $FILES \
             --title "$TAG" --notes "qinit turnkey: prebuilt dynamic-contract node ($PLATFORMS) + core-header snapshot" \
