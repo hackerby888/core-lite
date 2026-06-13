@@ -1,13 +1,19 @@
 # Windows CI tick-stall — handoff (continue on a Windows box)
 
-**One line:** the MSVC node deploys + ticks fine on a *local interactive* Windows session, but on the
-**headless `windows-latest` CI runner** it ticks ~14 empty ticks then **freezes at `tx=?`** (vote
-convergence stalls) the moment the deploy's first transactions arrive. The deploy smoke (`qinit test`)
-then fails. Linux-x64, linux-arm64, and macOS all pass the same smoke. This is the **last** thing blocking
-the 4-way `qinit-release` deploy smoke / digest-equivalence on `feat/dynamic-contracts`.
+**One line:** on the **headless `windows-latest` CI runner** the MSVC node ticks ~14 times then **freezes
+at `tx=?`** the moment the deploy's first transactions enter a tick — and the vote-count prefix reads
+**`000:000(000)` (ZERO votes), a hard stop, not a slow crawl.** The deploy smoke (`qinit test`) then fails.
+Linux-x64, linux-arm64, macOS all pass the same smoke. Last thing blocking the 4-way `qinit-release` deploy
+smoke / digest-equivalence on `feat/dynamic-contracts`.
 
-This continues `WINDOWS_PORT.md` → *Phase 3b*. The local port already works (see that doc); the open gap
-is **CI-only**.
+**Read `## Root cause` before coding** — earlier work (incl. two commits this session) chased a Windows
+**timer-resolution / throughput** theory; the *zero* vote count disproves it. Current best explanation: a
+**tickProcessor worker thread wedges in `processTick()`** on the first tx-bearing tick (most likely the
+**WAMR contract-arm / linear-memory alloc**, which is *not* Linux-gated), so the node produces no further
+votes. **Diagnostic 1 (a thread-state dump) should name the exact stuck call.**
+
+This continues `WINDOWS_PORT.md` → *Phase 3b*. The local *interactive* port works (see that doc); the open
+gap is the **headless** case (CI, or any detached/service launch).
 
 ---
 
@@ -38,57 +44,80 @@ cannot pick a next-tick transaction digest.
 
 ---
 
-## Root cause (high confidence)
+## Root cause — corrected (read this; it supersedes the timer theory)
 
-It ticks **14 empty ticks**, then stalls on **the first tick that carries transactions** (the upload
-chunks + DEPLOY tx). That is the timing fingerprint of a **vote-throughput** problem, not a logic bug:
+The node ticks **14 times**, then freezes the instant the deploy's transactions enter a tick. The frozen
+status line's **prefix** is the decisive evidence (formatter at `src/qubic.cpp:498-512`):
 
-- Single-node testnet (`TESTNET_PREFILL_QUS`, 676-seat fixture) — the node produces **all** votes itself.
-- Empty ticks vote a trivial (zero) transaction digest → all seats agree instantly → quorum trivially →
-  ticks advance. (14 of them.)
-- The first **non-empty** tick needs the node's seats to vote the *same* transaction digest and reach
-  **QUORUM = 451** (`= 676*2/3+1`, `src/network_messages/common_def.h:11`). Convergence is decided in
-  `findNextTickDataDigestFromNextTickVotes()` (`src/qubic.cpp:5248`): tally unique vote digests; if the
-  top one has `>= QUORUM` → `targetNextTickDataDigestIsKnown = true` (line 5292-5295); else if quorum is
-  *provably impossible* → fall back to an empty tick (line 5299-5304). **Permanent `tx=?` means neither
-  fires** — the votes are still trickling in too slowly for the top digest to reach 451, but it isn't yet
-  "impossible," so the node waits… forever.
+```
+AAA:BBB(CCC).TICK.EPOCH    ->    000:000(000).55900014.216
+ |   |   |
+ |   |   gFutureTickTotalNumberOfComputors  (votes for the NEXT tick)             = 0
+ |   gTickTotalNumberOfComputors - gTickNumberOfComputors  (misaligned votes)     = 0
+ gTickNumberOfComputors  (computors whose vote AGREES on this tick)               = 0
+```
 
-**Why the votes trickle:** Windows' default multimedia timer resolution is **~15.6 ms**. The hot loops
-pace themselves with sub-millisecond sleeps that round **up to 15.6 ms** when the resolution isn't raised.
-The dominant one:
+The node registers **ZERO votes** — current tick *and* next tick. This is **not** "votes crawling at
+~25/s" (the historical timer-throttle signature from `WINDOWS_PORT.md` Phase 2); it is a **hard stop at
+zero**. That distinction is everything:
 
-- **`src/qubic.cpp:2037`** — the request-processor loop: `std::this_thread::sleep_for(microseconds(50))`
-  **every iteration**. At 15.6 ms/iter that's ~64 iters/s per processor instead of ~20 000 — request/vote
-  dissemination collapses. This is exactly the `WINDOWS_PORT.md` Phase-2 signature: *"ticks 2-3×, then
-  stalls at `tx=?` with the vote counter crawling (~25 votes/s; quorum needs 451)."*
+- A throughput / timer-resolution problem makes the count **climb slowly** toward 451. Here it is **0**.
+- **=> The 15.6 ms-timer / 50 µs-sleep starvation theory is the WRONG target.** That is also why this
+  session's EcoQoS + high-res-sleep commits changed nothing — they fought a throughput problem that isn't
+  the one happening. (The `qubic.cpp:2037` `sleep_for(50us)` pacing sleep is real, and the local Phase-2
+  `timeBeginPeriod(1)` + `IGNORE_TIMER_RESOLUTION` opt-out is a legit fix for *that* — but a starved-but-
+  progressing vote count would not sit at exactly 0.)
 
-`WINDOWS_PORT.md` already fixed this **locally** with, in `overload.h` `initializeUefi()` (`_MSC_VER`):
-`timeBeginPeriod(1)` **+** `SetProcessInformation(ProcessPowerThrottling, IGNORE_TIMER_RESOLUTION)`. That
-makes the 50 µs sleep ≈ 1 ms and the node hits Linux-parity ~1 tick/s.
+`tx=?` (`!targetNextTickDataDigestIsKnown`) then follows trivially: with 0 future votes,
+`findNextTickDataDigestFromNextTickVotes()` (`src/qubic.cpp:5248`) isn't even entered (gated at `:6349` on
+`gFutureTickTotalNumberOfComputors > 225`), and the MAIN-mode current-tick path
+(`findNextTickDataDigestFromCurrentTickVotes`, `:6359`) has nothing to tally. Quorum **451**
+(`= 676*2/3+1`, `common_def.h:11`) is unreachable from 0.
 
-**The open question — why CI still stalls:** the fix relies on Windows *honoring* the timer-resolution
-request. The same doc notes the tell: *"interactive-console runs eventually recovered, qinit-spawned
-(detached, stdio→file) nodes never did"* — Windows 11 **power-throttles background/occluded processes** and
-silently ignores `timeBeginPeriod`. The CI `windows-latest` runner is the most extreme background case
-(headless VM, no interactive desktop session). The hypothesis: **on the CI runner the timer-resolution
-opt-out is not being honored, so the 50 µs sleeps are back at 15.6 ms and votes crawl.**
+**So the real question: why does a single-node MAIN node — which produces all 676 of its own votes —
+register ZERO votes the moment a tick carries transactions?** Framing facts (all verified):
+
+- Node **is** MAIN: `--node-mode 3` → `mainAuxStatus=3` → `isMainMode()` true (MAIN&MAIN, `qubic.cpp:9593`).
+  It voted fine for 14 ticks, so vote production worked **until transactions appeared**.
+- `TARGET_TICK_DURATION = 1000 ms` (testnet, `public_settings.h:56`) — the tick is **54× past** target, yet
+  the `AUTO_FORCE_NEXT_TICK` (`qubic.cpp:5775`) and `autoResendTickVotes` (`:5742`) safety paths are **not**
+  rescuing it. A self-healing throughput dip would have force-ticked long ago. **Nothing recovers it.**
+- The per-second status keeps printing (`Main loop duration`, `Ticker loop duration`) → the **main/logging
+  thread is alive**; it is a **tickProcessor worker thread that is wedged**. (`tickProcessor` = 32 threads
+  in TESTNET; `processTick()` per-thread at `qubic.cpp:6341`.)
+
+### Leading hypotheses (a Windows thread-state dump decides between them in minutes)
+
+1. **A tickProcessor thread is wedged inside `processTick()` on the first tx-bearing tick** — the per-tx
+   path hangs on Windows, the tick never completes, next-tick votes are never produced, the counters stay
+   at their last (reset → 0) value. The DEPLOY tx **arms a WAMR contract**: instantiate + the ~1 GB linear-
+   memory arena via the Windows mmap-shim / `VirtualAlloc`. That path is **NOT** Linux-gated (unlike
+   `k12_engine.h`) and is the most Windows-divergent code any transaction can reach. **Most likely** — and,
+   importantly, it lives in `src/extensions/lite_wasm_contracts.h` / the WAMR glue, which **is** editable.
+2. **Vote broadcast/counting halted** — the node still produces votes but they aren't stored/counted in
+   `ts.ticks[]` (loopback self-vote dropped under the deploy burst, or a lock left held). Less likely (the
+   `ACQUIRE` locks are `_mm_pause` spins, `concurrency.h:31`), but a thread dump rules it in or out.
 
 ### Ruled out (don't re-chase)
-- **Console / `_kbhit` hang** — no; the main loop runs every iteration (`Main loop duration` keeps printing).
-- **WASM engine / k12 demand-zero** (`728aab3e`) — no; `k12_engine.h` is `#if defined(__linux__)`
-  (`src/qubic.cpp:189`), compiled out on Windows.
-- **Network transmit/receive stall** — no; 541 req/s, and `transmitProcessor` (`overload.h:1142`) is
-  bounded (1 s/ item timeout, always drains). The node is busy, not blocked.
-- **A consensus logic bug** — no; identical code converges on Linux/macOS/arm. It's throughput/timing.
+- **Timer-resolution / 50 µs-sleep throughput** — downgraded: it would show a *climbing* vote count, not 0.
+- **Console / `_kbhit` hang** — no; the main loop prints every iteration.
+- **k12 demand-zero contract-state engine** (`728aab3e`) — no; `k12_engine.h` is `#if defined(__linux__)`
+  (`qubic.cpp:189`), compiled out on Windows. (NB: this is the *digest/eviction* engine — **distinct** from
+  the WAMR contract-execution path in hypothesis 1, which is *not* gated and is still suspect.)
+- **Network transmit/receive stall** — no; 541 req/s, `transmitProcessor` (`overload.h:1142`) is bounded
+  (1 s/item, always drains). Node is busy, not network-dead.
+- **A consensus *logic* bug** — no; identical code converges on Linux/macOS/arm. The divergence is in a
+  Windows-specific primitive a tickProcessor thread touches.
 
 ### Tried this session, did **not** close CI (be honest / clean up)
 Two commits on `feat/dynamic-contracts` claim "(fixes tick stall)" but do **not** fix CI — reword or drop:
-- `acb8595a` — opt out of EcoQoS `EXECUTION_SPEED` throttling (a second `SetProcessInformation` call).
-- `6cebb3f2` — `preciseSleepMicros()` (a `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` waitable timer) wired into
-  **only 3 sites** (`Stall`, transmit-WOULDBLOCK, the timeout-wait) — **not** the `qubic.cpp:2037` pacing
-  sleep, which is the actual bottleneck. The helper itself (`overload.h:52`) is the right primitive; it's
-  just not applied where it matters. Both are harmless hardening; only the commit *messages* overclaim.
+- `acb8595a` — opt out of EcoQoS `EXECUTION_SPEED` throttling. (Targeted throughput; votes were at 0.)
+- `6cebb3f2` — `preciseSleepMicros()` (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) into 3 sleep sites. Harmless
+  Windows hardening; not the cause. Helper at `overload.h:52` is fine — just not relevant to a vote=0 halt.
+
+(`winmm` **is** linked — `overload.h:13` `#pragma comment(lib,"winmm.lib")` — so a missing-winmm theory is
+also out. `timeBeginPeriod`/`SetProcessInformation` return values are still unchecked, but with votes at 0
+that is no longer the prime suspect.)
 
 ---
 
@@ -127,44 +156,44 @@ background launch reproduces it and a normal terminal launch does not, the diagn
 
 ---
 
-## Diagnostics (do these first — cheap, decisive)
+## Diagnostics (do these first — in order; each is cheap and splits the tree)
 
-1. **Is it throughput or logic?** Submit a *plain transfer* tx (no contract) instead of a deploy. If the
-   node *also* stalls at that tick → pure vote-throughput/timer issue (expected). If a plain tx is fine and
-   only the deploy stalls → the dynamic-contract tx handler is implicated instead (then look at
-   `src/extensions/lite_wasm_contracts.h` / `lite_dynamic_contracts.h` on Windows). This single test splits
-   the remaining hypotheses.
-2. **Confirm the timer is throttled on the runner.** In the hidden/background process, log the actual
-   granularity right after the opt-out: call `timeGetDevCaps`, then time a `sleep_for(microseconds(50))` in
-   a loop and print the measured ms. Expect ~15.6 ms when throttled, ~1 ms when honored. Also **check the
-   return value of `SetProcessInformation(ProcessPowerThrottling, …)`** and `timeBeginPeriod` — they may be
-   failing silently on the CI VM.
-3. **Confirm it's the votes.** Temporarily log, in `findNextTickDataDigestFromNextTickVotes()`
-   (`src/qubic.cpp:5248`), `numberOfUniqueNextTickTransactionDigests`, the top counter, and how many of 676
-   seats have voted (`epoch == system.epoch`). Stuck = top counter < 451 and seats-voted < 676 and climbing
-   slowly → starved by the sleep. (split digests, by contrast, would show many uniques — that'd point at a
-   *non-determinism* bug, not timing.)
+1. **Thread-state dump — THE decisive one.** Repro the freeze, then attach the VS debugger (or `procdump
+   -ma Qubic.exe`, or WinDbg `~*k`) and look at the **32 tickProcessor threads**. The wedged worker's call
+   stack names the culprit directly. Expect to find one parked inside `processTick()` (`qubic.cpp:6341`) →
+   the per-tx path → the WAMR arm/instantiate or the linear-memory `VirtualAlloc`/mmap-shim. (If instead
+   every worker is idle and the stall is in the *counting* path, that's hypothesis 2.) **Do this before
+   touching any code** — it likely ends the investigation.
+2. **Contract vs any-tx split.** Submit a **plain transfer** tx (no contract) and watch the prefix vote
+   count. If it **also** freezes at `000:000(000)` → the halt is generic to *any* tx in a tick (look at the
+   tx/tickData assembly + vote production, not the wasm engine). If a plain tx sails through and **only the
+   deploy** freezes → it's the **dynamic-contract path** (`src/extensions/lite_wasm_contracts.h` /
+   `lite_dynamic_contracts.h`, WAMR arm) — hypothesis 1. This one test eliminates half the search space.
+3. **Watch the vote counters live.** The prefix already prints them (`AAA:BBB(CCC)` = aligned : misaligned
+   : future, `qubic.cpp:498-512`). Confirm they sit at **0** (halt) and never climb. If they climb slowly
+   toward 451 instead, re-open the timer-throughput theory — but the captured CI log shows a flat 0.
+4. **Only if hypothesis 1 is implicated:** add a log at `processTick()` entry/exit and around the WAMR
+   instantiate / linear-memory alloc in the wasm glue — find the exact call that never returns on Windows.
+   The arena is ~1 GB lazy-mapped (`io_base = [in 64K | out 64K | locals 32K | arena 1GB]`); a Windows
+   commit/`VirtualAlloc` or mmap-shim that **eager-commits or faults** is the prime suspect.
 
 ---
 
-## Candidate fixes (ranked)
+## Candidate fixes (ranked — pick after the thread dump points somewhere)
 
-1. **Force the timer resolution in a way background-throttling can't ignore.** `timeBeginPeriod` is
-   advisory and gets throttled; the undocumented **`NtSetTimerResolution`** (ntdll) sets it directly and is
-   commonly used to win exactly this fight. Try calling it in `initializeUefi()` (`overload.h`, `_MSC_VER`)
-   alongside the existing opt-out. **In-scope (extensions-only), smallest blast radius — try first.**
-2. **Make the hot pacing sleeps resolution-independent** rather than relying on the global timer. The
-   bottleneck is `src/qubic.cpp:2037` (and any other per-iteration `sleep_for(microseconds(...))` in the
-   request/tick loops — grep `sleep_for` in `qubic.cpp`). Route them through the existing
-   `preciseSleepMicros()` (`overload.h:52`, high-res waitable timer — per-object, **not** subject to the
-   global resolution/QoS). Caveat: `qubic.cpp` is normally off-limits in this fork; this is the one change
-   that may warrant touching it, or hoist the loop's pacing into an extension helper.
-3. **Drop the pacing sleep to a busy `_mm_pause()` spin** in the request loop (like `ACQUIRE`,
-   `concurrency.h:31`) — no timer dependency at all. Costs idle CPU; fine for a CI smoke, maybe not for a
-   real node. Could be gated to `_MSC_VER` + a "headless" flag.
-4. **Verify `winmm` is actually linked** for `timeBeginPeriod`/`timeGetDevCaps` in the CMake/MSVC build
-   (`src/CMakeLists.txt`) — if the opt-out silently no-ops because the lib isn't linked, that alone explains
-   CI vs local.
+> The thread dump in Diagnostic 1 should pick the fix for you. Most-likely target is the WAMR arm path:
+
+1. **Fix the wedged call the thread dump names.** If it's WAMR instantiate / linear-memory alloc
+   (`src/extensions/lite_wasm_contracts.h` + the mmap-shim used on Windows): make the arena allocation lazy/
+   non-faulting on Windows (`MEM_RESERVE` then commit-on-touch, or a VEH commit handler), or bound/relocate
+   whatever blocks. **In-scope (extensions-only).** This is where hypothesis 1 lands.
+2. **If it's the counting/broadcast path (hypothesis 2):** a lock left held or a loopback self-vote dropped
+   under the deploy burst — fix the specific drop/lock the dump shows. Verify votes appear in `ts.ticks[]`.
+3. **Timer-resolution hardening (do regardless, but it is NOT this bug):** `timeBeginPeriod` is advisory and
+   gets throttled on background processes; the undocumented **`NtSetTimerResolution`** (ntdll) forces it.
+   Worth adding in `initializeUefi()` for general Windows-port health and to close the *original* Phase-2
+   crawl on hostile hosts — but it will not move a vote=0 halt. Keep separate from the real fix; don't
+   relabel it "fixes tick stall."
 
 Validate any fix by re-running `qinit-release` and watching `smoke (windows-latest)` reach the deploy +
 the `digest-check` job (the Windows `GET /live/v1/dev/contract-digest?slot=N` must byte-match the other
@@ -174,14 +203,24 @@ legs — that's the cross-platform consensus proof Phase 3b is for).
 
 ## Anchors / constants (verified)
 
+- **Vote-count prefix** `AAA:BBB(CCC).tick.epoch` formatter: `src/qubic.cpp:498-512` — `AAA`=
+  `gTickNumberOfComputors` (aligned current-tick votes), `CCC`=`gFutureTickTotalNumberOfComputors`
+  (next-tick votes). Frozen value in CI: `000:000(000)` = **0 votes** (the key evidence).
 - `tx=?` printer + status builder: `src/qubic.cpp:7778-7864`; flag decl `:313`.
-- Vote convergence: `findNextTickDataDigestFromNextTickVotes()` `src/qubic.cpp:5248` (quorum `:5292`,
-  empty-fallback `:5299`).
-- `QUORUM = 451`: `src/network_messages/common_def.h:11` (`676*2/3+1`).
-- Bottleneck pacing sleep: `src/qubic.cpp:2037` (`sleep_for(microseconds(50))`).
-- Timer opt-out + `preciseSleepMicros()`: `src/extensions/overload.h` (`initializeUefi()`, helper `:52`).
-- `tickProcessor` is multi-threaded (32 in TESTNET) — votes produced across threads; `src/qubic.cpp:~6020`.
-- Node launch (qinit smoke): `--peers 127.0.0.1 --node-mode 3 --ticking-delay 1000`.
+- Vote convergence: `findNextTickDataDigestFromNextTickVotes()` `:5248` (entered only when future votes
+  `>225`, gate `:6349`); MAIN current-tick path `findNextTickDataDigestFromCurrentTickVotes` `:6359`.
+- Counter set/reset: `gTickNumberOfComputors` set `:6700`, reset `:6584`/`:6895`; future-vote count
+  `:5116-5130`. Self-heal that is NOT firing: `AUTO_FORCE_NEXT_TICK` `:5775`, `autoResendTickVotes` `:5742`.
+- `processTick()` per-thread call site: `src/qubic.cpp:6341`; `tickProcessor` = 32 threads in TESTNET (~6020).
+- `QUORUM = 451`: `src/network_messages/common_def.h:11` (`676*2/3+1`). `TARGET_TICK_DURATION = 1000`:
+  `src/public_settings.h:56`.
+- MAIN mode: `--node-mode 3` → `mainAuxStatus=3` → `isMainMode()` (`qubic.cpp:9593`, def `:535`).
+- WAMR contract-exec / arm path (hypothesis 1, NOT Linux-gated): `src/extensions/lite_wasm_contracts.h`,
+  `lite_dynamic_contracts.h`. Contrast `k12_engine.h` which **is** `#if __linux__` (`qubic.cpp:189`).
+- `winmm` linked: `src/extensions/overload.h:13`. Timer opt-out block: `overload.h:1266-1289`
+  (`timeBeginPeriod` `:1271`, `IGNORE_TIMER_RESOLUTION` `:1288`). `preciseSleepMicros()` helper `:52`.
+  Pacing sleep (real but not this bug): `src/qubic.cpp:2037`.
+- Node launch (qinit smoke): `--peers 127.0.0.1 --node-mode 3 --ticking-delay 1000` (`node-ops.ts:94`).
 - Failing CI run: `27435740466` (hackerby888/core-lite, `qinit-release`). Windows leg added by `5bf70556`;
   it has **never** passed (not a regression).
 - Branch: `feat/dynamic-contracts`, remote **hackerby888** (not qubic upstream).
