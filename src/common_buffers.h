@@ -70,7 +70,7 @@ public:
         // kept) so RSS tracks actual use — an idle node never fills the MAX_CONTRACT_STATE_SIZE-sized arena.
         // Mainnet/normal testnet keep eager commit so the arena is guaranteed resident (no late OOM mid-reorg).
 #if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
-        bool ok = allocPoolWithErrorLog(L"commonBuffers", ptrSize + lockSize + bufSize, (void**)&buffer, __LINE__, true, true);
+        bool ok = allocPoolWithErrorLog(L"commonBuffers", ptrSize + lockSize + bufSize, (void**)&buffer, __LINE__, true, true, /*lazyCommit=*/true);
 #else
         bool ok = allocPoolWithErrorLog(L"commonBuffers", ptrSize + lockSize + bufSize, (void**)&buffer, __LINE__);
 #endif

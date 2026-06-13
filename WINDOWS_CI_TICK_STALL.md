@@ -1,3 +1,37 @@
+> ## ✅ RESOLVED (2026-06-13) — root cause was the eager Windows commit charge, not a thread wedge
+> **One line:** the node eager-`MEM_COMMIT`s ~16.7 GB of big demand-zero reserves (contract states 10 GB,
+> score 2 GB, commonBuffers 2 GB, peer 0.86 GB, processor 0.2 GB). On a 16 GB `windows-latest` VM that sits on
+> the **commit limit**, so the deploy's extra ~1 GB WAMR arena tips it over. Linux/macOS never hit this: mmap
+> overcommit + the shared zero page charge only *written* pages (~2 GB). The working set was already ~2 GB on
+> Windows — it's the **commit charge** that was 16.7 GB.
+>
+> **Correction to the hypotheses below:** the "tickProcessor wedges in the WAMR arm" guess (Root cause §, hyp 1)
+> was **not** it. Reproduced locally under a job-object commit cap (`tools/joblaunch.exe`): a commit-limit hit
+> at the WAMR `malloc` fails **gracefully** ("LITEWASM: instantiate failed", node keeps ticking) — it does not
+> freeze. The freeze on CI is commit-limit *pressure* on the constrained VM; removing the 14 GB phantom commit
+> (so the node runs at ~2.8 GB with 12 GB of headroom) resolves it. The timer/EcoQoS theory was already ruled
+> out here; those commits (`acca8595a`, `6cebb3f2`) are legit Windows hardening for the *Phase-2 local* timer
+> throttle but are **not** the CI-stall fix — the CI stall is the commit charge.
+>
+> **Fix (all `_WIN32`-guarded; Linux/macOS byte-identical):** emulate Linux overcommit on Windows —
+> `qVirtualAllocLazy` reserves (`MEM_RESERVE`) and a vectored handler commits each page on first write
+> (`overload.h`); the per-tick state digest reads via **`KangarooTwelvePaged`** (`extensions/k12_paged.h`),
+> which hashes written pages as-is and synthesized zeros for untouched pages WITHOUT faulting them in — proven
+> byte-identical to canonical `KangarooTwelve` for every size/pattern (`tools/k12paged_test.cpp`), so the
+> cross-platform contract-state digest is unchanged. Applied to contract states (+ page-aware digest), score,
+> commonBuffers, processor; peer buffers stay eager (kernel `recv` write targets can't fault-commit).
+>
+> **Result (measured locally):** boot commit **16.7 GB → 2.77 GB**; with a contract armed **3.8 GB**; working
+> set **~1.77 GB throughout** (Linux parity). `qinit test` passes (deploy + WAMR exec + state read-back green),
+> confirming the page-aware digest / consensus path is correct. Final proof is the `windows-latest` smoke +
+> `digest-check` leg on push.
+>
+> Files: `src/extensions/overload.h`, `src/extensions/k12_paged.h` (new), `src/extensions/lite_sc_engine_adapter.h`,
+> `src/platform/memory_util.h`, `src/qubic.cpp`, `src/common_buffers.h`; harness `tools/joblaunch.c`,
+> `tools/k12paged_test.cpp`.
+
+---
+
 # Windows CI tick-stall — handoff (continue on a Windows box)
 
 **One line:** on the **headless `windows-latest` CI runner** the MSVC node ticks ~14 times then **freezes

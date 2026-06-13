@@ -7239,11 +7239,11 @@ static bool initialize()
 
         // demand-zero (useVirtualMem): the score struct holds a ~1GB random2 pool that SC-dev low-RAM
         // never fills (see ScoreFunction::initMiningData). Lazy commit -> RSS tracks actual use.
-        if (!allocPoolWithErrorLog(L"score", sizeof(*score), (void**)&score, __LINE__, true, true))
+        if (!allocPoolWithErrorLog(L"score", sizeof(*score), (void**)&score, __LINE__, true, true, /*lazyCommit=*/true))
         {
             return false;
         }
-        if (!allocPoolWithErrorLog(L"score", sizeof(*score_qpi), (void**)&score_qpi, __LINE__, true, true))
+        if (!allocPoolWithErrorLog(L"score", sizeof(*score_qpi), (void**)&score_qpi, __LINE__, true, true, /*lazyCommit=*/true))
         {
             return false;
         }
@@ -8686,7 +8686,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                 // testnet dynamic-contract: demand-zero the per-processor network buffer (low local traffic
                 // never fills 32MB); mainnet/normal keep eager commit. Capacity unchanged either way.
 #if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
-                if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__, true, true))
+                if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__, true, true, /*lazyCommit=*/true))
 #else
                 if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))
 #endif

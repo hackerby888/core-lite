@@ -13,17 +13,29 @@
 inline void* qVirtualAlloc(const unsigned long long size, bool commitMem);
 inline void* qVirtualCommit(void* address, const unsigned long long size);
 inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size);
+#ifdef _MSC_VER
+inline void* qVirtualAllocLazy(const unsigned long long size);   // reserve + commit-on-touch (overload.h)
+#endif
 
 // useVirtualMem indicates whether to use VirtualAlloc or malloc
 // commitMem indicates whether to commit memory when using VirtualAlloc
 // NOTE: commitMem only used if host machine have enough RAM+Pagefile, otherwise VirtualAlloc will fail
-static bool allocPoolWithErrorLog(const wchar_t* name, const unsigned long long size, void** buffer, const int LINE, bool useVirtualMem = false, bool commitMem = false)
+// lazyCommit (Windows only): reserve only and commit pages on first touch (overcommit emulation), so the
+//   commit charge tracks the WRITTEN footprint not the full reserve. On Linux/macOS mmap overcommit already
+//   does this, so the flag is a no-op there (commitMem path is identical). Only safe for user-mode-written
+//   buffers — NOT for kernel write targets (socket recv); see qVirtualAllocLazy.
+static bool allocPoolWithErrorLog(const wchar_t* name, const unsigned long long size, void** buffer, const int LINE, bool useVirtualMem = false, bool commitMem = false, bool lazyCommit = false)
 {
     static unsigned long long totalMemoryUsed = 0;
     static unsigned long long totalVirtualMemoryUsed = 0;
     size_t padded_size = (size + 64 - 1) & ~(64 - 1);
     if (useVirtualMem) {
+#ifdef _MSC_VER
+		*buffer = lazyCommit ? qVirtualAllocLazy(size) : qVirtualAlloc(size, commitMem);
+#else
+		(void)lazyCommit;   // mmap(MAP_ANONYMOUS) overcommit is already demand-zero/lazy
 		*buffer = qVirtualAlloc(size, commitMem);
+#endif
     }
     else {
 #if defined(__linux__) || defined(__APPLE__)

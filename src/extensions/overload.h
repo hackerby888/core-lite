@@ -257,6 +257,66 @@ inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size
 	}
     return VirtualAlloc(address, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE) != address;
 }
+
+// ---- Windows lazy commit (overcommit emulation) -------------------------------------------------------
+// Linux/macOS reserve the node's big demand-zero buffers with mmap(MAP_ANONYMOUS): pages cost nothing until
+// WRITTEN (overcommit) and reads of untouched pages hit the shared zero page. Windows MEM_COMMIT charges the
+// WHOLE reserve against the system commit limit up front (even though the working set stays small) — the
+// node's ~16 GB of contract-state + score + scratch reserves (the "Total RAM required 30 GB" boot line, of
+// which ~16.7 GB is committed) then sit right at the commit ceiling of a 16 GB CI VM, so the moment a deploy
+// arms a WAMR contract (+~1 GB) the node tips over the limit. qVirtualAllocLazy reserves only (0 commit) and
+// a vectored handler commits each page on first touch, so the commit charge tracks the written footprint
+// (~2 GB), matching Linux. Per-tick contract-state digest READS are routed through KangarooTwelvePaged
+// (k12_paged.h) so they don't fault every untouched reserve page back into commit.
+struct LazyCommitRegion { uintptr_t base, end; };
+inline LazyCommitRegion g_lazyCommitRegions[128];
+inline volatile long g_lazyCommitRegionCount = 0;   // written only during single-threaded boot allocation
+inline volatile long g_lazyCommitVehInstalled = 0;
+inline unsigned long g_lazyCommitPageSize = 4096;
+
+inline bool inLazyCommitRegion(uintptr_t a) {
+    long n = g_lazyCommitRegionCount;   // publish barrier in qVirtualAllocLazy makes [0,n) fully initialized
+    for (long i = 0; i < n; i++) if (a >= g_lazyCommitRegions[i].base && a < g_lazyCommitRegions[i].end) return true;
+    return false;
+}
+
+// First-chance handler: an access fault inside a lazy region means the page is reserved-not-yet-committed ->
+// commit it (zero-filled by the OS) and retry. Fires on any tick-processor/network thread; VirtualAlloc is
+// thread-safe and MEM_COMMIT of an already-committed page is an idempotent no-op, so concurrent faults on the
+// same page are safe. A genuine commit-limit OOM falls through (CONTINUE_SEARCH) rather than spinning.
+static LONG WINAPI lazyCommitVeh(EXCEPTION_POINTERS* xp) {
+    if (xp->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t fa = (uintptr_t)xp->ExceptionRecord->ExceptionInformation[1];
+    if (!inLazyCommitRegion(fa)) return EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t page = fa & ~((uintptr_t)g_lazyCommitPageSize - 1);
+    if (VirtualAlloc((void*)page, g_lazyCommitPageSize, MEM_COMMIT, PAGE_READWRITE)) return EXCEPTION_CONTINUE_EXECUTION;
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Reserve `size` bytes; pages commit on first touch via lazyCommitVeh. Use for big demand-zero buffers that
+// are written by USER-MODE code only (contract state, score, common/processor scratch). NOT for buffers the
+// KERNEL writes (socket recv targets) — the kernel can't fault an uncommitted page in; those stay eager.
+inline void* qVirtualAllocLazy(const unsigned long long size) {
+    if (!_InterlockedCompareExchange(&g_lazyCommitVehInstalled, 1, 0)) {
+        SYSTEM_INFO si; GetSystemInfo(&si);
+        g_lazyCommitPageSize = si.dwPageSize ? si.dwPageSize : 4096;
+        AddVectoredExceptionHandler(1 /*first*/, lazyCommitVeh);
+    }
+    void* addr = VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE, PAGE_READWRITE);
+    if (!addr) { logToConsole(L"CRITIAL: VirtualAlloc(MEM_RESERVE) failed in qVirtualAllocLazy"); return nullptr; }
+    long i = g_lazyCommitRegionCount;   // boot-time, single-threaded; barrier publishes the count
+    if (i < (long)(sizeof(g_lazyCommitRegions) / sizeof(g_lazyCommitRegions[0]))) {
+        g_lazyCommitRegions[i].base = (uintptr_t)addr;
+        g_lazyCommitRegions[i].end = (uintptr_t)addr + size;
+        _ReadWriteBarrier();
+        g_lazyCommitRegionCount = i + 1;
+    } else {
+        VirtualAlloc(addr, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE);   // registry full: fall back to eager
+    }
+    commitMemMap[(unsigned long long)addr] = true;   // freePoolOrVirtual treats it as virtual (never free())
+    return addr;
+}
+#include "k12_paged.h"   // KangarooTwelvePaged — page-aware digest of lazy contract-state reserves
 #else
 inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false) {
     int prot = commitMem ? (PROT_READ | PROT_WRITE) : PROT_NONE;

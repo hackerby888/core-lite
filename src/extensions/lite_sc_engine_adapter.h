@@ -38,9 +38,16 @@ inline bool liteSCAlloc(unsigned int idx, unsigned long long size)
 #if defined(LITE_SC_ENGINE)
     return ContractStateEngine::create(&contractStates[idx], size, idx);
 #elif defined(LITE_SC_CONTRACT_LEVEL)
-    // demand-zero (mmap/VirtualAlloc, no eager memset): RSS tracks actual use; reads of untouched pages
-    // hit the shared zero page, so the per-tick digest doesn't commit unused contracts.
+    // demand-zero: COMMIT charge (not just RSS) must track actual use, else the sum of all slot reserves
+    // (~10 GB) sits on the commit limit and a 16 GB CI VM tips over when a deploy arms a WAMR contract.
+#ifdef _MSC_VER
+    // Windows: MEM_COMMIT charges the whole reserve up front -> reserve only, commit-on-write via the VEH in
+    // overload.h. The per-tick digest reads are routed through KangarooTwelvePaged (see liteSCDigest) so they
+    // don't fault untouched pages back into commit. (macOS/Linux mmap overcommit is already lazy on commit.)
+    contractStates[idx] = (unsigned char*)qVirtualAllocLazy(size);
+#else
     contractStates[idx] = (unsigned char*)qVirtualAlloc(size, /*commitMem=*/true);
+#endif
     return contractStates[idx] != nullptr;
 #else
     return allocPoolWithErrorLog(L"contractStates", size, (void**)&contractStates[idx], __LINE__);
@@ -58,16 +65,19 @@ inline void liteSCDigest(unsigned int idx, unsigned char* out, unsigned long lon
     }
     else
     {
+#ifdef _MSC_VER
+        // Windows: the contract-state reserve is lazily committed (commit-on-write, overload.h). A plain
+        // KangarooTwelve over the whole effective span would fault every untouched page, the VEH would commit
+        // it, and the commit charge would balloon back to the full ~10 GB of reserves on the boot sweep
+        // (change flags start 0xFF -> every contract digested once). KangarooTwelvePaged hashes committed
+        // (written) pages as-is and reserved (never-written, therefore all-zero) pages as synthesized zeros
+        // WITHOUT touching them -> bit-identical to KangarooTwelve (proven: tools/k12paged_test.cpp), so the
+        // cross-platform contract-state digest is unchanged while the commit charge stays at the written
+        // footprint (~2 GB, Linux parity). Replaces the earlier VirtualUnlock RSS-trim, now unnecessary:
+        // the digest no longer faults untouched pages in, so there is nothing to unlock.
+        KangarooTwelvePaged(contractStates[idx], (unsigned int)effectiveSize, out, 32);
+#else
         KangarooTwelve(contractStates[idx], (unsigned int)effectiveSize, out, 32);
-#ifdef _WIN32
-        // Windows has no shared zero page for committed private memory: the digest's READS of
-        // never-written pages each fault in their own physical zero page, so the first full sweep
-        // (change flags boot at 0xFF) pins every contract state's whole reserve in RAM (~11 GB
-        // measured: 4x1GB dyn-slot reserves + QX 593MB + ...; linux/macOS read the shared zero
-        // page and stay ~1.9 GB). VirtualUnlock on an unlocked range is the documented way to
-        // drop pages from the working set WITHOUT invalidating them: concurrent readers just
-        // soft-fault them back, clean zero pages are reclaimed outright, the digest is unchanged.
-        VirtualUnlock(contractStates[idx], (SIZE_T)effectiveSize);
 #endif
     }
 }

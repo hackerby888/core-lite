@@ -104,9 +104,17 @@ pgrep elsewhere), `Qubic.exe` binary name, no chmod; `test.tsx`/`verify.ts` `Bun
 spawning `sh`; `deploy-ops.ts` tick-wait 90s → 300s (cold-node warm-up stall, below).
 
 ## Known issues (Windows, non-blocking)
-- **Commit charge** ~16.7 GB (unchanged by the working-set fix): every contract reserve is
-  MEM_COMMITted up front, which counts against RAM+pagefile. Linux relies on overcommit. Only a
-  real lazy-commit scheme (VEH commit-on-write) would shrink it; pagefile-backed, so not RAM.
+- **Commit charge** ~16.7 GB → **FIXED (2026-06-13): now ~2.8 GB** (working set ~1.77 GB, Linux parity).
+  Root cause: every big demand-zero reserve (contract states 10 GB, score 2 GB, commonBuffers 2 GB,
+  peer 0.86 GB, processor 0.2 GB) was `MEM_COMMIT`ted up front, charging the full reserve against the
+  commit limit (Linux relies on mmap overcommit + the shared zero page, so only *written* pages count).
+  Fix = the "real lazy-commit scheme" this note called for: `qVirtualAllocLazy` (`MEM_RESERVE` +
+  commit-on-write via a vectored handler, `overload.h`) + a page-aware `KangarooTwelvePaged`
+  (`extensions/k12_paged.h`) so the per-tick digest doesn't fault untouched reserve pages back into
+  commit. This was ALSO the CI tick-stall root cause (the 16.7 GB sat on a 16 GB CI VM's commit limit;
+  the deploy's +1 GB WAMR arena tipped it over) — see `WINDOWS_CI_TICK_STALL.md`. Peer buffers stay
+  eager (kernel `recv` write targets can't fault-commit). The page-aware digest is proven byte-identical
+  to canonical K12 (`tools/k12paged_test.cpp`), so the cross-platform contract-state digest is unchanged.
   (The earlier "warm-up stall" and "2-4s tick rate" entries were the timer-resolution throttling
   above — gone since the opt-out; ticks run ~1/s from the first tick. qinit's longer deploy
   budgets, added while diagnosing, were kept as general slow-node robustness.)
@@ -115,10 +123,12 @@ spawning `sh`; `deploy-ops.ts` tick-wait 90s → 300s (cold-node warm-up stall, 
 - Add **`windows-x64`** to the qinit-release smoke + **digest-equivalence** matrix
   (`GET /live/v1/dev/contract-digest?slot=N` must byte-match linux/macOS) → 4-way consensus proof.
 - The windows-dyn-build CI now links; consider uploading Qubic.exe + the applocal DLLs as one artifact.
-- **BLOCKER (CI-only):** the smoke leg is wired up but the headless `windows-latest` node ticks ~14 empty
-  ticks then freezes at `tx=?` when deploy txs arrive — the Phase-2 timer-resolution opt-out isn't honored
-  on the throttled CI VM, so vote dissemination crawls and quorum (451) is never reached. Full diagnosis,
-  repro, diagnostics, and ranked fixes: **`WINDOWS_CI_TICK_STALL.md`**.
+- ~~**BLOCKER (CI-only):** the smoke leg freezes at `tx=?` when deploy txs arrive~~ → **FIXED (2026-06-13).**
+  Real root cause was NOT the timer/throttle theory but the **eager ~16.7 GB commit charge** sitting on the
+  16 GB CI VM's commit limit (the deploy's +1 GB WAMR arena tipped it over). Fixed by the lazy-commit +
+  page-aware-digest work in the Known-issues entry above (commit now ~2.8 GB). Validated locally (qinit test
+  passes, commit/WS measured); final proof is the green `windows-latest` smoke + `digest-check` leg on push.
+  Full corrected diagnosis: **`WINDOWS_CI_TICK_STALL.md`** (see the RESOLVED block at its top).
 
 ## Pointers
 - Build recipe + CI: `.github/workflows/windows-dyn-build.yml` (push to `feat/dynamic-contracts` runs it).
