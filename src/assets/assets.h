@@ -721,8 +721,6 @@ static void getUniverseDigest(m256i& digest)
 {
     PROFILE_SCOPE();
 
-    // Track 1b: skip whole clean 64-bit flag words so the leaf scan + Merkle walk are ~O(dirty)
-    // instead of O(ASSETS_CAPACITY); parent write index computed from i (decoupled from a counter).
     unsigned int digestIndex;
     for (digestIndex = 0; digestIndex < ASSETS_CAPACITY; digestIndex++)
     {
