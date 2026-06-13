@@ -115,6 +115,10 @@ spawning `sh`; `deploy-ops.ts` tick-wait 90s → 300s (cold-node warm-up stall, 
 - Add **`windows-x64`** to the qinit-release smoke + **digest-equivalence** matrix
   (`GET /live/v1/dev/contract-digest?slot=N` must byte-match linux/macOS) → 4-way consensus proof.
 - The windows-dyn-build CI now links; consider uploading Qubic.exe + the applocal DLLs as one artifact.
+- **BLOCKER (CI-only):** the smoke leg is wired up but the headless `windows-latest` node ticks ~14 empty
+  ticks then freezes at `tx=?` when deploy txs arrive — the Phase-2 timer-resolution opt-out isn't honored
+  on the throttled CI VM, so vote dissemination crawls and quorum (451) is never reached. Full diagnosis,
+  repro, diagnostics, and ranked fixes: **`WINDOWS_CI_TICK_STALL.md`**.
 
 ## Pointers
 - Build recipe + CI: `.github/workflows/windows-dyn-build.yml` (push to `feat/dynamic-contracts` runs it).
