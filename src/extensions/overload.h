@@ -32,6 +32,10 @@
 #include <queue>
 #endif
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+
 static volatile bool listOfPeersIsStaticLiteNode = false;
 
 #define ACQUIRE_NO_SPINNING(lock) while (_InterlockedCompareExchange8(&lock, 1, 0)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1199,11 +1203,52 @@ struct Overload {
         return EFI_SUCCESS;
     }
 
+    // ---- [NETPROBE] loopback I/O health counters (aggregated across the tx/rx thread pool) ----
+    // Distinguishes the two suspects for the Windows-CI tick-stall: slow send/recv SYSCALLS (WFP/filter
+    // traversal on loopback -> high *_ns_avg) vs WOULDBLOCK back-pressure (high wblk). Reset each second.
+    inline static std::atomic<unsigned long long>
+        npTxReqs{0}, npTxSend{0}, npTxBytes{0}, npTxWblk{0}, npTxTmo{0}, npTxSendNs{0}, npTxSendMaxNs{0},
+        npRxRecv{0}, npRxOk{0}, npRxBytes{0}, npRxRecvNs{0}, npRxRecvMaxNs{0};
+    inline static unsigned long long npSleepUs = 1000;   // measured precise-sleep granularity (set at init)
+
+    // One probe thread (Windows-started) emits a per-second [NETPROBE] line even if the I/O threads block.
+    static void netprobeProcessor()
+    {
+        while (true)
+        {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            unsigned long long txr = npTxReqs.exchange(0), txs = npTxSend.exchange(0), txb = npTxBytes.exchange(0),
+                txw = npTxWblk.exchange(0), txt = npTxTmo.exchange(0), txns = npTxSendNs.exchange(0),
+                txmx = npTxSendMaxNs.exchange(0);
+            unsigned long long rxr = npRxRecv.exchange(0), rxo = npRxOk.exchange(0),
+                rxb = npRxBytes.exchange(0), rxns = npRxRecvNs.exchange(0), rxmx = npRxRecvMaxNs.exchange(0);
+            if (!txr && !txs && !rxr) continue;   // idle second -> stay quiet
+            CHAR16 m[700];
+            setText(m, L"[NETPROBE] tx reqs="); appendNumber(m, txr, FALSE);
+            appendText(m, L" send="); appendNumber(m, txs, FALSE);
+            appendText(m, L" wblk="); appendNumber(m, txw, FALSE);
+            appendText(m, L" tmo="); appendNumber(m, txt, FALSE);
+            appendText(m, L" send_ns_avg="); appendNumber(m, txs ? txns / txs : 0, FALSE);
+            appendText(m, L" send_ns_max="); appendNumber(m, txmx, FALSE);
+            appendText(m, L" sleep_ms~="); appendNumber(m, (txw * npSleepUs) / 1000, FALSE);
+            appendText(m, L" txbytes="); appendNumber(m, txb, FALSE);
+            appendText(m, L" || rx recv="); appendNumber(m, rxr, FALSE);
+            appendText(m, L" ok="); appendNumber(m, rxo, FALSE);
+            appendText(m, L" nonok="); appendNumber(m, rxr >= rxo ? rxr - rxo : 0, FALSE);
+            appendText(m, L" recv_ns_avg="); appendNumber(m, rxr ? rxns / rxr : 0, FALSE);
+            appendText(m, L" recv_ns_max="); appendNumber(m, rxmx, FALSE);
+            appendText(m, L" rxbytes="); appendNumber(m, rxb, FALSE);
+            logToConsole(m);
+            fflush(stdout);
+        }
+    }
+
     static void transmitProcessor()
     {
         while (true)
         {
             TransmitRequest request = transmitQueue.pop();
+            npTxReqs.fetch_add(1, std::memory_order_relaxed);
             int totalSentBytes = 0;
             auto& fragment = request.token->Packet.TxData->FragmentTable[0];
             auto startTime = std::chrono::high_resolution_clock::now();
@@ -1215,12 +1260,18 @@ struct Overload {
                 totalNanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count();
                 if (totalNanoseconds > 1'000'000'000) { // 1 seconds timeout
                     request.token->CompletionToken.Status = EFI_TIMEOUT;
+                    npTxTmo.fetch_add(1, std::memory_order_relaxed);
                     break;
                 }
+                auto _np0 = std::chrono::high_resolution_clock::now();
                 auto n = send(request.socket, (const char*)fragment.FragmentBuffer + totalSentBytes, fragment.FragmentLength - totalSentBytes, MSG_DONTWAIT | MSG_NOSIGNAL);
+                unsigned long long _npd = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - _np0).count();
+                npTxSend.fetch_add(1, std::memory_order_relaxed); npTxSendNs.fetch_add(_npd, std::memory_order_relaxed);
+                { unsigned long long _c = npTxSendMaxNs.load(std::memory_order_relaxed); if (_npd > _c) npTxSendMaxNs.store(_npd, std::memory_order_relaxed); }
                 if (n > 0)
                 {
                     totalSentBytes += n;
+                    npTxBytes.fetch_add((unsigned long long)n, std::memory_order_relaxed);
                 } else if (n == 0)
                 {
                     // connection closed
@@ -1233,6 +1284,7 @@ struct Overload {
 					int err = WSAGetLastError();
                     if (err == WSAEWOULDBLOCK)
                     {
+                        npTxWblk.fetch_add(1, std::memory_order_relaxed);
                         preciseSleepMicros(1000);   // 1ms — precise (default Windows sleep would be ~15.6ms)
                         continue;
                     }
@@ -1245,6 +1297,7 @@ struct Overload {
 #else
                     if (errno == EWOULDBLOCK || errno == EAGAIN)
                     {
+                        npTxWblk.fetch_add(1, std::memory_order_relaxed);
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         continue;
                     }
@@ -1270,11 +1323,16 @@ struct Overload {
         while (true)
         {
             ReceiveRequest request = receiveQueue.pop();
+            auto _np0 = std::chrono::high_resolution_clock::now();
             auto n = recv(request.socket, (char *)request.token->Packet.RxData->FragmentTable[0].FragmentBuffer, BUFFER_SIZE, MSG_DONTWAIT);
+            unsigned long long _npd = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - _np0).count();
+            npRxRecv.fetch_add(1, std::memory_order_relaxed); npRxRecvNs.fetch_add(_npd, std::memory_order_relaxed);
+            { unsigned long long _c = npRxRecvMaxNs.load(std::memory_order_relaxed); if (_npd > _c) npRxRecvMaxNs.store(_npd, std::memory_order_relaxed); }
             if (n > 0)
             {
                 request.token->Packet.RxData->DataLength = n;
                 request.token->CompletionToken.Status = EFI_SUCCESS;
+                npRxOk.fetch_add(1, std::memory_order_relaxed); npRxBytes.fetch_add((unsigned long long)n, std::memory_order_relaxed);
             }
             else if (n == 0)
             {
@@ -1347,6 +1405,19 @@ struct Overload {
         // Win11: also stop it dropping the 1ms timeBeginPeriod request when backgrounded.
         pt.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
         SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
+
+        // [NETPROBE] verify the precise-sleep path actually achieves ~1ms here (a coarse ~15.6ms timer is a
+        // prime suspect for the loopback WOULDBLOCK retry stall). Measure 10x preciseSleepMicros(1000us).
+        {
+            LARGE_INTEGER _qf, _a, _b; QueryPerformanceFrequency(&_qf); QueryPerformanceCounter(&_a);
+            for (int _i = 0; _i < 10; _i++) preciseSleepMicros(1000);
+            QueryPerformanceCounter(&_b);
+            npSleepUs = (unsigned long long)(((_b.QuadPart - _a.QuadPart) * 1000000ULL / _qf.QuadPart) / 10);
+            if (!npSleepUs) npSleepUs = 1;
+            CHAR16 _m[256]; setText(_m, L"[NETPROBE] preciseSleep(1000us) actual avg = "); appendNumber(_m, npSleepUs, FALSE);
+            appendText(_m, L" us/call; io_thread_pairs = "); appendNumber(_m, (unsigned long long)(NUMBER_OF_INCOMING_CONNECTIONS + NUMBER_OF_OUTGOING_CONNECTIONS), FALSE);
+            logToConsole(_m); fflush(stdout);
+        }
         #endif
 
         ih = new EFI_HANDLE;
@@ -1387,6 +1458,10 @@ struct Overload {
             std::thread receiveProcessorThread(receiveProcessor);
             receiveProcessorThread.detach();
         }
+#ifdef _MSC_VER
+        // [NETPROBE] one probe thread emits the per-second loopback-I/O health line to node.log (Windows only).
+        { std::thread npT(netprobeProcessor); npT.detach(); }
+#endif
 
         // Reserve space
         incomingSocketMap.reserve(1024);
