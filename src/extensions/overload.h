@@ -1211,20 +1211,47 @@ struct Overload {
         npRxRecv{0}, npRxOk{0}, npRxBytes{0}, npRxRecvNs{0}, npRxRecvMaxNs{0};
     inline static unsigned long long npSleepUs = 1000;   // measured precise-sleep granularity (set at init)
 
+    // Process CPU time (user+kernel) in 100ns units; 0 where unavailable. Reveals whether the node is
+    // spinning (cores pegged) or idle/blocked (barely any CPU) during the stall.
+    static unsigned long long npProcessCpu100ns()
+    {
+#ifdef _MSC_VER
+        FILETIME _c, _e, _k, _u;
+        if (!GetProcessTimes(GetCurrentProcess(), &_c, &_e, &_k, &_u)) return 0;
+        ULARGE_INTEGER _ku, _uu;
+        _ku.LowPart = _k.dwLowDateTime; _ku.HighPart = _k.dwHighDateTime;
+        _uu.LowPart = _u.dwLowDateTime; _uu.HighPart = _u.dwHighDateTime;
+        return _ku.QuadPart + _uu.QuadPart;
+#else
+        return 0;
+#endif
+    }
+
     // One probe thread (Windows-started) emits a per-second [NETPROBE] line even if the I/O threads block.
+    // sched_gap_ms = actual gap of this 1s-sleep thread (>>1000 => process scheduling-throttled / descheduled);
+    // cpu_cores_x100 = process CPU cores used x100 (35 => 0.35 cores "barely any CPU"; 400 => 4 cores pegged).
     static void netprobeProcessor()
     {
+        auto tPrev = std::chrono::steady_clock::now();
+        unsigned long long cpuPrev = npProcessCpu100ns();
         while (true)
         {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            auto tNow = std::chrono::steady_clock::now();
+            unsigned long long wallNs = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(tNow - tPrev).count();
+            tPrev = tNow;
+            unsigned long long cpuNow = npProcessCpu100ns();
+            unsigned long long cpuCoresX100 = wallNs ? ((cpuNow - cpuPrev) * 10000ULL / wallNs) : 0;
+            cpuPrev = cpuNow;
             unsigned long long txr = npTxReqs.exchange(0), txs = npTxSend.exchange(0), txb = npTxBytes.exchange(0),
                 txw = npTxWblk.exchange(0), txt = npTxTmo.exchange(0), txns = npTxSendNs.exchange(0),
                 txmx = npTxSendMaxNs.exchange(0);
             unsigned long long rxr = npRxRecv.exchange(0), rxo = npRxOk.exchange(0),
                 rxb = npRxBytes.exchange(0), rxns = npRxRecvNs.exchange(0), rxmx = npRxRecvMaxNs.exchange(0);
-            if (!txr && !txs && !rxr) continue;   // idle second -> stay quiet
-            CHAR16 m[700];
-            setText(m, L"[NETPROBE] tx reqs="); appendNumber(m, txr, FALSE);
+            CHAR16 m[760];
+            setText(m, L"[NETPROBE] cpu_cores_x100="); appendNumber(m, cpuCoresX100, FALSE);
+            appendText(m, L" sched_gap_ms="); appendNumber(m, wallNs / 1000000, FALSE);
+            appendText(m, L" | tx reqs="); appendNumber(m, txr, FALSE);
             appendText(m, L" send="); appendNumber(m, txs, FALSE);
             appendText(m, L" wblk="); appendNumber(m, txw, FALSE);
             appendText(m, L" tmo="); appendNumber(m, txt, FALSE);
