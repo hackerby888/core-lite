@@ -250,13 +250,11 @@ jobs:
   # on-chain deploy + read + write (DigestProbe: Get -> Inc -> Get) through the wasm engine, not a tick-only
   # check. A crash / deploy-fail / test-fail turns the job red, so a node change that breaks the
   # deploy-exec pipeline is caught. GATES publish (publish needs smoke + digest-check), so a node that can't
-  # deploy/run a contract never ships — EXCEPT windows-x64, which is NON-gating (continue-on-error below):
-  # the free windows-latest runner's loopback is ~190x slower than real hardware (~12 vote-disseminations/s
-  # vs ~2280), so the node crawls at ~50s/tick and the deploy times out. That's a hosted-runner limit, NOT a
-  # node bug — the SAME node ticks ~1s/tick headless on real hardware (verified via a Session-0 repro). So the
-  # windows smoke is advisory; the windows node still BUILDS + ships in the manifest, and digest-check still
-  # proves cross-platform consensus over the linux x64/arm64 + macOS legs (n>=2). (macOS RAM trims keep that
-  # node ~1.9 GB so it fits the 7 GB macos-14 runner.)
+  # tick + deploy/run a contract never ships -- on EVERY platform, windows-x64 included. (Windows used to
+  # stall on the free runner: the 676-computor quorum couldn't converge over its ~190x-slower loopback, so it
+  # crawled at ~50s/tick and the deploy timed out. The dynamic-contract testnet now runs an 8-computor
+  # committee, so quorum converges instantly regardless of loopback speed and windows ticks ~1s/tick like the
+  # rest -- see WINDOWS_CI_TICK_STALL.md.) (macOS RAM trims keep that node ~1.9 GB so it fits the macos-14 runner.)
   smoke:
     needs: [node, node-macos, node-windows]
     strategy:
@@ -268,8 +266,6 @@ jobs:
           - { runner: macos-14,         key: darwin-arm64, artifact: node-darwin-arm64 }
           - { runner: windows-latest,   key: windows-x64,  artifact: node-windows-x64 }
     runs-on: ${{ matrix.runner }}
-    # windows-x64 is advisory (hosted-runner loopback too slow -> deploy times out); never blocks the release.
-    continue-on-error: ${{ matrix.key == 'windows-x64' }}
     timeout-minutes: 30
     steps:
       - name: Checkout core-lite (--core, wasm contract headers)
