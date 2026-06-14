@@ -11,6 +11,18 @@
 
 static std::string OPERATOR = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
+#ifdef TESTNET
+static unsigned char computorSeeds[][55 + 1] = {
+"eraaastggldisjhoojaekgyimrsddjxbvgaawswfvnvaygqmusnkevv",
+"sgwnpzidgxbclnisgehigeculaejjxedzdkjyyfrzgzvuojrhdzywfh",
+"xeejtwxqrrlvacapbujaleejhbrsnnpvviknskemmgdihggpssjjkrg",
+"hwrmwgyjvytgemdqcewrufgumgukfsvgudaqnujykjnindlaxkjzrke",
+"pvdlzxjxnzbrlutlcvjfnmcmwmyyjzifczztqycnultdaekezffkpdz",
+"apmtsmsnrawvzwdympngnxfivnktidmfdhtltprsepmryihmeqteokh",
+"knxhupfxcfyvkrrdawbkotquiqrgzlijmltmxmpddtprtkmvmmvrxoc",
+"dislmzydvccdsghqdfploggiheykqntsevpublwwglnqfeyapqymhtj",
+};
+#else
 static unsigned char computorSeeds[][55 + 1] = {
 "eraaastggldisjhoojaekgyimrsddjxbvgaawswfvnvaygqmusnkevv",
 "sgwnpzidgxbclnisgehigeculaejjxedzdkjyyfrzgzvuojrhdzywfh",
@@ -689,7 +701,20 @@ static unsigned char computorSeeds[][55 + 1] = {
 "efdzopbwdfonciethdldptzjdtntrvugdpxefrghidzhdekgtsoaxat",
 "qicuxaeksjvynsomgevfkewhtjenprpogjaqloirxsdpqpvfgwlotru",
 };
+#endif
 
+#ifdef TESTNET
+static unsigned char broadcastedComputorSeeds[][55 + 1] = {
+"eraaastggldisjhoojaekgyimrsddjxbvgaawswfvnvaygqmusnkevv",
+"sgwnpzidgxbclnisgehigeculaejjxedzdkjyyfrzgzvuojrhdzywfh",
+"xeejtwxqrrlvacapbujaleejhbrsnnpvviknskemmgdihggpssjjkrg",
+"hwrmwgyjvytgemdqcewrufgumgukfsvgudaqnujykjnindlaxkjzrke",
+"pvdlzxjxnzbrlutlcvjfnmcmwmyyjzifczztqycnultdaekezffkpdz",
+"apmtsmsnrawvzwdympngnxfivnktidmfdhtltprsepmryihmeqteokh",
+"knxhupfxcfyvkrrdawbkotquiqrgzlijmltmxmpddtprtkmvmmvrxoc",
+"dislmzydvccdsghqdfploggiheykqntsevpublwwglnqfeyapqymhtj",
+};
+#else
 static unsigned char broadcastedComputorSeeds[][55 + 1] = {
 "eraaastggldisjhoojaekgyimrsddjxbvgaawswfvnvaygqmusnkevv",
 "sgwnpzidgxbclnisgehigeculaejjxedzdkjyyfrzgzvuojrhdzywfh",
@@ -1368,6 +1393,7 @@ static unsigned char broadcastedComputorSeeds[][55 + 1] = {
 "efdzopbwdfonciethdldptzjdtntrvugdpxefrghidzhdekgtsoaxat",
 "qicuxaeksjvynsomgevfkewhtjenprpogjaqloirxsdpqpvfgwlotru",
 };
+#endif
 
 // If you want to fund any of your custom seeds with initial spectrum, add them here.
 static unsigned char customSeeds[][55 + 1] = {

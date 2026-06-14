@@ -14,14 +14,22 @@
 static unsigned long long gVoteScoreBuffer[NUMBER_OF_COMPUTORS];
 static unsigned long long gCustomMiningScoreBuffer[NUMBER_OF_COMPUTORS];
 
+// TESTNET's tiny committee makes per-computor issuance (ISSUANCE_RATE/NUMBER_OF_COMPUTORS) much larger,
+// shrinking the headroom before the revenue normalization overflows; use a smaller scaling shift there.
+#ifdef TESTNET
+#define REVENUE_SCALE_SHIFT 9
+#else
+#define REVENUE_SCALE_SHIFT 10
+#endif
+
 static unsigned long long gTxScoreFactor[NUMBER_OF_COMPUTORS];
-static constexpr unsigned long long gTxScoreScalingThreshold = (1ULL << 10);
+static constexpr unsigned long long gTxScoreScalingThreshold = (1ULL << REVENUE_SCALE_SHIFT);
 
 static unsigned long long gVoteScoreFactor[NUMBER_OF_COMPUTORS];
-static constexpr unsigned long long gVoteScoreScalingThreshold = (1ULL << 10);
+static constexpr unsigned long long gVoteScoreScalingThreshold = (1ULL << REVENUE_SCALE_SHIFT);
 
 static unsigned long long gCustomMiningScoreFactor[NUMBER_OF_COMPUTORS];
-static constexpr unsigned long long gCustomMiningScoreScalingThreshold = (1ULL << 10);
+static constexpr unsigned long long gCustomMiningScoreScalingThreshold = (1ULL << REVENUE_SCALE_SHIFT);
 
 // gTxRevenuePoints is calculated from 4096 * ln(tx + 1)
 // When NUMBER_OF_TRANSACTIONS_PER_TICK is changed, this table needs to be regenerated

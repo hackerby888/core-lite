@@ -7,7 +7,12 @@
 #define NUMBER_OF_TRANSACTIONS_PER_TICK 4096ULL // Must be 2^N
 #endif
 #define MAX_NUMBER_OF_CONTRACTS 1024 // Must be 1024
+// TESTNET uses a tiny committee so a single-node testnet reaches quorum cheaply on few-core machines.
+#ifdef TESTNET
+#define NUMBER_OF_COMPUTORS 8
+#else
 #define NUMBER_OF_COMPUTORS 676
+#endif
 #define QUORUM (NUMBER_OF_COMPUTORS * 2 / 3 + 1)
 #define NUMBER_OF_EXCHANGED_PEERS 4
 
