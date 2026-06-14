@@ -16,7 +16,7 @@ static unsigned long long gCustomMiningScoreBuffer[NUMBER_OF_COMPUTORS];
 
 // TESTNET's tiny committee makes per-computor issuance (ISSUANCE_RATE/NUMBER_OF_COMPUTORS) much larger,
 // shrinking the headroom before the revenue normalization overflows; use a smaller scaling shift there.
-#ifdef TESTNET
+#if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
 #define REVENUE_SCALE_SHIFT 9
 #else
 #define REVENUE_SCALE_SHIFT 10

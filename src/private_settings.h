@@ -11,7 +11,7 @@
 
 static std::string OPERATOR = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-#ifdef TESTNET
+#if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
 static unsigned char computorSeeds[][55 + 1] = {
 "eraaastggldisjhoojaekgyimrsddjxbvgaawswfvnvaygqmusnkevv",
 "sgwnpzidgxbclnisgehigeculaejjxedzdkjyyfrzgzvuojrhdzywfh",
@@ -703,7 +703,7 @@ static unsigned char computorSeeds[][55 + 1] = {
 };
 #endif
 
-#ifdef TESTNET
+#if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
 static unsigned char broadcastedComputorSeeds[][55 + 1] = {
 "eraaastggldisjhoojaekgyimrsddjxbvgaawswfvnvaygqmusnkevv",
 "sgwnpzidgxbclnisgehigeculaejjxedzdkjyyfrzgzvuojrhdzywfh",

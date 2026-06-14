@@ -151,8 +151,9 @@ namespace QPI
 		return _mm256_set_epi64x(((((((((((((((uint64)_55) * 26 + _54) * 26 + _53) * 26 + _52) * 26 + _51) * 26 + _50) * 26 + _49) * 26 + _48) * 26 + _47) * 26 + _46) * 26 + _45) * 26 + _44) * 26 + _43) * 26 + _42, ((((((((((((((uint64)_41) * 26 + _40) * 26 + _39) * 26 + _38) * 26 + _37) * 26 + _36) * 26 + _35) * 26 + _34) * 26 + _33) * 26 + _32) * 26 + _31) * 26 + _30) * 26 + _29) * 26 + _28, ((((((((((((((uint64)_27) * 26 + _26) * 26 + _25) * 26 + _24) * 26 + _23) * 26 + _22) * 26 + _21) * 26 + _20) * 26 + _19) * 26 + _18) * 26 + _17) * 26 + _16) * 26 + _15) * 26 + _14, ((((((((((((((uint64)_13) * 26 + _12) * 26 + _11) * 26 + _10) * 26 + _09) * 26 + _08) * 26 + _07) * 26 + _06) * 26 + _05) * 26 + _04) * 26 + _03) * 26 + _02) * 26 + _01) * 26 + _00); 
 	}
 
-// TESTNET uses a tiny committee so a single-node testnet reaches quorum cheaply on few-core machines.
-#ifdef TESTNET
+// Dynamic-contract testnet (SC-dev) uses a tiny 8-computor committee so it reaches quorum cheaply on
+// few-core hosts (consensus realism is irrelevant for contract dev). Standard testnet + mainnet keep 676.
+#if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
 #define NUMBER_OF_COMPUTORS 8
 #else
 #define NUMBER_OF_COMPUTORS 676
