@@ -703,7 +703,17 @@ public:
 
     unsigned long long dumpVMState(unsigned char* buffer)
     {
+        // Main-thread save: a worker may hold memLock while parked in asyncLoad/Save (serviced
+        // only by main-thread flush). Pump the IO queue while waiting so it can release the lock.
+#if defined(NO_UEFI) && !defined(REAL_NODE)
         ACQUIRE(memLock);
+#else
+        while (!TRY_ACQUIRE(memLock))
+        {
+            flushAsyncFileIOBuffer();
+            _mm_pause();
+        }
+#endif
         unsigned long long ret = 0;
         copyMem(buffer, currentPage, pageSize);
         ret += pageSize;
