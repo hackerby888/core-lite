@@ -48,7 +48,61 @@ inline void broadcastTransfer(unsigned int sourceComputorIdx,
     enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
 }
 
+// Broadcast one mining-solution tx with a random nonce from computor `computorIdx`. The nonce won't
+// score, so it is "invalid" at the normal threshold and "valid" if the threshold is forced to 0
+// (--test-solution-threshold 0). Many of these from the SAME computor drain its balance, so later
+// ones fail the security-deposit payment (the out-of-qus case).
+inline void broadcastSolution(unsigned int computorIdx, const m256i& currentMiningSeed, unsigned int txTick)
+{
+    struct
+    {
+        Transaction transaction;
+        m256i       miningSeed;
+        m256i       nonce;
+        unsigned char signature[SIGNATURE_SIZE];
+    } payload;
+    static_assert(sizeof(payload) == sizeof(Transaction) + 32 + 32 + SIGNATURE_SIZE,
+                  "TestInvalidSolution payload layout drifted");
+
+    payload.transaction.sourcePublicKey      = computorPublicKeys[computorIdx];
+    payload.transaction.destinationPublicKey = m256i::zero();
+    payload.transaction.amount               = MiningSolutionTransaction::minAmount();
+    payload.transaction.tick                 = txTick;
+    payload.transaction.inputType            = MiningSolutionTransaction::transactionType();
+    payload.transaction.inputSize            = sizeof(payload.miningSeed) + sizeof(payload.nonce);
+
+    payload.miningSeed = currentMiningSeed;
+    payload.nonce.setRandomValue();
+
+    unsigned char digest[32];
+    KangarooTwelve(&payload.transaction,
+                   sizeof(payload.transaction) + sizeof(payload.miningSeed) + sizeof(payload.nonce),
+                   digest,
+                   sizeof(digest));
+    sign(computorSubseeds[computorIdx].m256i_u8,
+         computorPublicKeys[computorIdx].m256i_u8,
+         digest,
+         payload.signature);
+
+    enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
+}
+
 } // namespace detail
+
+// Edge-case injector: `count` solution txs into `txTick`. sameComputor=true sends them all from one
+// computor so its balance runs out (out-of-qus); false spreads them across our computors.
+inline bool broadcastN(const m256i& currentMiningSeed, unsigned int txTick, unsigned int count, bool sameComputor)
+{
+    if (computorSeedsCount == 0) return false;
+    m256i rnd; rnd.setRandomValue();
+    const unsigned int base = (unsigned int)(rnd.m256i_u64[0] % computorSeedsCount);
+    for (unsigned int k = 0; k < count; k++)
+    {
+        const unsigned int idx = sameComputor ? base : (unsigned int)((base + k) % computorSeedsCount);
+        detail::broadcastSolution(idx, currentMiningSeed, txTick);
+    }
+    return true;
+}
 
 inline bool broadcastRandom(const m256i& currentMiningSeed, unsigned int txTick)
 {
@@ -63,39 +117,7 @@ inline bool broadcastRandom(const m256i& currentMiningSeed, unsigned int txTick)
     const unsigned int computorIdx = (unsigned int)(rnd.m256i_u64[0] % computorSeedsCount);
 
     // ---- 1) Invalid solution tx ----
-    {
-        struct
-        {
-            Transaction transaction;
-            m256i       miningSeed;
-            m256i       nonce;
-            unsigned char signature[SIGNATURE_SIZE];
-        } payload;
-        static_assert(sizeof(payload) == sizeof(Transaction) + 32 + 32 + SIGNATURE_SIZE,
-                      "TestInvalidSolution payload layout drifted");
-
-        payload.transaction.sourcePublicKey      = computorPublicKeys[computorIdx];
-        payload.transaction.destinationPublicKey = m256i::zero();
-        payload.transaction.amount               = MiningSolutionTransaction::minAmount();
-        payload.transaction.tick                 = txTick;
-        payload.transaction.inputType            = MiningSolutionTransaction::transactionType();
-        payload.transaction.inputSize            = sizeof(payload.miningSeed) + sizeof(payload.nonce);
-
-        payload.miningSeed = currentMiningSeed;
-        payload.nonce.setRandomValue();
-
-        unsigned char digest[32];
-        KangarooTwelve(&payload.transaction,
-                       sizeof(payload.transaction) + sizeof(payload.miningSeed) + sizeof(payload.nonce),
-                       digest,
-                       sizeof(digest));
-        sign(computorSubseeds[computorIdx].m256i_u8,
-             computorPublicKeys[computorIdx].m256i_u8,
-             digest,
-             payload.signature);
-
-        enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
-    }
+    detail::broadcastSolution(computorIdx, currentMiningSeed, txTick);
 
     // ---- 2) Standard QU transfer to the id that signed the wrong sol ----
     const long long transferAmount = 1;

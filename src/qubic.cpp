@@ -237,6 +237,9 @@ static int misalignedState = 0;
 
 static bool forceVerifySolutions = false;
 static bool forceBroadcastInvalidSolution = false;
+static unsigned int gFbisCount = 1;          // test: number of solution txs to inject per tick
+static bool gFbisSameComputor = false;       // test: all from one computor (drains it -> out-of-qus)
+static int gTestSolutionThreshold = -1;      // test: override runtime solution threshold (-1 = off, 0 = all valid)
 
 static volatile unsigned char epochTransitionState = 0;
 static volatile unsigned char epochTransitionCleanMemoryFlag = 1;
@@ -3301,6 +3304,15 @@ static void processTick(unsigned long long processorNumber)
     PROFILE_SCOPE();
     TickBench::Scope _btTotal(TickBench::TICK_TOTAL);
 
+    // TEST: force the runtime solution threshold (e.g. 0 = injected solutions validate). Applied on
+    // both quorum + re-run nodes so they agree. HyperIdentity stays pre-activation-pinned (line ~795),
+    // so with random nonces this naturally yields a valid(Addition)/invalid(HyperIdentity) mix.
+    if (gTestSolutionThreshold >= 0 && system.epoch < MAX_NUMBER_EPOCH)
+    {
+        solutionThreshold[system.epoch][score_engine::AlgoType::HyperIdentity] = gTestSolutionThreshold;
+        solutionThreshold[system.epoch][score_engine::AlgoType::Addition] = gTestSolutionThreshold;
+    }
+
 #ifdef TESTNET
     if (tickDelay > 0) {
         bs->Stall(tickDelay * 1'000);
@@ -4228,17 +4240,20 @@ static void processTick(unsigned long long processorNumber)
             }
         }
 
-        // TEST: synthesize an invalid solution tx (random nonce, random own-computor)
-        // to exercise reprocessSolutionTransaction() on receiving nodes. Skip across
-        // a mining-seed rotation window for the same reason the legitimate broadcaster
-        // does — the tx would otherwise verify against a rotated seed.
-        if (forceBroadcastInvalidSolution
-            && computorSeedsCount > 0
-            && (system.tick % MINING_SEED_ROTATION_INTERVAL) + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET < MINING_SEED_ROTATION_INTERVAL)
-        {
-            TestInvalidSolution::broadcastRandom(score->currentRandomSeed,
-                                                 system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET);
-        }
+    }
+
+    // TEST: broadcast random-nonce solution tx(s) to exercise the wrong-solution rollback path on
+    // receiving nodes. Runs in any mode (an AUX can broadcast too), so a lite node can self-inject.
+    // Skip across a mining-seed rotation window (the tx would otherwise verify against a rotated seed).
+    if (forceBroadcastInvalidSolution
+        && computorSeedsCount > 0
+        && (system.tick % MINING_SEED_ROTATION_INTERVAL) + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET < MINING_SEED_ROTATION_INTERVAL)
+    {
+        const unsigned int txTick = system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET;
+        if (gFbisCount > 1 || gFbisSameComputor)
+            TestInvalidSolution::broadcastN(score->currentRandomSeed, txTick, gFbisCount, gFbisSameComputor);
+        else
+            TestInvalidSolution::broadcastRandom(score->currentRandomSeed, txTick);
     }
 
 #ifndef NDEBUG
@@ -8742,12 +8757,16 @@ static void spawnAPs()
         mpServicesProtocol->GetProcessorInfo(mpServicesProtocol, i, &processorInformation);
         if (processorInformation.StatusFlag == (PROCESSOR_ENABLED_BIT | PROCESSOR_HEALTH_STATUS_BIT))
         {
-            if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))
+            // Reuse buffers already allocated (the fork child inherits them via COW); re-allocating
+            // each promotion would leak ~BUFFER_SIZE+STACK_SIZE per processor every fork.
+            if (!processors[numberOfProcessors].buffer
+                && !allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))
             {
                 numberOfProcessors = 0;
                 break;
             }
-            if (!processors[numberOfProcessors].alloc(STACK_SIZE))
+            if (!processors[numberOfProcessors].stackBottom
+                && !processors[numberOfProcessors].alloc(STACK_SIZE))
             {
                 logToConsole(L"Failed to allocate stack for processor!");
                 numberOfProcessors = 0;
@@ -8824,6 +8843,7 @@ static void tickForkChildPromote()
     }
     registerAsynFileIO(mpServicesProtocol);
     spawnAPs();
+    if (gForkBench) { fprintf(stderr, "[FORK-BENCH] child promoted rss=%ldMB\n", tickForkRssKb() / 1024); fflush(stderr); }
     tickForkLog("CHILD: promote done, now the live node");
     // Inherited socket fds are abandoned here (a small fd leak on the rare promotion).
 }
@@ -8833,10 +8853,14 @@ static void bspForkPoint()
 {
     // Stop the world: park the networking processors and hold networkingLock across the fork so the
     // child snapshots consistent net state (no thread mid map-mutation, no held queue mutex).
+    long long q0 = gForkBench ? tickForkNowNs() : 0;
     Overload::quiesceNetworking();
     Overload::networkingLock.lock();
+    if (gForkBench) gForkQuiesceNs = tickForkNowNs() - q0;
 
+    long long f0 = gForkBench ? tickForkNowNs() : 0;
     pid_t pid = fork();
+    if (gForkBench && pid != 0) gForkSyscallNs = tickForkNowNs() - f0;
     if (pid == 0)
     {
         // CHILD BSP: pristine donor. Block until the parent's verdict, then become the node.
@@ -9647,6 +9671,12 @@ void processArgs(int argc, const char* argv[]) {
         ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
         ("rollback-mode", "AUX wrong-solution tick rollback: legacy (hand-rolled reprocess) or fork (fork-on-BSP child-promote)", cxxopts::value<std::string>()->default_value("legacy"))
         ("verify-fork-rollback", "TEST: assert the fork re-run reproduces the quorum digest", cxxopts::value<bool>())
+        ("fork-force-fork", "TEST: fork every tick (exercise the MATCH path on clean ticks)", cxxopts::value<bool>())
+        ("fork-force-match", "TEST: force the fork verdict to take the match branch (commit + kill child)", cxxopts::value<bool>())
+        ("fork-bench", "TEST: print per-fork timing + RSS", cxxopts::value<bool>())
+        ("fbis-count", "TEST: number of solution txs to inject per tick (with --fbis)", cxxopts::value<int>()->default_value("1"))
+        ("fbis-same", "TEST: inject all --fbis solutions from one computor (drains it -> out-of-qus)", cxxopts::value<bool>())
+        ("test-solution-threshold", "TEST: override the runtime solution threshold for the current epoch (0 = injected solutions validate)", cxxopts::value<int>()->default_value("-1"))
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"));
     auto result = options.parse(argc, argv);
 
@@ -9665,6 +9695,32 @@ void processArgs(int argc, const char* argv[]) {
     if (result.count("verify-fork-rollback")) {
         gVerifyForkRollback = true;
         logColorToScreen("INFO", "Fork rollback self-verify enabled");
+    }
+    if (result.count("fork-force-fork")) {
+        gForkForceFork = true;
+        logColorToScreen("INFO", "TEST: fork every tick (MATCH path on clean ticks)");
+    }
+    if (result.count("fork-force-match")) {
+        gForkForceMatch = true;
+        logColorToScreen("INFO", "TEST: fork verdict forced to match");
+    }
+    if (result.count("fork-bench")) {
+        gForkBench = true;
+        logColorToScreen("INFO", "TEST: per-fork timing + RSS benchmark enabled");
+    }
+    if (result.count("fbis-count")) {
+        int c = result["fbis-count"].as<int>();
+        if (c > 0) gFbisCount = (unsigned int)c;
+        logColorToScreen("INFO", std::string("TEST: fbis solutions per tick = ") + std::to_string(gFbisCount));
+    }
+    if (result.count("fbis-same")) {
+        gFbisSameComputor = true;
+        logColorToScreen("INFO", "TEST: fbis solutions all from one computor (out-of-qus)");
+    }
+    if (result.count("test-solution-threshold")) {
+        gTestSolutionThreshold = result["test-solution-threshold"].as<int>();
+        if (gTestSolutionThreshold >= 0)
+            logColorToScreen("INFO", std::string("TEST: solution threshold override = ") + std::to_string(gTestSolutionThreshold));
     }
 
     if (result.count("peers")) {

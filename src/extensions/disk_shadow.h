@@ -31,6 +31,12 @@ inline volatile bool gReRunStrict = false;
 // Test: assert the fork re-run reproduces the quorum digest.
 inline volatile bool gVerifyForkRollback = false;
 
+// Test hooks (fork mode): force a fork every tick (exercise the MATCH path on clean ticks),
+// force the verdict to take the match branch, and print per-fork timing + RSS.
+inline volatile bool gForkForceFork = false;
+inline volatile bool gForkForceMatch = false;
+inline volatile bool gForkBench = false;
+
 // Request-processor quiesce for a consistent fork snapshot.
 inline volatile bool gForkQuiesceRequest = false;
 inline std::atomic<int> gForkParked{ 0 };

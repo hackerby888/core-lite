@@ -15,6 +15,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <cstdio>
+#include <ctime>
 
 // Fork-path diagnostics: fprintf/stderr is fork-safe (no log-subsystem locks/buffers).
 static inline void tickForkLog(const char* msg)
@@ -22,6 +23,30 @@ static inline void tickForkLog(const char* msg)
     fprintf(stderr, "[FORK] %s (pid=%d tick=%u)\n", msg, (int)getpid(), (unsigned)system.tick);
     fflush(stderr);
 }
+
+// Benchmark helpers (--fork-bench): monotonic ns + parent RSS from /proc/self/status.
+static inline long long tickForkNowNs()
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+static inline long tickForkRssKb()
+{
+    FILE* f = fopen("/proc/self/status", "r");
+    if (!f) return -1;
+    char line[256];
+    long kb = -1;
+    while (fgets(line, sizeof(line), f))
+        if (sscanf(line, "VmRSS: %ld kB", &kb) == 1) break;
+    fclose(f);
+    return kb;
+}
+// Set by maybeForkBeforeTick / bspForkPoint; consumed by verdict to report one fork's cost.
+inline long long gForkWindowStartNs = 0;
+inline long long gForkQuiesceNs = 0;     // quiesceNetworking() duration (BSP)
+inline long long gForkSyscallNs = 0;     // fork() syscall duration (BSP)
+inline long gForkRssBeforeKb = 0;        // parent RSS just before fork
 
 namespace tickFork
 {
@@ -61,8 +86,9 @@ namespace tickFork
         if (gReRunStrict) return;                   // this is the re-run tick: do not fork again
         if (gRollbackMode != RollbackMode::Fork) return;
         if (isMainMode()) return;
-        if (!tickHasSolution(system.tick)) return;
+        if (!gForkForceFork && !tickHasSolution(system.tick)) return;  // force: fork clean ticks too
 
+        if (gForkBench) { gForkWindowStartNs = tickForkNowNs(); gForkRssBeforeKb = tickForkRssKb(); }
         tickForkLog("solution tick -> request BSP fork");
         gForkParked.store(0, std::memory_order_release);
         gForkQuiesceRequest = true;
@@ -92,6 +118,21 @@ namespace tickFork
     {
         (void)quorumSpectrumDigest; (void)processorNumber;
         if (gChildPid < 0) return false;            // no live child (no fork this tick, or we are the re-run)
+
+        if (gForkForceMatch) mismatch = false;      // test: exercise the commit + kill-child path
+
+        if (gForkBench)
+        {
+            long long windowNs = tickForkNowNs() - gForkWindowStartNs;
+            long rssNow = tickForkRssKb();
+            fprintf(stderr,
+                "[FORK-BENCH] tick=%u %s window=%.2fms quiesce=%.2fms fork()=%.3fms "
+                "rss: before=%ldMB after=%ldMB cow_delta=%ldMB\n",
+                (unsigned)system.tick, mismatch ? "MISMATCH" : "MATCH",
+                windowNs / 1e6, gForkQuiesceNs / 1e6, gForkSyscallNs / 1e6,
+                gForkRssBeforeKb / 1024, rssNow / 1024, (rssNow - gForkRssBeforeKb) / 1024);
+            fflush(stderr);
+        }
 
         if (!mismatch)
         {
