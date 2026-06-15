@@ -103,7 +103,9 @@ public:
         std::lock_guard<std::mutex> g(mtx);
         std::string realUtf8 = wchar_to_string(realDir);
         CHAR16* sd = ensure(realUtf8, realDir);
-        written.insert({ std::move(realUtf8), wchar_to_string(pageName) });
+        std::string pageUtf8 = wchar_to_string(pageName);
+        if (gForkBench) { fprintf(stderr, "[SHADOW] divert %s/%s\n", realUtf8.c_str(), pageUtf8.c_str()); fflush(stderr); }
+        written.insert({ std::move(realUtf8), std::move(pageUtf8) });
         return sd;
     }
 
@@ -122,6 +124,7 @@ public:
     void commit()
     {
         std::lock_guard<std::mutex> g(mtx);
+        if (gForkBench && !written.empty()) { fprintf(stderr, "[SHADOW] commit %zu diverted page(s) -> real\n", written.size()); fflush(stderr); }
         for (const auto& [real, name] : written)
         {
             std::error_code ec;
@@ -134,6 +137,7 @@ public:
     void discard()
     {
         std::lock_guard<std::mutex> g(mtx);
+        if (gForkBench && !written.empty()) { fprintf(stderr, "[SHADOW] discard %zu diverted page(s)\n", written.size()); fflush(stderr); }
         for (const auto& [real, name] : written)
         {
             std::error_code ec;
@@ -146,6 +150,7 @@ public:
     void purgeOrphans()
     {
         std::lock_guard<std::mutex> g(mtx);
+        if (gForkBench && !written.empty()) { fprintf(stderr, "[SHADOW] child purgeOrphans: drop %zu diverted page(s); real pristine\n", written.size()); fflush(stderr); }
         for (const auto& kv : shadowDir)
         {
             std::error_code ec;

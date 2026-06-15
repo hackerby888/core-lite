@@ -145,7 +145,11 @@ namespace tickFork
         }
 
         // Hand off to the child donor and die without committing; the child reads pristine disk.
+        // Discard our optimistic /s diverts first: the child forked BEFORE these page writes, so its
+        // COW shadow bookkeeping is empty and its purgeOrphans cannot see them. Real page files were
+        // never touched (writes diverted to /s), so removing /s is safe and prevents orphan buildup.
         tickForkLog("verdict MISMATCH: promote child + parent _exit");
+        gShadow.discard();
         const char tag = 'P';
         ssize_t w = write(gPipe[1], &tag, 1);
         (void)w;
