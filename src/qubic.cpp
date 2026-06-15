@@ -2717,7 +2717,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
                 {
                     increaseEnergy(transaction->sourcePublicKey, transaction->amount);
 
-                    if (!isRevalidation)
+                    if (!isRevalidation || gReRunStrict)   // fork re-run is pristine: log like a fresh run
                     {
                         gSolutionTxReturned[transactionIndex] = true; // deposit return applied; for reprocess undo
                         const QuTransfer quTransfer = { m256i::zero(), transaction->sourcePublicKey, transaction->amount };
@@ -2857,7 +2857,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
             else
             {
 #if ENABLE_QUBIC_LOGGING_EVENT
-                if (isRevalidation)
+                if (isRevalidation && !gReRunStrict)   // legacy reprocess undoes optimistic log; fork re-run is pristine
                 {
                     logger.tx.removeReturnDepositLogOfSolutionTransaction(transactionIndex);
                 }
@@ -2868,7 +2868,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
         else
         {
 #if ENABLE_QUBIC_LOGGING_EVENT
-            if (isRevalidation)
+            if (isRevalidation && !gReRunStrict)   // legacy reprocess undoes optimistic log; fork re-run is pristine
             {
                 logger.tx.removeReturnDepositLogOfSolutionTransaction(transactionIndex);
             }
