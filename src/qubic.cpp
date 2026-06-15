@@ -8799,6 +8799,7 @@ static void spawnAPs()
 // Promoted fork child: drop the donor role, rebuild the AP workers, re-run the tick strict.
 static void tickForkChildPromote()
 {
+    tickForkLog("CHILD: promote begin (rebuild net + APs, re-run tick strict)");
     tickFork::gIsForkChild = true;
     tickFork::gForkRequest = false;
     tickFork::gChildPid = -2;
@@ -8806,16 +8807,35 @@ static void tickForkChildPromote()
     close(tickFork::gPipe[0]); tickFork::gPipe[0] = -1;
     gShadow.purgeOrphans();   // drop the parent's optimistic shadow; real page files are pristine
     gReRunStrict = true;      // the re-spawned tick processor re-runs the current tick strict
-    Overload::resetForChildPromote();  // drop inherited TCP maps + sockets (none are serviced post-fork)
-    setMem(peers, sizeof(peers), 0);   // drop inherited connections; the main loop reconnects fresh
+    Overload::resetForChildPromote();  // drop inherited per-peer TCP state, keep the listen socket
+    Overload::respawnNetworking();      // re-spawn the transmit/receive processors (vanished at fork)
+    // Drop inherited connection state so the main loop reconnects fresh. reset() (not a full zero)
+    // preserves the per-peer heap buffers + EFI tokens that are allocated ONCE at startup
+    // (dataToTransmit/receiveBuffer/transmitData FragmentBuffer/tokens) and valid here via COW.
+    for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
+    {
+        peers[i].reset();
+        // Status 0 == EFI_SUCCESS would make peerConnectionNewlyEstablished treat a half-armed Accept
+        // (NewChildHandle still NULL) as completed -> OpenProtocol(NULL)/DestroyChild(NULL) crash.
+        peers[i].connectAcceptToken.CompletionToken.Status = -1;
+        peers[i].receiveToken.CompletionToken.Status = -1;
+        peers[i].transmitToken.CompletionToken.Status = -1;
+        peers[i].receiveData.FragmentTable[0].FragmentBuffer = peers[i].receiveBuffer;  // fresh receive cursor
+    }
     registerAsynFileIO(mpServicesProtocol);
     spawnAPs();
+    tickForkLog("CHILD: promote done, now the live node");
     // Inherited socket fds are abandoned here (a small fd leak on the rare promotion).
 }
 
 // Called from the BSP main-loop top (no networkingLock held) when a fork is requested.
 static void bspForkPoint()
 {
+    // Stop the world: park the networking processors and hold networkingLock across the fork so the
+    // child snapshots consistent net state (no thread mid map-mutation, no held queue mutex).
+    Overload::quiesceNetworking();
+    Overload::networkingLock.lock();
+
     pid_t pid = fork();
     if (pid == 0)
     {
@@ -8827,6 +8847,10 @@ static void bspForkPoint()
         tickForkChildPromote();
         return;
     }
+
+    // PARENT BSP: release the lock and resume networking; the child carries the frozen snapshot.
+    Overload::networkingLock.unlock();
+    Overload::resumeNetworking();
     tickFork::gChildPid = pid;   // >=0 on success, -1 on failure
     tickFork::gForkRequest = false;
 }

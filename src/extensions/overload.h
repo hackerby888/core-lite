@@ -30,6 +30,16 @@
 #include <queue>
 #endif
 
+#include <atomic>
+#include <chrono>
+#include <new>
+
+// Plan A fork quiesce: park the networking processor threads at a safe loop-top so a fork()
+// snapshots consistent net state. Driven by the BSP fork point (tick_fork_rollback).
+inline volatile bool gNetQuiesce = false;
+inline std::atomic<int> gNetParked{ 0 };
+inline int gNetProcThreadCount = 0;   // transmit + receive processors that must reach the park
+
 static volatile bool listOfPeersIsStaticLiteNode = false;
 
 #define ACQUIRE_NO_SPINNING(lock) while (_InterlockedCompareExchange8(&lock, 1, 0)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -355,6 +365,23 @@ public:
         return val;
     }
 
+    // Like pop() but returns false after timeoutMs so callers can re-check a quiesce flag.
+    bool popTimed(T& out, int timeoutMs) {
+        std::unique_lock<std::mutex> lock(mtx_);
+        if (!cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return !q_.empty(); }))
+            return false;
+        out = q_.front();
+        q_.pop();
+        return true;
+    }
+
+    // Promoted fork child only: forcibly reset sync state inherited (locked/waited) from the parent.
+    void reinitForChildPromote() {
+        new (&mtx_) std::mutex();
+        new (&cv_) std::condition_variable();
+        new (&q_) std::queue<T>();
+    }
+
 private:
     std::queue<T> q_;
     std::mutex mtx_;
@@ -401,18 +428,67 @@ struct Overload {
 
     inline static std::mutex networkingLock;
 
+    // Park a networking processor thread at a safe loop-top while a fork window is set up.
+    static void netPark()
+    {
+        if (!gNetQuiesce) return;
+        gNetParked.fetch_add(1, std::memory_order_acq_rel);
+        while (gNetQuiesce) std::this_thread::yield();
+        gNetParked.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    // Plan A: stop the world for a fork. Park the networking processors (bounded wait). A thread
+    // mid-send may not reach the park, which is still fork-safe: it holds no lock and mutates no
+    // shared container, and the promoted child re-inits the queues regardless.
+    static void quiesceNetworking()
+    {
+        gNetParked.store(0, std::memory_order_release);
+        gNetQuiesce = true;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (gNetParked.load(std::memory_order_acquire) < gNetProcThreadCount
+               && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+    }
+
+    static void resumeNetworking()
+    {
+        gNetQuiesce = false;
+    }
+
+    // Promoted child: re-spawn the transmit/receive processors (the originals vanished at fork).
+    static void respawnNetworking()
+    {
+        for (int i = 0; i < NUMBER_OF_INCOMING_CONNECTIONS + NUMBER_OF_OUTGOING_CONNECTIONS; i++)
+        {
+            std::thread(transmitProcessor).detach();
+            std::thread(receiveProcessor).detach();
+        }
+    }
+
     // After a fork the promoted child inherits the parent's TCP maps + socket fds but none of the
-    // servicing threads. Drop them all (single-threaded here) so reconnect rebuilds cleanly.
+    // servicing threads. Drop the per-peer state (reconnect rebuilds it) but keep the global listen
+    // socket: it is still bound, so the child keeps accepting once it re-arms Accept().
     static void resetForChildPromote()
     {
-        for (auto& kv : tcpDataMap) if (kv.second.socket != INVALID_SOCKET) closesocket(kv.second.socket);
+        const unsigned long long listenKey = (unsigned long long)peerTcp4Protocol;
+        TcpData listenData{};
+        bool haveListen = false;
+        if (auto it = tcpDataMap.find(listenKey); it != tcpDataMap.end()) { listenData = it->second; haveListen = true; }
+
+        for (auto& kv : tcpDataMap) if (kv.first != listenKey && kv.second.socket != INVALID_SOCKET) closesocket(kv.second.socket);
         for (auto& kv : incomingSocketMap) if (kv.second != INVALID_SOCKET) closesocket(kv.second);
         tcpDataMap.clear();
         incomingSocketMap.clear();
         eventDataMap.clear();
         isReceiveThreadSetupMap.clear();
         isSendThreadSetupMap.clear();
+        if (haveListen) tcpDataMap.emplace(listenKey, listenData);
+
         new (&networkingLock) std::mutex();
+        transmitQueue.reinitForChildPromote();
+        receiveQueue.reinitForChildPromote();
+        gNetQuiesce = false;
+        gNetParked.store(0, std::memory_order_release);
     }
 
     // Directly call the setup function without using custom stack.
@@ -1089,7 +1165,13 @@ struct Overload {
         std::thread connectThread([tcpData, serverAddr, ConnectionToken, ipInNumber]() {
             auto now = std::chrono::system_clock::now();
             long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-            if (ms - latestConnectTimestampMap[ipInNumber] < 2'000) {
+            bool throttle;
+            {
+                // Guard the map so a fork (BSP holds networkingLock across it) never snapshots it torn.
+                std::lock_guard<std::mutex> lk(networkingLock);
+                throttle = (ms - latestConnectTimestampMap[ipInNumber] < 2'000);
+            }
+            if (throttle) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             tcpData->connectStatus = ConnectStatus::Connecting;
@@ -1106,7 +1188,10 @@ struct Overload {
 #endif
             }
 
-            latestConnectTimestampMap[ipInNumber] = ms;
+            {
+                std::lock_guard<std::mutex> lk(networkingLock);
+                latestConnectTimestampMap[ipInNumber] = ms;
+            }
             });
         connectThread.detach();
 
@@ -1117,7 +1202,9 @@ struct Overload {
     {
         while (true)
         {
-            TransmitRequest request = transmitQueue.pop();
+            netPark();
+            TransmitRequest request;
+            if (!transmitQueue.popTimed(request, 50)) continue;
             int totalSentBytes = 0;
             auto& fragment = request.token->Packet.TxData->FragmentTable[0];
             // Abort a send only after 5s of zero progress (not total time) so big transfers aren't cut mid-stream.
@@ -1183,7 +1270,9 @@ struct Overload {
     {
         while (true)
         {
-            ReceiveRequest request = receiveQueue.pop();
+            netPark();
+            ReceiveRequest request;
+            if (!receiveQueue.popTimed(request, 50)) continue;
             auto n = recv(request.socket, (char *)request.token->Packet.RxData->FragmentTable[0].FragmentBuffer, BUFFER_SIZE, MSG_DONTWAIT);
             if (n > 0)
             {
@@ -1278,6 +1367,7 @@ struct Overload {
             std::thread receiveProcessorThread(receiveProcessor);
             receiveProcessorThread.detach();
         }
+        gNetProcThreadCount = 2 * (NUMBER_OF_INCOMING_CONNECTIONS + NUMBER_OF_OUTGOING_CONNECTIONS);
 
         // Reserve space
         incomingSocketMap.reserve(1024);

@@ -14,6 +14,14 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <cstdio>
+
+// Fork-path diagnostics: fprintf/stderr is fork-safe (no log-subsystem locks/buffers).
+static inline void tickForkLog(const char* msg)
+{
+    fprintf(stderr, "[FORK] %s (pid=%d tick=%u)\n", msg, (int)getpid(), (unsigned)system.tick);
+    fflush(stderr);
+}
 
 namespace tickFork
 {
@@ -55,6 +63,7 @@ namespace tickFork
         if (isMainMode()) return;
         if (!tickHasSolution(system.tick)) return;
 
+        tickForkLog("solution tick -> request BSP fork");
         gForkParked.store(0, std::memory_order_release);
         gForkQuiesceRequest = true;
         while (gForkParked.load(std::memory_order_acquire) < nRequestProcessorIDs)
@@ -75,6 +84,7 @@ namespace tickFork
         }
         close(gPipe[0]);                            // parent keeps the write end
         gForkQuiesceRequest = false;                // release request processors
+        tickForkLog("parent: child forked, optimistic processTick ahead");
     }
 
     // At the quorum compare. Returns true if fork handled this tick (skip legacy reprocess).
@@ -85,6 +95,7 @@ namespace tickFork
 
         if (!mismatch)
         {
+            tickForkLog("verdict MATCH: commit shadow + kill child");
             gShadow.commit();
             kill(gChildPid, SIGKILL);
             int st; waitpid(gChildPid, &st, 0);
@@ -94,6 +105,7 @@ namespace tickFork
         }
 
         // Hand off to the child donor and die without committing; the child reads pristine disk.
+        tickForkLog("verdict MISMATCH: promote child + parent _exit");
         const char tag = 'P';
         ssize_t w = write(gPipe[1], &tag, 1);
         (void)w;
