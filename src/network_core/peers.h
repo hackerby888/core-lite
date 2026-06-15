@@ -4,6 +4,7 @@
 #pragma once
 
 #include <vector>
+#include <atomic>
 
 #include <lib/platform_common/processor.h>
 #include <lib/platform_efi/uefi.h>
@@ -362,7 +363,11 @@ static void push(Peer* peer, RequestResponseHeader* requestResponseHeader)
     // The sending buffer may queue multiple messages, each of which may need to transmitted in many small packets.
     if (peer->tcp4Protocol && peer->isConnectedAccepted && !peer->isClosing)
     {
-        if (peer->dataToTransmitSize + requestResponseHeader->size() > BUFFER_SIZE)
+        // Read the size exactly once: re-reading requestResponseHeader->size() while the
+        // source is concurrently mutated would make the copy length, the cursor advance and
+        // the copied header disagree, producing a malformed frame in the outgoing buffer.
+        const unsigned int msgSize = requestResponseHeader->size();
+        if (peer->dataToTransmitSize + msgSize > BUFFER_SIZE)
         {
             // Buffer is full, which indicates a problem
 #ifndef NDEBUG
@@ -373,7 +378,7 @@ static void push(Peer* peer, RequestResponseHeader* requestResponseHeader)
                 appendText(debugMessage, L" | dataToTransmitSize: ");
                 appendNumber(debugMessage, peer->dataToTransmitSize, true);
                 appendText(debugMessage, L" | requestResponseHeader->size(): ");
-                appendNumber(debugMessage, requestResponseHeader->size(), true);
+                appendNumber(debugMessage, msgSize, true);
                 addDebugMessage(debugMessage);
             }
 #endif
@@ -382,8 +387,8 @@ static void push(Peer* peer, RequestResponseHeader* requestResponseHeader)
         else
         {
             // Add message to buffer
-            copyMem(&peer->dataToTransmit[peer->dataToTransmitSize], requestResponseHeader, requestResponseHeader->size());
-            peer->dataToTransmitSize += requestResponseHeader->size();
+            copyMem(&peer->dataToTransmit[peer->dataToTransmitSize], requestResponseHeader, msgSize);
+            peer->dataToTransmitSize += msgSize;
             peer->trackDejavu(requestResponseHeader->dejavu());
             _InterlockedIncrement64(&numberOfDisseminatedRequests);
         }
@@ -938,6 +943,11 @@ static void processReceivedData(unsigned int i, unsigned int salt)
     {
         if (peers[i].receiveToken.CompletionToken.Status != -1)
         {
+            // Pair with the release fence in receiveProcessor: we read Status above and
+            // DataLength below, so acquire here to guarantee the receive thread's DataLength
+            // store is visible (otherwise a stale, buffer-sized DataLength over-advances the
+            // cursor into zero-filled memory and the parser reads size()==0).
+            std::atomic_thread_fence(std::memory_order_acquire);
             peers[i].isReceiving = FALSE;
             if (peers[i].receiveToken.CompletionToken.Status)
             {
@@ -953,9 +963,18 @@ static void processReceivedData(unsigned int i, unsigned int salt)
                 }
                 else
                 {
-                    numberOfReceivedBytes += peers[i].receiveData.DataLength;
-                    PeerDisc::noteRx(i, peers[i].receiveData.DataLength);
-                    *((unsigned long long*) & peers[i].receiveData.FragmentTable[0].FragmentBuffer) += peers[i].receiveData.DataLength;
+                    // Defensive: never advance the receive cursor past the end of the buffer,
+                    // even if a bogus DataLength were ever observed. recv is already capped to
+                    // this same free space, so this clamp is a no-op in normal operation.
+                    const unsigned long long usedBefore = ((unsigned long long)peers[i].receiveData.FragmentTable[0].FragmentBuffer) - ((unsigned long long)peers[i].receiveBuffer);
+                    unsigned int receivedLen = peers[i].receiveData.DataLength;
+                    if (receivedLen > BUFFER_SIZE - usedBefore)
+                    {
+                        receivedLen = (unsigned int)(BUFFER_SIZE - usedBefore);
+                    }
+                    numberOfReceivedBytes += receivedLen;
+                    PeerDisc::noteRx(i, receivedLen);
+                    *((unsigned long long*) & peers[i].receiveData.FragmentTable[0].FragmentBuffer) += receivedLen;
 
                     // Parse every complete packet in place, advancing a read cursor per packet.
                     const unsigned int totalReceivedSize = (unsigned int)(((unsigned long long)peers[i].receiveData.FragmentTable[0].FragmentBuffer) - ((unsigned long long)peers[i].receiveBuffer));
@@ -967,6 +986,21 @@ static void processReceivedData(unsigned int i, unsigned int salt)
                         RequestResponseHeader* requestResponseHeader = (RequestResponseHeader*)((char*)peers[i].receiveBuffer + readOffset);
                         if (requestResponseHeader->size() < sizeof(RequestResponseHeader))
                         {
+                            // TODO: remove this tolerate on epoch 218
+                            // TOLERATE TRAILING ZERO PADDING: other nodes run old buggy code that
+                            // can append zero bytes past their real messages. A valid frame never
+                            // starts with a zero size field (min message size is
+                            // sizeof(RequestResponseHeader)), so a zero here is padding, not a frame.
+                            // Skip the zero run and resync instead of forgetting the (un-updatable) peer.
+                            if (requestResponseHeader->size() == 0)
+                            {
+                                const unsigned char* p = (const unsigned char*)peers[i].receiveBuffer;
+                                unsigned int z = readOffset;
+                                while (z < totalReceivedSize && p[z] == 0) z++;
+                                _InterlockedIncrement64(&numberOfDiscardedRequests);
+                                readOffset = z;
+                                continue; // re-check loop condition; resync at next non-zero byte
+                            }
                             // protocol violation -> forget peer
                             setText(message, L"Forgetting ");
                             appendIPv4Address(message, peers[i].address);

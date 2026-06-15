@@ -100,6 +100,12 @@ static void requestFutureQuorumTicks(unsigned int prefetchDepth)
 static void requestFutureTickTransactions(unsigned int prefetchDepth)
 {
     if (prefetchDepth <= 2) return;
+    // Serialize all access to the shared requestedTickTransactions global with the tick
+    // processor (which mutates .tick/.transactionFlags under this lock). Without it, the
+    // push() copy below races a concurrent writer and emits a malformed frame. Acquire it
+    // before ts.tickData to match the main loop's lock order (requestedTickTransactionsLock
+    // -> ts.tickData) and avoid a deadlock.
+    LockGuard rttGuard(requestedTickTransactionsLock);
     ts.tickData.acquireLock();
     for (unsigned int d = 2; d <= prefetchDepth; d++)
     {

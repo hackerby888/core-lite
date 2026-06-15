@@ -302,7 +302,12 @@ void setMem(void* buffer, unsigned long long size, unsigned char value)
 
 void copyMem(void* destination, const void* source, unsigned long long length)
 {
-    memcpy(destination, source, length);
+    // Must match UEFI EFI_BOOT_SERVICES.CopyMem semantics, which explicitly support
+    // overlapping source/destination. The original (bare-metal) code relies on this —
+    // e.g. processReceivedData() compacts its receive buffer in place with overlapping
+    // ranges. memcpy() is UB on overlap (glibc corrupts large copies), which left zeroed
+    // bytes mid-stream and made the parser read size()==0 and force-forget valid peers.
+    memmove(destination, source, length);
 }
 
 bool allocatePool(unsigned long long size, void** buffer)
@@ -1268,10 +1273,21 @@ struct Overload {
             netPark();
             ReceiveRequest request;
             if (!receiveQueue.popTimed(request, 50)) continue;
-            auto n = recv(request.socket, (char *)request.token->Packet.RxData->FragmentTable[0].FragmentBuffer, BUFFER_SIZE, MSG_DONTWAIT);
+            // Read at most the free space the caller reserved in its receive buffer
+            // (receiveData() sets this in FragmentLength = BUFFER_SIZE - bytesAlreadyBuffered).
+            // Passing BUFFER_SIZE here overruns peers[i].receiveBuffer whenever it already
+            // holds a partial message, clobbering the adjacent peer's buffer — which then
+            // parses as malformed (size() < header) and gets force-forgotten.
+            const unsigned int maxReceiveSize = (unsigned int)request.token->Packet.RxData->FragmentTable[0].FragmentLength;
+            auto n = recv(request.socket, (char *)request.token->Packet.RxData->FragmentTable[0].FragmentBuffer, maxReceiveSize, MSG_DONTWAIT);
             if (n > 0)
             {
                 request.token->Packet.RxData->DataLength = n;
+                // Publish DataLength before Status. The main loop reads Status first, then
+                // DataLength; without this barrier it can observe SUCCESS together with the
+                // stale, buffer-sized DataLength pre-set in receiveData(), over-advancing the
+                // receive cursor into zero-filled buffer so the parser reads size()==0.
+                std::atomic_thread_fence(std::memory_order_release);
                 request.token->CompletionToken.Status = EFI_SUCCESS;
             }
             else if (n == 0)
@@ -1285,6 +1301,7 @@ struct Overload {
 				if (err == WSAEWOULDBLOCK)
 				{
 					request.token->Packet.RxData->DataLength = 0;
+					std::atomic_thread_fence(std::memory_order_release);
 					request.token->CompletionToken.Status = EFI_SUCCESS;
 					continue;
 				}
@@ -1296,6 +1313,7 @@ struct Overload {
                 if (errno == EWOULDBLOCK || errno == EAGAIN)
                 {
                     request.token->Packet.RxData->DataLength = 0;
+                    std::atomic_thread_fence(std::memory_order_release);
                     request.token->CompletionToken.Status = EFI_SUCCESS;
                     continue;
                 }
