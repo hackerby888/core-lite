@@ -6,6 +6,7 @@
 #include "platform/memory_util.h"
 #include "platform/debugging.h"
 #include "platform/file_io.h"
+#include "extensions/disk_shadow.h"
 
 #include "four_q.h"
 #include "kangaroo_twelve.h"
@@ -146,9 +147,9 @@ protected:
         CHAR16 pageName[64];
         generatePageName(pageName, currentPageId);
 #if defined(NO_UEFI) && !defined(REAL_NODE)
-        auto sz = save(pageName, pageSize, (unsigned char*)currentPage, pageDir);
+        auto sz = save(pageName, pageSize, (unsigned char*)currentPage, liteShadowWriteDir(pageDir, pageName));
 #else
-        auto sz = asyncSave(pageName, pageSize, (unsigned char*)currentPage, pageDir, true);
+        auto sz = asyncSave(pageName, pageSize, (unsigned char*)currentPage, liteShadowWriteDir(pageDir, pageName), true);
 #endif
 
 #if !defined(NDEBUG)
@@ -251,7 +252,7 @@ protected:
         generatePageName(pageName, pageId);
         cache_page_id = getMostOutdatedCachePage();
 #if defined(NO_UEFI) && !defined(REAL_NODE)
-        auto sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
+        auto sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], liteShadowReadDir(pageDir, pageName));
         lastAccessedTimestamp[cache_page_id] = now_ms();
 #else
 #if !defined(NDEBUG)
@@ -262,7 +263,7 @@ protected:
             addDebugMessage(debugMsg);
         }
 #endif
-        auto sz = asyncLoad(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
+        auto sz = asyncLoad(pageName, pageSize, (unsigned char*)cache[cache_page_id], liteShadowReadDir(pageDir, pageName));
         if (sz != pageSize)
         {
 #if !defined(NDEBUG)
@@ -863,7 +864,7 @@ private:
         unsigned int delayMs = SWAPVM_IO_INITIAL_DELAY_MS;
         for (int attempt = 0; attempt < SWAPVM_IO_MAX_ATTEMPTS; attempt++)
         {
-            sz = save(pageName, expectedSize, saveBuffer, pageDir);
+            sz = save(pageName, expectedSize, saveBuffer, liteShadowWriteDir(pageDir, pageName));
             if (sz == expectedSize)
                 break;
 
@@ -976,11 +977,11 @@ private:
                 if (gSwapCompressionEnabled)
                 {
                     sz = 0;
-                    long long compressedSize = getFileSize((CHAR16*)pageName, (CHAR16*)pageDir);
+                    long long compressedSize = getFileSize((CHAR16*)pageName, liteShadowReadDir(pageDir, pageName));
                     if (compressedSize > 0)
                     {
                         std::vector<unsigned char> tmp((size_t)compressedSize);
-                        long long readBytes = load(pageName, (unsigned long long)compressedSize, tmp.data(), pageDir);
+                        long long readBytes = load(pageName, (unsigned long long)compressedSize, tmp.data(), liteShadowReadDir(pageDir, pageName));
                         if (readBytes == compressedSize)
                         {
                             std::vector<unsigned char> decompressed = Zipper::unzip(tmp.data(), (size_t)compressedSize, 4);
@@ -995,7 +996,7 @@ private:
                 else
 #endif
                 {
-                    sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
+                    sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], liteShadowReadDir(pageDir, pageName));
                 }
                 if (sz == pageSize)
                     break;

@@ -2047,6 +2047,7 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
     {
         PinScope _pinScope; // release swap-page pins taken while handling this request
         checkinTime(processorNumber);
+        liteForkRequestPark();
         std::this_thread::sleep_for(std::chrono::microseconds(50));
         // in epoch transition, wait here
         if (epochTransitionState)
@@ -3015,7 +3016,7 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                     if (transaction->amount >= MiningSolutionTransaction::minAmount()
                         && transaction->inputSize >= MiningSolutionTransaction::minInputSize())
                     {
-                        processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber);
+                        processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber, gReRunStrict);
                     }
                 }
                 break;
@@ -6291,6 +6292,8 @@ void doBadBoySpam()
 #endif
 }
 
+#include "extensions/tick_fork_rollback.h"
+
 // Disabling the optimizer for tickProcessor() is a workaround introduced to solve an issue
 // that has been observed in testnets/2025-04-30-profiling.
 // In this test, the processor calling tickProcessor() was stuck before entering the function.
@@ -6305,7 +6308,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
 
 #if !START_NETWORK_FROM_SCRATCH
     // only init first tick if it doesn't load all node states from file
-    if (!loadAllNodeStateFromFile)
+    if (!loadAllNodeStateFromFile && !tickFork::gIsForkChild)
     {
         initializeFirstTick();
     }
@@ -6426,7 +6429,9 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     doBadBoySpam();
                 });
                 spamThread.detach();
+                tickFork::maybeForkBeforeTick(processorNumber);
                 processTick(processorNumber);
+                gReRunStrict = false;
                 latestProcessedTick = system.tick;
 
                 // safety check for contract locks
@@ -6518,6 +6523,14 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     int status = findCurrentDigestsFromNextTickVotes(spectrumDigestFromQuorum, resourceTestingDigestFromQuorum);
                     if (status == 1)
                     {
+                        bool tickForkMismatch = (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum);
+                        if (tickFork::verdict(tickForkMismatch, spectrumDigestFromQuorum, processorNumber))
+                        {
+                            resourceTestingDigest = resourceTestingDigestFromQuorum;
+                            etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
+                        }
+                        else
+                        {
                         // If the spectrum digest from quorum doesn't match with etalonTick, that indicates there is invalid solutions in current tick
                         if (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum)
                         {
@@ -6584,6 +6597,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                         {
                             resourceTestingDigest = resourceTestingDigestFromQuorum;
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
+                        }
                         }
                     }
                     else if (status == 2)
@@ -8702,6 +8716,120 @@ static void processKeyPresses()
 
 #include "optimizations/opt_future_tick_prefetch.h"
 
+static unsigned int computingProcessorNumber;
+static unsigned long long numberOfAllProcessors;
+
+// Spawn the AP threads (tick + request) and set up the contract-processor slot.
+// Extracted from efi_main so the promoted fork child can re-spawn the same workers.
+// numberOfAllProcessors must be populated (GetNumberOfProcessors) before calling.
+static void spawnAPs()
+{
+    numberOfProcessors = 0;
+    nTickProcessorIDs = 0;
+    nRequestProcessorIDs = 0;
+    nContractProcessorIDs = 0;
+    nSolutionProcessorIDs = 0;
+
+    for (int i = 0; i < MAX_NUMBER_OF_PROCESSORS; i++)
+    {
+        solutionProcessorFlags[i] = false;
+        preprocessSolutionFlags[i] = false;
+    }
+
+    for (unsigned int i = 0; i < numberOfAllProcessors && numberOfProcessors < MAX_NUMBER_OF_PROCESSORS; i++)
+    {
+        EFI_PROCESSOR_INFORMATION processorInformation;
+        mpServicesProtocol->GetProcessorInfo(mpServicesProtocol, i, &processorInformation);
+        if (processorInformation.StatusFlag == (PROCESSOR_ENABLED_BIT | PROCESSOR_HEALTH_STATUS_BIT))
+        {
+            if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))
+            {
+                numberOfProcessors = 0;
+                break;
+            }
+            if (!processors[numberOfProcessors].alloc(STACK_SIZE))
+            {
+                logToConsole(L"Failed to allocate stack for processor!");
+                numberOfProcessors = 0;
+                break;
+            }
+
+            if (numberOfProcessors == 2)
+            {
+                processors[numberOfProcessors].type = Processor::ContractProcessor;
+                processors[numberOfProcessors].setupFunction(contractProcessor, 0);
+                computingProcessorNumber = numberOfProcessors;
+                contractProcessorIDs[nContractProcessorIDs++] = i;
+            }
+            else
+            {
+                if (numberOfProcessors == 1)
+                {
+                    processors[numberOfProcessors].type = Processor::TickProcessor;
+                    processors[numberOfProcessors].setupFunction(tickProcessor, &processors[numberOfProcessors]);
+                    tickProcessorIDs[nTickProcessorIDs++] = i;
+                }
+                else
+                {
+                    processors[numberOfProcessors].type = Processor::RequestProcessor;
+                    processors[numberOfProcessors].setupFunction(requestProcessor, &processors[numberOfProcessors]);
+                    requestProcessorIDs[nRequestProcessorIDs++] = i;
+                }
+
+                createEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK, (void*)&shutdownCallback, NULL, &processors[numberOfProcessors].event);
+                mpServicesProtocol->StartupThisAP(mpServicesProtocol, Processor::runFunction, i, processors[numberOfProcessors].event, 0, &processors[numberOfProcessors], NULL);
+
+                if (!solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS]
+                    && !solutionProcessorFlags[i])
+                {
+                    solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS] = true;
+                    solutionProcessorFlags[i] = true;
+                    if (nSolutionProcessorIDs < NUMBER_OF_PREPROCESS_SOLUTION_PROCESSORS)
+                    {
+                        preprocessSolutionFlags[i] = true;
+                    }
+                    solutionProcessorIDs[nSolutionProcessorIDs++] = i;
+                }
+            }
+            numberOfProcessors++;
+        }
+    }
+}
+
+// Promoted fork child: drop the donor role, rebuild the AP workers, re-run the tick strict.
+static void tickForkChildPromote()
+{
+    tickFork::gIsForkChild = true;
+    tickFork::gForkRequest = false;
+    tickFork::gChildPid = -2;
+    gForkQuiesceRequest = false;
+    close(tickFork::gPipe[0]); tickFork::gPipe[0] = -1;
+    gShadow.purgeOrphans();   // drop the parent's optimistic shadow; real page files are pristine
+    gReRunStrict = true;      // the re-spawned tick processor re-runs the current tick strict
+    setMem(peers, sizeof(peers), 0);  // drop inherited connections; the main loop reconnects fresh
+    registerAsynFileIO(mpServicesProtocol);
+    spawnAPs();
+    // Inherited socket fds are abandoned here (a small fd leak on the rare promotion).
+}
+
+// Called from the BSP main-loop top (no networkingLock held) when a fork is requested.
+static void bspForkPoint()
+{
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        // CHILD BSP: pristine donor. Block until the parent's verdict, then become the node.
+        close(tickFork::gPipe[1]);
+        char tag = 0;
+        ssize_t n = read(tickFork::gPipe[0], &tag, 1);   // 'P' = promote; 0/EOF = parent crash -> promote
+        (void)n; (void)tag;
+        tickForkChildPromote();
+        return;
+    }
+    tickFork::gChildPid = pid;   // >=0 on success, -1 on failure
+    tickFork::gForkRequest = false;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 {
     ih = imageHandle;
@@ -8728,10 +8856,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
         debugLogOnlyMainProcessorRunning = false;
         #endif
 
-        unsigned int computingProcessorNumber;
         EFI_GUID mpServiceProtocolGuid = EFI_MP_SERVICES_PROTOCOL_GUID;
         bs->LocateProtocol(&mpServiceProtocolGuid, NULL, (void**)&mpServicesProtocol);
-        unsigned long long numberOfAllProcessors, numberOfEnabledProcessors;
+        unsigned long long numberOfEnabledProcessors;
         mpServicesProtocol->GetNumberOfProcessors(mpServicesProtocol, &numberOfAllProcessors, &numberOfEnabledProcessors);
         mpServicesProtocol->WhoAmI(mpServicesProtocol, &mainThreadProcessorID); // get the proc Id of main thread (for later use)
         registerAsynFileIO(mpServicesProtocol);
@@ -8741,76 +8868,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
         //             - there are potentially 2+ tick processors in the future
         // procId is guaranteed lower than MAX_NUMBER_OF_PROCESSORS (https://github.com/tianocore/edk2/blob/master/MdePkg/Include/Protocol/MpService.h#L615)
         // First part: tick processors always process solutions         
-        nTickProcessorIDs = 0;
-        nRequestProcessorIDs = 0;
-        nContractProcessorIDs = 0;
-        nSolutionProcessorIDs = 0;
-        
-        for (int i = 0; i < MAX_NUMBER_OF_PROCESSORS; i++)
-        {
-            solutionProcessorFlags[i] = false;
-            preprocessSolutionFlags[i] = false;
-        }
-
-        for (unsigned int i = 0; i < numberOfAllProcessors && numberOfProcessors < MAX_NUMBER_OF_PROCESSORS; i++)
-        {
-            EFI_PROCESSOR_INFORMATION processorInformation;
-            mpServicesProtocol->GetProcessorInfo(mpServicesProtocol, i, &processorInformation);
-            if (processorInformation.StatusFlag == (PROCESSOR_ENABLED_BIT | PROCESSOR_HEALTH_STATUS_BIT))
-            {
-                if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))
-                {
-                    numberOfProcessors = 0;
-
-                    break;
-                }
-                if (!processors[numberOfProcessors].alloc(STACK_SIZE))
-                {
-                    logToConsole(L"Failed to allocate stack for processor!");
-                    numberOfProcessors = 0;
-                    break;
-                }
-
-                if (numberOfProcessors == 2)
-                {
-                    processors[numberOfProcessors].type = Processor::ContractProcessor;
-                    processors[numberOfProcessors].setupFunction(contractProcessor, 0);
-                    computingProcessorNumber = numberOfProcessors;
-                    contractProcessorIDs[nContractProcessorIDs++] = i;
-                }
-                else
-                {
-                    if (numberOfProcessors == 1)
-                    {
-                        processors[numberOfProcessors].type = Processor::TickProcessor;
-                        processors[numberOfProcessors].setupFunction(tickProcessor, &processors[numberOfProcessors]);
-                        tickProcessorIDs[nTickProcessorIDs++] = i;
-                    }
-                    else
-                    {
-                        processors[numberOfProcessors].type = Processor::RequestProcessor;
-                        processors[numberOfProcessors].setupFunction(requestProcessor, &processors[numberOfProcessors]);
-                        requestProcessorIDs[nRequestProcessorIDs++] = i;
-                    }
-
-                    createEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK, (void*)&shutdownCallback, NULL, &processors[numberOfProcessors].event);
-                    mpServicesProtocol->StartupThisAP(mpServicesProtocol, Processor::runFunction, i, processors[numberOfProcessors].event, 0, &processors[numberOfProcessors], NULL);
-
-                    if (!solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS]
-                        && !solutionProcessorFlags[i])
-                    {
-                        solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS] = true;
-                        solutionProcessorFlags[i] = true;
-                        if (nSolutionProcessorIDs < NUMBER_OF_PREPROCESS_SOLUTION_PROCESSORS)
-                        {
-                            preprocessSolutionFlags[i] = true;
-                        }
-                        solutionProcessorIDs[nSolutionProcessorIDs++] = i;
-                    }
-                }
-                numberOfProcessors++;
-            }
-        }
+        spawnAPs();
         if (numberOfProcessors < 3)
         {
             logToConsole(L"At least 4 healthy enabled processors are required! Exiting...");
@@ -8877,6 +8935,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             while (!shutDownNode)
             {
                 PinScope _pinScope; // release swap-page pins taken during this main-loop iteration
+                if (tickFork::gForkRequest) bspForkPoint();
                 if (criticalSituation == 1)
                 {
                     logToConsole(L"CRITICAL SITUATION #1!!!");
@@ -9561,6 +9620,8 @@ void processArgs(int argc, const char* argv[]) {
         ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
         ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
+        ("rollback-mode", "AUX wrong-solution tick rollback: legacy (hand-rolled reprocess) or fork (fork-on-BSP child-promote)", cxxopts::value<std::string>()->default_value("legacy"))
+        ("verify-fork-rollback", "TEST: assert the fork re-run reproduces the quorum digest", cxxopts::value<bool>())
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"));
     auto result = options.parse(argc, argv);
 
@@ -9570,6 +9631,16 @@ void processArgs(int argc, const char* argv[]) {
         logColorToScreen("INFO", "Swap compression enabled: SwapVM disk pages will be compressed with blosc2 on save/load");
     }
 #endif
+
+    if (result.count("rollback-mode")) {
+        std::string rbm = result["rollback-mode"].as<std::string>();
+        gRollbackMode = (rbm == "fork") ? RollbackMode::Fork : RollbackMode::Legacy;
+        logColorToScreen("INFO", std::string("Tick rollback mode: ") + (gRollbackMode == RollbackMode::Fork ? "fork (fork-on-BSP child-promote)" : "legacy"));
+    }
+    if (result.count("verify-fork-rollback")) {
+        gVerifyForkRollback = true;
+        logColorToScreen("INFO", "Fork rollback self-verify enabled");
+    }
 
     if (result.count("peers")) {
         std::string peersStr = result["peers"].as<std::string>();
