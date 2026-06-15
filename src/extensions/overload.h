@@ -162,13 +162,6 @@ bool isNextTickIsSecurityTick()
     return (((system.tick + 1) - system.initialTick) % securityTick == 0);
 }
 
-////////// Skip Solution Transaction Verification Feature \\\\\\\\\\
-
-static inline EntityRecord spectrumDataRollback[NUMBER_OF_TRANSACTIONS_PER_TICK];
-static inline bool gSolutionTxPaid[NUMBER_OF_TRANSACTIONS_PER_TICK];     // optimistic decreaseEnergy succeeded for the solution tx at this index
-static inline bool gSolutionTxReturned[NUMBER_OF_TRANSACTIONS_PER_TICK]; // optimistic deposit-return increaseEnergy applied for the solution tx at this index
-unsigned int resourceTestingDigestRollback = 0;
-
 uint32_t getCurrentCpuIndex() {
 #if defined(_WIN32)
     return GetCurrentProcessorNumber();
@@ -250,6 +243,8 @@ inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false
     void* addr = mmap(nullptr, size, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (addr != MAP_FAILED)
     {
+        // THP hint: fewer PTEs -> cheaper fork() of the large-RSS node. Unprivileged; no-op if THP off.
+        madvise(addr, size, MADV_HUGEPAGE);
         commitMemMap[(unsigned long long)addr] = commitMem;
         return addr;
     }

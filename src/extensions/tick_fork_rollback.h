@@ -1,7 +1,7 @@
 #pragma once
 
-// Fork-on-BSP child-promote tick rollback (AUX wrong-solution path). Behind gRollbackMode==Fork;
-// inert by default. Disk side: disk_shadow.h.
+// Fork-on-BSP child-promote tick rollback (AUX wrong-solution path); the only rollback path.
+// Disk side: disk_shadow.h.
 //
 // The fork is taken on the BSP (main-loop thread) so the child inherits the thread that drives
 // networking + contract dispatch; the child re-spawns only the simple AP loops on promotion.
@@ -84,7 +84,6 @@ namespace tickFork
     {
         (void)processorNumber;
         if (gReRunStrict) return;                   // this is the re-run tick: do not fork again
-        if (gRollbackMode != RollbackMode::Fork) return;
         if (isMainMode()) return;
         if (!gForkForceFork && !tickHasSolution(system.tick)) return;  // force: fork clean ticks too
 

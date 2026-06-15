@@ -162,7 +162,6 @@ static bool loadAllNodeStateFromFile = false;
 static volatile int shutDownNode = 0;
 static volatile char enableBadBoySpammer = 0;
 static volatile bool spammerWithRpc = false;
-static volatile bool isReprocessingSolutions = false;
 
 #include "extensions/global_data.h"
 #include "extensions/cxxopts.h"
@@ -323,10 +322,7 @@ static volatile char solutionsLock = 0;
 static unsigned long long* minerSolutionFlags = NULL;
 static volatile m256i minerPublicKeys[MAX_NUMBER_OF_MINERS + 1];
 static volatile unsigned int minerScores[MAX_NUMBER_OF_MINERS + 1];
-static volatile m256i minerPublicKeysRollback[MAX_NUMBER_OF_MINERS + 1];
-static volatile unsigned int minerScoresRollback[MAX_NUMBER_OF_MINERS + 1];
 static volatile unsigned int numberOfMiners = NUMBER_OF_COMPUTORS;
-static unsigned int numberOfMinersRollback = NUMBER_OF_COMPUTORS;
 static m256i competitorPublicKeys[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
 static unsigned int competitorScores[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
 static bool competitorComputorStatuses[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
@@ -2717,12 +2713,8 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
                 {
                     increaseEnergy(transaction->sourcePublicKey, transaction->amount);
 
-                    if (!isRevalidation || gReRunStrict)   // fork re-run is pristine: log like a fresh run
-                    {
-                        gSolutionTxReturned[transactionIndex] = true; // deposit return applied; for reprocess undo
-                        const QuTransfer quTransfer = { m256i::zero(), transaction->sourcePublicKey, transaction->amount };
-                        logger.logQuTransfer(quTransfer);
-                    }
+                    const QuTransfer quTransfer = { m256i::zero(), transaction->sourcePublicKey, transaction->amount };
+                    logger.logQuTransfer(quTransfer);
                 }
 
                 for (unsigned int i = 0; i < computorSeedsCount; i++)
@@ -2856,23 +2848,10 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
             }
             else
             {
-#if ENABLE_QUBIC_LOGGING_EVENT
-                if (isRevalidation && !gReRunStrict)   // legacy reprocess undoes optimistic log; fork re-run is pristine
-                {
-                    logger.tx.removeReturnDepositLogOfSolutionTransaction(transactionIndex);
-                }
-#endif
-
             }
         }
         else
         {
-#if ENABLE_QUBIC_LOGGING_EVENT
-            if (isRevalidation && !gReRunStrict)   // legacy reprocess undoes optimistic log; fork re-run is pristine
-            {
-                logger.tx.removeReturnDepositLogOfSolutionTransaction(transactionIndex);
-            }
-#endif
         }
     }
     else
@@ -3015,7 +2994,6 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
 
                 case MiningSolutionTransaction::transactionType():
                 {
-                    gSolutionTxPaid[transactionIndex] = true; // deposit paid; reaching here means decreaseEnergy succeeded
                     if (transaction->amount >= MiningSolutionTransaction::minAmount()
                         && transaction->inputSize >= MiningSolutionTransaction::minInputSize())
                     {
@@ -3390,8 +3368,6 @@ static void processTick(unsigned long long processorNumber)
     TickBench::add(TickBench::BEGIN_TICK, _btBeginTickStart, __rdtsc());
     PROFILE_SCOPE_END();
 
-    latestIncomingTransferTickPreservePubkeys.clear();
-
     bool isThereQearnTx = false;
     unsigned int tickIndex = ts.tickToIndexCurrentEpoch(system.tick);
     ts.tickData.acquireLock();
@@ -3462,16 +3438,6 @@ static void processTick(unsigned long long processorNumber)
 
         solutionTotalExecutionTicks = __rdtsc() - solutionProcessStartTick; // for tracking the time processing solutions
 
-        // Setup spectrum rollback data
-        setMem(spectrumDataRollback, sizeof(spectrumDataRollback), 0);
-        setMem(gSolutionTxPaid, sizeof(gSolutionTxPaid), 0);
-        setMem(gSolutionTxReturned, sizeof(gSolutionTxReturned), 0);
-        resourceTestingDigestRollback = resourceTestingDigest;
-
-        copyMem((void*)minerPublicKeysRollback, (void*)minerPublicKeys, sizeof(minerPublicKeys));
-        copyMem((void*)minerScoresRollback, (void*)minerScores, sizeof(minerScores));
-        numberOfMinersRollback = numberOfMiners;
-
         // Process all transaction of the tick
         PROFILE_NAMED_SCOPE_BEGIN("processTick(): process transactions");
         unsigned long long _bProcTxsStart = __rdtsc();
@@ -3482,50 +3448,6 @@ static void processTick(unsigned long long processorNumber)
         setMem(gTxObservation, sizeof(gTxObservation), 0);
 
         const m256i& tickLeaderKey = broadcastedComputors.computors.publicKeys[system.tick % NUMBER_OF_COMPUTORS];
-
-        bool isThisTickHasSolution = false;
-
-        // Sources of solution txs in this tick (deduped). Only these addresses can be
-        // affected by the rollback inside reprocessSolutionTransaction(), so they are
-        // the only ones whose latestIncomingTransferTick we need to track during
-        // non-solution tx processing below.
-        m256i solutionTxSourcePubKeys[NUMBER_OF_TRANSACTIONS_PER_TICK];
-        unsigned int solutionSrcLastNIT[NUMBER_OF_TRANSACTIONS_PER_TICK];
-        unsigned int numSolutionTxSources = 0;
-
-        // Backup the spectrum data first
-        for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
-        {
-            if (!isZero(nextTickData.transactionDigests[transactionIndex]))
-            {
-                if (tsCurrentTickTransactionOffsets[transactionIndex])
-                {
-                    Transaction* transaction = ts.tickTransactions(tsCurrentTickTransactionOffsets[transactionIndex]);
-                    // Store spectrum data for rollback if there is invalid solutions in the tick
-                    auto sourceSpectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
-                    spectrumDataRollback[transactionIndex] = spectrum[sourceSpectrumIndex];
-
-                    if (MiningSolutionTransaction::isSolutionTransaction(transaction))
-                    {
-                        isThisTickHasSolution = true;
-
-                        bool alreadyTracked = false;
-                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
-                        {
-                            if (solutionTxSourcePubKeys[k] == transaction->sourcePublicKey)
-                            {
-                                alreadyTracked = true;
-                                break;
-                            }
-                        }
-                        if (!alreadyTracked)
-                        {
-                            solutionTxSourcePubKeys[numSolutionTxSources++] = transaction->sourcePublicKey;
-                        }
-                    }
-                }
-            }
-        }
 
         for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
         {
@@ -3541,35 +3463,7 @@ static void processTick(unsigned long long processorNumber)
                         isThereQearnTx = true;
                     }
 
-                    const bool shouldTrackSolutionSrc =
-                        isThisTickHasSolution
-                        && numSolutionTxSources > 0
-                        && !MiningSolutionTransaction::isSolutionTransaction(transaction);
-
-                    if (shouldTrackSolutionSrc)
-                    {
-                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
-                        {
-                            const int spectrumIdx = ::spectrumIndex(solutionTxSourcePubKeys[k]);
-                            solutionSrcLastNIT[k] =
-                                (spectrumIdx >= 0) ? spectrum[spectrumIdx].numberOfIncomingTransfers : 0;
-                        }
-                    }
-
                     processTickTransaction(transaction, transactionIndex, tsCurrentTickTransactionOffsets[transactionIndex], processorNumber);
-
-                    if (shouldTrackSolutionSrc)
-                    {
-                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
-                        {
-                            const int spectrumIdx = ::spectrumIndex(solutionTxSourcePubKeys[k]);
-                            if (spectrumIdx >= 0
-                                && spectrum[spectrumIdx].numberOfIncomingTransfers != solutionSrcLastNIT[k])
-                            {
-                                latestIncomingTransferTickPreservePubkeys.push_back(solutionTxSourcePubKeys[k]);
-                            }
-                        }
-                    }
 
                     // Multi-dim revenue: categorize this tx into the REVENUE_TX_DIM observation
                     if (isZero(transaction->destinationPublicKey))
@@ -5890,175 +5784,6 @@ static bool isTickTimeOut()
     return (__rdtsc() - tickTicks[sizeof(tickTicks) / sizeof(tickTicks[0]) - 1] > TARGET_TICK_DURATION * NEXT_TICK_TIMEOUT_THRESHOLD * frequency / 1000);
 }
 
-void reprocessSolutionTransaction(unsigned long long processorNumber)
-{
-    isReprocessingSolutions = true;
-
-    TickData currentTickData;
-    // copy system.tick data
-    ts.tickData.acquireLock();
-    copyMem(&currentTickData, ts.tickData.getByTickIfNotEmpty(system.tick), sizeof(TickData));
-    ts.tickData.releaseLock();
-
-    // first rollback the miner scores data
-    copyMem((void*)minerPublicKeys, (void*)minerPublicKeysRollback, sizeof(minerPublicKeysRollback));
-    copyMem((void*)minerScores, (void*)minerScoresRollback, sizeof(minerScoresRollback));
-    numberOfMiners = numberOfMinersRollback;
-
-    auto tsCurrentTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(system.tick);
-
-    unsigned long long solutionProcessStartTick = __rdtsc(); // for tracking the time processing solutions
-    // reset solution task queue
-    score->resetTaskQueue();
-    // pre-scan any solution tx and add them to solution task queue
-    for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
-    {
-        if (!isZero(currentTickData.transactionDigests[transactionIndex]))
-        {
-            if (tsCurrentTickTransactionOffsets[transactionIndex])
-            {
-                Transaction* transaction = ts.tickTransactions(tsCurrentTickTransactionOffsets[transactionIndex]);
-                ASSERT(transaction->checkValidity());
-                ASSERT(transaction->tick == system.tick);
-                const int spectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
-                if (spectrumIndex >= 0)
-                {
-                    // Solution transactions
-                    if (isZero(transaction->destinationPublicKey)
-                        && transaction->amount >= MiningSolutionTransaction::minAmount()
-                        && transaction->inputType == MiningSolutionTransaction::transactionType())
-                    {
-                        if (transaction->inputSize == 32 + 32)
-                        {
-                            const m256i& solution_miningSeed = *(m256i*)transaction->inputPtr();
-                            const m256i& solution_nonce = *(m256i*)(transaction->inputPtr() + 32);
-                            m256i data[3] = { transaction->sourcePublicKey, solution_miningSeed, solution_nonce };
-                            static_assert(sizeof(data) == 3 * 32, "Unexpected array size");
-                            unsigned int flagIndex;
-                            KangarooTwelve(data, sizeof(data), &flagIndex, sizeof(flagIndex));
-
-                            score->addTask(transaction->sourcePublicKey, solution_miningSeed, solution_nonce);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    {
-        // Process solutions in this tick and store in cache. In parallel, score->tryProcessSolution() is called by
-        // request processors to speed up solution processing.
-        score->startProcessTaskQueue();
-        while (!score->isTaskQueueProcessed())
-        {
-            score->tryProcessSolution(processorNumber);
-        }
-        score->stopProcessTaskQueue();
-    }
-
-    solutionTotalExecutionTicks = __rdtsc() - solutionProcessStartTick; // for tracking the time processing solutions
-
-    ts.tickData.acquireLock();
-    for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
-    {
-        if (!isZero(currentTickData.transactionDigests[transactionIndex]))
-        {
-            if (tsCurrentTickTransactionOffsets[transactionIndex])
-            {
-                Transaction *transaction = ts.tickTransactions(tsCurrentTickTransactionOffsets[transactionIndex]);
-                ASSERT(transaction->checkValidity());
-                ASSERT(transaction->tick == system.tick);
-                const int spectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
-                if (spectrumIndex >= 0)
-                {
-                    // Solution transactions
-                    if (isZero(transaction->destinationPublicKey)
-                        && transaction->amount >= MiningSolutionTransaction::minAmount()
-                        && transaction->inputType == MiningSolutionTransaction::transactionType())
-                    {
-                        CHAR16 srcChars[60 + 1];
-                        CHAR16 seedChars[60 + 1];
-                        CHAR16 nonceChars[60 + 1];
-                        getIdentity(transaction->sourcePublicKey.m256i_u8, srcChars, true);
-                        getIdentity(transaction->inputPtr(), seedChars, true);
-                        getIdentity(transaction->inputPtr() + 32, nonceChars, true);
-                        setText(message, L"Reprocess sol tx #");
-                        appendNumber(message, transactionIndex, FALSE);
-                        appendText(message, L" src=");
-                        appendText(message, srcChars);
-                        appendText(message, L" seed=");
-                        appendText(message, seedChars);
-                        appendText(message, L" nonce=");
-                        appendText(message, nonceChars);
-                        logToConsole(message);
-
-                        // Undo this solution tx's optimistic deposit payment and return, then replay the balance-gated path.
-                        ACQUIRE(spectrumLock);
-                        if (gSolutionTxReturned[transactionIndex]) // optimistic deposit return existed
-                        {
-                            spectrum[spectrumIndex].incomingAmount -= transaction->amount;
-                            spectrum[spectrumIndex].numberOfIncomingTransfers--;
-                            spectrumInfo.totalAmount -= transaction->amount;
-                        }
-                        if (gSolutionTxPaid[transactionIndex]) // optimistic deposit payment existed
-                        {
-                            spectrum[spectrumIndex].outgoingAmount -= transaction->amount;
-                            spectrum[spectrumIndex].numberOfOutgoingTransfers--;
-                            spectrumInfo.totalAmount += transaction->amount;
-                        }
-                        spectrum[spectrumIndex].latestIncomingTransferTick = spectrumDataRollback[transactionIndex].latestIncomingTransferTick;
-                        auto backupNumberOfIncomingTransfers = spectrum[spectrumIndex].numberOfIncomingTransfers;
-                        RELEASE(spectrumLock);
-
-                        // Replay deposit payment (balance-gated) then re-score; mirrors the solution branch of processTickTransaction().
-                        if (decreaseEnergy(spectrumIndex, transaction->amount))
-                        {
-                            // Skip dedup re-submissions (minerSolutionFlags set in a prior tick) -> stay burned, no return.
-                            if (gSolutionTxReturned[transactionIndex])
-                            {
-                                processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber, true);
-                            }
-                        }
-
-                        // A good solution re-adds the return; preserve its tick so a later same-source undo can't reset it.
-                        // Re-resolve the index: the good-path increaseEnergy may have triggered reorganizeSpectrum().
-                        const int spectrumIndexAfter = ::spectrumIndex(transaction->sourcePublicKey);
-                        ACQUIRE(spectrumLock);
-                        if (spectrumIndexAfter >= 0
-                            && spectrum[spectrumIndexAfter].numberOfIncomingTransfers != backupNumberOfIncomingTransfers)
-                        {
-                            latestIncomingTransferTickPreservePubkeys.push_back(transaction->sourcePublicKey);
-                        }
-                        RELEASE(spectrumLock);
-                    }
-                }
-            }
-            else
-            {
-                while (true)
-                {
-                    logToConsole(L"Error: transaction missing in tickTransaction storage during reprocessSolutionTransaction()");
-                    bs->Stall(1'000'000);
-                }
-            }
-        }
-    }
-
-
-    for (const m256i &pubkey : latestIncomingTransferTickPreservePubkeys)
-    {
-        int spectrumIndex = ::spectrumIndex(pubkey);
-        if (spectrumIndex >= 0)
-        {
-            ACQUIRE(spectrumLock);
-            spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
-            RELEASE(spectrumLock);
-        }
-    }
-
-    ts.tickData.releaseLock();
-    isReprocessingSolutions = false;
-}
 
 void checkAllContractLocksReleased()
 {
@@ -6546,73 +6271,19 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                         }
                         else
                         {
-                        // If the spectrum digest from quorum doesn't match with etalonTick, that indicates there is invalid solutions in current tick
-                        if (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum)
-                        {
-                            CHAR16 localDigestChars[60 + 1];
-                            CHAR16 quorumDigestChars[60 + 1];
-                            getIdentity(etalonTick.saltedSpectrumDigest.m256i_u8, localDigestChars, true);
-                            getIdentity(spectrumDigestFromQuorum.m256i_u8, quorumDigestChars, true);
-                            setText(message, L"Invalid solutions detected at tick ");
-                            appendNumber(message, system.tick, FALSE);
-                            appendText(message, L": local=");
-                            appendText(message, localDigestChars);
-                            appendText(message, L" quorum=");
-                            appendText(message, quorumDigestChars);
-                            appendText(message, L". Reprocessing solutions...");
-                            logToConsole(message);
-                            resourceTestingDigest = resourceTestingDigestRollback;
-                            etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
-                            reprocessSolutionTransaction(processorNumber);
-                            etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
-
-                            // Update etalonTick.saltedSpectrumDigest
-                            unsigned int digestIndex;
-                            ACQUIRE(spectrumLock);
-                            for (digestIndex = 0; digestIndex < SPECTRUM_CAPACITY; digestIndex++)
-                            {
-                                if (spectrum[digestIndex].latestIncomingTransferTick == system.tick || spectrum[digestIndex].latestOutgoingTransferTick == system.tick)
-                                {
-                                    KangarooTwelve64To32(&spectrum[digestIndex], &spectrumDigests[digestIndex]);
-                                    spectrumChangeFlags[digestIndex >> 6] |= (1ULL << (digestIndex & 63));
-                                }
-                            }
-                            unsigned int previousLevelBeginning = 0;
-                            unsigned int numberOfLeafs = SPECTRUM_CAPACITY;
-                            while (numberOfLeafs > 1)
-                            {
-                                for (unsigned int i = 0; i < numberOfLeafs; i += 2)
-                                {
-                                    if (spectrumChangeFlags[i >> 6] & (3ULL << (i & 63)))
-                                    {
-                                        KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[digestIndex]);
-                                        spectrumChangeFlags[i >> 6] &= ~(3ULL << (i & 63));
-                                        spectrumChangeFlags[i >> 7] |= (1ULL << ((i >> 1) & 63));
-                                    }
-                                    digestIndex++;
-                                }
-                                previousLevelBeginning += numberOfLeafs;
-                                numberOfLeafs >>= 1;
-                            }
-                            spectrumChangeFlags[0] = 0;
-
-                            etalonTick.saltedSpectrumDigest = spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1];
-                            RELEASE(spectrumLock);
-
+                            // No fork this tick (non-solution tick, or the strict re-run): the local
+                            // spectrum digest must already match quorum. fork is the only rollback path,
+                            // so a mismatch here is unrecoverable.
                             if (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum)
                             {
                                 while (true)
                                 {
-                                    logToConsole(L"Error: Solutions invalid detected, but cannot recover spectrum digest");
+                                    logToConsole(L"Error: spectrum digest mismatch with no fork rollback available");
                                     bs->Stall(1'000'000);
                                 }
                             }
-                        }
-                        else
-                        {
                             resourceTestingDigest = resourceTestingDigestFromQuorum;
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
-                        }
                         }
                     }
                     else if (status == 2)
@@ -9446,16 +9117,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                             // state persisting for at least a second -> also log to debug.log
                             misalignedState = 2;
                         }
-                        if (!isReprocessingSolutions)
-                        {
-                            logToConsole(L"MISALIGNED STATE DETECTED");
-                        } else
-                        {
-                            setText(message, L"REPROCESSING SOLUTIONS - STATE IS NOT FINALIZED YET | Solutions in queue: ");
-                            appendNumber(message, score->_nTask - score->_nFinished, TRUE);
-                            appendText(message, L".");
-                            logToConsole(message);
-                        }
+                        logToConsole(L"MISALIGNED STATE DETECTED");
                         if (misalignedState == 2)
                         {
                             // print health status and stop repeated logging to debug.log
@@ -9663,13 +9325,13 @@ void processArgs(int argc, const char* argv[]) {
         ("op, operator-seed", "Lite node seed", cxxopts::value<std::string>())
 		("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
         ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
-        ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the reprocessSolutionTransaction() rollback path", cxxopts::value<bool>())
+        ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the fork rollback path", cxxopts::value<bool>())
         ("s,security-tick", "Core will verify state after x tick, to reduce computational to the node", cxxopts::value<int>()->default_value("1"))
         ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
         ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
         ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
-        ("rollback-mode", "AUX wrong-solution tick rollback: legacy (hand-rolled reprocess) or fork (fork-on-BSP child-promote)", cxxopts::value<std::string>()->default_value("legacy"))
+        ("rollback-mode", "DEPRECATED: AUX wrong-solution tick rollback is always fork-on-BSP child-promote now; accepted but ignored", cxxopts::value<std::string>()->default_value("fork"))
         ("verify-fork-rollback", "TEST: assert the fork re-run reproduces the quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise the MATCH path on clean ticks)", cxxopts::value<bool>())
         ("fork-force-match", "TEST: force the fork verdict to take the match branch (commit + kill child)", cxxopts::value<bool>())
@@ -9689,9 +9351,10 @@ void processArgs(int argc, const char* argv[]) {
 
     if (result.count("rollback-mode")) {
         std::string rbm = result["rollback-mode"].as<std::string>();
-        gRollbackMode = (rbm == "fork") ? RollbackMode::Fork : RollbackMode::Legacy;
-        logColorToScreen("INFO", std::string("Tick rollback mode: ") + (gRollbackMode == RollbackMode::Fork ? "fork (fork-on-BSP child-promote)" : "legacy"));
+        if (rbm != "fork")
+            logColorToScreen("WARNING", "rollback-mode is deprecated; tick rollback is always fork-on-BSP child-promote now");
     }
+    logColorToScreen("INFO", "Tick rollback: fork-on-BSP child-promote");
     if (result.count("verify-fork-rollback")) {
         gVerifyForkRollback = true;
         logColorToScreen("INFO", "Fork rollback self-verify enabled");

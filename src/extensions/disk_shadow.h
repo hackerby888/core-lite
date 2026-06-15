@@ -21,9 +21,6 @@
 #include <filesystem>
 #include <utility>
 
-enum class RollbackMode { Legacy, Fork };
-inline RollbackMode gRollbackMode = RollbackMode::Legacy;
-
 // Armed on the parent for the duration of one fork window.
 inline volatile bool gForkWindowActive = false;
 // Drives isRevalidation strict scoring during the child re-run (not forceVerifySolutions).
