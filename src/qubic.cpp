@@ -8806,7 +8806,8 @@ static void tickForkChildPromote()
     close(tickFork::gPipe[0]); tickFork::gPipe[0] = -1;
     gShadow.purgeOrphans();   // drop the parent's optimistic shadow; real page files are pristine
     gReRunStrict = true;      // the re-spawned tick processor re-runs the current tick strict
-    setMem(peers, sizeof(peers), 0);  // drop inherited connections; the main loop reconnects fresh
+    Overload::resetForChildPromote();  // drop inherited TCP maps + sockets (none are serviced post-fork)
+    setMem(peers, sizeof(peers), 0);   // drop inherited connections; the main loop reconnects fresh
     registerAsynFileIO(mpServicesProtocol);
     spawnAPs();
     // Inherited socket fds are abandoned here (a small fd leak on the rare promotion).

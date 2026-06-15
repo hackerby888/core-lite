@@ -401,6 +401,20 @@ struct Overload {
 
     inline static std::mutex networkingLock;
 
+    // After a fork the promoted child inherits the parent's TCP maps + socket fds but none of the
+    // servicing threads. Drop them all (single-threaded here) so reconnect rebuilds cleanly.
+    static void resetForChildPromote()
+    {
+        for (auto& kv : tcpDataMap) if (kv.second.socket != INVALID_SOCKET) closesocket(kv.second.socket);
+        for (auto& kv : incomingSocketMap) if (kv.second != INVALID_SOCKET) closesocket(kv.second);
+        tcpDataMap.clear();
+        incomingSocketMap.clear();
+        eventDataMap.clear();
+        isReceiveThreadSetupMap.clear();
+        isSendThreadSetupMap.clear();
+        new (&networkingLock) std::mutex();
+    }
+
     // Directly call the setup function without using custom stack.
     static void startThread(EFI_AP_PROCEDURE procedure, void* data, unsigned long long ProcessorNumber, EFI_EVENT WaitEvent, unsigned long long TimeoutInMicroseconds) {
 		bool isThreadFinished = false;
