@@ -182,6 +182,8 @@ static int numberOfAcceptedIncommingConnection = 0;
 static int maxInboundAccepts = NUMBER_OF_INCOMING_CONNECTIONS;
 // Max incoming slots per single IP (--max-inbound-per-ip); 0 = unlimited (default).
 static int maxIncomingConnectionsPerIp = 0;
+// Extra inbound slots armed beyond --max-inbound; admit loopback only (local RPC/tooling always connects).
+static constexpr unsigned int LOOPBACK_INBOUND_RESERVE = 4;
 
 static volatile char publicPeersLock = 0;
 static unsigned int numberOfPublicPeers = 0;
@@ -963,9 +965,24 @@ static bool peerConnectionNewlyEstablished(unsigned int i)
         {
             if (peers[i].isIncommingConnection)
             {
-                // Cap incoming slots per IP if configured (--max-inbound-per-ip; 0 = unlimited; loopback
-                // exempt): one peer can't flood many slots (wastes slots + redundant sends -> churn).
-                if (maxIncomingConnectionsPerIp > 0 && peers[i].address.u8[0] != 127 && peers[i].address.u32 != 0)
+                // Loopback (local RPC/tooling) is never capped: unlimited slots, unlimited per-IP.
+                const bool isLoopback = (peers[i].address.u8[0] == 127);
+
+                // Count before the cap rejects so each reject's closePeer() decrement stays balanced.
+                numberOfAcceptedIncommingConnection++;
+                ASSERT(numberOfAcceptedIncommingConnection <= NUMBER_OF_INCOMING_CONNECTIONS);
+
+                // Total inbound cap (--max-inbound): reserve-band slots admit only loopback, so local
+                // connections get in even when remotes saturate the cap.
+                if (!isLoopback && (i - NUMBER_OF_OUTGOING_CONNECTIONS) >= (unsigned int)maxInboundAccepts)
+                {
+                    closePeer(&peers[i]);
+                    return false;
+                }
+
+                // Per-IP cap (--max-inbound-per-ip; 0 = unlimited; loopback exempt): one peer can't flood
+                // many slots (wastes slots + redundant sends -> churn).
+                if (maxIncomingConnectionsPerIp > 0 && !isLoopback && peers[i].address.u32 != 0)
                 {
                     unsigned int sameIp = 0;
                     for (unsigned int k = 0; k < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; k++)
@@ -981,8 +998,6 @@ static bool peerConnectionNewlyEstablished(unsigned int i)
                         }
                     }
                 }
-                numberOfAcceptedIncommingConnection++;
-                ASSERT(numberOfAcceptedIncommingConnection <= NUMBER_OF_INCOMING_CONNECTIONS);
             }
             return true;
         }
@@ -1376,8 +1391,9 @@ static void peerReconnectIfInactive(unsigned int i, unsigned short port)
         else
         {
             // incoming connection:
-            // accept connections if peer list is not static and inbound cap not reached
-            if (!listOfPeersIsStatic && (i - NUMBER_OF_OUTGOING_CONNECTIONS) < (unsigned int)maxInboundAccepts)
+            // Arm Accept on the cap plus a small reserve band; the reserve admits only loopback (checked at
+            // accept time) so local RPC/tooling connects even when remotes saturate --max-inbound.
+            if (!listOfPeersIsStatic && (i - NUMBER_OF_OUTGOING_CONNECTIONS) < (unsigned int)maxInboundAccepts + LOOPBACK_INBOUND_RESERVE)
             {
                 peers[i].isIncommingConnection = TRUE;
                 peers[i].receiveData.FragmentTable[0].FragmentBuffer = peers[i].receiveBuffer;
