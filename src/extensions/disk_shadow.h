@@ -3,17 +3,10 @@
 // Disk-rollback shadow for the fork tick rollback: during a window, parent VM page writes divert
 // to a per-dir /s subdir (real files stay pristine for the child); commit on match, discard on
 // mismatch. Include before virtual_memory.h. CHAR16 = 2-byte (-fshort-wchar): no std::wstring/libc-wide.
+// The fork machinery is Linux-only; only the flags below + the VM hooks are cross-platform (the heavy
+// std deps pull <process.h> on MSVC, which collides with system.h's `system` macro), so they are gated.
 
-#include <map>
-#include <set>
-#include <string>
-#include <vector>
-#include <mutex>
-#include <atomic>
-#include <new>
-#include <thread>
-#include <filesystem>
-#include <utility>
+#include <atomic>   // the fork-rollback flags below are CLI-settable on every platform
 
 // Armed on the parent for the duration of one fork window.
 inline volatile bool gForkWindowActive = false;
@@ -39,6 +32,18 @@ inline volatile bool gForkBench = false;
 inline std::atomic<bool> gForkQuiesceRequest{ false };
 inline std::atomic<int> gForkParked{ 0 };
 inline std::atomic<unsigned> gForkParkGen{ 0 };   // bumped per fork window; see liteForkRequestPark
+
+#ifdef __linux__   // fork-based disk rollback: Linux-only (fork/COW); these std deps pull <process.h> on MSVC
+
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+#include <mutex>
+#include <new>
+#include <thread>
+#include <filesystem>
+#include <utility>
 
 // Called by request processors at loop top; parks while a fork window is set up.
 static inline void liteForkRequestPark()
@@ -199,3 +204,11 @@ static inline CHAR16* liteShadowReadDir(CHAR16* pageDir, const CHAR16* pageName)
 {
     return gShadow.readDir(pageDir, pageName);
 }
+
+#else  // !__linux__ : no fork rollback; the VM hooks pass through and the request park is a no-op.
+
+static inline void liteForkRequestPark() {}
+static inline CHAR16* liteShadowWriteDir(CHAR16* pageDir, const CHAR16*) { return pageDir; }
+static inline CHAR16* liteShadowReadDir(CHAR16* pageDir, const CHAR16*) { return pageDir; }
+
+#endif // __linux__
