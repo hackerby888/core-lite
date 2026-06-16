@@ -391,6 +391,8 @@ static struct
 } latestCreatedTickInfo;
 
 #include "extensions/http/http.h"
+#include "extensions/rpc/rpc_core.h"
+#include "extensions/rpc/rpc_proxy.h"
 
 static struct
 {
@@ -6043,6 +6045,7 @@ void doBadBoySpam()
 }
 
 #include "extensions/tick_fork_rollback.h"
+#include "extensions/rpc/rpc_routes.h"
 
 // Disabling the optimizer for tickProcessor() is a workaround introduced to solve an issue
 // that has been observed in testnets/2025-04-30-profiling.
@@ -8526,6 +8529,11 @@ static void tickForkChildPromote()
     }
     if (gAsyncFileIO) gAsyncFileIO->reinitForChildPromote();   // clean queues; reuse inherited struct (no leak)
     spawnAPs();
+#if defined(__linux__) && !defined(NO_RPC)
+    new (&gRpcDispatchLock) std::shared_mutex();   // inherited locked across fork; reset (like networkingLock)
+    gRpcUnixRunning = false;                       // inherited unix-server thread is gone; re-bind the socket
+    rpcUnixStart(rpcUnixPath(httpPort));
+#endif
     if (gForkBench) { fprintf(stderr, "[FORK-BENCH] child promoted rss=%ldMB\n", tickForkRssKb() / 1024); fflush(stderr); }
     tickForkLog("CHILD: promote done, now the live node");
     // Inherited socket fds are abandoned here (a small fd leak on the rare promotion).
@@ -8539,6 +8547,9 @@ static void bspForkPoint()
     long long q0 = gForkBench ? tickForkNowNs() : 0;
     Overload::quiesceNetworking();
     Overload::networkingLock.lock();
+#if !defined(NO_RPC)
+    gRpcDispatchLock.lock();   // drain in-flight RPC dispatches so no handler holds a node lock at fork
+#endif
     if (gForkBench) gForkQuiesceNs = tickForkNowNs() - q0;
 
     long long f0 = gForkBench ? tickForkNowNs() : 0;
@@ -8557,6 +8568,9 @@ static void bspForkPoint()
 
     // PARENT BSP: release the lock and resume networking; the child carries the frozen snapshot.
     Overload::networkingLock.unlock();
+#if !defined(NO_RPC)
+    gRpcDispatchLock.unlock();
+#endif
     Overload::resumeNetworking();
     tickFork::gChildPid = pid;   // >=0 on success, -1 on failure
     tickFork::gForkRequest = false;
@@ -9355,6 +9369,10 @@ void processArgs(int argc, const char* argv[]) {
         ("fbis-count", "TEST: number of solution txs to inject per tick (with --fbis)", cxxopts::value<int>()->default_value("1"))
         ("fbis-same", "TEST: inject all --fbis solutions from one computor (drains it -> out-of-qus)", cxxopts::value<bool>())
         ("test-solution-threshold", "TEST: override the runtime solution threshold for the current epoch (0 = injected solutions validate)", cxxopts::value<int>()->default_value("-1"))
+        ("rpc-sidecar", "Run the RPC HTTP server as a separate sidecar process so it survives fork-promotes", cxxopts::value<bool>())
+        ("rpc-proxy", "INTERNAL: run as the RPC sidecar (drogon HTTP -> node unix-socket forwarder)", cxxopts::value<bool>())
+        ("rpc-listen", "RPC sidecar HTTP listen port", cxxopts::value<int>()->default_value("41850"))
+        ("rpc-node", "RPC sidecar: node http port used as the unix-socket key", cxxopts::value<int>()->default_value("41841"))
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"));
     auto result = options.parse(argc, argv);
 
@@ -9753,8 +9771,22 @@ void setupSignalHandlers() {
 #include "extensions/supervisor_shim.h"
 
 int main(int argc, const char* argv[]) {
+#if defined(__linux__) && !defined(NO_RPC)
+    // RPC sidecar mode (design B): a stateless drogon forwarder -> node unix socket.
+    for (int i = 1; i < argc; i++)
+        if (std::string(argv[i]) == "--rpc-proxy")
+        {
+            int listenPort = 41850, nodePort = 41841;
+            for (int j = 1; j + 1 < argc; j++)
+            {
+                if (std::string(argv[j]) == "--rpc-listen") listenPort = atoi(argv[j + 1]);
+                if (std::string(argv[j]) == "--rpc-node")   nodePort  = atoi(argv[j + 1]);
+            }
+            return rpcProxyMain(listenPort, rpcUnixPath(nodePort));
+        }
+#endif
 #ifdef __linux__
-    runUnderSupervisor();   // parent holds the stable supervisor PID across promotes; returns here only as the node
+    runUnderSupervisor(argc, argv);   // forks the node (+ RPC sidecar if --rpc-sidecar); returns here only as the node
     setupSignalHandlers();
 #endif
     logColorToScreen("INFO", "================== Qubic Core Lite ==================");
@@ -9763,7 +9795,10 @@ int main(int argc, const char* argv[]) {
 
     Overload::initializeUefi();
 #if defined(__linux__) && !defined(NO_RPC)
-    QubicHttpServer::start(httpPort);
+    bool rpcSidecar = false;
+    for (int i = 1; i < argc; i++) if (std::string(argv[i]) == "--rpc-sidecar") rpcSidecar = true;
+    if (!rpcSidecar) QubicHttpServer::start(httpPort);   // sidecar mode: node runs no in-process drogon
+    rpcUnixStart(rpcUnixPath(httpPort));                 // node-side RPC dispatch over a unix socket
     watchAndCheckin();
 #endif
     auto status = (int)efi_main(ih, st);

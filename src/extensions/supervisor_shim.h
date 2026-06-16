@@ -1,14 +1,18 @@
 #pragma once
 
-// Supervisor shim: keep the supervisor-facing PID stable across fork-rollback promotes.
+// Supervisor shim: keep the supervisor-facing PID stable across fork-rollback promotes, and
+// (optionally) own the RPC sidecar so it survives promotes too.
 //
 // The fork rollback promotes by replacing the process (the old node _exit()s, the forked child
-// takes over), so the PID changes on every mismatch. Under docker (the node as PID 1) or systemd
-// Restart=, that looks like the service died -> PID-namespace teardown kills the promoted child, or
-// a duplicate node is restarted on the inherited port. This shim is a tiny non-consensus parent
-// that owns the stable PID: it forks the node, becomes a child-subreaper so a promoted grandchild
-// reparents to IT (not init), and keeps a node alive in its process tree until the tree drains,
-// then exits with the last node's fate so the supervisor sees the real outcome.
+// takes over), so the node PID changes on every mismatch. Under docker (the node as PID 1) or
+// systemd Restart=, that looks like the service died. This shim is a tiny non-consensus parent that
+// owns the stable PID: it forks the node, becomes a child-subreaper so a promoted grandchild
+// reparents to IT (not init), and keeps a node alive in its tree until the node lineage drains.
+//
+// With --rpc-sidecar it also forks the RPC proxy (re-exec self with --rpc-proxy) as a *sibling* of
+// the node, outside the rollback-fork chain, and restarts it if it dies. Node promotes never touch
+// the sidecar; the new node generation re-binds the unix socket and the sidecar reconnects. That is
+// the fix for "RPC dead in the promoted child".
 //
 // Linux-only (prctl subreaper). Opt out with QUBIC_NO_SUPERVISOR=1 (e.g. under screen / dev).
 
@@ -19,32 +23,80 @@
 #include <signal.h>
 #include <unistd.h>
 #include <cstdlib>
+#include <cstdio>
+#include <cstring>
 #include <cerrno>
+#include <string>
 
-// Forward a stop signal to the node generation so the container/service stops promptly. We ignore
-// the signal for ourselves first so kill(0, ...) (whole process group) does not re-enter the shim.
+inline char gSidecarPort[16] = "41841";   // node http port -> sidecar listen + unix-socket key
+
+// Forward a stop signal to the children so the container/service stops promptly.
 static void shimForwardSignal(int sig)
 {
     signal(sig, SIG_IGN);
-    kill(0, sig);   // the active node + any donor children share our process group
+    kill(0, sig);   // node + donors + sidecar share our process group
 }
 
-// Returns ONLY in the node child. The supervisor parent loops here and _exit()s when the tree drains.
-static inline void runUnderSupervisor()
+// Re-exec self as the stateless RPC proxy (a sibling of the node).
+static pid_t shimForkSidecar()
 {
-    if (getenv("QUBIC_NO_SUPERVISOR")) return;          // opt-out: run the node inline (screen / dev)
-    if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return;  // can't subreap: run inline, don't risk it
+    pid_t p = fork();
+    if (p != 0) return p;                 // shim: child pid (or -1)
+    char self[512];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n <= 0) _exit(127);
+    self[n] = 0;
+    execl(self, "qubic-rpc-sidecar", "--rpc-proxy",
+          "--rpc-listen", gSidecarPort, "--rpc-node", gSidecarPort, (char*)nullptr);
+    _exit(127);                           // execl failed
+}
+
+// True while any child other than the sidecar exists (i.e. the node lineage is still alive).
+static bool shimHasNodeChild(pid_t sidecar)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/task/%d/children", (int)getpid());
+    FILE* f = fopen(path, "r");
+    if (!f) return true;                  // can't tell -> assume yes (never exit prematurely)
+    int c;
+    bool any = false;
+    while (fscanf(f, "%d", &c) == 1)
+        if (c != (int)sidecar) { any = true; break; }
+    fclose(f);
+    return any;
+}
+
+// Returns ONLY in the node child. The supervisor parent loops here and _exit()s when the node drains.
+static inline void runUnderSupervisor(int argc, const char** argv)
+{
+    if (getenv("QUBIC_NO_SUPERVISOR")) return;            // opt-out: run the node inline (screen / dev)
+
+    bool wantSidecar = false;
+    for (int i = 1; i < argc; i++)
+    {
+        if (std::string(argv[i]) == "--rpc-sidecar") wantSidecar = true;
+        else if (std::string(argv[i]) == "--http-port" && i + 1 < argc)
+        {
+            std::strncpy(gSidecarPort, argv[i + 1], sizeof(gSidecarPort) - 1);
+            gSidecarPort[sizeof(gSidecarPort) - 1] = 0;
+        }
+    }
+#ifdef NO_RPC
+    wantSidecar = false;
+#endif
+
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return;  // can't subreap: run inline
+
+    pid_t sidecar = wantSidecar ? shimForkSidecar() : -1;
 
     pid_t node = fork();
-    if (node < 0) return;                               // fork failed: run the node inline
-    if (node == 0) return;                              // CHILD: become the node
+    if (node < 0) return;                                 // fork failed: run the node inline
+    if (node == 0) return;                                // CHILD: become the node
 
     // SUPERVISOR (stable PID). Reap everything (PID-1 duty under docker) + forward stop signals.
     signal(SIGTERM, shimForwardSignal);
     signal(SIGINT, shimForwardSignal);
 
-    // A promote = the current node _exit()s and its child reparents to us (subreaper). Keep waiting
-    // until the whole tree drains; remember the last fate (and whether anything crashed) to propagate.
     int lastSt = 0;
     bool sawSignal = false;
     for (;;)
@@ -53,15 +105,23 @@ static inline void runUnderSupervisor()
         pid_t dead = waitpid(-1, &st, 0);
         if (dead < 0)
         {
-            if (errno == EINTR) continue;               // our signal handler interrupted: retry
-            break;                                      // ECHILD: no node left in the tree
+            if (errno == EINTR) continue;
+            break;                                        // ECHILD: nothing left
         }
+        if (wantSidecar && dead == sidecar)
+        {
+            sidecar = shimForkSidecar();                  // RPC must not stay down: restart it
+            continue;
+        }
+        // a node-lineage generation ended; a promoted successor (if any) has reparented to us.
         lastSt = st;
-        if (WIFSIGNALED(st)) sawSignal = true;          // a generation crashed somewhere in the chain
+        if (WIFSIGNALED(st)) sawSignal = true;
+        if (!shimHasNodeChild(sidecar)) break;            // node lineage drained -> shim exits
     }
+    if (wantSidecar && sidecar > 0) kill(sidecar, SIGTERM);
     _exit(sawSignal ? 1 : (WIFEXITED(lastSt) ? WEXITSTATUS(lastSt) : 1));
 }
 
 #else
-static inline void runUnderSupervisor() {}              // non-Linux: no fork rollback, no shim
+static inline void runUnderSupervisor(int, const char**) {}   // non-Linux: no fork rollback, no shim
 #endif
