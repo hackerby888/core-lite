@@ -263,6 +263,11 @@ static ExecutionFeeReportCollector executionFeeReportCollector;
 static TickData nextTickData;
 static PendingTxsPool pendingTxsPool;
 
+// opt/fast-tx headers reference pendingTxsPool, so include them after it.
+#include "optimizations/opt_config.h"
+#include "optimizations/opt_eager_tx_fetch.h"
+#include "extensions/fast_tx_window.h"
+
 static m256i uniqueNextTickTransactionDigests[NUMBER_OF_COMPUTORS];
 static m256i uniqueCurrentSpectrumDigests[NUMBER_OF_COMPUTORS];
 static unsigned int uniqueNextTickTransactionDigestCounters[NUMBER_OF_COMPUTORS];
@@ -509,14 +514,17 @@ void logToConsole(const CHAR16* message)
 #endif
 }
 
-#include "extensions/missing_tx_debug.h"
-#include "extensions/peer_reaper.h"
-
-
 static inline bool isMainMode()
 {
     return (mainAuxStatus & 1) == 1;
 }
+
+// These headers reference logToConsole/isMainMode (above), so include them after.
+#include "extensions/supervisor_shim.h"
+#include "extensions/tick_fork_rollback.h"
+#include "extensions/rpc/rpc_routes.h"
+#include "extensions/missing_tx_debug.h"
+#include "extensions/peer_reaper.h"
 
 static inline bool isTestnet()
 {
@@ -965,10 +973,6 @@ static void processBroadcastTick(Peer* peer, RequestResponseHeader* header)
         }
     }
 }
-
-#include "optimizations/opt_config.h"
-#include "optimizations/opt_eager_tx_fetch.h"
-#include "extensions/fast_tx_window.h"
 
 static FastTxWindow fastTxWindow;
 
@@ -6044,9 +6048,6 @@ void doBadBoySpam()
 #endif
 }
 
-#include "extensions/tick_fork_rollback.h"
-#include "extensions/rpc/rpc_routes.h"
-
 // Disabling the optimizer for tickProcessor() is a workaround introduced to solve an issue
 // that has been observed in testnets/2025-04-30-profiling.
 // In this test, the processor calling tickProcessor() was stuck before entering the function.
@@ -9777,11 +9778,9 @@ void setupSignalHandlers() {
 }
 #endif
 
-#include "extensions/supervisor_shim.h"
-
 int main(int argc, const char* argv[]) {
 #if defined(__linux__) && !defined(NO_RPC)
-    // RPC sidecar mode (design B): a stateless drogon forwarder -> node unix socket.
+    // RPC sidecar mode: a stateless drogon forwarder -> node unix socket.
     for (int i = 1; i < argc; i++)
         if (std::string(argv[i]) == "--rpc-proxy")
         {
