@@ -161,6 +161,19 @@ namespace tickFork
         if (forceVerifySolutions) return;           // -fv = strict-all mode: no trick/rollback/fork
         if (isMainMode()) return;
 
+        // Only fork at the network frontier. While catching up the node replays already-finalized ticks
+        // (their solutions match quorum -> no optimistic divergence -> no rollback needed); a full-RSS
+        // fork per checkpoint there would stall a large node (the deep-catch-up fork storm). Skip until
+        // within a couple ticks of the network tip.
+        {
+            unsigned int tip = 0;
+            for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
+                if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing
+                    && peers[i].peerReportedTick > tip)
+                    tip = peers[i].peerReportedTick;
+            if (tip > (unsigned)system.tick + 2) return;   // behind the tip -> catching up, no fork
+        }
+
         // Test: force a single-tick fork + rollback every N ticks. Retire any live window first so the
         // forced mismatch (in verdict) rewinds exactly this tick, back to the tick-1 state.
         if (gForkForceRollbackEvery && (unsigned)system.tick % gForkForceRollbackEvery == 0)
