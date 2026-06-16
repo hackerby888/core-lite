@@ -9740,8 +9740,11 @@ void setupSignalHandlers() {
 }
 #endif
 
+#include "extensions/supervisor_shim.h"
+
 int main(int argc, const char* argv[]) {
 #ifdef __linux__
+    runUnderSupervisor();   // parent holds the stable supervisor PID across promotes; returns here only as the node
     setupSignalHandlers();
 #endif
     logColorToScreen("INFO", "================== Qubic Core Lite ==================");
