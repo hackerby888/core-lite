@@ -1,13 +1,7 @@
 #pragma once
 
-// RPC core (node side): a drogon-free router + a unix-socket dispatch server.
-//
-// Design B for the fork-rollback RPC problem: drogon (HTTP transport) runs in a
-// stateless sidecar process; the API *logic* stays here in the node behind this
-// router, reached over a unix socket. The node re-binds the socket after a
-// fork-promote, so RPC survives promotes. Adding an API = one RPC_ROUTE block.
-//
-// Linux-only (AF_UNIX). Pure node-state -> JSON handlers; no drogon dependency.
+// Node-side drogon-free RPC: a router + unix-socket server. The drogon sidecar forwards
+// HTTP here; the node re-binds the socket after a fork-promote so RPC survives. Linux-only.
 
 #ifdef __linux__
 
@@ -129,8 +123,7 @@ public:
 
 inline RpcRouter gRpc;
 
-// Add an API: one block. Registered at static-init; the sidecar never changes.
-// __COUNTER__ is captured once (via RPC_ROUTE_I) so all three names match + are TU-unique.
+// One RPC_ROUTE block per API; __COUNTER__ captured once (RPC_ROUTE_I) for TU-unique names.
 #define QRPC_CAT_(a, b) a##b
 #define QRPC_CAT(a, b) QRPC_CAT_(a, b)
 #define RPC_ROUTE(METHOD, PATTERN) RPC_ROUTE_I(METHOD, PATTERN, __COUNTER__)
@@ -175,9 +168,8 @@ namespace rpcwire
 // ---------------- node-side unix-socket server ----------------
 inline std::atomic<bool> gRpcUnixRunning{ false };
 
-// Fork-safety: each dispatch takes a SHARED lock; the fork barrier (bspForkPoint) takes it
-// EXCLUSIVELY before fork() so no handler is mid-dispatch (holding a node lock) when the process
-// forks -> the child can't inherit a node lock held by a vanished RPC thread. Reinit in the child.
+// Fork-safety: dispatch takes a SHARED lock; bspForkPoint takes it EXCLUSIVE before fork() so no
+// handler holds a node lock at fork. Reinit in the child.
 inline std::shared_mutex gRpcDispatchLock;
 
 inline void rpcUnixHandleConn(int c)
@@ -234,8 +226,7 @@ inline void rpcUnixServe(std::string path)
     }
 }
 
-// Spawn the unix server (idempotent in the parent). After a promote the child
-// resets gRpcUnixRunning and calls this again to re-bind the inherited path.
+// Spawn the unix server (idempotent). Child re-binds after a promote (resets gRpcUnixRunning).
 inline void rpcUnixStart(const std::string& path)
 {
     bool expected = false;

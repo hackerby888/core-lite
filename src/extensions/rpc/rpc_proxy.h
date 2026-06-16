@@ -1,12 +1,7 @@
 #pragma once
 
-// RPC sidecar (drogon): a stateless HTTP -> unix-socket forwarder.
-//
-// Runs as a separate process (re-exec self with --rpc-proxy), forked once by the
-// supervisor shim as a sibling of the node, so node fork-promotes never touch it.
-// It holds no node state: every request is forwarded verbatim to the node's unix
-// socket and the framed reply is turned back into HTTP. Adding an API never edits
-// this file. drogon's fork-hostility is now isolated to a process that never forks.
+// RPC sidecar: a stateless drogon HTTP -> node-unix-socket forwarder. A separate process
+// (re-exec self --rpc-proxy), sibling of the node, so fork-promotes never touch it.
 
 #if defined(__linux__) && !defined(NO_RPC)
 
@@ -24,13 +19,8 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
 {
     using namespace drogon;
 
-    // Forward EVERY request to the node unix socket as a SYNC ADVICE, not a
-    // default handler. A sync advice runs BEFORE routing, so it pre-empts the
-    // drogon HttpControllers that this same binary auto-registers at static init
-    // (RpcLive/RpcQueryV2/RpcStats/Explorer). Were those left to route here, they
-    // would run inside the proxy process — which has no node state — and read
-    // zeroed globals or segfault (e.g. richList scanning an unmapped spectrum).
-    // Returning a non-null response short-circuits routing entirely.
+    // Forward every request via a SYNC ADVICE (runs before routing) so it pre-empts the
+    // HttpControllers this binary auto-registers — they'd run here with no node state and crash.
     app().registerSyncAdvice(
         [unixPath](const HttpRequestPtr& req) -> HttpResponsePtr
         {

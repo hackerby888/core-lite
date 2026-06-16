@@ -1,9 +1,7 @@
 #pragma once
 
-// Migrated controller endpoints (explorer, stats, live, query/v2): the SAME logic
-// as the drogon HttpController classes, but as RpcReq->RpcResp handlers behind the
-// router. Path params {x} -> :x (captured into req.params); JSON bodies parsed from
-// req.body; cb(newHttpJsonResponse(j)) -> return jsonResp(j). Logic verbatim.
+// Controller endpoints (explorer/stats/live) as RpcReq->RpcResp router handlers; {x} path
+// params -> :x, JSON body via rpcJsonBody. Logic verbatim from the drogon controllers.
 
 #ifdef __linux__
 

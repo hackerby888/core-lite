@@ -1,20 +1,8 @@
 #pragma once
 
-// Supervisor shim: keep the supervisor-facing PID stable across fork-rollback promotes, and
-// (optionally) own the RPC sidecar so it survives promotes too.
-//
-// The fork rollback promotes by replacing the process (the old node _exit()s, the forked child
-// takes over), so the node PID changes on every mismatch. Under docker (the node as PID 1) or
-// systemd Restart=, that looks like the service died. This shim is a tiny non-consensus parent that
-// owns the stable PID: it forks the node, becomes a child-subreaper so a promoted grandchild
-// reparents to IT (not init), and keeps a node alive in its tree until the node lineage drains.
-//
-// With --rpc-sidecar it also forks the RPC proxy (re-exec self with --rpc-proxy) as a *sibling* of
-// the node, outside the rollback-fork chain, and restarts it if it dies. Node promotes never touch
-// the sidecar; the new node generation re-binds the unix socket and the sidecar reconnects. That is
-// the fix for "RPC dead in the promoted child".
-//
-// Linux-only (prctl subreaper). Opt out with QUBIC_NO_SUPERVISOR=1 (e.g. under screen / dev).
+// Supervisor shim: a tiny subreaper parent that keeps a stable PID across fork-rollback promotes
+// (the promoted child reparents to it, not init). With --rpc-sidecar it also forks the RPC proxy as
+// a sibling that survives promotes + restarts it on death. Linux-only; opt out QUBIC_NO_SUPERVISOR=1.
 
 #ifdef __linux__
 

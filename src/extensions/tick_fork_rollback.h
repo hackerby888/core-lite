@@ -1,18 +1,8 @@
 #pragma once
 
-// Fork-on-BSP child-promote tick rollback (AUX wrong-solution path); the only rollback path.
-// Disk side: disk_shadow.h.
-//
-// The fork is taken on the BSP (main-loop thread) so the child inherits the thread that drives
-// networking + contract dispatch; the child re-spawns only the simple AP loops on promotion.
-//
-// tickProcessor side (here): before processTick of a solution-bearing AUX tick it parks the request
-// processors, arms the disk shadow, and asks the BSP to fork. At the quorum compare it issues the
-// verdict: match -> commit shadow + kill the child; mismatch -> hand off to the child + _exit.
-// BSP side (bspForkPoint / tickForkChildPromote) lives in qubic.cpp where spawnAPs is visible.
-//
-// fork()/pipe()/_exit are POSIX: this rollback is Linux-only. On other platforms the #else block
-// provides inert stubs so the shared qubic.cpp translation unit still compiles.
+// Fork-on-BSP child-promote tick rollback (AUX wrong-solution path); disk side in disk_shadow.h.
+// The fork is on the BSP so the child keeps the networking/dispatch thread; it re-spawns the AP
+// loops on promote. Linux-only (fork/pipe/_exit); #else gives inert stubs for the shared TU.
 
 #ifdef __linux__
 
@@ -85,10 +75,8 @@ namespace tickFork
         return false;
     }
 
-    // Checkpoint-and-replay: k ticks share ONE fork. The checkpoint child snapshots state BEFORE
-    // gCheckpointTick and stays alive across [gCheckpointTick, +gForkWindowK). A matching solution
-    // tick keeps it; a mismatch rewinds to it and replays the window strict; staleness commits it.
-    // This amortizes the O(RSS) fork over the window instead of paying it on every solution tick.
+    // Checkpoint-and-replay: k ticks share one fork (amortizes the O(RSS) fork). The checkpoint child
+    // stays alive across the window; match keeps it, mismatch rewinds+replays strict, staleness commits.
     inline unsigned int gForkWindowK = 16;
     inline unsigned int gCheckpointTick = 0;
 
@@ -193,9 +181,8 @@ namespace tickFork
             return true;
         }
 
-        // Mismatch: rewind to the checkpoint (state before gCheckpointTick) and replay
-        // [gCheckpointTick, system.tick] strict. Tell the child the last tick to re-run strict, then
-        // discard the whole window's diverts so the child reads pristine on-disk pages.
+        // Mismatch: rewind to the checkpoint and replay [gCheckpointTick, system.tick] strict (target
+        // sent to the child); discard the window's diverts so the child reads pristine pages.
         tickForkLog("verdict MISMATCH: rewind to checkpoint + parent _exit");
         gShadow.discard();
         unsigned int target = (unsigned)system.tick;

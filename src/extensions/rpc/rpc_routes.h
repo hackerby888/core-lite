@@ -1,9 +1,7 @@
 #pragma once
 
-// Migrated RPC endpoints: the SAME logic as the drogon handlers in http.h, but as
-// RpcReq->RpcResp handlers behind the router. Only the two edges changed (input
-// accessor + return); the JSON-from-state bodies are verbatim. Included late in
-// qubic.cpp so node globals (system, ts, computorSeeds, ...) are visible.
+// http.h endpoints as RpcReq->RpcResp router handlers (same JSON-from-state bodies, swapped
+// I/O edges). Included late in qubic.cpp so node globals are visible.
 
 #ifdef __linux__
 

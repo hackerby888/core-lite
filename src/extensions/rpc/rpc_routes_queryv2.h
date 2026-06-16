@@ -1,11 +1,7 @@
 #pragma once
 
-// Migrated /query/v1 endpoints (the RpcQueryV2 controller), as RpcReq->RpcResp
-// handlers. The pure log-decoding helpers (payloadFieldValue, buildTypedPayload,
-// eventLogToJson, eventMatchesFilters, rangeMatches, readUnaligned, identityFromBytes)
-// are REUSED verbatim from RpcQueryV2::RpcQueryV2Controller (still compiled; its drogon
-// registration is inert because the node never runs the drogon loop in sidecar mode).
-// Only the handler control-flow + req/resp edges are reproduced here.
+// /query/v1 endpoints as RpcReq->RpcResp handlers; reuses RpcQueryV2Controller's static log
+// helpers verbatim (its drogon registration is inert with no loop running). Edges swapped.
 
 #ifdef __linux__
 

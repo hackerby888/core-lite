@@ -1,15 +1,8 @@
 #pragma once
 
-// Disk-rollback shadow for the fork-based tick rollback.
-// During a fork window the parent's VM page writes are redirected into a per-dir
-// shadow subdir, leaving the real page files pristine for the child. On a quorum
-// match the shadow is committed (moved into the real dir); on mismatch it is
-// discarded. In-RAM VM bookkeeping rides fork-COW, so only on-disk bytes divert.
-//
-// Included before virtual_memory.h so the VM disk choke-points can call the hooks.
-// Depends only on file_io.h (save/load/getFileSize/createDir + wchar_to_string).
-// CHAR16 is wchar_t built with -fshort-wchar (2 byte): never use std::wstring or
-// libc wide funcs on it; keys are UTF-8, dir buffers are raw CHAR16 vectors.
+// Disk-rollback shadow for the fork tick rollback: during a window, parent VM page writes divert
+// to a per-dir /s subdir (real files stay pristine for the child); commit on match, discard on
+// mismatch. Include before virtual_memory.h. CHAR16 = 2-byte (-fshort-wchar): no std::wstring/libc-wide.
 
 #include <map>
 #include <set>
