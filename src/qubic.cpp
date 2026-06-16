@@ -8556,6 +8556,7 @@ static void bspForkPoint()
 {
     // Stop the world: park the networking processors and hold networkingLock across the fork so the
     // child snapshots consistent net state (no thread mid map-mutation, no held queue mutex).
+    tickForkLog("BSP fork: quiescing networking + taking locks");
     long long q0 = gForkBench ? tickForkNowNs() : 0;
     Overload::quiesceNetworking();
     Overload::networkingLock.lock();
@@ -8564,6 +8565,7 @@ static void bspForkPoint()
 #endif
     if (gForkBench) gForkQuiesceNs = tickForkNowNs() - q0;
 
+    tickForkLog("BSP fork: locks held, calling fork() now");   // if no 'fork() returned' follows -> fork() itself stalled
     long long f0 = gForkBench ? tickForkNowNs() : 0;
     pid_t pid = fork();
     if (gForkBench && pid != 0) gForkSyscallNs = tickForkNowNs() - f0;
@@ -8585,6 +8587,7 @@ static void bspForkPoint()
         return;
     }
 
+    tickForkLog("BSP fork: fork() returned to parent, resuming networking");
     // PARENT BSP: release the lock and resume networking; the child carries the frozen snapshot.
     Overload::networkingLock.unlock();
 #if !defined(NO_RPC)
