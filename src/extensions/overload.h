@@ -3,7 +3,10 @@
 ////////////////// Extensions \\\\\\\\\\\\
 
 #if defined(_WIN32)
+#include <atomic>
 #include <condition_variable>
+#include <memory>
+#include <mutex>
 #include <queue>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -25,6 +28,8 @@
 #include <poll.h>
 #include <sys/mman.h>
 #include <cstddef>
+#include <atomic>
+#include <memory>
 #include <mutex>
 #include <condition_variable>
 #include <queue>
@@ -34,12 +39,8 @@
 #include <chrono>
 #include <new>
 
-// Plan A fork quiesce: park the networking processor threads at a safe loop-top so a fork()
-// snapshots consistent net state. Driven by the BSP fork point (tick_fork_rollback).
-inline std::atomic<bool> gNetQuiesce{ false };
-inline std::atomic<int> gNetParked{ 0 };
-inline std::atomic<unsigned> gNetParkGen{ 0 };   // bumped per fork window; see netPark
-inline int gNetProcThreadCount = 0;   // transmit + receive processors that must reach the park
+// Fork quiesce: the BSP fork point holds networkingLock across fork() for a consistent map snapshot.
+// Per-socket workers are cv-blocked when idle (no busy-spin), so they don't starve the fork.
 
 static volatile bool listOfPeersIsStaticLiteNode = false;
 
@@ -349,49 +350,16 @@ enum class ConnectStatus
     Error
 };
 
-template <typename T>
-class EventQueue {
-public:
-    void push(const T& value) {
-        {
-            std::unique_lock<std::mutex> lock(mtx_);
-            q_.push(value);
-        }
-        cv_.notify_one(); // event triggered here
-    }
-
-    T pop() {
-        std::unique_lock<std::mutex> lock(mtx_);
-        cv_.wait(lock, [&] { return !q_.empty(); }); // wait for event
-        T val = q_.front();
-        q_.pop();
-        return val;
-    }
-
-    // Like pop() but returns false after timeoutMs so callers can re-check a quiesce flag.
-    bool popTimed(T& out, int timeoutMs) {
-        std::unique_lock<std::mutex> lock(mtx_);
-        if (!cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return !q_.empty(); }))
-            return false;
-        out = q_.front();
-        q_.pop();
-        return true;
-    }
-
-    // Promoted fork child only: forcibly reset sync state inherited (locked/waited) from the parent.
-    void reinitForChildPromote() {
-        new (&mtx_) std::mutex();
-        new (&cv_) std::condition_variable();
-        new (&q_) std::queue<T>();
-    }
-
-private:
-    std::queue<T> q_;
-    std::mutex mtx_;
-    std::condition_variable cv_;
-};
-
 struct Overload {
+
+    struct PerSocketIo {
+        std::mutex mtx;
+        std::condition_variable cv;
+        EFI_TCP4_IO_TOKEN* pendingToken = nullptr;
+        bool hasPending = false;
+        SOCKET socket = INVALID_SOCKET;
+        std::atomic<bool> stop{false};
+    };
 
     struct TcpData {
         EFI_TCP4_CONFIG_DATA configData;
@@ -400,6 +368,8 @@ struct Overload {
         volatile char receiveLock;
         volatile char sendLock;
         ConnectStatus connectStatus;
+        std::shared_ptr<PerSocketIo> sendIo;
+        std::shared_ptr<PerSocketIo> recvIo;
     };
 
     struct EventData {
@@ -408,72 +378,18 @@ struct Overload {
         void* notifyFunction;
     };
 
-    struct TransmitRequest
-    {
-        SOCKET socket;
-        EFI_TCP4_IO_TOKEN *token;
-    };
-
-    struct ReceiveRequest
-    {
-        SOCKET socket;
-        EFI_TCP4_IO_TOKEN *token;
-    };
-
     inline static std::vector<std::thread> threads;
     inline static std::unordered_map<unsigned long long, SOCKET> incomingSocketMap;
     inline static std::unordered_map<unsigned long long, TcpData> tcpDataMap;
     inline static std::unordered_map<unsigned long long, EventData> eventDataMap;
     inline static std::unordered_map<unsigned long long, bool> isReceiveThreadSetupMap;
     inline static std::unordered_map<unsigned long long, bool> isSendThreadSetupMap;
-    inline static EventQueue<TransmitRequest> transmitQueue;
-    inline static EventQueue<ReceiveRequest> receiveQueue;
 
     inline static std::mutex networkingLock;
 
-    // Park a networking processor thread at a safe loop-top while a fork window is set up.
-    static void netPark()
-    {
-        if (!gNetQuiesce.load(std::memory_order_acquire)) return;
-        // Count once per fork window (generation): no decrement-on-release to race the next window's
-        // reset, so the barrier can't underflow (mirrors liteForkRequestPark).
-        static thread_local unsigned myGen = (unsigned)-1;
-        unsigned g = gNetParkGen.load(std::memory_order_acquire);
-        if (myGen != g) { myGen = g; gNetParked.fetch_add(1, std::memory_order_acq_rel); }
-        while (gNetQuiesce.load(std::memory_order_acquire)) std::this_thread::yield();
-    }
-
-    // Stop the world for a fork. Park the networking processors (bounded wait). A thread
-    // mid-send may not reach the park, which is still fork-safe: it holds no lock and mutates no
-    // shared container, and the promoted child re-inits the queues regardless.
-    static void quiesceNetworking()
-    {
-        gNetParked.store(0, std::memory_order_release);
-        gNetParkGen.fetch_add(1, std::memory_order_acq_rel);
-        gNetQuiesce = true;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-        while (gNetParked.load(std::memory_order_acquire) < gNetProcThreadCount
-               && std::chrono::steady_clock::now() < deadline)
-            std::this_thread::yield();
-    }
-
-    static void resumeNetworking()
-    {
-        gNetQuiesce = false;
-    }
-
-    // Promoted child: re-spawn the transmit/receive processors (the originals vanished at fork).
-    static void respawnNetworking()
-    {
-        for (int i = 0; i < NUMBER_OF_INCOMING_CONNECTIONS + NUMBER_OF_OUTGOING_CONNECTIONS; i++)
-        {
-            std::thread(transmitProcessor).detach();
-            std::thread(receiveProcessor).detach();
-        }
-    }
-
     // After a fork the promoted child inherits the parent's TCP maps + socket fds but none of the
-    // servicing threads. Drop the per-peer state (reconnect rebuilds it) but keep the global listen
+    // per-socket worker threads (only the calling thread survives fork). Drop the per-peer state
+    // (reconnect lazily re-spawns workers on the first Transmit/Receive) but keep the global listen
     // socket: it is still bound, so the child keeps accepting once it re-arms Accept().
     static void resetForChildPromote()
     {
@@ -489,13 +405,13 @@ struct Overload {
         eventDataMap.clear();
         isReceiveThreadSetupMap.clear();
         isSendThreadSetupMap.clear();
+        // The kept listen socket's inherited per-socket worker refs are stale (threads gone); null
+        // them so the next op lazy-spawns fresh workers.
+        listenData.sendIo.reset();
+        listenData.recvIo.reset();
         if (haveListen) tcpDataMap.emplace(listenKey, listenData);
 
         new (&networkingLock) std::mutex();
-        transmitQueue.reinitForChildPromote();
-        receiveQueue.reinitForChildPromote();
-        gNetQuiesce = false;
-        gNetParked.store(0, std::memory_order_release);
     }
 
     // Directly call the setup function without using custom stack.
@@ -852,6 +768,17 @@ struct Overload {
         unsigned long long key = *(unsigned long long*)ChildHandle;
 		if (tcpDataMap.contains(key)) {
 			TcpData& tcpData = tcpDataMap[key];
+			// Signal per-socket workers to exit; shared_ptr keeps PerSocketIo alive until they do.
+			auto signalIo = [](std::shared_ptr<PerSocketIo>& io) {
+				if (!io) return;
+				{
+					std::lock_guard<std::mutex> lk(io->mtx);
+					io->stop.store(true, std::memory_order_release);
+				}
+				io->cv.notify_all();
+			};
+			signalIo(tcpData.sendIo);
+			signalIo(tcpData.recvIo);
 			if (tcpData.socket != INVALID_SOCKET) {
 				closesocket(tcpData.socket);
 				tcpData.socket = INVALID_SOCKET;
@@ -900,14 +827,25 @@ struct Overload {
             return EFI_UNSUPPORTED;
         }
 
-        RELEASE(tcpData->sendLock);
-
         if (tcpData->connectStatus == ConnectStatus::Disconnected || tcpData->connectStatus == ConnectStatus::Error) {
             Token->CompletionToken.Status = EFI_ABORTED;
             return EFI_ABORTED;
         }
 
-        transmitQueue.push({ tcpData->socket, Token});
+        // Lazy-spawn one dedicated send worker per socket (only the main thread calls Transmit per peer).
+        if (!tcpData->sendIo) {
+            tcpData->sendIo = std::make_shared<PerSocketIo>();
+            tcpData->sendIo->socket = tcpData->socket;
+            auto io = tcpData->sendIo;
+            std::thread([io]() { sendWorkerLoop(io); }).detach();
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(tcpData->sendIo->mtx);
+            tcpData->sendIo->pendingToken = Token;
+            tcpData->sendIo->hasPending = true;
+        }
+        tcpData->sendIo->cv.notify_one();
 
         return EFI_SUCCESS;
     }
@@ -936,7 +874,19 @@ struct Overload {
             return EFI_ABORTED;
         }
 
-        receiveQueue.push({ tcpData->socket, Token});
+        if (!tcpData->recvIo) {
+            tcpData->recvIo = std::make_shared<PerSocketIo>();
+            tcpData->recvIo->socket = tcpData->socket;
+            auto io = tcpData->recvIo;
+            std::thread([io]() { recvWorkerLoop(io); }).detach();
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(tcpData->recvIo->mtx);
+            tcpData->recvIo->pendingToken = Token;
+            tcpData->recvIo->hasPending = true;
+        }
+        tcpData->recvIo->cv.notify_one();
 
         return EFI_SUCCESS;
     }
@@ -1205,15 +1155,27 @@ struct Overload {
         return EFI_SUCCESS;
     }
 
-    static void transmitProcessor()
+    // One dedicated send worker per socket. Consumes hasPending under mtx at start of work,
+    // does the send unlocked, then writes Token Status last as the completion signal to main.
+    // Main never sees Status != -1 until the worker has finished touching pendingToken/Token.
+    static void sendWorkerLoop(std::shared_ptr<PerSocketIo> io)
     {
-        while (true)
+        while (!io->stop.load(std::memory_order_acquire))
         {
-            netPark();
-            TransmitRequest request;
-            if (!transmitQueue.popTimed(request, 50)) continue;
+            EFI_TCP4_IO_TOKEN* token = nullptr;
+            {
+                std::unique_lock<std::mutex> lk(io->mtx);
+                io->cv.wait(lk, [&] {
+                    return io->hasPending || io->stop.load(std::memory_order_acquire);
+                });
+                if (io->stop.load(std::memory_order_acquire)) return;
+                token = io->pendingToken;
+                io->hasPending = false;
+            }
+
             int totalSentBytes = 0;
-            auto& fragment = request.token->Packet.TxData->FragmentTable[0];
+            auto& fragment = token->Packet.TxData->FragmentTable[0];
+            EFI_STATUS finalStatus = EFI_SUCCESS;
             // Abort a send only after 5s of zero progress (not total time) so big transfers aren't cut mid-stream.
             constexpr unsigned long long NO_PROGRESS_TIMEOUT_NS = 5'000'000'000ULL;
             auto lastProgress = std::chrono::high_resolution_clock::now();
@@ -1221,115 +1183,115 @@ struct Overload {
             {
                 auto now = std::chrono::high_resolution_clock::now();
                 if ((unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(now - lastProgress).count() > NO_PROGRESS_TIMEOUT_NS) {
-                    request.token->CompletionToken.Status = EFI_TIMEOUT;
+                    finalStatus = EFI_TIMEOUT;
                     break;
                 }
-                auto n = send(request.socket, (const char*)fragment.FragmentBuffer + totalSentBytes, fragment.FragmentLength - totalSentBytes, MSG_DONTWAIT | MSG_NOSIGNAL);
+                auto n = send(io->socket, (const char*)fragment.FragmentBuffer + totalSentBytes, fragment.FragmentLength - totalSentBytes, MSG_DONTWAIT | MSG_NOSIGNAL);
                 if (n > 0)
                 {
                     totalSentBytes += n;
                     lastProgress = now;
-                } else if (n == 0)
+                }
+                else if (n == 0)
                 {
-                    // connection closed
-                    request.token->CompletionToken.Status = EFI_ABORTED;
+                    finalStatus = EFI_ABORTED;
                     break;
                 }
                 else if (n == SOCKET_ERROR)
                 {
 #ifdef _MSC_VER
-					int err = WSAGetLastError();
+                    int err = WSAGetLastError();
                     if (err == WSAEWOULDBLOCK)
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         continue;
                     }
-                    else
-                    {
-                        logToConsole(L"Closed a transmit socket");
-                        request.token->CompletionToken.Status = EFI_ABORTED;
-                        break;
-                    }
+                    logToConsole(L"Closed a transmit socket");
+                    finalStatus = EFI_ABORTED;
+                    break;
 #else
                     if (errno == EWOULDBLOCK || errno == EAGAIN)
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         continue;
                     }
-                    else
-                    {
-                        logToConsole(L"Closed a transmit socket");
-                        request.token->CompletionToken.Status = EFI_ABORTED;
-                        break;
-                    }
+                    logToConsole(L"Closed a transmit socket");
+                    finalStatus = EFI_ABORTED;
+                    break;
 #endif
                 }
             }
 
             if ((unsigned int)totalSentBytes >= fragment.FragmentLength)
             {
-                request.token->CompletionToken.Status = EFI_SUCCESS;
+                finalStatus = EFI_SUCCESS;
             }
+            // Status write MUST be the last touch on `token` for this op — main may
+            // immediately reuse the Token / FragmentBuffer once it sees Status != -1.
+            token->CompletionToken.Status = finalStatus;
         }
     }
 
-    static void receiveProcessor()
+    static void recvWorkerLoop(std::shared_ptr<PerSocketIo> io)
     {
-        while (true)
+        while (!io->stop.load(std::memory_order_acquire))
         {
-            netPark();
-            ReceiveRequest request;
-            if (!receiveQueue.popTimed(request, 50)) continue;
-            // Read at most the free space the caller reserved in its receive buffer
-            // (receiveData() sets this in FragmentLength = BUFFER_SIZE - bytesAlreadyBuffered).
-            // Passing BUFFER_SIZE here overruns peers[i].receiveBuffer whenever it already
-            // holds a partial message, clobbering the adjacent peer's buffer — which then
-            // parses as malformed (size() < header) and gets force-forgotten.
-            const unsigned int maxReceiveSize = (unsigned int)request.token->Packet.RxData->FragmentTable[0].FragmentLength;
-            auto n = recv(request.socket, (char *)request.token->Packet.RxData->FragmentTable[0].FragmentBuffer, maxReceiveSize, MSG_DONTWAIT);
+            EFI_TCP4_IO_TOKEN* token = nullptr;
+            {
+                std::unique_lock<std::mutex> lk(io->mtx);
+                io->cv.wait(lk, [&] {
+                    return io->hasPending || io->stop.load(std::memory_order_acquire);
+                });
+                if (io->stop.load(std::memory_order_acquire)) return;
+                token = io->pendingToken;
+                io->hasPending = false;
+            }
+
+            // Read at most the free space the caller reserved (FragmentLength), NOT BUFFER_SIZE:
+            // BUFFER_SIZE overruns receiveBuffer when it holds a partial message, clobbering the
+            // adjacent peer's buffer (parses as malformed -> force-forgotten).
+            const unsigned int maxReceiveSize = (unsigned int)token->Packet.RxData->FragmentTable[0].FragmentLength;
+            auto n = recv(io->socket, (char*)token->Packet.RxData->FragmentTable[0].FragmentBuffer, maxReceiveSize, MSG_DONTWAIT);
+            EFI_STATUS finalStatus;
+            unsigned int dataLen = 0;
             if (n > 0)
             {
-                request.token->Packet.RxData->DataLength = n;
-                // Publish DataLength before Status. The main loop reads Status first, then
-                // DataLength; without this barrier it can observe SUCCESS together with the
-                // stale, buffer-sized DataLength pre-set in receiveData(), over-advancing the
-                // receive cursor into zero-filled buffer so the parser reads size()==0.
-                std::atomic_thread_fence(std::memory_order_release);
-                request.token->CompletionToken.Status = EFI_SUCCESS;
+                dataLen = (unsigned int)n;
+                finalStatus = EFI_SUCCESS;
             }
             else if (n == 0)
             {
-                request.token->CompletionToken.Status = EFI_ABORTED;
+                finalStatus = EFI_ABORTED;
             }
-            else if (n == SOCKET_ERROR)
+            else
             {
 #ifdef _MSC_VER
-				int err = WSAGetLastError();
-				if (err == WSAEWOULDBLOCK)
-				{
-					request.token->Packet.RxData->DataLength = 0;
-					std::atomic_thread_fence(std::memory_order_release);
-					request.token->CompletionToken.Status = EFI_SUCCESS;
-					continue;
-				}
-				else
-				{
-					request.token->CompletionToken.Status = EFI_ABORTED;
-				}
-#else
-                if (errno == EWOULDBLOCK || errno == EAGAIN)
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK)
                 {
-                    request.token->Packet.RxData->DataLength = 0;
-                    std::atomic_thread_fence(std::memory_order_release);
-                    request.token->CompletionToken.Status = EFI_SUCCESS;
-                    continue;
+                    finalStatus = EFI_SUCCESS;
                 }
                 else
                 {
-                    request.token->CompletionToken.Status = EFI_ABORTED;
+                    finalStatus = EFI_ABORTED;
+                }
+#else
+                if (errno == EWOULDBLOCK || errno == EAGAIN)
+                {
+                    finalStatus = EFI_SUCCESS;
+                }
+                else
+                {
+                    finalStatus = EFI_ABORTED;
                 }
 #endif
             }
+            token->Packet.RxData->DataLength = dataLen;
+            // Publish DataLength before Status: the main loop reads Status first, then DataLength;
+            // without this barrier it can see SUCCESS with a stale buffer-sized DataLength.
+            std::atomic_thread_fence(std::memory_order_release);
+            // Status write MUST be the last touch on `token` for this op.
+            token->CompletionToken.Status = finalStatus;
         }
     }
 
@@ -1379,15 +1341,7 @@ struct Overload {
         st->ConOut->ClearScreen = Overload::ClearScreen;
         st->ConIn->ReadKeyStroke = Overload::ReadKeyStroke;
 
-        // Open transmit and receive processor threads
-        for (int i = 0; i < NUMBER_OF_INCOMING_CONNECTIONS + NUMBER_OF_OUTGOING_CONNECTIONS; i++)
-        {
-            std::thread transmitProcessorThread(transmitProcessor);
-            transmitProcessorThread.detach();
-            std::thread receiveProcessorThread(receiveProcessor);
-            receiveProcessorThread.detach();
-        }
-        gNetProcThreadCount = 2 * (NUMBER_OF_INCOMING_CONNECTIONS + NUMBER_OF_OUTGOING_CONNECTIONS);
+        // Per-socket send/recv worker threads are spawned lazily on first Transmit/Receive call.
 
         // Reserve space
         incomingSocketMap.reserve(1024);

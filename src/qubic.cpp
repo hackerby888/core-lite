@@ -8516,10 +8516,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     gReRunStrict = true;                          // re-run strict from the checkpoint tick ...
     gReRunStrictUntilTick = strictUntilTick;      // ... through the mismatch tick (the window), then optimistic
     Overload::resetForChildPromote();  // drop inherited per-peer TCP state, keep the listen socket
-    // Thread creation can fail under resource pressure; a half-rebuilt child would wedge silently, so
-    // bail loud and let the supervisor restart the node from its snapshot.
-    try { Overload::respawnNetworking(); }   // re-spawn the transmit/receive processors (vanished at fork)
-    catch (...) { tickForkLog("respawnNetworking failed -> fatal child exit (supervisor restart)"); _exit(71); }
+    // Per-socket send/recv workers lazy-spawn on the first Transmit/Receive after reconnect (no eager respawn).
     // Drop inherited connection state so the main loop reconnects fresh. reset() (not a full zero)
     // preserves the per-peer heap buffers + EFI tokens that are allocated ONCE at startup
     // (dataToTransmit/receiveBuffer/transmitData FragmentBuffer/tokens) and valid here via COW.
@@ -8554,11 +8551,11 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
 // Called from the BSP main-loop top (no networkingLock held) when a fork is requested.
 static void bspForkPoint()
 {
-    // Stop the world: park the networking processors and hold networkingLock across the fork so the
-    // child snapshots consistent net state (no thread mid map-mutation, no held queue mutex).
-    tickForkLog("BSP fork: quiescing networking + taking locks");
+    // Hold networkingLock across the fork so the child snapshots a consistent map state (no thread
+    // mid map-mutation). The per-socket workers are cv-blocked when idle (no busy-spin), so they
+    // don't starve the fork; they vanish in the child and lazy-respawn on reconnect.
+    tickForkLog("BSP fork: taking locks");
     long long q0 = gForkBench ? tickForkNowNs() : 0;
-    Overload::quiesceNetworking();
     Overload::networkingLock.lock();
 #if !defined(NO_RPC)
     gRpcDispatchLock.lock();   // drain in-flight RPC dispatches so no handler holds a node lock at fork
@@ -8587,13 +8584,12 @@ static void bspForkPoint()
         return;
     }
 
-    tickForkLog("BSP fork: fork() returned to parent, resuming networking");
-    // PARENT BSP: release the lock and resume networking; the child carries the frozen snapshot.
+    tickForkLog("BSP fork: fork() returned to parent");
+    // PARENT BSP: release the lock; the child carries the frozen snapshot.
     Overload::networkingLock.unlock();
 #if !defined(NO_RPC)
     gRpcDispatchLock.unlock();
 #endif
-    Overload::resumeNetworking();
     if (pid < 0) tickForkLog("fork() failed -> parent strict fallback (no checkpoint)");
     tickFork::gChildPid = pid;   // >=0 on success, -1 on failure
     tickFork::gForkRequest = false;
