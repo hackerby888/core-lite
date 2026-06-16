@@ -85,33 +85,34 @@ namespace tickFork
         return false;
     }
 
-    // tickProcessor, before processTick(system.tick). Requests a BSP fork on a risky tick.
-    inline void maybeForkBeforeTick(unsigned long long processorNumber)
-    {
-        (void)processorNumber;
-        if (gReRunStrict) return;                   // this is the re-run tick: do not fork again
-        if (forceVerifySolutions) return;           // -fv = strict-all mode: no trick/rollback/fork
-        if (isMainMode()) return;
-        if (!gForkForceFork && !tickHasSolution(system.tick)) return;  // force: fork clean ticks too
+    // Checkpoint-and-replay: k ticks share ONE fork. The checkpoint child snapshots state BEFORE
+    // gCheckpointTick and stays alive across [gCheckpointTick, +gForkWindowK). A matching solution
+    // tick keeps it; a mismatch rewinds to it and replays the window strict; staleness commits it.
+    // This amortizes the O(RSS) fork over the window instead of paying it on every solution tick.
+    inline unsigned int gForkWindowK = 16;
+    inline unsigned int gCheckpointTick = 0;
 
+    // Establish a fresh checkpoint at system.tick: park request procs, pipe, arm shadow, ask BSP to fork.
+    inline void establishCheckpoint()
+    {
         if (gForkBench) { gForkWindowStartNs = tickForkNowNs(); gForkRssBeforeKb = tickForkRssKb(); }
-        tickForkLog("solution tick -> request BSP fork");
+        tickForkLog("checkpoint -> request BSP fork");
         gForkParked.store(0, std::memory_order_release);
         gForkParkGen.fetch_add(1, std::memory_order_acq_rel);   // open a new park generation
         gForkQuiesceRequest = true;
         while (gForkParked.load(std::memory_order_acquire) < nRequestProcessorIDs)
             std::this_thread::yield();
 
-        // If the fork cannot be set up, score this tick strict (like the re-run) so the optimistic
-        // pass cannot diverge from quorum: no child is needed and the no-fork verdict won't stall.
+        // If the fork cannot be set up, score this tick strict so the optimistic pass cannot diverge
+        // from quorum: no child is needed and the no-fork verdict won't stall.
         if (pipe(gPipe) != 0)
         {
             gForkQuiesceRequest = false;
-            gReRunStrict = true;
+            gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
             tickForkLog("pipe() failed -> scoring this tick strict (no fork)");
             return;
         }
-        gShadow.arm();                              // parent disk writes -> shadow; child resets on promote
+        gShadow.arm();                              // parent disk writes -> shadow for the whole window
         gChildPid = -2;
         gForkRequest = true;                        // BSP forks at its loop-top
         while (gChildPid == -2) std::this_thread::yield();
@@ -121,32 +122,65 @@ namespace tickFork
             gShadow.discard();
             close(gPipe[0]); close(gPipe[1]); gPipe[0] = gPipe[1] = -1;
             gForkQuiesceRequest = false;
-            gReRunStrict = true;
+            gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
             tickForkLog("fork() failed -> scoring this tick strict (no fork)");
             return;
         }
-        close(gPipe[0]);                            // parent keeps the write end
+        close(gPipe[0]);                            // parent keeps the write end across the window
         gForkQuiesceRequest = false;                // release request processors
-        tickForkLog("parent: child forked, optimistic processTick ahead");
+        gCheckpointTick = (unsigned)system.tick;
+        tickForkLog("parent: checkpoint forked, optimistic processTick ahead");
     }
 
-    // At the quorum compare. Returns true if fork handled this tick (skip legacy reprocess).
+    // Close out a window that completed with no mismatch (we are still alive): commit its diverted
+    // disk writes into the real files and reap the checkpoint child.
+    inline void retireCheckpoint()
+    {
+        tickForkLog("window complete -> commit shadow + reap checkpoint");
+        gShadow.commit();
+        kill(gChildPid.load(), SIGKILL);
+        int st; waitpid(gChildPid.load(), &st, 0);
+        close(gPipe[1]); gPipe[1] = -1;
+        gChildPid = -2;
+    }
+
+    // tickProcessor, before processTick(system.tick). Maintains the checkpoint window.
+    inline void maybeForkBeforeTick(unsigned long long processorNumber)
+    {
+        (void)processorNumber;
+        if (gReRunStrict) return;                   // replaying the window strict: never fork
+        if (forceVerifySolutions) return;           // -fv = strict-all mode: no trick/rollback/fork
+        if (isMainMode()) return;
+
+        // Cheap common path: a live checkpoint still covers this tick -> reuse it, no fork.
+        if (gChildPid >= 0 && (unsigned)system.tick - gCheckpointTick < gForkWindowK) return;
+
+        // Window aged out with no mismatch (still alive) -> commit it and drop the child.
+        if (gChildPid >= 0) retireCheckpoint();
+
+        // Only solution ticks can diverge from quorum, so only they need a checkpoint.
+        if (!gForkForceFork && !tickHasSolution(system.tick)) return;
+
+        establishCheckpoint();
+    }
+
+    // At the quorum compare. Returns true if the checkpoint window handled this tick.
     inline bool verdict(bool mismatch, const m256i& quorumSpectrumDigest, unsigned long long processorNumber)
     {
         (void)quorumSpectrumDigest; (void)processorNumber;
-        if (gChildPid < 0) return false;            // no live child (no fork this tick, or we are the re-run)
+        if (gChildPid < 0) return false;            // no checkpoint (non-solution tick, or mid-replay)
 
-        if (gForkForceMatch) mismatch = false;      // test: exercise the commit + kill-child path
-        if (gForkForceMismatch) mismatch = true;    // test: force promote (parent _exit + child takes over)
+        if (gForkForceMatch) mismatch = false;      // test: exercise the keep-checkpoint path
+        if (gForkForceMismatch) mismatch = true;    // test: force rewind (parent _exit + child replays)
 
         if (gForkBench)
         {
             long long windowNs = tickForkNowNs() - gForkWindowStartNs;
             long rssNow = tickForkRssKb();
             fprintf(stderr,
-                "[FORK-BENCH] tick=%u %s window=%.2fms quiesce=%.2fms fork()=%.3fms "
+                "[FORK-BENCH] tick=%u %s ckpt=%u window=%.2fms quiesce=%.2fms fork()=%.3fms "
                 "rss: before=%ldMB after=%ldMB cow_delta=%ldMB\n",
-                (unsigned)system.tick, mismatch ? "MISMATCH" : "MATCH",
+                (unsigned)system.tick, mismatch ? "MISMATCH" : "MATCH", gCheckpointTick,
                 windowNs / 1e6, gForkQuiesceNs / 1e6, gForkSyscallNs / 1e6,
                 gForkRssBeforeKb / 1024, rssNow / 1024, (rssNow - gForkRssBeforeKb) / 1024);
             fflush(stderr);
@@ -154,24 +188,20 @@ namespace tickFork
 
         if (!mismatch)
         {
-            tickForkLog("verdict MATCH: commit shadow + kill child");
-            gShadow.commit();
-            kill(gChildPid.load(), SIGKILL);
-            int st; waitpid(gChildPid.load(), &st, 0);
-            close(gPipe[1]); gPipe[1] = -1;
-            gChildPid = -2;
+            // Keep the checkpoint for the rest of the window; committed + reaped at staleness.
+            tickForkLog("verdict MATCH: keep checkpoint (window)");
             return true;
         }
 
-        // Hand off to the child donor and die without committing; the child reads pristine disk.
-        // Discard our optimistic /s diverts first: the child forked BEFORE these page writes, so its
-        // COW shadow bookkeeping is empty and its purgeOrphans cannot see them. Real page files were
-        // never touched (writes diverted to /s), so removing /s is safe and prevents orphan buildup.
-        tickForkLog("verdict MISMATCH: promote child + parent _exit");
+        // Mismatch: rewind to the checkpoint (state before gCheckpointTick) and replay
+        // [gCheckpointTick, system.tick] strict. Tell the child the last tick to re-run strict, then
+        // discard the whole window's diverts so the child reads pristine on-disk pages.
+        tickForkLog("verdict MISMATCH: rewind to checkpoint + parent _exit");
         gShadow.discard();
+        unsigned int target = (unsigned)system.tick;
         const char tag = 'P';
-        ssize_t w = write(gPipe[1], &tag, 1);
-        (void)w;
+        ssize_t w = write(gPipe[1], &tag, 1); (void)w;
+        w = write(gPipe[1], &target, sizeof(target)); (void)w;
         _exit(0);
     }
 }

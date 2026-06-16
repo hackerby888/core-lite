@@ -6184,7 +6184,8 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 spamThread.detach();
                 tickFork::maybeForkBeforeTick(processorNumber);
                 processTick(processorNumber);
-                gReRunStrict = false;
+                // Strict re-run spans the whole replay window [checkpoint, target]; clear once past it.
+                if ((unsigned)system.tick >= gReRunStrictUntilTick) gReRunStrict = false;
                 latestProcessedTick = system.tick;
 
                 // safety check for contract locks
@@ -8501,9 +8502,9 @@ static void spawnAPs()
 
 #ifdef __linux__
 // Promoted fork child: drop the donor role, rebuild the AP workers, re-run the tick strict.
-static void tickForkChildPromote()
+static void tickForkChildPromote(unsigned int strictUntilTick)
 {
-    tickForkLog("CHILD: promote begin (rebuild net + APs, re-run tick strict)");
+    tickForkLog("CHILD: promote begin (rebuild net + APs, replay window strict)");
     tickFork::gIsForkChild = true;
     tickFork::gForkRequest = false;
     tickFork::gChildPid = -2;
@@ -8511,7 +8512,8 @@ static void tickForkChildPromote()
     close(tickFork::gPipe[0]); tickFork::gPipe[0] = -1;
     gShadow.reinitForChildPromote();   // inherited mtx may be held by a non-surviving thread
     gShadow.purgeOrphans();   // drop the parent's optimistic shadow; real page files are pristine
-    gReRunStrict = true;      // the re-spawned tick processor re-runs the current tick strict
+    gReRunStrict = true;                          // re-run strict from the checkpoint tick ...
+    gReRunStrictUntilTick = strictUntilTick;      // ... through the mismatch tick (the window), then optimistic
     Overload::resetForChildPromote();  // drop inherited per-peer TCP state, keep the listen socket
     Overload::respawnNetworking();      // re-spawn the transmit/receive processors (vanished at fork)
     // Drop inherited connection state so the main loop reconnects fresh. reset() (not a full zero)
@@ -8560,9 +8562,16 @@ static void bspForkPoint()
         // CHILD BSP: pristine donor. Block until the parent's verdict, then become the node.
         close(tickFork::gPipe[1]);
         char tag = 0;
+        unsigned int target = 0;
         ssize_t n = read(tickFork::gPipe[0], &tag, 1);   // 'P' = promote; 0/EOF = parent crash -> promote
-        (void)n; (void)tag;
-        tickForkChildPromote();
+        if (n == 1 && tag == 'P')
+        {
+            // The promote frame carries the last tick to replay strict (the mismatch tick).
+            if (read(tickFork::gPipe[0], &target, sizeof(target)) != (ssize_t)sizeof(target)) target = 0;
+        }
+        // Crash/short-read: no target -> replay the full window strict to cover any mismatch position.
+        if (target == 0) target = (unsigned)system.tick + tickFork::gForkWindowK;
+        tickForkChildPromote(target);
         return;
     }
 

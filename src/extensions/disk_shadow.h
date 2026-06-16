@@ -26,6 +26,9 @@
 inline volatile bool gForkWindowActive = false;
 // Drives isRevalidation strict scoring during the child re-run (not forceVerifySolutions).
 inline std::atomic<bool> gReRunStrict{ false };
+// Checkpoint-and-replay: the promoted child re-runs strict through this tick (the window's last
+// processed tick at mismatch), then resumes optimistic. 0 = single-tick strict (legacy/fork-fail).
+inline std::atomic<unsigned int> gReRunStrictUntilTick{ 0 };
 // Test: assert the fork re-run reproduces the quorum digest.
 inline volatile bool gVerifyForkRollback = false;
 
