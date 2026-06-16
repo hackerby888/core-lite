@@ -8496,6 +8496,7 @@ static void spawnAPs()
     }
 }
 
+#ifdef __linux__
 // Promoted fork child: drop the donor role, rebuild the AP workers, re-run the tick strict.
 static void tickForkChildPromote()
 {
@@ -8505,6 +8506,7 @@ static void tickForkChildPromote()
     tickFork::gChildPid = -2;
     gForkQuiesceRequest = false;
     close(tickFork::gPipe[0]); tickFork::gPipe[0] = -1;
+    gShadow.reinitForChildPromote();   // inherited mtx may be held by a non-surviving thread
     gShadow.purgeOrphans();   // drop the parent's optimistic shadow; real page files are pristine
     gReRunStrict = true;      // the re-spawned tick processor re-runs the current tick strict
     Overload::resetForChildPromote();  // drop inherited per-peer TCP state, keep the listen socket
@@ -8522,7 +8524,7 @@ static void tickForkChildPromote()
         peers[i].transmitToken.CompletionToken.Status = -1;
         peers[i].receiveData.FragmentTable[0].FragmentBuffer = peers[i].receiveBuffer;  // fresh receive cursor
     }
-    registerAsynFileIO(mpServicesProtocol);
+    if (gAsyncFileIO) gAsyncFileIO->reinitForChildPromote();   // clean queues; reuse inherited struct (no leak)
     spawnAPs();
     if (gForkBench) { fprintf(stderr, "[FORK-BENCH] child promoted rss=%ldMB\n", tickForkRssKb() / 1024); fflush(stderr); }
     tickForkLog("CHILD: promote done, now the live node");
@@ -8559,6 +8561,7 @@ static void bspForkPoint()
     tickFork::gChildPid = pid;   // >=0 on success, -1 on failure
     tickFork::gForkRequest = false;
 }
+#endif // __linux__
 
 EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 {
@@ -8665,7 +8668,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             while (!shutDownNode)
             {
                 PinScope _pinScope; // release swap-page pins taken during this main-loop iteration
+#ifdef __linux__
                 if (tickFork::gForkRequest) bspForkPoint();
+#endif
                 if (criticalSituation == 1)
                 {
                     logToConsole(L"CRITICAL SITUATION #1!!!");
@@ -9345,6 +9350,7 @@ void processArgs(int argc, const char* argv[]) {
         ("verify-fork-rollback", "TEST: assert the fork re-run reproduces the quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise the MATCH path on clean ticks)", cxxopts::value<bool>())
         ("fork-force-match", "TEST: force the fork verdict to take the match branch (commit + kill child)", cxxopts::value<bool>())
+        ("fork-force-mismatch", "TEST: force the fork verdict to take the mismatch branch (promote child + parent _exit)", cxxopts::value<bool>())
         ("fork-bench", "TEST: print per-fork timing + RSS", cxxopts::value<bool>())
         ("fbis-count", "TEST: number of solution txs to inject per tick (with --fbis)", cxxopts::value<int>()->default_value("1"))
         ("fbis-same", "TEST: inject all --fbis solutions from one computor (drains it -> out-of-qus)", cxxopts::value<bool>())
@@ -9376,6 +9382,10 @@ void processArgs(int argc, const char* argv[]) {
     if (result.count("fork-force-match")) {
         gForkForceMatch = true;
         logColorToScreen("INFO", "TEST: fork verdict forced to match");
+    }
+    if (result.count("fork-force-mismatch")) {
+        gForkForceMismatch = true;
+        logColorToScreen("INFO", "TEST: fork verdict forced to mismatch (promote every fork)");
     }
     if (result.count("fork-bench")) {
         gForkBench = true;

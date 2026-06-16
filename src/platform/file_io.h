@@ -900,10 +900,34 @@ public:
 
         // Flush all remained tasks
         flush();
-        if (mpSaveBuffer == NULL)
+        if (mpSaveBuffer != NULL)
         {
             freePool(mpSaveBuffer);
+            mpSaveBuffer = NULL;
         }
+    }
+
+    // Promoted fork child: re-init the queues (drop entries inherited from the parent) reusing the
+    // existing save buffer. No alloc/free/flush, so it is safe after fork() (no worker threads on the
+    // OS port) and never replays the parent's pending writes.
+    void reinitForChildPromote()
+    {
+        mIsStop = false;
+        mEnableNonBlockSave = false;
+        mFileBlockingReadQueue.initializeQueue(NULL);
+        mFileBlockingWriteQueue.initializeQueue(NULL);
+        if (mpSaveBuffer != NULL)
+        {
+            mFileWriteQueue.initializeQueue(mpSaveBuffer);
+            mEnableNonBlockSave = true;
+        }
+        setMem(mRemoveFileNameQueue, sizeof(mRemoveFileNameQueue), 0);
+        setMem(mRemoveFileDirQueue, sizeof(mRemoveFileDirQueue), 0);
+        mRemoveFilePathQueueCount = 0;
+        mRemoveFilePathQueueLock = 0;
+        setMem(mCreateDirQueue, sizeof(mCreateDirQueue), 0);
+        mCreateDirQueueCount = 0;
+        mCreateDirQueueLock = 0;
     }
 
     bool isMainThread()

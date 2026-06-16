@@ -36,8 +36,9 @@
 
 // Plan A fork quiesce: park the networking processor threads at a safe loop-top so a fork()
 // snapshots consistent net state. Driven by the BSP fork point (tick_fork_rollback).
-inline volatile bool gNetQuiesce = false;
+inline std::atomic<bool> gNetQuiesce{ false };
 inline std::atomic<int> gNetParked{ 0 };
+inline std::atomic<unsigned> gNetParkGen{ 0 };   // bumped per fork window; see netPark
 inline int gNetProcThreadCount = 0;   // transmit + receive processors that must reach the park
 
 static volatile bool listOfPeersIsStaticLiteNode = false;
@@ -244,7 +245,9 @@ inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false
     if (addr != MAP_FAILED)
     {
         // THP hint: fewer PTEs -> cheaper fork() of the large-RSS node. Unprivileged; no-op if THP off.
-        madvise(addr, size, MADV_HUGEPAGE);
+#if defined(__linux__)
+        madvise(addr, size, MADV_HUGEPAGE);   // MADV_HUGEPAGE is Linux-only (absent on macOS/Darwin)
+#endif
         commitMemMap[(unsigned long long)addr] = commitMem;
         return addr;
     }
@@ -431,10 +434,13 @@ struct Overload {
     // Park a networking processor thread at a safe loop-top while a fork window is set up.
     static void netPark()
     {
-        if (!gNetQuiesce) return;
-        gNetParked.fetch_add(1, std::memory_order_acq_rel);
-        while (gNetQuiesce) std::this_thread::yield();
-        gNetParked.fetch_sub(1, std::memory_order_acq_rel);
+        if (!gNetQuiesce.load(std::memory_order_acquire)) return;
+        // Count once per fork window (generation): no decrement-on-release to race the next window's
+        // reset, so the barrier can't underflow (mirrors liteForkRequestPark).
+        static thread_local unsigned myGen = (unsigned)-1;
+        unsigned g = gNetParkGen.load(std::memory_order_acquire);
+        if (myGen != g) { myGen = g; gNetParked.fetch_add(1, std::memory_order_acq_rel); }
+        while (gNetQuiesce.load(std::memory_order_acquire)) std::this_thread::yield();
     }
 
     // Plan A: stop the world for a fork. Park the networking processors (bounded wait). A thread
@@ -443,6 +449,7 @@ struct Overload {
     static void quiesceNetworking()
     {
         gNetParked.store(0, std::memory_order_release);
+        gNetParkGen.fetch_add(1, std::memory_order_acq_rel);
         gNetQuiesce = true;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
         while (gNetParked.load(std::memory_order_acquire) < gNetProcThreadCount

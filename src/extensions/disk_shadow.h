@@ -17,6 +17,7 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <new>
 #include <thread>
 #include <filesystem>
 #include <utility>
@@ -24,7 +25,7 @@
 // Armed on the parent for the duration of one fork window.
 inline volatile bool gForkWindowActive = false;
 // Drives isRevalidation strict scoring during the child re-run (not forceVerifySolutions).
-inline volatile bool gReRunStrict = false;
+inline std::atomic<bool> gReRunStrict{ false };
 // Test: assert the fork re-run reproduces the quorum digest.
 inline volatile bool gVerifyForkRollback = false;
 
@@ -32,19 +33,24 @@ inline volatile bool gVerifyForkRollback = false;
 // force the verdict to take the match branch, and print per-fork timing + RSS.
 inline volatile bool gForkForceFork = false;
 inline volatile bool gForkForceMatch = false;
+inline volatile bool gForkForceMismatch = false;
 inline volatile bool gForkBench = false;
 
 // Request-processor quiesce for a consistent fork snapshot.
-inline volatile bool gForkQuiesceRequest = false;
+inline std::atomic<bool> gForkQuiesceRequest{ false };
 inline std::atomic<int> gForkParked{ 0 };
+inline std::atomic<unsigned> gForkParkGen{ 0 };   // bumped per fork window; see liteForkRequestPark
 
 // Called by request processors at loop top; parks while a fork window is set up.
 static inline void liteForkRequestPark()
 {
-    if (!gForkQuiesceRequest) return;
-    gForkParked.fetch_add(1, std::memory_order_acq_rel);
-    while (gForkQuiesceRequest) std::this_thread::yield();
-    gForkParked.fetch_sub(1, std::memory_order_acq_rel);
+    if (!gForkQuiesceRequest.load(std::memory_order_acquire)) return;
+    // Count once per fork window (generation): a straggler from a prior window can't double-count or
+    // underflow the barrier, and there is no decrement-on-release to race the next window's reset.
+    static thread_local unsigned myGen = (unsigned)-1;
+    unsigned g = gForkParkGen.load(std::memory_order_acquire);
+    if (myGen != g) { myGen = g; gForkParked.fetch_add(1, std::memory_order_acq_rel); }
+    while (gForkQuiesceRequest.load(std::memory_order_acquire)) std::this_thread::yield();
 }
 
 class DiskShadow
@@ -81,25 +87,25 @@ class DiskShadow
     void clearWindow()
     {
         gForkWindowActive = false;
-        active = false;
+        active.store(false, std::memory_order_release);
         written.clear();
     }
 
 public:
-    volatile bool active = false;
+    std::atomic<bool> active{ false };
 
     void arm()
     {
         std::lock_guard<std::mutex> g(mtx);
         written.clear();
-        active = true;
+        active.store(true, std::memory_order_release);
         gForkWindowActive = true;
     }
 
     // Write choke-point: record the page and redirect to the shadow dir.
     CHAR16* writeDir(CHAR16* realDir, const CHAR16* pageName)
     {
-        if (!active) return realDir;
+        if (!active.load(std::memory_order_acquire)) return realDir;
         std::lock_guard<std::mutex> g(mtx);
         std::string realUtf8 = wchar_to_string(realDir);
         CHAR16* sd = ensure(realUtf8, realDir);
@@ -112,7 +118,7 @@ public:
     // Read choke-point: serve from the shadow dir if the page was diverted, else real.
     CHAR16* readDir(CHAR16* realDir, const CHAR16* pageName)
     {
-        if (!active) return realDir;
+        if (!active.load(std::memory_order_acquire)) return realDir;
         std::lock_guard<std::mutex> g(mtx);
         auto it = shadowDir.find(wchar_to_string(realDir));
         if (it == shadowDir.end()) return realDir;
@@ -146,6 +152,13 @@ public:
         clearWindow();
     }
 
+    // Promoted fork child: the inherited mtx may be held by a thread that did not survive the fork.
+    // Reinit it (mirrors Overload::resetForChildPromote) so the following purgeOrphans cannot deadlock.
+    void reinitForChildPromote()
+    {
+        new (&mtx) std::mutex();
+    }
+
     // Defensive cleanup of leftover shadow subdirs (e.g. after a parent crash).
     void purgeOrphans()
     {
@@ -157,7 +170,7 @@ public:
             std::filesystem::remove_all(kv.first + "/s", ec);
         }
         written.clear();
-        active = false;
+        active.store(false, std::memory_order_release);
     }
 };
 
