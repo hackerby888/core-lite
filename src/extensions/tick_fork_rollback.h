@@ -161,6 +161,15 @@ namespace tickFork
         if (forceVerifySolutions) return;           // -fv = strict-all mode: no trick/rollback/fork
         if (isMainMode()) return;
 
+        // Test: force a single-tick fork + rollback every N ticks. Retire any live window first so the
+        // forced mismatch (in verdict) rewinds exactly this tick, back to the tick-1 state.
+        if (gForkForceRollbackEvery && (unsigned)system.tick % gForkForceRollbackEvery == 0)
+        {
+            if (gChildPid >= 0) retireCheckpoint();
+            establishCheckpoint();
+            return;
+        }
+
         // Cheap common path: a live checkpoint still covers this tick -> reuse it, no fork.
         if (gChildPid >= 0 && (unsigned)system.tick - gCheckpointTick < gForkWindowK) return;
 
@@ -181,6 +190,7 @@ namespace tickFork
 
         if (gForkForceMatch) mismatch = false;      // test: exercise the keep-checkpoint path
         if (gForkForceMismatch) mismatch = true;    // test: force rewind (parent _exit + child replays)
+        if (gForkForceRollbackEvery && (unsigned)system.tick % gForkForceRollbackEvery == 0) mismatch = true;  // test: periodic forced rollback
         if (gShadowPoisoned.load(std::memory_order_acquire)) mismatch = true;  // shadow I/O failed -> replay strict from pristine
 
         if (gForkBench)

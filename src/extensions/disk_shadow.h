@@ -27,6 +27,8 @@ inline volatile bool gForkForceFork = false;
 inline volatile bool gForkForceMatch = false;
 inline volatile bool gForkForceMismatch = false;
 inline volatile bool gForkBench = false;
+// Force a single-tick fork + rollback-replay every N ticks (0 = off).
+inline unsigned int gForkForceRollbackEvery = 0;
 
 // Request-processor quiesce for a consistent fork snapshot.
 inline std::atomic<bool> gForkQuiesceRequest{ false };

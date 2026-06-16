@@ -9389,6 +9389,7 @@ void processArgs(int argc, const char* argv[]) {
         ("fork-force-match", "TEST: force the fork verdict to take the match branch (commit + kill child)", cxxopts::value<bool>())
         ("fork-force-mismatch", "TEST: force the fork verdict to take the mismatch branch (promote child + parent _exit)", cxxopts::value<bool>())
         ("fork-bench", "TEST: print per-fork timing + RSS", cxxopts::value<bool>())
+        ("fork-force-rollback-every", "TEST: force a fork + single-tick rollback (to tick-1) every N ticks (0=off)", cxxopts::value<unsigned int>()->default_value("0"))
         ("fbis-count", "TEST: number of solution txs to inject per tick (with --fbis)", cxxopts::value<int>()->default_value("1"))
         ("fbis-same", "TEST: inject all --fbis solutions from one computor (drains it -> out-of-qus)", cxxopts::value<bool>())
         ("test-solution-threshold", "TEST: override the runtime solution threshold for the current epoch (0 = injected solutions validate)", cxxopts::value<int>()->default_value("-1"))
@@ -9432,6 +9433,11 @@ void processArgs(int argc, const char* argv[]) {
     if (result.count("fork-bench")) {
         gForkBench = true;
         logColorToScreen("INFO", "TEST: per-fork timing + RSS benchmark enabled");
+    }
+    if (result.count("fork-force-rollback-every")) {
+        gForkForceRollbackEvery = result["fork-force-rollback-every"].as<unsigned int>();
+        if (gForkForceRollbackEvery)
+            logColorToScreen("INFO", "TEST: forcing a fork + single-tick rollback every " + std::to_string(gForkForceRollbackEvery) + " ticks");
     }
     if (result.count("fbis-count")) {
         int c = result["fbis-count"].as<int>();
