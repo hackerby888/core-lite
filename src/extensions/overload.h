@@ -443,7 +443,7 @@ struct Overload {
         while (gNetQuiesce.load(std::memory_order_acquire)) std::this_thread::yield();
     }
 
-    // Plan A: stop the world for a fork. Park the networking processors (bounded wait). A thread
+    // Stop the world for a fork. Park the networking processors (bounded wait). A thread
     // mid-send may not reach the park, which is still fork-safe: it holds no lock and mutates no
     // shared container, and the promoted child re-inits the queues regardless.
     static void quiesceNetworking()
