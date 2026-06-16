@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <cstring>
 #include "extensions/rpc/rpc_core.h"
+#include "extensions/http/rate_limit.h"
 
 inline int rpcProxyMain(int httpPort, std::string unixPath)
 {
@@ -24,6 +25,18 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
     app().registerSyncAdvice(
         [unixPath](const HttpRequestPtr& req) -> HttpResponsePtr
         {
+            // Per-IP rate limit at the edge: the sidecar sees the real client IP; the node behind
+            // the unix socket only sees loopback, so it must throttle here, before the forward.
+#ifndef NO_HTTP_RATE_LIMIT
+            if (!rl::checkRateLimit(rl::extractClientIp(req)))
+            {
+                auto r = HttpResponse::newHttpResponse();
+                r->setStatusCode(k429TooManyRequests);
+                r->addHeader("Retry-After", "1");
+                r->setBody("Too Many Requests");
+                return r;
+            }
+#endif
             int s = socket(AF_UNIX, SOCK_STREAM, 0);
             sockaddr_un addr{};
             addr.sun_family = AF_UNIX;
@@ -83,6 +96,12 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
         });
 
     LOG_INFO << "RPC sidecar: HTTP :" << httpPort << " -> unix " << unixPath;
+#ifndef NO_HTTP_RATE_LIMIT
+    if (rl::rateLimitEnabled())
+        LOG_INFO << "RPC sidecar rate limit: " << rl::rateLimitRefillPerSec()
+                 << " req/s, burst " << rl::rateLimitBurst() << " (per IP, loopback/RFC1918 exempt)";
+    app().getLoop()->runEvery(60.0, []() { rl::logRateLimitReport(60, 10); });
+#endif
     app().addListener("0.0.0.0", httpPort)
          .setThreadNum(std::thread::hardware_concurrency())
          .run();

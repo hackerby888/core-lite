@@ -168,6 +168,10 @@ namespace rpcwire
 // ---------------- node-side unix-socket server ----------------
 inline std::atomic<bool> gRpcUnixRunning{ false };
 
+// Set once the node finishes init and enters the main loop. Until then a handler would read
+// uninitialized/zeroed consensus state and segfault, so dispatch answers 503 before it is set.
+inline std::atomic<bool> gRpcNodeReady{ false };
+
 // Fork-safety: dispatch takes a SHARED lock; bspForkPoint takes it EXCLUSIVE before fork() so no
 // handler holds a node lock at fork. Reinit in the child.
 inline std::shared_mutex gRpcDispatchLock;
@@ -178,9 +182,12 @@ inline void rpcUnixHandleConn(int c)
     if (!rpcwire::readFrame(c, meta, body)) { close(c); return; }
 
     Json::Value m;
-    { Json::CharReaderBuilder rb; std::string err;
-      const std::unique_ptr<Json::CharReader> rd(rb.newCharReader());
-      rd->parse(meta.data(), meta.data() + meta.size(), &m, &err); }
+    {
+        Json::CharReaderBuilder rb;
+        std::string err;
+        const std::unique_ptr<Json::CharReader> rd(rb.newCharReader());
+        rd->parse(meta.data(), meta.data() + meta.size(), &m, &err);
+    }
 
     RpcReq req;
     req.method = m.get("method", "GET").asString();
@@ -189,6 +196,9 @@ inline void rpcUnixHandleConn(int c)
     req.body   = std::move(body);
 
     RpcResp resp;
+    if (!gRpcNodeReady.load(std::memory_order_acquire))
+        resp = { 503, "application/json", "{\"error\":\"node not ready\"}", "", "" };
+    else
     { std::shared_lock<std::shared_mutex> g(gRpcDispatchLock); resp = gRpc.dispatch(req); }
 
     Json::Value rm;

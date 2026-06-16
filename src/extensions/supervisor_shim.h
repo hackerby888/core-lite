@@ -1,8 +1,9 @@
 #pragma once
 
 // Supervisor shim: a tiny subreaper parent that keeps a stable PID across fork-rollback promotes
-// (the promoted child reparents to it, not init). With --rpc-sidecar it also forks the RPC proxy as
-// a sibling that survives promotes + restarts it on death. Linux-only; opt out QUBIC_NO_SUPERVISOR=1.
+// (the promoted child reparents to it, not init). By default it also forks the RPC proxy as a sibling
+// that survives promotes + restarts it on death. Linux-only; opt out QUBIC_NO_SUPERVISOR=1 (no shim)
+// or --rpc-inprocess (shim, but RPC served in-process).
 
 #ifdef __linux__
 
@@ -57,12 +58,13 @@ static bool shimHasNodeChild(pid_t sidecar)
 // Returns ONLY in the node child. The supervisor parent loops here and _exit()s when the node drains.
 static inline void runUnderSupervisor(int argc, const char** argv)
 {
-    if (getenv("QUBIC_NO_SUPERVISOR")) return;            // opt-out: run the node inline (screen / dev)
+    // No shim -> no sidecar process; tell main() to serve RPC in-process (dev / screen).
+    if (getenv("QUBIC_NO_SUPERVISOR")) { setenv("QUBIC_RPC_INPROCESS", "1", 1); return; }
 
-    bool wantSidecar = false;
+    bool wantSidecar = true;   // sidecar is the default; --rpc-inprocess opts back to in-process drogon
     for (int i = 1; i < argc; i++)
     {
-        if (std::string(argv[i]) == "--rpc-sidecar") wantSidecar = true;
+        if (std::string(argv[i]) == "--rpc-inprocess") wantSidecar = false;
         else if (std::string(argv[i]) == "--http-port" && i + 1 < argc)
         {
             std::strncpy(gSidecarPort, argv[i + 1], sizeof(gSidecarPort) - 1);
@@ -72,13 +74,23 @@ static inline void runUnderSupervisor(int argc, const char** argv)
 #ifdef NO_RPC
     wantSidecar = false;
 #endif
+    // Every path that does not fork a sidecar must hand RPC back to the in-process server.
+    if (!wantSidecar) setenv("QUBIC_RPC_INPROCESS", "1", 1);
 
-    if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return;  // can't subreap: run inline
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0)   // can't subreap: run the node inline
+    {
+        setenv("QUBIC_RPC_INPROCESS", "1", 1);
+        return;
+    }
 
     pid_t sidecar = wantSidecar ? shimForkSidecar() : -1;
 
     pid_t node = fork();
-    if (node < 0) return;                                 // fork failed: run the node inline
+    if (node < 0)                                         // fork failed: run the node inline
+    {
+        setenv("QUBIC_RPC_INPROCESS", "1", 1);
+        return;
+    }
     if (node == 0) return;                                // CHILD: become the node
 
     // SUPERVISOR (stable PID). Reap everything (PID-1 duty under docker) + forward stop signals.
