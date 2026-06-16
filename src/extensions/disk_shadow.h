@@ -22,6 +22,9 @@ inline std::atomic<bool> gReRunStrict{ false };
 // Checkpoint-and-replay: the promoted child re-runs strict through this tick (the window's last
 // processed tick at mismatch), then resumes optimistic. 0 = single-tick strict (legacy/fork-fail).
 inline std::atomic<unsigned int> gReRunStrictUntilTick{ 0 };
+// Set when a shadow dir/commit disk op fails; verdict then forces a strict child replay from the
+// pristine real files (the optimistic on-disk state can no longer be trusted). Cleared at arm().
+inline std::atomic<bool> gShadowPoisoned{ false };
 // Test: assert the fork re-run reproduces the quorum digest.
 inline volatile bool gVerifyForkRollback = false;
 
@@ -74,7 +77,12 @@ class DiskShadow
             std::vector<CHAR16> buf(n + 3);
             for (size_t i = 0; i < n; i++) buf[i] = realDir[i];
             buf[n] = (CHAR16)'/'; buf[n + 1] = (CHAR16)'s'; buf[n + 2] = 0;
-            createDir(buf.data());
+            if (!createDir(buf.data()))
+            {
+                gShadowPoisoned.store(true, std::memory_order_release);
+                fprintf(stderr, "[SHADOW] createDir failed for %s/s -> poison (force strict replay)\n", realUtf8.c_str());
+                fflush(stderr);
+            }
             it = shadowDir.emplace(realUtf8, std::move(buf)).first;
         }
         return it->second.data();
@@ -94,6 +102,7 @@ public:
     {
         std::lock_guard<std::mutex> g(mtx);
         written.clear();
+        gShadowPoisoned.store(false, std::memory_order_release);
         active.store(true, std::memory_order_release);
         gForkWindowActive = true;
     }
@@ -127,10 +136,19 @@ public:
     {
         std::lock_guard<std::mutex> g(mtx);
         if (gForkBench && !written.empty()) { fprintf(stderr, "[SHADOW] commit %zu diverted page(s) -> real\n", written.size()); fflush(stderr); }
+        size_t failed = 0;
         for (const auto& [real, name] : written)
         {
             std::error_code ec;
             std::filesystem::rename(real + "/s/" + name, real + "/" + name, ec);
+            if (ec) failed++;
+        }
+        if (failed)
+        {
+            // Match path: RAM state is authoritative and correct; only the on-disk copy is stale, which
+            // bites only a later USE_SWAP reload. Loud so a failing disk is visible to the operator.
+            fprintf(stderr, "[SHADOW] commit: %zu page(s) failed to persist (disk error); RAM state is authoritative\n", failed);
+            fflush(stderr);
         }
         clearWindow();
     }

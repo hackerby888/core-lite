@@ -8516,7 +8516,10 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     gReRunStrict = true;                          // re-run strict from the checkpoint tick ...
     gReRunStrictUntilTick = strictUntilTick;      // ... through the mismatch tick (the window), then optimistic
     Overload::resetForChildPromote();  // drop inherited per-peer TCP state, keep the listen socket
-    Overload::respawnNetworking();      // re-spawn the transmit/receive processors (vanished at fork)
+    // Thread creation can fail under resource pressure; a half-rebuilt child would wedge silently, so
+    // bail loud and let the supervisor restart the node from its snapshot.
+    try { Overload::respawnNetworking(); }   // re-spawn the transmit/receive processors (vanished at fork)
+    catch (...) { tickForkLog("respawnNetworking failed -> fatal child exit (supervisor restart)"); _exit(71); }
     // Drop inherited connection state so the main loop reconnects fresh. reset() (not a full zero)
     // preserves the per-peer heap buffers + EFI tokens that are allocated ONCE at startup
     // (dataToTransmit/receiveBuffer/transmitData FragmentBuffer/tokens) and valid here via COW.
@@ -8532,6 +8535,11 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     }
     if (gAsyncFileIO) gAsyncFileIO->reinitForChildPromote();   // clean queues; reuse inherited struct (no leak)
     spawnAPs();
+    if (numberOfProcessors < 3)   // spawnAPs could not bring up the worker threads -> unrunnable child
+    {
+        tickForkLog("spawnAPs failed: too few processors -> fatal child exit (supervisor restart)");
+        _exit(71);
+    }
 #if defined(__linux__) && !defined(NO_RPC)
     new (&gRpcDispatchLock) std::shared_mutex();   // inherited locked across fork; reset (like networkingLock)
     gRpcUnixRunning = false;                       // inherited unix-server thread is gone; re-bind the socket
@@ -8582,6 +8590,7 @@ static void bspForkPoint()
     gRpcDispatchLock.unlock();
 #endif
     Overload::resumeNetworking();
+    if (pid < 0) tickForkLog("fork() failed -> parent strict fallback (no checkpoint)");
     tickFork::gChildPid = pid;   // >=0 on success, -1 on failure
     tickFork::gForkRequest = false;
 }

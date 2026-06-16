@@ -67,9 +67,7 @@ namespace tickFork
             if (isZero(td.transactionDigests[i]) || !offsets[i]) continue;
             Transaction* t = ts.tickTransactions(offsets[i]);
             if (!t->checkValidity()) continue;
-            if (isZero(t->destinationPublicKey)
-                && t->amount >= MiningSolutionTransaction::minAmount()
-                && t->inputType == MiningSolutionTransaction::transactionType())
+            if (MiningSolutionTransaction::isSolutionTransaction(t))
                 return true;
         }
         return false;
@@ -88,8 +86,19 @@ namespace tickFork
         gForkParked.store(0, std::memory_order_release);
         gForkParkGen.fetch_add(1, std::memory_order_acq_rel);   // open a new park generation
         gForkQuiesceRequest = true;
+        // Bounded: a wedged request processor must not hang the fork. On timeout, score this tick strict.
+        long long parkDeadline = tickForkNowNs() + 5000000000LL;
         while (gForkParked.load(std::memory_order_acquire) < nRequestProcessorIDs)
+        {
+            if (tickForkNowNs() > parkDeadline)
+            {
+                gForkQuiesceRequest = false;
+                gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
+                tickForkLog("park barrier timeout -> scoring this tick strict (no fork)");
+                return;
+            }
             std::this_thread::yield();
+        }
 
         // If the fork cannot be set up, score this tick strict so the optimistic pass cannot diverge
         // from quorum: no child is needed and the no-fork verdict won't stall.
@@ -103,7 +112,19 @@ namespace tickFork
         gShadow.arm();                              // parent disk writes -> shadow for the whole window
         gChildPid = -2;
         gForkRequest = true;                        // BSP forks at its loop-top
-        while (gChildPid == -2) std::this_thread::yield();
+        // The BSP handoff is synchronous and fast; only a wedged/dead main loop stalls here. Reclaiming
+        // on timeout would race a late fork into a rogue promoted child, so treat a true stall as fatal
+        // and let the supervisor restart the node from its snapshot.
+        long long forkDeadline = tickForkNowNs() + 30000000000LL;
+        while (gChildPid == -2)
+        {
+            if (tickForkNowNs() > forkDeadline)
+            {
+                tickForkLog("BSP fork handoff stalled -> fatal exit for supervisor restart");
+                _exit(70);
+            }
+            std::this_thread::yield();
+        }
 
         if (gChildPid < 0)                          // fork failed
         {
@@ -160,6 +181,7 @@ namespace tickFork
 
         if (gForkForceMatch) mismatch = false;      // test: exercise the keep-checkpoint path
         if (gForkForceMismatch) mismatch = true;    // test: force rewind (parent _exit + child replays)
+        if (gShadowPoisoned.load(std::memory_order_acquire)) mismatch = true;  // shadow I/O failed -> replay strict from pristine
 
         if (gForkBench)
         {
