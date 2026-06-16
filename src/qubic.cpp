@@ -8542,6 +8542,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     }
 #if defined(__linux__) && !defined(NO_RPC)
     new (&gRpcDispatchLock) std::shared_mutex();   // inherited locked across fork; reset (like networkingLock)
+    if (gRpcUnixListenFd >= 0) { close(gRpcUnixListenFd); gRpcUnixListenFd = -1; }  // close inherited listener (else +1 fd/promote)
     gRpcUnixRunning = false;                       // inherited unix-server thread is gone; re-bind the socket
     rpcUnixStart(rpcUnixPath(httpPort));
 #endif

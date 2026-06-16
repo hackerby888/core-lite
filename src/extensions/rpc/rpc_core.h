@@ -168,6 +168,10 @@ namespace rpcwire
 // ---------------- node-side unix-socket server ----------------
 inline std::atomic<bool> gRpcUnixRunning{ false };
 
+// The unix listen socket fd, so a promoted child can close the one it inherited from the forked
+// parent before re-binding (else each promote leaks one stale LISTEN socket).
+inline std::atomic<int> gRpcUnixListenFd{ -1 };
+
 // Set once the node finishes init and enters the main loop. Until then a handler would read
 // uninitialized/zeroed consensus state and segfault, so dispatch answers 503 before it is set.
 inline std::atomic<bool> gRpcNodeReady{ false };
@@ -228,6 +232,7 @@ inline void rpcUnixServe(std::string path)
     unlink(path.c_str());
     if (bind(srv, (sockaddr*)&addr, sizeof(addr)) != 0) { close(srv); return; }
     listen(srv, 64);
+    gRpcUnixListenFd.store(srv, std::memory_order_release);
     for (;;)
     {
         int c = accept(srv, nullptr, nullptr);
