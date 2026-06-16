@@ -782,10 +782,13 @@ static void penalizePublicPeerRejectedConnection(const IPv4Address& address)
 
 static void addPublicPeer(const IPv4Address& address)
 {
+#ifndef TESTNET
     if (address.u8[0] == 127) // never dial loopback: same-port loopback is always self-connect
     {
         return;
     }
+#endif
+    // TESTNET keeps loopback: a single-node testnet self-echoes its votes via 127.0.0.1 to reach quorum.
     if (isBogonAddress(address)) // not add bogon ip
     {
         return;
