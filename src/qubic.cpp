@@ -9860,6 +9860,7 @@ void setupSignalHandlers() {
 #endif
 
 int main(int argc, const char* argv[]) {
+    setvbuf(stdout, nullptr, _IOLBF, 0);
 #if defined(__linux__) && !defined(NO_RPC)
     // RPC sidecar mode: a stateless drogon forwarder -> node unix socket.
     for (int i = 1; i < argc; i++)
