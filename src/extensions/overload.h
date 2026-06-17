@@ -414,6 +414,21 @@ struct Overload {
         new (&networkingLock) std::mutex();
     }
 
+    // Signal a TcpData's per-socket send/recv workers to exit. Each worker holds its own shared_ptr,
+    // so PerSocketIo lives until it returns; the caller then drops the map's reference (erase/reassign).
+    static void signalPerSocketWorkers(TcpData& tcpData) {
+        auto signalIo = [](std::shared_ptr<PerSocketIo>& io) {
+            if (!io) return;
+            {
+                std::lock_guard<std::mutex> lk(io->mtx);
+                io->stop.store(true, std::memory_order_release);
+            }
+            io->cv.notify_all();
+        };
+        signalIo(tcpData.sendIo);
+        signalIo(tcpData.recvIo);
+    }
+
     // Directly call the setup function without using custom stack.
     static void startThread(EFI_AP_PROCEDURE procedure, void* data, unsigned long long ProcessorNumber, EFI_EVENT WaitEvent, unsigned long long TimeoutInMicroseconds) {
 		bool isThreadFinished = false;
@@ -1025,6 +1040,21 @@ struct Overload {
         }
 
         unsigned long long key = (unsigned long long)This;
+        if (auto it = tcpDataMap.find(key); it != tcpDataMap.end()) {
+            // Key already present. The listen/global entry is one-time setup (bound socket) -> keep it.
+            // A peer key here means the slot was reused without DestroyChild erasing it: tear down the
+            // stale per-socket workers + old socket, then install the fresh config so the next
+            // Transmit/Receive lazy-spawns workers bound to the NEW socket (emplace alone would no-op).
+            if (key == (unsigned long long)peerTcp4Protocol)
+                return EFI_SUCCESS;
+            signalPerSocketWorkers(it->second);
+            if (it->second.socket != INVALID_SOCKET) {
+                closesocket(it->second.socket);
+                it->second.socket = INVALID_SOCKET;
+            }
+            it->second = data;
+            return EFI_SUCCESS;
+        }
         tcpDataMap.emplace(key, data);
         return EFI_SUCCESS;
     }
@@ -1192,11 +1222,15 @@ struct Overload {
             int totalSentBytes = 0;
             auto& fragment = token->Packet.TxData->FragmentTable[0];
             EFI_STATUS finalStatus = EFI_SUCCESS;
+            bool abandoned = false;
             // Abort a send only after 5s of zero progress (not total time) so big transfers aren't cut mid-stream.
             constexpr unsigned long long NO_PROGRESS_TIMEOUT_NS = 5'000'000'000ULL;
             auto lastProgress = std::chrono::high_resolution_clock::now();
             while ((unsigned int)totalSentBytes < fragment.FragmentLength)
             {
+                // Stop (DestroyChild/reconfigure): abandon WITHOUT touching token — the socket is being
+                // torn down and the peer slot's token may already be re-armed for a new connection.
+                if (io->stop.load(std::memory_order_acquire)) { abandoned = true; break; }
                 auto now = std::chrono::high_resolution_clock::now();
                 if ((unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(now - lastProgress).count() > NO_PROGRESS_TIMEOUT_NS) {
                     finalStatus = EFI_TIMEOUT;
@@ -1238,13 +1272,14 @@ struct Overload {
                 }
             }
 
-            if ((unsigned int)totalSentBytes >= fragment.FragmentLength)
+            if (!abandoned)
             {
-                finalStatus = EFI_SUCCESS;
+                if ((unsigned int)totalSentBytes >= fragment.FragmentLength)
+                    finalStatus = EFI_SUCCESS;
+                // Status write MUST be the last touch on `token` for this op — main may
+                // immediately reuse the Token / FragmentBuffer once it sees Status != -1.
+                token->CompletionToken.Status = finalStatus;
             }
-            // Status write MUST be the last touch on `token` for this op — main may
-            // immediately reuse the Token / FragmentBuffer once it sees Status != -1.
-            token->CompletionToken.Status = finalStatus;
         }
     }
 
@@ -1302,6 +1337,8 @@ struct Overload {
                 }
 #endif
             }
+            // Stop (DestroyChild/reconfigure): abandon WITHOUT touching token — the slot may be re-armed.
+            if (io->stop.load(std::memory_order_acquire)) continue;
             token->Packet.RxData->DataLength = dataLen;
             // Publish DataLength before Status: the main loop reads Status first, then DataLength;
             // without this barrier it can see SUCCESS with a stale buffer-sized DataLength.
