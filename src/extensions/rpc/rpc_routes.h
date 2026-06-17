@@ -51,14 +51,12 @@ static RpcResp rpcEpochFile(const RpcReq& req, const std::string& kind)
     return fileResp(ec ? path : abs, fileName);
 }
 
-// --- /  (liveness) ---
 RPC_ROUTE("GET", "/")
 {
     (void)req;
     return { 200, "text/plain", "Hello, World!2", "", "" };
 }
 
-// --- /tick-info ---
 RPC_ROUTE("GET", "/tick-info")
 {
     Json::Value json;
@@ -74,7 +72,6 @@ RPC_ROUTE("GET", "/tick-info")
     return jsonResp(json);
 }
 
-// --- /running-ids ---
 RPC_ROUTE("GET", "/running-ids")
 {
     (void)req;
@@ -100,7 +97,6 @@ RPC_ROUTE("GET", "/running-ids")
     return jsonResp(json);
 }
 
-// --- /latest-created-tick-info ---
 RPC_ROUTE("GET", "/latest-created-tick-info")
 {
     (void)req;
@@ -114,7 +110,6 @@ RPC_ROUTE("GET", "/latest-created-tick-info")
     return jsonResp(json);
 }
 
-// --- /solutions ---
 RPC_ROUTE("GET", "/solutions")
 {
     (void)req;
@@ -130,7 +125,6 @@ RPC_ROUTE("GET", "/solutions")
     return jsonResp(json);
 }
 
-// --- /solution-publish-ticks ---
 RPC_ROUTE("GET", "/solution-publish-ticks")
 {
     (void)req;
@@ -145,7 +139,6 @@ RPC_ROUTE("GET", "/solution-publish-ticks")
     return jsonResp(json);
 }
 
-// --- /request-save-snapshot ---
 RPC_ROUTE("GET", "/request-save-snapshot")
 {
     (void)req;
@@ -154,21 +147,18 @@ RPC_ROUTE("GET", "/request-save-snapshot")
     return jsonResp(json);
 }
 
-// --- /spectrum  (auth: passcode) ---
 RPC_ROUTE("GET", "/spectrum")
 {
     if (!rpcPasscodeOk(req)) return rpcUnauthorized();
     return rpcEpochFile(req, "spectrum");
 }
 
-// --- /universe  (auth: passcode) ---
 RPC_ROUTE("GET", "/universe")
 {
     if (!rpcPasscodeOk(req)) return rpcUnauthorized();
     return rpcEpochFile(req, "universe");
 }
 
-// --- /shutdown  (auth: passcode) ---
 RPC_ROUTE("GET", "/shutdown")
 {
     if (!rpcPasscodeOk(req)) return rpcUnauthorized();
@@ -177,7 +167,6 @@ RPC_ROUTE("GET", "/shutdown")
     return jsonResp(json);
 }
 
-// --- /set-max-inbound ---
 RPC_ROUTE("GET", "/set-max-inbound")
 {
     int n = std::stoi(req.getParameter("n"));
@@ -190,7 +179,6 @@ RPC_ROUTE("GET", "/set-max-inbound")
     return jsonResp(json);
 }
 
-// --- /spam ---
 RPC_ROUTE("GET", "/spam")
 {
     char enable = 0;
@@ -207,7 +195,6 @@ RPC_ROUTE("GET", "/spam")
     return jsonResp(json);
 }
 
-// --- /set-operator-seed ---
 RPC_ROUTE("GET", "/set-operator-seed")
 {
     std::string seed = req.getParameter("seed");
