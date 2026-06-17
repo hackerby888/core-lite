@@ -277,7 +277,7 @@ static unsigned int resourceTestingDigest = 0;
 
 static unsigned int numberOfTransactions = 0;
 
-static unsigned long long spectrumChangeFlags[SPECTRUM_CAPACITY / (sizeof(unsigned long long) * 8)];
+// spectrumChangeFlags + the dirty-leaf list now live in spectrum/spectrum.h (shared with the transfer sites).
 
 static unsigned long long mainLoopNumerator = 0, mainLoopDenominator = 0;
 static volatile unsigned char contractProcessorState = 0;
@@ -3756,34 +3756,77 @@ static void processTick(unsigned long long processorNumber)
     unsigned long long _bDigSpecStart = __rdtsc();
     unsigned int digestIndex;
     ACQUIRE(spectrumLock);
-    for (digestIndex = 0; digestIndex < SPECTRUM_CAPACITY; digestIndex++)
+    if (spectrumDirtyOverflow)
     {
-        if (spectrum[digestIndex].latestIncomingTransferTick == system.tick || spectrum[digestIndex].latestOutgoingTransferTick == system.tick)
+        // Fallback (rare): too many distinct leaves changed this tick — discover them by full scan.
+        for (digestIndex = 0; digestIndex < SPECTRUM_CAPACITY; digestIndex++)
         {
-            KangarooTwelve64To32(&spectrum[digestIndex], &spectrumDigests[digestIndex]);
-            spectrumChangeFlags[digestIndex >> 6] |= (1ULL << (digestIndex & 63));
+            if (spectrum[digestIndex].latestIncomingTransferTick == system.tick || spectrum[digestIndex].latestOutgoingTransferTick == system.tick)
+            {
+                KangarooTwelve64To32(&spectrum[digestIndex], &spectrumDigests[digestIndex]);
+                spectrumChangeFlags[digestIndex >> 6] |= (1ULL << (digestIndex & 63));
+            }
         }
     }
+    else
+    {
+        // Re-hash only the leaves touched this tick; their flags were set by markSpectrumDirty().
+        for (unsigned int k = 0; k < spectrumDirtyCount; k++)
+        {
+            const unsigned int idx = spectrumDirtyIndices[k];
+            KangarooTwelve64To32(&spectrum[idx], &spectrumDigests[idx]);
+        }
+    }
+    // Track 1b: parent write index is computed from i (writeBase + i/2), decoupled from a running
+    // counter, so a whole clean 64-bit flag word (32 pairs) can be skipped at once — the per-tick
+    // dirty set is tiny, so the Merkle walk becomes ~O(dirty) instead of O(SPECTRUM_CAPACITY).
     unsigned int previousLevelBeginning = 0;
+    unsigned int writeBase = SPECTRUM_CAPACITY; // Merkle walk writes parent nodes starting at this index
     unsigned int numberOfLeafs = SPECTRUM_CAPACITY;
     while (numberOfLeafs > 1)
     {
         for (unsigned int i = 0; i < numberOfLeafs; i += 2)
         {
+            if ((i & 63) == 0 && spectrumChangeFlags[i >> 6] == 0) { i += 62; continue; } // skip 32 clean pairs
             if (spectrumChangeFlags[i >> 6] & (3ULL << (i & 63)))
             {
-                KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[digestIndex]);
+                KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[writeBase + (i >> 1)]);
                 spectrumChangeFlags[i >> 6] &= ~(3ULL << (i & 63));
                 spectrumChangeFlags[i >> 7] |= (1ULL << ((i >> 1) & 63));
             }
-            digestIndex++;
         }
         previousLevelBeginning += numberOfLeafs;
+        writeBase += (numberOfLeafs >> 1);
         numberOfLeafs >>= 1;
     }
     spectrumChangeFlags[0] = 0;
+    spectrumDirtyCount = 0;        // consumed — ready for next tick
+    spectrumDirtyOverflow = false;
 
     etalonTick.saltedSpectrumDigest = spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1];
+#ifdef VERIFY_SPECTRUM_DIGEST
+    // Self-check: recompute the whole tree from scratch and assert the incremental result matches.
+    {
+        const m256i _dirtyRoot = etalonTick.saltedSpectrumDigest;
+        unsigned int _wi;
+        for (_wi = 0; _wi < SPECTRUM_CAPACITY; _wi++)
+            KangarooTwelve64To32(&spectrum[_wi], &spectrumDigests[_wi]);
+        unsigned int _plb = 0, _nl = SPECTRUM_CAPACITY;
+        while (_nl > 1)
+        {
+            for (unsigned int i = 0; i < _nl; i += 2)
+                KangarooTwelve64To32(&spectrumDigests[_plb + i], &spectrumDigests[_wi++]);
+            _plb += _nl;
+            _nl >>= 1;
+        }
+        if (spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1] != _dirtyRoot)
+        {
+            setText(message, L"FATAL: spectrum dirty-digest != full recompute at tick ");
+            appendNumber(message, system.tick, FALSE);
+            while (true) { logToConsole(message); bs->Stall(1'000'000); }
+        }
+    }
+#endif
     RELEASE(spectrumLock);
     TickBench::add(TickBench::DIGEST_SPECTRUM, _bDigSpecStart, __rdtsc());
     PROFILE_SCOPE_END();
@@ -7573,6 +7616,10 @@ static void logInfo()
     appendNumber(message, numberOfDuplicateRequests - prevNumberOfDuplicateRequests, TRUE);
     appendText(message, L" /");
     appendNumber(message, numberOfDisseminatedRequests - prevNumberOfDisseminatedRequests, TRUE);
+    appendText(message, L" !");
+    appendNumber(message, numberOfDroppedTransmits - prevNumberOfDroppedTransmits, TRUE);
+    appendText(message, L" ?");
+    appendNumber(message, numberOfSkippedBroadcasts - prevNumberOfSkippedBroadcasts, TRUE);
     appendText(message, L"] ");
 
     unsigned int numberOfConnectingSlots = 0, numberOfConnectedSlots = 0, numberOfHandshakedSlots = 0;
@@ -7671,6 +7718,8 @@ static void logInfo()
     prevNumberOfDiscardedRequests = numberOfDiscardedRequests;
     prevNumberOfDuplicateRequests = numberOfDuplicateRequests;
     prevNumberOfDisseminatedRequests = numberOfDisseminatedRequests;
+    prevNumberOfDroppedTransmits = numberOfDroppedTransmits;
+    prevNumberOfSkippedBroadcasts = numberOfSkippedBroadcasts;
     prevNumberOfReceivedBytes = numberOfReceivedBytes;
     prevNumberOfTransmittedBytes = numberOfTransmittedBytes;
 
@@ -8884,7 +8933,8 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     unsigned short numberOfSuitablePeers = 0;
                     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
                     {
-                        if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing)
+                        // Don't cull handshaked (productive) peers — only rotate unproductive ones.
+                        if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing && !peers[i].exchangedPublicPeers)
                         {
                             // Skip FullNode and OM nodes
                             if (!peers[i].isFullNode() && !peers[i].isOMNode)
@@ -8908,6 +8958,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                 {
                     // Request ticks
                     tickRequestingTick = curTimeTick;
+
 #if TICK_STORAGE_AUTOSAVE_MODE
                     const bool isNewTick = system.tick >= ts.getPreloadTick();
                     const bool isNewTickPlus1 = system.tick + 1 >= ts.getPreloadTick();
@@ -9397,7 +9448,8 @@ void processArgs(int argc, const char* argv[]) {
         ("rpc-proxy", "INTERNAL: run as the RPC sidecar (drogon HTTP -> node unix-socket forwarder)", cxxopts::value<bool>())
         ("rpc-listen", "RPC sidecar HTTP listen port", cxxopts::value<int>()->default_value("41850"))
         ("rpc-node", "RPC sidecar: node http port used as the unix-socket key", cxxopts::value<int>()->default_value("41841"))
-        ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"));
+        ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"))
+        ("max-inbound-per-ip", "Max inbound connection slots from a single IP (0 = unlimited, default). Stops one peer flooding many slots.", cxxopts::value<int>()->default_value("0"));
     auto result = options.parse(argc, argv);
 
 #ifdef __linux__
@@ -9508,6 +9560,13 @@ void processArgs(int argc, const char* argv[]) {
         if (mi >= 0) {
             maxInboundAccepts = mi > NUMBER_OF_INCOMING_CONNECTIONS ? NUMBER_OF_INCOMING_CONNECTIONS : mi;
             logColorToScreen("INFO", "Max inbound accepts capped at " + std::to_string(maxInboundAccepts));
+        }
+    }
+    {
+        int mp = result["max-inbound-per-ip"].as<int>();
+        if (mp > 0) {
+            maxIncomingConnectionsPerIp = mp;
+            logColorToScreen("INFO", "Max inbound per IP capped at " + std::to_string(maxIncomingConnectionsPerIp));
         }
     }
     if (result.count("auto-flush-stuck-seconds")) {

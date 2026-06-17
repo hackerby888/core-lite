@@ -33,5 +33,5 @@
 // AUX future-tx window horizon: stage broadcast txs for (currentTick, +FAST_TX_WINDOW_TICKS].
 // Replaces PendingTxsPool on AUX. RAM ~4.9 MB/tick; keep >= CATCHUP_MAX_PREFETCH. (fast_tx_window.h)
 #ifndef FAST_TX_WINDOW_TICKS
-#define FAST_TX_WINDOW_TICKS 32
+#define FAST_TX_WINDOW_TICKS 512
 #endif
