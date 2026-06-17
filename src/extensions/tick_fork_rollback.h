@@ -75,7 +75,7 @@ namespace tickFork
 
     // Checkpoint-and-replay: k ticks share one fork (amortizes the O(RSS) fork). The checkpoint child
     // stays alive across the window; match keeps it, mismatch rewinds+replays strict, staleness commits.
-    inline unsigned int gForkWindowK = 16;
+    inline unsigned int gForkWindowK = 32;
     inline unsigned int gCheckpointTick = 0;
 
     // Establish a fresh checkpoint at system.tick: park request procs, pipe, arm shadow, ask BSP to fork.
