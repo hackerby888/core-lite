@@ -519,6 +519,8 @@ static inline bool isMainMode()
     return (mainAuxStatus & 1) == 1;
 }
 
+// tick_fork_rollback.h's maybeForkBeforeTick needs isLastTickInEpoch (defined below) -> forward-declare.
+static bool isLastTickInEpoch();
 // These headers reference logToConsole/isMainMode (above), so include them after.
 #include "extensions/supervisor_shim.h"
 #include "extensions/tick_fork_rollback.h"

@@ -161,6 +161,16 @@ namespace tickFork
         if (forceVerifySolutions) return;           // -fv = strict-all mode: no trick/rollback/fork
         if (isMainMode()) return;
 
+        // Last tick of the epoch: verdict() is skipped here (same gate as main's reprocess path) and the
+        // next tick runs beginEpoch. Never let a window span the boundary — retire any live checkpoint
+        // and don't open one. An unresolved checkpoint would carry into the new epoch, forcing a promoted
+        // child to replay strict across beginEpoch (which blocks on the operator clean-memory flag).
+        if (isLastTickInEpoch())
+        {
+            if (gChildPid >= 0) retireCheckpoint();
+            return;
+        }
+
         // Test: force a single-tick fork + rollback every N ticks. Retire any live window first so the
         // forced mismatch (in verdict) rewinds exactly this tick, back to the tick-1 state.
         if (gForkForceRollbackEvery && (unsigned)system.tick % gForkForceRollbackEvery == 0)
