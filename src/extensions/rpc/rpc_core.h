@@ -203,7 +203,14 @@ inline void rpcUnixHandleConn(int c)
     if (!gRpcNodeReady.load(std::memory_order_acquire))
         resp = { 503, "application/json", "{\"error\":\"node not ready\"}", "", "" };
     else
-    { std::shared_lock<std::shared_mutex> g(gRpcDispatchLock); resp = gRpc.dispatch(req); }
+    {
+        // Release swap-page pins the handler takes via tickData/ticks/tx accessors. This is a one-shot
+        // detached thread with no tickProcessor PinScope, so without this the pins leak permanently
+        // (thread_local arena dies unreleased) until the swapVM hits "all cache pages pinned".
+        PinScope _pinScope;
+        std::shared_lock<std::shared_mutex> g(gRpcDispatchLock);
+        resp = gRpc.dispatch(req);
+    }
 
     Json::Value rm;
     rm["status"] = resp.status;
