@@ -219,7 +219,10 @@ namespace tickFork
         if (!mismatch)
         {
             // Keep the checkpoint for the rest of the window; committed + reaped at staleness.
-            tickForkLog("verdict MATCH: keep checkpoint (window)");
+            if (gForkBench)
+            {
+                tickForkLog("verdict MATCH: keep checkpoint (window)");
+            }
             return true;
         }
 
