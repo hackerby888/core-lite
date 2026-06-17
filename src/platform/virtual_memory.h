@@ -1194,6 +1194,19 @@ public:
     unsigned long long getCacheMisses() const { return cacheMisses; }
     static constexpr unsigned long long getNumCachePage() { return numCachePage; }
 
+    // Promoted fork child: pinCount[] reflects pins held by parent threads that did NOT survive the
+    // fork (only the calling thread did) -> those slots would stay pinned forever -> eviction starves
+    // -> the "all cache pages pinned" fatal. Clear the stale pin accounting WITHOUT evicting cached
+    // pages (the strict re-run needs them). The child is single-threaded here, so force-clear the
+    // (possibly inherited-locked) memLock rather than ACQUIRE it. Caller must releaseThreadPins()
+    // afterwards to drop the surviving thread's now-stale arena entries.
+    void resetPinsForChildPromote()
+    {
+        memLock = 0;
+        setMem(pinCount, sizeof(pinCount), 0);
+        pinnedNow = 0;
+    }
+
     T* operator[](unsigned long long offset)
     requires (mode == SwapMode::OFFSET_MODE)
     {

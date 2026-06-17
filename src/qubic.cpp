@@ -3777,7 +3777,7 @@ static void processTick(unsigned long long processorNumber)
             KangarooTwelve64To32(&spectrum[idx], &spectrumDigests[idx]);
         }
     }
-    // Track 1b: parent write index is computed from i (writeBase + i/2), decoupled from a running
+    // Parent write index is computed from i (writeBase + i/2), decoupled from a running
     // counter, so a whole clean 64-bit flag word (32 pairs) can be skipped at once — the per-tick
     // dirty set is tiny, so the Merkle walk becomes ~O(dirty) instead of O(SPECTRUM_CAPACITY).
     unsigned int previousLevelBeginning = 0;
@@ -8562,6 +8562,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     close(tickFork::gPipe[0]); tickFork::gPipe[0] = -1;
     gShadow.reinitForChildPromote();   // inherited mtx may be held by a non-surviving thread
     gShadow.purgeOrphans();   // drop the parent's optimistic shadow; real page files are pristine
+    ts.resetSwapPinsForChildPromote();   // drop swapVM pins leaked by non-surviving parent threads (else cache slots stay pinned -> fatal)
     gReRunStrict = true;                          // re-run strict from the checkpoint tick ...
     gReRunStrictUntilTick = strictUntilTick;      // ... through the mismatch tick (the window), then optimistic
     Overload::resetForChildPromote();  // drop inherited per-peer TCP state, keep the listen socket

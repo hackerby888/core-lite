@@ -777,6 +777,21 @@ public:
 #endif
     }
 
+    // Fork child promote: drop swapVM pins leaked by parent threads that didn't survive the fork
+    // (their pinCount is inherited via COW but never released since the holder threads are gone).
+    // Keeps cached pages (the strict re-run reads them). Single-threaded at the promote point.
+    static void resetSwapPinsForChildPromote()
+    {
+#ifdef USE_SWAP
+        tickDataSwapVM.resetPinsForChildPromote();
+        ticksSwapVM.resetPinsForChildPromote();
+        tickTransactionsSwapVM.resetPinsForChildPromote();
+        tickTransactionOffsetsSwapVM.resetPinsForChildPromote();
+        tickTransactionsDigestSwapVM.resetPinsForChildPromote();
+        releaseThreadPins();   // clear the surviving thread's stale arena (pinCount now 0 -> guarded no-op)
+#endif
+    }
+
     static bool init()
     {
         // TODO: allocate everything with one continuous buffer
