@@ -4504,12 +4504,20 @@ static void endEpoch()
             oracleEngine.getRevenuePoints(oracleRevPoints);
             copyMemory(gEpochRevenueData.oracleScore, oracleRevPoints.computorRevPoints);
         }
+        // The 8-computor SC-dev committee (TESTNET + LITE_DYNAMIC_CONTRACTS) serves qinit/contract devs, for
+        // whom consensus economics are irrelevant. The V2 / multi-dimension formulas assume a full-size
+        // committee and a full-length epoch: their sliding window divides by totalTicks (= system.tick -
+        // system.initialTick), which a forced or immediate dev epoch advance makes 0 -> divide-by-zero crash.
+        // Skip the formulas in that mode (revenue is split evenly below); standard testnet + mainnet are
+        // unaffected (the formulas still run and pay out as before).
+#if !(defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS))
         computeRevenueV2(gEpochRevenueData);
 
         // Multi-dimension revenue: computed for offline comparison; paid to computors
         // only when USE_REVENUE_MULTI_DIMENSION is set (see src/revenue.h).
         gMultiDimRevenue.totalTicks = system.tick - system.initialTick;
         computeMultiDimRevenue();
+#endif
 
         // Get revenue donation data by calling contract GQMPROP::GetRevenueDonation()
         QpiContextUserFunctionCall qpiContext(GQMPROP::__contract_index);
@@ -4523,7 +4531,11 @@ static void endEpoch()
         for (unsigned int computorIndex = 0; computorIndex < NUMBER_OF_COMPUTORS; computorIndex++)
         {
             // Compute initial computor revenue, reducing arbitrator revenue
-#if USE_REVENUE_MULTI_DIMENSION
+#if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
+            // SC-dev committee: revenue formulas skipped above; split issuance evenly so the epoch transition
+            // still pays computors + balances the arbitrator without exercising the windowed math.
+            long long revenue = issuancePerComputor;
+#elif USE_REVENUE_MULTI_DIMENSION
             long long revenue = gMultiDimRevenue.revenue[computorIndex];
 #else
             long long revenue = gEpochRevenueData.v2Revenue[computorIndex];
