@@ -2681,7 +2681,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
     flagIndices[1] &= (unsigned int)(NUMBER_OF_MINER_SOLUTION_FLAGS - 1);
     // Two independent flag checks to reduce false-positive collision probability from ~N/2^32 to ~N^2/2^64
     if (!(minerSolutionFlags[flagIndices[0] >> 6] & (1ULL << (flagIndices[0] & 63)))
-        || !(minerSolutionFlags[flagIndices[1] >> 6] & (1ULL << (flagIndices[1] & 63))) || isRevalidation)
+        || !(minerSolutionFlags[flagIndices[1] >> 6] & (1ULL << (flagIndices[1] & 63))))
     {
         minerSolutionFlags[flagIndices[0] >> 6] |= (1ULL << (flagIndices[0] & 63));
         minerSolutionFlags[flagIndices[1] >> 6] |= (1ULL << (flagIndices[1] & 63));
