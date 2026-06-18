@@ -260,6 +260,35 @@ static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, v
                      *(const void**)args[0], *(void**)args[1], *(void**)args[2], *(void**)args[3], *(void**)args[4]);
 }
 
+// RAII for a freshly loaded WAMR module set (mod + instance + exec_env). The dtor frees them in the correct
+// order (env -> inst -> mod); release() drops ownership once the handles have been handed to a slot. The loader
+// uses this so every early-return error path cleans up without a hand-written unwind, and the slot only ever
+// receives a fully-validated module (no freed-handle stranding).
+struct LiteWasmModuleSet {
+    wasm_module_t      mod  = nullptr;
+    wasm_module_inst_t inst = nullptr;
+    wasm_exec_env_t    env  = nullptr;
+    LiteWasmModuleSet() = default;
+    ~LiteWasmModuleSet() {
+        if (env)  wasm_runtime_destroy_exec_env(env);
+        if (inst) wasm_runtime_deinstantiate(inst);
+        if (mod)  wasm_runtime_unload(mod);
+    }
+    void release() { mod = nullptr; inst = nullptr; env = nullptr; }
+    LiteWasmModuleSet(const LiteWasmModuleSet&) = delete;
+    LiteWasmModuleSet& operator=(const LiteWasmModuleSet&) = delete;
+};
+
+// Minimal RAII malloc buffer (the state snapshot taken across a redeploy). Frees on scope exit.
+struct LiteMallocBuf {
+    unsigned char* p = nullptr;
+    LiteMallocBuf() = default;
+    ~LiteMallocBuf() { if (p) free(p); }
+    void alloc(size_t n) { if (p) free(p); p = n ? (unsigned char*)malloc(n) : nullptr; }
+    LiteMallocBuf(const LiteMallocBuf&) = delete;
+    LiteMallocBuf& operator=(const LiteMallocBuf&) = delete;
+};
+
 // Release a slot's loaded instance + closures (before reloading the slot, so a redeploy doesn't leak the
 // instance's linear memory or the libffi trampolines).
 static void liteWasmSlotUnload(LiteWasmSlot& s)
@@ -283,11 +312,12 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     liteWasmEnsureThreadEnv();   // load runs on a tick-processor thread (not main)
     // upgrade: the contract state lives in the instance's linear memory, which deinstantiate frees below.
     // Snapshot it now and restore into the fresh instance, so a redeploy preserves state (INITIALIZE runs once).
-    unsigned char* prevState = nullptr; uint32_t prevStateSize = 0;
+    // Snapshot held by RAII so a failed reload (any early return below) frees it instead of leaking.
+    LiteMallocBuf prevState; uint32_t prevStateSize = 0;
     if (s.inst && s.stubFreed && s.stateSize && contractStates[idx]) {
         prevStateSize = s.stateSize;
-        prevState = (unsigned char*)malloc(prevStateSize);
-        if (prevState) copyMem(prevState, contractStates[idx], prevStateSize);
+        prevState.alloc(prevStateSize);
+        if (prevState.p) copyMem(prevState.p, contractStates[idx], prevStateSize);
     }
     if (s.inst) liteWasmSlotUnload(s);   // redeploy into a live slot: free the prior instance first
 
@@ -297,12 +327,19 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     if (!s.wasmBuf) { logToConsole(L"LITEWASM: oom"); return false; }
     copyMem(s.wasmBuf, bytes, len);
 
+    // mod/inst/env held by RAII: any early return below frees them in the right order (no hand-unwind).
+    // Ownership is handed to the slot (ms.release()) only after every validation passes, so a failed load
+    // never strands the slot on freed handles.
+    LiteWasmModuleSet ms;
     char err[192];
-    wasm_module_t mod = wasm_runtime_load(s.wasmBuf, len, err, sizeof(err));
-    if (!mod) { logToConsole(L"LITEWASM: load failed"); free(s.wasmBuf); s.wasmBuf = nullptr; return false; }
-    wasm_module_inst_t inst = wasm_runtime_instantiate(mod, 64 * 1024, 1024 * 1024, err, sizeof(err));
-    if (!inst) { logToConsole(L"LITEWASM: instantiate failed"); wasm_runtime_unload(mod); return false; }
-    wasm_exec_env_t env = wasm_runtime_create_exec_env(inst, 64 * 1024);
+    ms.mod = wasm_runtime_load(s.wasmBuf, len, err, sizeof(err));
+    if (!ms.mod) { logToConsole(L"LITEWASM: load failed"); free(s.wasmBuf); s.wasmBuf = nullptr; return false; }
+    ms.inst = wasm_runtime_instantiate(ms.mod, 64 * 1024, 1024 * 1024, err, sizeof(err));
+    if (!ms.inst) { logToConsole(L"LITEWASM: instantiate failed"); return false; }
+    ms.env = wasm_runtime_create_exec_env(ms.inst, 64 * 1024);
+    if (!ms.env) { logToConsole(L"LITEWASM: exec env alloc failed"); return false; }
+    wasm_module_inst_t inst = ms.inst;
+    wasm_exec_env_t env = ms.env;
 
     wasm_function_inst_t f_state_addr = wasm_runtime_lookup_function(inst, "state_addr");
     wasm_function_inst_t f_state_size = wasm_runtime_lookup_function(inst, "state_size");
@@ -312,24 +349,26 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     wasm_function_inst_t f_dispatch   = wasm_runtime_lookup_function(inst, "dispatch");
     if (!f_state_addr || !f_state_size || !f_io_base || !f_reg_count || !f_reg_info || !f_dispatch) {
         logToConsole(L"LITEWASM: missing required export");
-        wasm_runtime_destroy_exec_env(env); wasm_runtime_deinstantiate(inst); wasm_runtime_unload(mod);
         return false;
     }
 
-    s.mod = mod; s.inst = inst; s.env = env; s.dispatchFn = f_dispatch;
     s.stateOff = liteWasmCallU32(env, f_state_addr);
     s.stateSize = liteWasmCallU32(env, f_state_size);
     s.ioBase = liteWasmCallU32(env, f_io_base);
 
     // The contract's io_base region [in|out|locals|arena] must hold the engine's carve (LITE_WASM_IO_TOTAL).
     // io_size is exported so an engine/contract size mismatch fails loudly here, not as silent over-carve.
-    // (optional export: pre-io_size contracts skip the check and keep their matching layout.)
+    // (optional export: pre-io_size contracts skip the check and keep their matching layout.) Checked BEFORE
+    // ms.release() so a mismatch frees the module cleanly instead of stranding the slot on freed handles.
     { wasm_function_inst_t f_io_size = wasm_runtime_lookup_function(inst, "io_size");
       if (f_io_size && liteWasmCallU32(env, f_io_size) < LITE_WASM_IO_TOTAL) {
           logToConsole(L"LITEWASM: contract io region too small for the engine carve (rebuild the contract)");
-          wasm_runtime_destroy_exec_env(env); wasm_runtime_deinstantiate(inst); wasm_runtime_unload(mod);
           return false;
       } }
+
+    // All validation passed: hand the module set to the slot (ms no longer owns it).
+    s.mod = ms.mod; s.inst = ms.inst; s.env = ms.env; s.dispatchFn = f_dispatch;
+    ms.release();
 
     // Release the slot's reserve (once) and point contractStates[idx] AT the instance's resident state region.
     // Route through the adapter so the free matches the alloc: engine = flush+abandon (memfd, never freed);
@@ -337,10 +376,9 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     // macOS); plain = freePool the committed pool. (The old #else freePool'd the mmap stub -> darwin abort.)
     if (!s.stubFreed) { liteSCOnWasmTakeover(idx); s.stubFreed = true; }
     contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(inst, s.stateOff);
-    if (prevState) {   // upgrade: restore the snapshot (copy the overlap — a new layout may differ in size)
+    if (prevState.p) {   // upgrade: restore the snapshot (copy the overlap — a new layout may differ in size)
         uint32_t n = prevStateSize < s.stateSize ? prevStateSize : s.stateSize;
-        copyMem(contractStates[idx], prevState, n);
-        free(prevState);
+        copyMem(contractStates[idx], prevState.p, n);
         logColorToScreen("INFO", "LITEWASM: state preserved across upgrade — " + std::to_string(n) + " bytes");
     }
     { wasm_function_inst_t f_ctx = wasm_runtime_lookup_function(inst, "ctx_addr"); if (f_ctx) s.ctxOff = liteWasmCallU32(env, f_ctx); }
