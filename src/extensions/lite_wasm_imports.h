@@ -4,7 +4,16 @@
 // (LiteWasmCallCtx via exec_env user_data, Stage-2 ABI #1); pointers cross as i32 linear-mem offsets,
 // converted with addr_app_to_native (the general marshalling pattern). acquireScratch returns a linear-mem
 // offset, not a native ptr (ABI #2). Module name = "lhost"; the contract side (lite_wasm_tu.h) imports it.
+//
+// Most imports are pure forwards (A2N pointer args, pass scalars, call the vtable member) and are GENERATED
+// from one X-list (LHOST_TABLE) by LiteQpiImport/LiteInfraImport — the WAMR signature string is DERIVED from
+// the member's C type (liteWasmSig), so the hand-typed-sig bug class is gone. Imports with bespoke logic
+// (acquireScratch's arena, logBytes' ci-stamp, the debug-traced effectful calls) keep a hand-written wrapper
+// but still take their DERIVED sig + a static_assert that it reproduces the previously hand-written string.
 #ifdef LITE_WASM_CONTRACTS
+#include <cstdint>
+#include <type_traits>
+#include <array>
 #include "wasm_export.h"
 #include "extensions/lite_wasm_debug.h"   // trace ring + liteWasmTraceHostCall (debug toggle, off by default)
 
@@ -28,12 +37,64 @@ static inline void* liteWasmA2N(wasm_exec_env_t e, uint32_t off) {
 // record a side-effect into the call's debug trace (no-op unless debug is on for this call)
 #define LWTRACE(nm, det) do { if (cc && cc->trace) liteWasmTraceHostCall((LiteWasmTraceEntry*)cc->trace, nm, det); } while (0)
 
-// --- infra (no ctx) ---
-static void     w_beginFn(wasm_exec_env_t e, uint32_t id) { (void)e; g_liteHostServices.beginFn(id); }
-static void     w_endFn(wasm_exec_env_t e, uint32_t id) { (void)e; g_liteHostServices.endFn(id); }
-static void     w_markDirty(wasm_exec_env_t e, uint32_t ci) { (void)e; g_liteHostServices.markDirty(ci); }
-static void     w_pauseLog(wasm_exec_env_t e) { (void)e; g_liteHostServices.pauseLog(); }
-static void     w_resumeLog(wasm_exec_env_t e) { (void)e; g_liteHostServices.resumeLog(); }
+// ---------------------------------------------------------------------------
+// Codegen: derive the WAMR signature + the forwarding wrapper from a vtable member's C type.
+// ---------------------------------------------------------------------------
+// WAMR sig grammar: i=i32, I=i64, f=f32, F=f64; pointers + narrow ints cross as i32. void return => no suffix.
+template<class T> constexpr size_t liteSafeSizeof() { if constexpr (std::is_void_v<T>) return 8; else return sizeof(T); }
+template<class T> constexpr char liteWasmSigChar() {
+    if constexpr (std::is_void_v<T>)                return '\0';
+    else if constexpr (std::is_pointer_v<T>)        return 'i';
+    else if constexpr (std::is_floating_point_v<T>) return sizeof(T) == 4 ? 'f' : 'F';
+    else                                            return liteSafeSizeof<T>() <= 4 ? 'i' : 'I';
+}
+// wasm-ABI carrier type for a host param/return: ptr & narrow int -> uint32_t (i32); 64-bit kept; void kept.
+template<class T> using liteWasmAbi =
+    std::conditional_t<std::is_void_v<T>, void,
+      std::conditional_t<std::is_pointer_v<T>, uint32_t,
+        std::conditional_t<(std::is_integral_v<T> && liteSafeSizeof<T>() <= 4), uint32_t, T>>>;
+// per-arg conversion at the boundary: pointer param <- A2N(offset); scalar <- cast from the carrier.
+template<class P> static inline P liteWasmConv(wasm_exec_env_t e, liteWasmAbi<P> a) {
+    if constexpr (std::is_pointer_v<P>) return (P)liteWasmA2N(e, (uint32_t)a);
+    else                                return (P)a;
+}
+// constexpr sig string (usable in static_assert + as the NativeSymbol const char*).
+template<class Ret, class... Args>
+constexpr std::array<char, 4 + sizeof...(Args)> liteWasmSig() {
+    std::array<char, 4 + sizeof...(Args)> b{}; int n = 0; b[n++] = '(';
+    const char cs[] = { liteWasmSigChar<Args>()..., '\0' };
+    for (size_t i = 0; i < sizeof...(Args); ++i) b[n++] = cs[i];
+    b[n++] = ')'; char r = liteWasmSigChar<Ret>(); if (r) b[n++] = r; b[n] = '\0'; return b;
+}
+constexpr bool liteCstrEq(const char* a, const char* b) { while (*a && *a == *b) { ++a; ++b; } return *a == *b; }
+
+// Generated wrapper for a ctx-bound QPI backend: pointer-to-member of g_liteHostServices.
+// (g_liteHostServices is defined in lite_dynamic_contracts.h, included before this header.)
+template<auto Member> struct LiteQpiImport;
+template<class R, class... A, R(*LiteHostServices::*Member)(const void*, A...)>
+struct LiteQpiImport<Member> {
+    static liteWasmAbi<R> call(wasm_exec_env_t e, liteWasmAbi<A>... a) {
+        LiteWasmCallCtx* cc = liteWasmCC(e);
+        if constexpr (std::is_void_v<R>) (g_liteHostServices.*Member)(cc->ctx, liteWasmConv<A>(e, a)...);
+        else return (liteWasmAbi<R>)(g_liteHostServices.*Member)(cc->ctx, liteWasmConv<A>(e, a)...);
+    }
+    static constexpr auto sig = liteWasmSig<R, A...>();
+};
+// Generated wrapper for a ctx-less infra service (every param is a real wasm arg).
+template<auto Member> struct LiteInfraImport;
+template<class R, class... A, R(*LiteHostServices::*Member)(A...)>
+struct LiteInfraImport<Member> {
+    static liteWasmAbi<R> call(wasm_exec_env_t e, liteWasmAbi<A>... a) {
+        if constexpr (std::is_void_v<R>) (g_liteHostServices.*Member)(liteWasmConv<A>(e, a)...);
+        else return (liteWasmAbi<R>)(g_liteHostServices.*Member)(liteWasmConv<A>(e, a)...);
+    }
+    static constexpr auto sig = liteWasmSig<R, A...>();
+};
+
+// ---------------------------------------------------------------------------
+// Hand-written wrappers: bespoke logic the generator can't express (arena math, ci-stamp, debug-trace detail).
+// Their sig is still DERIVED (below) — only the body is hand-written.
+// ---------------------------------------------------------------------------
 static uint32_t w_acquireScratch(wasm_exec_env_t e, uint64_t size, uint32_t initZero) {
     LWC; uint32_t n = (uint32_t)((size + 7) & ~7ull);
     if (!cc || cc->arenaBump + n > cc->arenaEnd) {
@@ -52,40 +113,11 @@ static void     w_logBytes(wasm_exec_env_t e, uint32_t ci, uint32_t type, uint32
     if (cc && cc->trace) liteWasmTraceLog((LiteWasmTraceEntry*)cc->trace, (unsigned char)type, m, size); // pre-ci-stamp bytes
     g_liteHostServices.logBytes(ci, (unsigned char)type, m, size);
 }
-static void     w_k12(wasm_exec_env_t e, uint32_t inOff, uint32_t len, uint32_t outOff) {
-    g_liteHostServices.k12(A2N(inOff), len, A2N(outOff));
-}
-
-// --- QPI backends (ctx bound via user_data) ---
 static int64_t  w_transfer(wasm_exec_env_t e, uint32_t d, int64_t a) { LWC; LWTRACE("transfer", liteWasmHex(A2N(d), 8) + ".. " + std::to_string(a)); return g_liteHostServices.transfer(cc->ctx, A2N(d), a); }
 static int64_t  w_transferTyped(wasm_exec_env_t e, uint32_t d, int64_t a, uint32_t t) { LWC; LWTRACE("transferTyped", liteWasmHex(A2N(d), 8) + ".. " + std::to_string(a) + " t=" + std::to_string(t)); return g_liteHostServices.transferTyped(cc->ctx, A2N(d), a, (unsigned char)t); }
 static void     w_abort(wasm_exec_env_t e, uint32_t code) { LWC; LWTRACE("abort", std::to_string(code)); g_liteHostServices.abort(cc->ctx, code); }
 static int64_t  w_burn(wasm_exec_env_t e, int64_t a, uint32_t idx) { LWC; LWTRACE("burn", std::to_string(a) + " for " + std::to_string(idx)); return g_liteHostServices.burn(cc->ctx, a, idx); }
-static uint32_t w_epoch(wasm_exec_env_t e) { LWC; return g_liteHostServices.epoch(cc->ctx); }
-static uint32_t w_tick(wasm_exec_env_t e) { LWC; return g_liteHostServices.tick(cc->ctx); }
-static int32_t  w_numTickTx(wasm_exec_env_t e) { LWC; return g_liteHostServices.numberOfTickTransactions(cc->ctx); }
-static uint32_t w_getEntity(wasm_exec_env_t e, uint32_t id, uint32_t out) { LWC; return g_liteHostServices.getEntity(cc->ctx, A2N(id), A2N(out)); }
-static int64_t  w_queryFeeReserve(wasm_exec_env_t e, uint32_t ci) { LWC; return g_liteHostServices.queryFeeReserve(cc->ctx, ci); }
-static void     w_nextId(wasm_exec_env_t e, uint32_t id, uint32_t out) { LWC; g_liteHostServices.nextId(cc->ctx, A2N(id), A2N(out)); }
-static void     w_prevId(wasm_exec_env_t e, uint32_t id, uint32_t out) { LWC; g_liteHostServices.prevId(cc->ctx, A2N(id), A2N(out)); }
-static uint32_t w_isContractId(wasm_exec_env_t e, uint32_t id) { LWC; return g_liteHostServices.isContractId(cc->ctx, A2N(id)); }
-static void     w_arbitrator(wasm_exec_env_t e, uint32_t out) { LWC; g_liteHostServices.arbitrator(cc->ctx, A2N(out)); }
-static void     w_computor(wasm_exec_env_t e, uint32_t idx, uint32_t out) { LWC; g_liteHostServices.computor(cc->ctx, (unsigned short)idx, A2N(out)); }
-static uint32_t w_day(wasm_exec_env_t e) { LWC; return g_liteHostServices.day(cc->ctx); }
-static uint32_t w_year(wasm_exec_env_t e) { LWC; return g_liteHostServices.year(cc->ctx); }
-static uint32_t w_hour(wasm_exec_env_t e) { LWC; return g_liteHostServices.hour(cc->ctx); }
-static uint32_t w_minute(wasm_exec_env_t e) { LWC; return g_liteHostServices.minute(cc->ctx); }
-static uint32_t w_month(wasm_exec_env_t e) { LWC; return g_liteHostServices.month(cc->ctx); }
-static uint32_t w_second(wasm_exec_env_t e) { LWC; return g_liteHostServices.second(cc->ctx); }
-static uint32_t w_millisecond(wasm_exec_env_t e) { LWC; return g_liteHostServices.millisecond(cc->ctx); }
-static void     w_now(wasm_exec_env_t e, uint32_t out) { LWC; g_liteHostServices.now(cc->ctx, A2N(out)); }
-static void     w_prevSpectrumDigest(wasm_exec_env_t e, uint32_t out) { LWC; g_liteHostServices.prevSpectrumDigest(cc->ctx, A2N(out)); }
-static void     w_prevUniverseDigest(wasm_exec_env_t e, uint32_t out) { LWC; g_liteHostServices.prevUniverseDigest(cc->ctx, A2N(out)); }
-static void     w_prevComputerDigest(wasm_exec_env_t e, uint32_t out) { LWC; g_liteHostServices.prevComputerDigest(cc->ctx, A2N(out)); }
-static uint32_t w_isAssetIssued(wasm_exec_env_t e, uint32_t iss, uint64_t name) { LWC; return g_liteHostServices.isAssetIssued(cc->ctx, A2N(iss), name); }
 static int64_t  w_issueAsset(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t dec, int64_t shares, uint64_t unit) { LWC; LWTRACE("issueAsset", "name=" + std::to_string(name) + " shares=" + std::to_string(shares)); return g_liteHostServices.issueAsset(cc->ctx, name, A2N(iss), (signed char)dec, shares, unit); }
-static int64_t  w_numberOfShares(wasm_exec_env_t e, uint32_t a, uint32_t o, uint32_t p) { LWC; return g_liteHostServices.numberOfShares(cc->ctx, A2N(a), A2N(o), A2N(p)); }
-static int64_t  w_numberOfPossessedShares(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t own, uint32_t pos, uint32_t om, uint32_t pm) { LWC; return g_liteHostServices.numberOfPossessedShares(cc->ctx, name, A2N(iss), A2N(own), A2N(pos), (unsigned short)om, (unsigned short)pm); }
 static int64_t  w_transferShares(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t own, uint32_t pos, int64_t shares, uint32_t no) { LWC; LWTRACE("transferShares", "name=" + std::to_string(name) + " shares=" + std::to_string(shares)); return g_liteHostServices.transferShareOwnershipAndPossession(cc->ctx, name, A2N(iss), A2N(own), A2N(pos), shares, A2N(no)); }
 static uint32_t w_distributeDividends(wasm_exec_env_t e, int64_t a) { LWC; LWTRACE("distributeDividends", std::to_string(a)); return g_liteHostServices.distributeDividends(cc->ctx, a); }
 static int32_t  w_liteCallFunction(wasm_exec_env_t e, uint32_t idx, uint32_t it, uint32_t in, uint32_t inSize, uint32_t out, uint32_t outSize) { LWC; LWTRACE("callFunction", "-> " + std::to_string(idx) + "/" + std::to_string(it)); return g_liteHostServices.liteCallFunction(cc->ctx, idx, (unsigned short)it, A2N(in), inSize, A2N(out), outSize); }
@@ -96,52 +128,73 @@ static int32_t  w_liteSetShareholderVotes(wasm_exec_env_t e, uint32_t idx, uint3
 #undef LWC
 #undef A2N
 
-// WAMR signatures: i=i32, I=i64, ()=void; pointers cross as i32 offsets (converted in-fn), so never "*".
+// ---------------------------------------------------------------------------
+// The single source of truth: one row per import, in the original table order.
+//   GQ/GI  = generated   (Q ctx-bound QPI backend | I ctx-less infra)        -> LiteQpiImport/LiteInfraImport
+//   HQ/HI  = hand-written (bespoke body), sig still derived from the member  -> w_*
+// The 4th column is the previously hand-typed WAMR sig: each row static_asserts the DERIVED sig reproduces it.
+// ---------------------------------------------------------------------------
+#define LHOST_TABLE(GQ, GI, HQ, HI) \
+    GI("beginFn",                             beginFn,                              "(i)")       \
+    GI("endFn",                               endFn,                                "(i)")       \
+    GI("markDirty",                           markDirty,                            "(i)")       \
+    GI("pauseLog",                            pauseLog,                             "()")        \
+    GI("resumeLog",                           resumeLog,                            "()")        \
+    HI("acquireScratch",                      acquireScratch, w_acquireScratch,     "(Ii)i")     \
+    HI("releaseScratch",                      releaseScratch, w_releaseScratch,     "(i)")       \
+    HI("logBytes",                            logBytes,       w_logBytes,           "(iiii)")    \
+    GI("k12",                                 k12,                                  "(iii)")     \
+    HQ("transfer",                            transfer,       w_transfer,           "(iI)I")     \
+    HQ("transferTyped",                       transferTyped,  w_transferTyped,      "(iIi)I")    \
+    HQ("abort",                               abort,          w_abort,              "(i)")       \
+    HQ("burn",                                burn,           w_burn,               "(Ii)I")     \
+    GQ("epoch",                               epoch,                                "()i")       \
+    GQ("tick",                                tick,                                 "()i")       \
+    GQ("numberOfTickTransactions",            numberOfTickTransactions,             "()i")       \
+    GQ("getEntity",                           getEntity,                            "(ii)i")     \
+    GQ("queryFeeReserve",                     queryFeeReserve,                      "(i)I")      \
+    GQ("nextId",                              nextId,                               "(ii)")      \
+    GQ("prevId",                              prevId,                               "(ii)")      \
+    GQ("isContractId",                        isContractId,                         "(i)i")      \
+    GQ("arbitrator",                          arbitrator,                           "(i)")       \
+    GQ("computor",                            computor,                             "(ii)")      \
+    GQ("day",                                 day,                                  "()i")       \
+    GQ("year",                                year,                                 "()i")       \
+    GQ("hour",                                hour,                                 "()i")       \
+    GQ("minute",                              minute,                               "()i")       \
+    GQ("month",                               month,                                "()i")       \
+    GQ("second",                              second,                               "()i")       \
+    GQ("millisecond",                         millisecond,                          "()i")       \
+    GQ("now",                                 now,                                  "(i)")       \
+    GQ("prevSpectrumDigest",                  prevSpectrumDigest,                   "(i)")       \
+    GQ("prevUniverseDigest",                  prevUniverseDigest,                   "(i)")       \
+    GQ("prevComputerDigest",                  prevComputerDigest,                   "(i)")       \
+    GQ("isAssetIssued",                       isAssetIssued,                        "(iI)i")     \
+    HQ("issueAsset",                          issueAsset,     w_issueAsset,         "(IiiII)I")  \
+    GQ("numberOfShares",                      numberOfShares,                       "(iii)I")    \
+    GQ("numberOfPossessedShares",             numberOfPossessedShares,              "(Iiiiii)I") \
+    HQ("transferShareOwnershipAndPossession", transferShareOwnershipAndPossession, w_transferShares, "(IiiiIi)I") \
+    HQ("distributeDividends",                 distributeDividends, w_distributeDividends,        "(I)i")     \
+    HQ("liteCallFunction",                    liteCallFunction,    w_liteCallFunction,           "(iiiiii)i")  \
+    HQ("liteInvokeProcedure",                 liteInvokeProcedure, w_liteInvokeProcedure,        "(iiiiiiI)i") \
+    HQ("liteSetShareholderProposal",          setShareholderProposal, w_liteSetShareholderProposal, "(iiI)i") \
+    HQ("liteSetShareholderVotes",             setShareholderVotes,    w_liteSetShareholderVotes,    "(iiiI)i")
+
+// pass 1 — prove the derived sig reproduces every previously hand-typed string (transition safety net).
+#define LHOST_AS_GQ(nm, m, lit)     static_assert(liteCstrEq(LiteQpiImport<&LiteHostServices::m>::sig.data(),   lit), "wasm sig drift: " nm);
+#define LHOST_AS_GI(nm, m, lit)     static_assert(liteCstrEq(LiteInfraImport<&LiteHostServices::m>::sig.data(), lit), "wasm sig drift: " nm);
+#define LHOST_AS_HQ(nm, m, wfn, lit) static_assert(liteCstrEq(LiteQpiImport<&LiteHostServices::m>::sig.data(),   lit), "wasm sig drift: " nm);
+#define LHOST_AS_HI(nm, m, wfn, lit) static_assert(liteCstrEq(LiteInfraImport<&LiteHostServices::m>::sig.data(), lit), "wasm sig drift: " nm);
+LHOST_TABLE(LHOST_AS_GQ, LHOST_AS_GI, LHOST_AS_HQ, LHOST_AS_HI)
+
+// pass 2 — the NativeSymbol table. Generated rows use the templated wrapper; hand rows use w_*; sig is DERIVED
+// for every row (single source). Pointers cross as i32 offsets (converted in-fn), so the sig never names "*".
+#define LHOST_ROW_GQ(nm, m, lit)      { nm, (void*)&LiteQpiImport<&LiteHostServices::m>::call,   LiteQpiImport<&LiteHostServices::m>::sig.data(),   NULL },
+#define LHOST_ROW_GI(nm, m, lit)      { nm, (void*)&LiteInfraImport<&LiteHostServices::m>::call, LiteInfraImport<&LiteHostServices::m>::sig.data(), NULL },
+#define LHOST_ROW_HQ(nm, m, wfn, lit) { nm, (void*)wfn,                                          LiteQpiImport<&LiteHostServices::m>::sig.data(),   NULL },
+#define LHOST_ROW_HI(nm, m, wfn, lit) { nm, (void*)wfn,                                          LiteInfraImport<&LiteHostServices::m>::sig.data(), NULL },
 static NativeSymbol g_liteWasmNatives[] = {
-    { "beginFn",                            (void*)w_beginFn,                            "(i)",     NULL },
-    { "endFn",                              (void*)w_endFn,                              "(i)",     NULL },
-    { "markDirty",                          (void*)w_markDirty,                          "(i)",     NULL },
-    { "pauseLog",                           (void*)w_pauseLog,                           "()",      NULL },
-    { "resumeLog",                          (void*)w_resumeLog,                          "()",      NULL },
-    { "acquireScratch",                     (void*)w_acquireScratch,                     "(Ii)i",   NULL },
-    { "releaseScratch",                     (void*)w_releaseScratch,                     "(i)",     NULL },
-    { "logBytes",                           (void*)w_logBytes,                           "(iiii)",  NULL },
-    { "k12",                                (void*)w_k12,                                "(iii)",   NULL },
-    { "transfer",                           (void*)w_transfer,                           "(iI)I",   NULL },
-    { "transferTyped",                      (void*)w_transferTyped,                      "(iIi)I",  NULL },
-    { "abort",                              (void*)w_abort,                              "(i)",     NULL },
-    { "burn",                               (void*)w_burn,                               "(Ii)I",   NULL },
-    { "epoch",                              (void*)w_epoch,                              "()i",     NULL },
-    { "tick",                               (void*)w_tick,                               "()i",     NULL },
-    { "numberOfTickTransactions",           (void*)w_numTickTx,                          "()i",     NULL },
-    { "getEntity",                          (void*)w_getEntity,                          "(ii)i",   NULL },
-    { "queryFeeReserve",                    (void*)w_queryFeeReserve,                    "(i)I",    NULL },
-    { "nextId",                             (void*)w_nextId,                             "(ii)",    NULL },
-    { "prevId",                             (void*)w_prevId,                             "(ii)",    NULL },
-    { "isContractId",                       (void*)w_isContractId,                       "(i)i",    NULL },
-    { "arbitrator",                         (void*)w_arbitrator,                         "(i)",     NULL },
-    { "computor",                           (void*)w_computor,                           "(ii)",    NULL },
-    { "day",                                (void*)w_day,                                "()i",     NULL },
-    { "year",                               (void*)w_year,                               "()i",     NULL },
-    { "hour",                               (void*)w_hour,                               "()i",     NULL },
-    { "minute",                             (void*)w_minute,                             "()i",     NULL },
-    { "month",                              (void*)w_month,                              "()i",     NULL },
-    { "second",                             (void*)w_second,                             "()i",     NULL },
-    { "millisecond",                        (void*)w_millisecond,                        "()i",     NULL },
-    { "now",                                (void*)w_now,                                "(i)",     NULL },
-    { "prevSpectrumDigest",                 (void*)w_prevSpectrumDigest,                 "(i)",     NULL },
-    { "prevUniverseDigest",                 (void*)w_prevUniverseDigest,                 "(i)",     NULL },
-    { "prevComputerDigest",                 (void*)w_prevComputerDigest,                 "(i)",     NULL },
-    { "isAssetIssued",                      (void*)w_isAssetIssued,                      "(iI)i",   NULL },
-    { "issueAsset",                         (void*)w_issueAsset,                         "(IiiII)I",NULL },
-    { "numberOfShares",                     (void*)w_numberOfShares,                     "(iii)I",  NULL },
-    { "numberOfPossessedShares",            (void*)w_numberOfPossessedShares,            "(Iiiiii)I",NULL },
-    { "transferShareOwnershipAndPossession",(void*)w_transferShares,                     "(IiiiIi)I",NULL },
-    { "distributeDividends",                (void*)w_distributeDividends,                "(I)i",    NULL },
-    { "liteCallFunction",                   (void*)w_liteCallFunction,                   "(iiiiii)i",NULL },
-    { "liteInvokeProcedure",                (void*)w_liteInvokeProcedure,                "(iiiiiiI)i",NULL },
-    { "liteSetShareholderProposal",         (void*)w_liteSetShareholderProposal,         "(iiI)i",   NULL },
-    { "liteSetShareholderVotes",            (void*)w_liteSetShareholderVotes,            "(iiiI)i",  NULL },
+    LHOST_TABLE(LHOST_ROW_GQ, LHOST_ROW_GI, LHOST_ROW_HQ, LHOST_ROW_HI)
 };
 static const uint32_t g_liteWasmNativesCount = (uint32_t)(sizeof(g_liteWasmNatives) / sizeof(g_liteWasmNatives[0]));
 
