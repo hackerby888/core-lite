@@ -275,6 +275,7 @@ TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_IndexModeRandomAccess) {
     }
 
     for (int i = 0; i < 1024 * 128 * 64; i++) {
+        PinScope _pinScope; // release this iteration's page pin (no work-unit boundary in tests)
         auto randomRange = m256i::randomValue().m256i_u64[0] % (1024*128*64);
         if (randomRange != 1 && randomRange != 1000 && randomRange != 1'000'000) {
             TxHashMapEntry& entry = test_vm.getRef(randomRange);
@@ -314,6 +315,7 @@ TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_IndexModeLinearAccess) {
     test_vm.init();
 
     for (unsigned long long i = 0; i < 1024 * 128 * 64; i++) {
+        PinScope _pinScope; // release this iteration's page pin (no work-unit boundary in tests)
         TxHashMapEntry& entry = test_vm.getRef(i);
         entry.digest = m256i::zero();
         entry.digest.m256i_u64[0] = i;
@@ -321,10 +323,45 @@ TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_IndexModeLinearAccess) {
     }
 
     for (unsigned long long i = 0; i < 1024 * 128 * 64; i++) {
+        PinScope _pinScope; // release this iteration's page pin (no work-unit boundary in tests)
         TxHashMapEntry& entry = test_vm.getRef(i);
         EXPECT_TRUE(entry.digest.m256i_u64[0] == i);
         EXPECT_TRUE(entry.offset == i);
     }
+}
+
+// Reproduces the epoch-transition pin-leak: a thread holds pin "notes" in its arena, the VM is
+// reset() (as beginEpoch does), then the thread keeps working. Without the generation guard, the
+// stale notes (a) suppress fresh pins (under-pin) and (b) make pinnedNow drift; with it, a reset
+// cleanly invalidates the stale notes.
+TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_ResetInvalidatesStalePins) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+
+    releaseThreadPins(); // start from a clean arena
+
+    struct E { unsigned long long a, b; };
+    SwapVirtualMemory<E, wcharToNumber(L"rsta"), wcharToNumber(L"data"), 64, 8, INDEX_MODE, 0> vm;
+    vm.init();
+
+    // Pin two distinct pages and DON'T release them (simulating a thread that holds notes across
+    // the reset, like an in-flight HTTP request during an epoch transition).
+    vm.getRef(0);    // page 0
+    vm.getRef(64);   // page 1
+    EXPECT_EQ(vm.getPinnedNow(), 2);
+
+    // Epoch transition: reset wipes the cache + pin counters (but cannot touch this thread's arena).
+    vm.reset();
+    EXPECT_EQ(vm.getPinnedNow(), 0);
+
+    // Fresh access to the SAME page must take a real pin again (stale note must not suppress it).
+    vm.getRef(0);
+    EXPECT_EQ(vm.getPinnedNow(), 1); // without the generation guard this would wrongly be 0
+
+    // Releasing everything (the one fresh pin + the two stale notes) must land back at exactly 0,
+    // not underflow or leave a phantom pinned slot.
+    releaseThreadPins();
+    EXPECT_EQ(vm.getPinnedNow(), 0);
 }
 
 

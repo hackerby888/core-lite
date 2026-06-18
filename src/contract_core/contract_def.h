@@ -206,7 +206,11 @@
 #define CONTRACT_INDEX QRAFFLE_CONTRACT_INDEX
 #define CONTRACT_STATE_TYPE QRAFFLE
 #define CONTRACT_STATE2_TYPE QRAFFLE2
+#ifdef OLD_QRAFFLE
+#include "contracts/QRaffle_old.h"
+#else
 #include "contracts/QRaffle.h"
+#endif
 
 #undef CONTRACT_INDEX
 #undef CONTRACT_STATE_TYPE
@@ -288,8 +292,6 @@
 #define CONTRACT_STATE2_TYPE ESCROW2
 #include "contracts/Escrow.h"
 
-#ifndef NO_GGWP
-
 #undef CONTRACT_INDEX
 #undef CONTRACT_STATE_TYPE
 #undef CONTRACT_STATE2_TYPE
@@ -299,8 +301,6 @@
 #define CONTRACT_STATE_TYPE WOLFPACK
 #define CONTRACT_STATE2_TYPE WOLFPACK2
 #include "contracts/GGWP.h"
-
-#endif
 
 // new contracts should be added above this line
 
@@ -467,9 +467,7 @@ constexpr struct ContractDescription
     {"VOTTUN", 206, 10000, sizeof(VOTTUNBRIDGE::StateData)}, // proposal in epoch 204, IPO in 205, construction and first use in 206
     {"QUSINO", 208, 10000, sizeof(QUSINO::StateData)}, // proposal in epoch 206, IPO in 207, construction and first use in 208
     {"ESCROW", 210, 10000, sizeof(ESCROW::StateData)}, // proposal in epoch 208, IPO in 209, construction and first use in 210
-#ifndef NO_GGWP
-    {"GGWP", 217, 10000, sizeof(WOLFPACK::StateData)}, // proposal in epoch 215, IPO in 216, construction and first use in 217
-#endif
+    {"GGWP", 218, 10000, sizeof(WOLFPACK::StateData)}, // proposal in epoch 216, IPO in 217, construction and first use in 218
     // new contracts should be added above this line
 #ifdef INCLUDE_CONTRACT_TEST_EXAMPLES
     {"TESTEXA", 138, 10000, sizeof(TESTEXA::StateData)},
@@ -599,9 +597,7 @@ static void initializeContracts()
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(VOTTUNBRIDGE);
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(QUSINO);
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(ESCROW);
-#ifndef NO_GGWP
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(WOLFPACK);
-#endif
     // new contracts should be added above this line
 #ifdef INCLUDE_CONTRACT_TEST_EXAMPLES
     REGISTER_CONTRACT_FUNCTIONS_AND_PROCEDURES(TESTEXA);
@@ -620,7 +616,9 @@ static void initializeContracts()
 // Automatic Contract State Changes
 enum ContractStateChangeType
 {
+    // Keeps the saved state's old bytes, only zero-fills the new bytes at the end (used when struct grew; old fields preserved)
     PADDING,
+    // Discards the saved state entirely, zeros the whole buffer
     RESET,
 };
 struct ContractStateChangeInfo
@@ -629,11 +627,12 @@ struct ContractStateChangeInfo
     ContractStateChangeType changeType;
 };
 // Contracts whose state struct changed this epoch. Update this list each epoch as needed.
+// Each entry is { CONTRACT_INDEX, PADDING or RESET }
 // When enabling, replace both lines below, e.g.:
-constexpr ContractStateChangeInfo contractStateChangeInfos[] = { { QIP_CONTRACT_INDEX, RESET } };
-constexpr unsigned int contractStateChangeCount = sizeof(contractStateChangeInfos) / sizeof(contractStateChangeInfos[0]);
-// constexpr const ContractStateChangeInfo* contractStateChangeInfos = nullptr;
-// constexpr unsigned int contractStateChangeCount = 0;
+//constexpr ContractStateChangeInfo contractStateChangeInfos[] = { { RANDOM_CONTRACT_INDEX, PADDING } };
+//constexpr unsigned int contractStateChangeCount = sizeof(contractStateChangeInfos) / sizeof(contractStateChangeInfos[0]);
+ constexpr const ContractStateChangeInfo* contractStateChangeInfos = nullptr;
+ constexpr unsigned int contractStateChangeCount = 0;
 
 
 // Class for registering and looking up user procedures independently of input type, for example for notifications

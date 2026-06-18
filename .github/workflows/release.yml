@@ -17,6 +17,12 @@ jobs:
       configuration: "Release"
       build_dir: "build"
 
+  build-linux-avx512:
+    uses: ./.github/workflows/linux-build-avx512.yml
+    with:
+      configuration: "Release"
+      build_dir: "build"
+
   build-windows:
     uses: ./.github/workflows/windows-build.yml
     with:
@@ -38,6 +44,28 @@ jobs:
           name: "Mainnet Executable Release ${{ github.ref_name }}"
           body: "Mainnet release of Qubic Core Lite executables."
           files: ${{ env.RELEASE_BUILD_DIR }}/src/Qubic
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-linux-avx512:
+    needs: build-linux-avx512
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Linux AVX-512 build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: QubicLiteLinuxBuild-AVX512-${{ env.BUILD_CONFIGURATION }}
+          path: ${{ env.RELEASE_BUILD_DIR }}
+
+      - name: Rename binary to QubicAVX512
+        run: mv ${{ env.RELEASE_BUILD_DIR }}/src/Qubic ${{ env.RELEASE_BUILD_DIR }}/src/QubicAVX512
+
+      - name: Create release package
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Mainnet Executable Release ${{ github.ref_name }}"
+          body: "Mainnet release of Qubic Core Lite executables."
+          files: ${{ env.RELEASE_BUILD_DIR }}/src/QubicAVX512
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

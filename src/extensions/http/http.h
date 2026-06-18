@@ -1,5 +1,9 @@
 #pragma once
 
+#include "../tx_stats.h"
+#include "../tx_slot_index.h"
+#include "../tick_bench.h"
+
 static unsigned long long httpPasscodes[4] = {};
 
 // Windows: only the cmake build links drogon/jsoncpp; the legacy Qubic.sln sets NO_RPC to opt out.
@@ -290,6 +294,10 @@ private:
             [](const HttpRequestPtr &req,
                const HttpResponsePtr &resp)
             {
+                // Release any swap-cache page pins taken while serving this request (the
+                // handler ran on this same loop thread). See releaseThreadPins / PinScope.
+                releaseThreadPins();
+
                 auto end = std::chrono::steady_clock::now();
                 std::chrono::steady_clock::time_point start;
                 try
@@ -683,6 +691,21 @@ private:
                 auto resp = HttpResponse::newHttpJsonResponse(json);
                 callback(resp);
             }, {drogon::Get, "MiddleWare::PasscodeVerifier"});
+
+        app.registerHandler("/set-max-inbound",
+            [](const HttpRequestPtr &req,
+               std::function<void(const HttpResponsePtr &)> &&callback)
+            {
+                int n = std::stoi(req->getParameter("n"));
+                if (n < 0) n = 0;
+                if (n > NUMBER_OF_INCOMING_CONNECTIONS) n = NUMBER_OF_INCOMING_CONNECTIONS;
+                maxInboundAccepts = n;
+                Json::Value json;
+                json["status"] = "ok";
+                json["maxInboundAccepts"] = maxInboundAccepts;
+                auto resp = HttpResponse::newHttpJsonResponse(json);
+                callback(resp);
+            }, {drogon::Get});
 
         app.registerHandler("/spam",
             [](const HttpRequestPtr &req,

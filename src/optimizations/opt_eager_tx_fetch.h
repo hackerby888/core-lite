@@ -72,7 +72,12 @@ static void eagerFetchMissingTransactions(const TickData& tickData)
     req->tick = tick;
     copyMem(req->transactionFlags, txFlags, sizeof(txFlags));
 
-    pushToSeveral(reqHeader);
+    // This runs on a request-processor (worker) thread. push()/pushToSeveral() write
+    // peer->dataToTransmit and are NOT thread-safe (main-thread only), so calling them here
+    // races the main loop's pushes and corrupts the send buffer (manifesting as malformed
+    // outgoing frames and a wedged send path). Hand the request to the lock-protected response
+    // queue instead; the main loop drains peer==NULL entries via pushToSeveral().
+    enqueueResponse(NULL, reqHeader);
 }
 
 #endif // USE_EAGER_TX_FETCH

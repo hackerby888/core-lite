@@ -259,21 +259,30 @@ public:
     }
 
     // Check validity of transaction and add to the pool. Return boolean indicating whether transaction was added.
-    static bool add(const Transaction* tx)
+    // buildPriorityIndex=false (AUX): skip the priority Collection (unused without tick publishing); still dedups+stores.
+    static bool add(const Transaction* tx, bool buildPriorityIndex = true)
     {
 //#if !defined(NDEBUG) && !defined(NO_UEFI)
 //        addDebugMessage(L"Begin pendingTxsPool.add()");
 //#endif
         bool txAdded = false;
+
+        // checkValidity + digest depend only on tx; compute before the lock to shrink the critical section.
+        const bool valid = tx->checkValidity();
+        unsigned int transactionSize = 0;
+        m256i digest;
+        if (valid)
+        {
+            transactionSize = tx->totalSize();
+            KangarooTwelve(tx, transactionSize, &digest, sizeof(m256i));
+        }
+
         ACQUIRE(lock);
-        if (tx->checkValidity() && tickInStorage(tx->tick))
+        if (valid && tickInStorage(tx->tick))
         {
             unsigned int tickIndex = tickToIndex(tx->tick);
-            const unsigned int transactionSize = tx->totalSize();
 
             // check if tx with same digest already exists
-            m256i digest;
-            KangarooTwelve(tx, transactionSize, &digest, sizeof(m256i));
             for (unsigned int txIndex = 0; txIndex < numSavedTxsPerTick[tickIndex]; ++txIndex)
             {
                 if (*getDigestPtr(tickIndex, txIndex) == digest)
@@ -286,6 +295,20 @@ public:
 #endif
                     goto end_add_function;
                 }
+            }
+
+            if (!buildPriorityIndex)
+            {
+                if (numSavedTxsPerTick[tickIndex] < maxNumTxsPerTick)
+                {
+                    copyMem(getDigestPtr(tickIndex, numSavedTxsPerTick[tickIndex]), &digest, sizeof(m256i));
+                    copyMem(getTxPtr(tickIndex, numSavedTxsPerTick[tickIndex]), tx, transactionSize);
+
+                    numSavedTxsPerTick[tickIndex]++;
+                    txAdded = true;
+                }
+
+                goto end_add_function;
             }
 
             sint64 priority = calculateTxPriority(tx);

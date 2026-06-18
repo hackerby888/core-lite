@@ -1421,7 +1421,7 @@ static const unsigned char whiteListPeers[][4] = {
 // Enter static IPs of one or multiple oracle machine node(s). This node will connect to these and try to keep the
 // connection open for low latency. The oracle machine nodes also need to whitelist the IP of this core node.
 static const unsigned char oracleMachineIPs[][4] = {
-     {127, 0, 0, 1}, // REMOVE THIS ENTRY AND REPLACE IT WITH YOUR OWN IP ADDRESSES
+     {0, 0, 0, 0}, // no oracle machine: zero address is never dialed (address.u32 != 0 guard)
 };
 
 #define ENABLE_QUBIC_LOGGING_EVENT 1 // turn on logging events

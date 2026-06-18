@@ -100,6 +100,12 @@ static void requestFutureQuorumTicks(unsigned int prefetchDepth)
 static void requestFutureTickTransactions(unsigned int prefetchDepth)
 {
     if (prefetchDepth <= 2) return;
+    // Serialize all access to the shared requestedTickTransactions global with the tick
+    // processor (which mutates .tick/.transactionFlags under this lock). Without it, the
+    // push() copy below races a concurrent writer and emits a malformed frame. Acquire it
+    // before ts.tickData to match the main loop's lock order (requestedTickTransactionsLock
+    // -> ts.tickData) and avoid a deadlock.
+    LockGuard rttGuard(requestedTickTransactionsLock);
     ts.tickData.acquireLock();
     for (unsigned int d = 2; d <= prefetchDepth; d++)
     {
@@ -107,10 +113,24 @@ static void requestFutureTickTransactions(unsigned int prefetchDepth)
         if (!ts.tickInCurrentEpochStorage(futureTick)) break;
         if (ts.tickData[futureTick - system.initialTick].epoch == system.epoch)
         {
+            // Request only txs not yet stored (offset==0); requesting all re-sends the whole tick each round.
+            const TickData& td = ts.tickData[futureTick - system.initialTick];
+            const unsigned long long* offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(futureTick);
+            setMem(requestedTickTransactions.requestedTickTransactions.transactionFlags,
+                   sizeof(requestedTickTransactions.requestedTickTransactions.transactionFlags), 0xff);
+            bool anyMissing = false;
+            for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
+            {
+                if (!offsets[i] && !isZero(td.transactionDigests[i]))
+                {
+                    requestedTickTransactions.requestedTickTransactions.transactionFlags[i >> 3] &= ~(1 << (i & 7));
+                    anyMissing = true;
+                }
+            }
+            if (!anyMissing)
+                continue;
             requestedTickTransactions.header.randomizeDejavu();
             requestedTickTransactions.requestedTickTransactions.tick = futureTick;
-            setMem(requestedTickTransactions.requestedTickTransactions.transactionFlags,
-                   sizeof(requestedTickTransactions.requestedTickTransactions.transactionFlags), 0);
             pushPreferringAtOrAbove(&requestedTickTransactions.header, futureTick);
         }
     }

@@ -16,7 +16,134 @@ public:
     ADD_METHOD_TO(RpcStatsController::queryAssetOwners, "/v1/issuers/{issuerIdentity}/assets/{assetName}/owners", Get);
     ADD_METHOD_TO(RpcStatsController::latestStats, "/v1/latest-stats", Get);
     ADD_METHOD_TO(RpcStatsController::richList, "/v1/rich-list", Get);
+    ADD_METHOD_TO(RpcStatsController::txStats, "/v1/tx-stats", Get);
+    ADD_METHOD_TO(RpcStatsController::tickBench, "/v1/tick-bench", Get);
+    ADD_METHOD_TO(RpcStatsController::peerStats, "/v1/peer-stats", Get);
     METHOD_LIST_END
+
+    // Peer connection state + disconnect-reason counters (why handshaked peers drop).
+    inline void peerStats(const HttpRequestPtr &req,
+                         std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        using namespace std;
+        Json::Value result;
+
+        Json::Value reasons;
+        for (unsigned int r = 0; r < PeerDisc::REASON_COUNT; r++)
+            reasons[PeerDisc::kName[r]] = Json::UInt64(PeerDisc::gReasonCount[r].load(memory_order_relaxed));
+        result["disconnectReasons"] = reasons;
+        result["disconnectTotal"] = Json::UInt64(PeerDisc::gTotal.load(memory_order_relaxed));
+        unsigned int last = PeerDisc::gLastReason.load(memory_order_relaxed);
+        result["lastReason"] = PeerDisc::kName[last < PeerDisc::REASON_COUNT ? last : 0];
+
+        unsigned int connected = 0, handshaked = 0;
+        Json::Value slots(Json::arrayValue);
+        unsigned int n = NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS;
+        for (unsigned int i = 0; i < n; i++)
+        {
+            auto &p = peers[i];
+            Json::Value e;
+            e["slot"] = i;
+            e["outgoing"] = (i < NUMBER_OF_OUTGOING_CONNECTIONS);
+            e["hasConn"] = (((unsigned long long)p.tcp4Protocol) > 1);
+            e["connected"] = (bool)p.isConnectedAccepted;
+            e["handshaked"] = (bool)p.exchangedPublicPeers;
+            e["closing"] = (bool)p.isClosing;
+            e["incoming"] = (bool)p.isIncommingConnection;
+            e["peerReportedTick"] = p.peerReportedTick;
+            e["lastActiveTick"] = p.lastActiveTick;
+            e["ip"] = std::to_string(p.address.u8[0]) + "." + std::to_string(p.address.u8[1]) + "." +
+                      std::to_string(p.address.u8[2]) + "." + std::to_string(p.address.u8[3]);
+            unsigned int sc = (i < PeerDisc::MAX_SLOTS) ? PeerDisc::gSlotCount[i].load(memory_order_relaxed) : 0;
+            unsigned int sr = (i < PeerDisc::MAX_SLOTS) ? PeerDisc::gSlotLastReason[i].load(memory_order_relaxed) : 0;
+            e["disconnects"] = Json::UInt(sc);
+            e["lastReason"] = PeerDisc::kName[sr < PeerDisc::REASON_COUNT ? sr : 0];
+            e["rxBytes"] = Json::UInt64((i < PeerDisc::MAX_SLOTS) ? PeerDisc::gSlotRxBytes[i].load(memory_order_relaxed) : 0);
+            e["txBytes"] = Json::UInt64((i < PeerDisc::MAX_SLOTS) ? PeerDisc::gSlotTxBytes[i].load(memory_order_relaxed) : 0);
+            if (p.isConnectedAccepted) connected++;
+            if (p.exchangedPublicPeers) handshaked++;
+            slots.append(e);
+        }
+        result["connectedCount"] = connected;
+        result["handshakedCount"] = handshaked;
+        result["peers"] = slots;
+        result["currentTick"] = system.tick;
+        cb(HttpResponse::newHttpJsonResponse(result));
+    }
+
+    // Per-phase processTick() timings (TSC). Query: reset=1 clears counters after reading.
+    inline void tickBench(const HttpRequestPtr &req,
+                         std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        using namespace std;
+        unsigned long long freq = frequency; // TSC Hz, set at boot
+        auto toUs = [freq](uint64_t t) -> Json::UInt64
+        { return Json::UInt64(freq ? (t * 1000000ull / freq) : 0); };
+
+        Json::Value result;
+        Json::Value phases(Json::arrayValue);
+        for (unsigned int p = 0; p < TickBench::PHASE_COUNT; p++)
+        {
+            auto &s = TickBench::gStat[p];
+            uint64_t c = s.count.load(memory_order_relaxed);
+            uint64_t sum = s.sumTsc.load(memory_order_relaxed);
+            Json::Value e;
+            e["phase"] = TickBench::kPhaseName[p];
+            e["count"] = Json::UInt64(c);
+            e["sumUs"] = toUs(sum);
+            e["avgUs"] = toUs(c ? sum / c : 0);
+            e["maxUs"] = toUs(s.maxTsc.load(memory_order_relaxed));
+            e["lastUs"] = toUs(s.lastTsc.load(memory_order_relaxed));
+            phases.append(e);
+        }
+        result["frequencyHz"] = Json::UInt64(freq);
+        result["currentTick"] = system.tick;
+        result["phases"] = phases;
+
+        if (req->getParameter("reset") == "1" || req->getParameter("reset") == "true")
+            TickBench::reset();
+
+        cb(HttpResponse::newHttpJsonResponse(result));
+    }
+
+    // Broadcast-tx throughput counters from processBroadcastTransaction().
+    // Query: count = number of recent target-ticks to return (default 20, max RING).
+    inline void txStats(const HttpRequestPtr &req,
+                        std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        using namespace std;
+        Json::Value result;
+        Json::Value data;
+        data["totalReceived"] = Json::UInt64(TxStats::gTotalReceived.load(memory_order_relaxed));
+        data["totalValid"] = Json::UInt64(TxStats::gTotalValid.load(memory_order_relaxed));
+        data["totalStored"] = Json::UInt64(TxStats::gTotalStored.load(memory_order_relaxed));
+        uint32_t last = TxStats::gLastTick.load(memory_order_relaxed);
+        data["lastTick"] = Json::UInt(last);
+        data["currentTick"] = system.tick;
+
+        long long count = 20;
+        if (req->getParameter("count") != "")
+            count = std::stoll(req->getParameter("count"));
+        if (count < 0) count = 0;
+        if (count > (long long)TxStats::RING) count = TxStats::RING;
+
+        Json::Value perTick(Json::arrayValue);
+        for (long long i = count - 1; i >= 0; i--)
+        {
+            if ((long long)last - i < 0) continue;
+            uint32_t t = (uint32_t)(last - i);
+            TxStats::TickSlot &s = TxStats::gRing[t & TxStats::RING_MASK];
+            if (s.tick.load(memory_order_relaxed) != t) continue; // evicted / never seen
+            Json::Value e;
+            e["tick"] = Json::UInt(t);
+            e["received"] = Json::UInt(s.received.load(memory_order_relaxed));
+            e["stored"] = Json::UInt(s.stored.load(memory_order_relaxed));
+            perTick.append(e);
+        }
+        data["perTick"] = perTick;
+        result["data"] = data;
+        cb(HttpResponse::newHttpJsonResponse(result));
+    }
 
     inline void queryAssetOwners(const HttpRequestPtr &req,
                                  std::function<void(const HttpResponsePtr &)> &&cb,
