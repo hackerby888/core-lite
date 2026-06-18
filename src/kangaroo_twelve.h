@@ -658,7 +658,9 @@ static void initAVX512KangarooTwelveConstants()
 
 typedef struct
 {
-    unsigned char state[200];
+    // state is cast to (unsigned long long*) / (m256i*) in the permute and XOR paths; force the
+    // alignment those accesses already assume so the lane loads aren't misaligned UB (UBSan trap).
+    alignas(32) unsigned char state[200];
     unsigned char byteIOIndex;
 } KangarooTwelve_F;
 
@@ -2497,7 +2499,8 @@ static void KangarooTwelve64To32(const void* input, void* output)
 
 static void random(const unsigned char* publicKey, const unsigned char* nonce, unsigned char* output, unsigned long long outputSize)
 {
-    unsigned char state[200];
+    // 32-byte aligned: written as m256i below and read as unsigned long long lanes in the permute.
+    alignas(32) unsigned char state[200];
 #ifdef _MSC_VER
     *((__m256i*)&state[0]) = *((__m256i*)publicKey);
     *((__m256i*)&state[32]) = *((__m256i*)nonce);
