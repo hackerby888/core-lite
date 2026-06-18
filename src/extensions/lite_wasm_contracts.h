@@ -95,6 +95,76 @@ static inline void liteWasmEnsureThreadEnv() {
 // module_inst (Stage-3b: a fresh/foreign env traps "invalid exec env" against WAMR's per-thread TLS env).
 static thread_local wasm_exec_env_t t_liteWasmCurEnv = nullptr;
 
+// ---- liteWasmDispatch helpers (extracted; behavior identical to the previously inlined code) ----
+
+// Resolve a call's registered input/output sizes by kind; false (+logs) if they exceed the io regions.
+static inline bool liteWasmResolveIO(uint32_t idx, uint16_t it, uint8_t kind, const LiteWasmSlot& s,
+                                     uint16_t& inSize, uint16_t& outSize) {
+    if (kind == LITE_KIND_FUNCTION)          { inSize = contractUserFunctionInputSizes[idx][it];  outSize = contractUserFunctionOutputSizes[idx][it]; }
+    else if (kind == LITE_WASM_KIND_SYSPROC) { inSize = s.sysInSize[it]; outSize = s.sysOutSize[it]; }   // QPI sysproc in/out
+    else                                     { inSize = contractUserProcedureInputSizes[idx][it]; outSize = contractUserProcedureOutputSizes[idx][it]; }
+    // Registered sizes are uint16 (<=65535 < 64K) so this never fires today — defense against a tighter region.
+    if (inSize > LITE_WASM_IN_SZ || outSize > LITE_WASM_OUT_SZ) {
+        logColorToScreen("ERROR", "LITEWASM dispatch in/out exceeds io region idx=" + std::to_string(idx)
+                         + " in=" + std::to_string(inSize) + " out=" + std::to_string(outSize));
+        return false;
+    }
+    return true;
+}
+
+// RAII exec_env selection. Outermost dispatch on a thread creates a fresh exec_env on the slot's instance; a
+// nested wasm->wasm call (liteCallFunction) reuses the thread's current env + swaps its module_inst. The dtor
+// destroys the fresh env (outer) or restores the borrowed env's module_inst + user_data (nested). ok=false if
+// the outer exec_env couldn't be created.
+struct LiteWasmEnvScope {
+    wasm_exec_env_t    env = nullptr;
+    bool               outer = false;
+    bool               ok = false;
+    wasm_module_inst_t savedInst = nullptr;
+    void*              savedUD = nullptr;
+
+    explicit LiteWasmEnvScope(const LiteWasmSlot& s) {
+        if (t_liteWasmCurEnv) {
+            env = t_liteWasmCurEnv;
+            savedInst = wasm_runtime_get_module_inst(env);
+            savedUD   = wasm_runtime_get_user_data(env);
+            wasm_runtime_set_module_inst(env, s.inst);
+            outer = false; ok = true;
+        } else {
+            // WAMR exec_envs are thread-bound + the slot's load-time env belongs to the deploy thread.
+            liteWasmEnsureThreadEnv();
+            env = wasm_runtime_create_exec_env(s.inst, 64 * 1024);
+            if (!env) return;
+            t_liteWasmCurEnv = env;
+            outer = true; ok = true;
+        }
+    }
+    ~LiteWasmEnvScope() {
+        if (!ok) return;
+        if (outer) { wasm_runtime_set_user_data(env, nullptr); wasm_runtime_destroy_exec_env(env); t_liteWasmCurEnv = nullptr; }
+        else       { wasm_runtime_set_user_data(env, savedUD); wasm_runtime_set_module_inst(env, savedInst); }
+    }
+    LiteWasmEnvScope(const LiteWasmEnvScope&) = delete;
+    LiteWasmEnvScope& operator=(const LiteWasmEnvScope&) = delete;
+};
+
+// Copy ctx base + input into linear memory; zero the output region. (State is resident — not passed in.)
+static inline void liteWasmMarshalIn(const LiteWasmSlot& s, const void* ctx, const void* input,
+                                     uint16_t inSize, uint16_t outSize, uint32_t wIn, uint32_t wOut) {
+    if (ctx && s.ctxOff) copyMem(wasm_runtime_addr_app_to_native(s.inst, s.ctxOff), ctx, sizeof(QPI::QpiContext));
+    if (inSize) copyMem(wasm_runtime_addr_app_to_native(s.inst, wIn), input, inSize);
+    setMem(wasm_runtime_addr_app_to_native(s.inst, wOut), outSize ? outSize : 1, 0);
+}
+
+// Copy the output region out; refresh contractStates[idx] (linear-mem base may move on memory.grow); flag the
+// slot dirty for write calls so the digest re-hashes.
+static inline void liteWasmMarshalOut(const LiteWasmSlot& s, uint32_t idx, uint8_t kind,
+                                      void* output, uint16_t outSize, uint32_t wOut) {
+    if (outSize) copyMem(output, wasm_runtime_addr_app_to_native(s.inst, wOut), outSize);
+    contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
+    if (kind != LITE_KIND_FUNCTION) g_liteHostServices.markDirty(idx);   // procedures + system procedures write state
+}
+
 // The real engine entry: marshal one contract call through the wasm instance. Receives the SAME native ptrs
 // the core hands a native contract fn (ctx, state, input, output, locals); copies them in/out of linear memory.
 static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void* ctx,
@@ -107,38 +177,11 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     if (!s.loaded) return;
 
     uint16_t inSize, outSize;
-    if (kind == LITE_KIND_FUNCTION)            { inSize = contractUserFunctionInputSizes[idx][it];  outSize = contractUserFunctionOutputSizes[idx][it]; }
-    else if (kind == LITE_WASM_KIND_SYSPROC)   { inSize = s.sysInSize[it]; outSize = s.sysOutSize[it]; }   // QPI sysproc in/out
-    else                                       { inSize = contractUserProcedureInputSizes[idx][it]; outSize = contractUserProcedureOutputSizes[idx][it]; }
+    if (!liteWasmResolveIO(idx, it, kind, s, inSize, outSize)) return;
 
-    // guard: input/output must fit their io regions before we copy into linear memory. Registered sizes are
-    // uint16 (<=65535 < 64K) so this never fires today — defense against a tighter region / wider size type.
-    if (inSize > LITE_WASM_IN_SZ || outSize > LITE_WASM_OUT_SZ) {
-        logColorToScreen("ERROR", "LITEWASM dispatch in/out exceeds io region idx=" + std::to_string(idx)
-                         + " in=" + std::to_string(inSize) + " out=" + std::to_string(outSize));
-        return;
-    }
-
-    // env selection: outermost uses the slot env; nested reuses the thread's current env + set_module_inst.
-    wasm_exec_env_t env;
-    bool outer;
-    wasm_module_inst_t savedInst = nullptr;
-    void* savedUD = nullptr;
-    if (t_liteWasmCurEnv) {
-        env = t_liteWasmCurEnv;
-        savedInst = wasm_runtime_get_module_inst(env);
-        savedUD   = wasm_runtime_get_user_data(env);
-        wasm_runtime_set_module_inst(env, s.inst);
-        outer = false;
-    } else {
-        // outermost call on this thread: WAMR exec_envs are thread-bound, and the slot's load-time env
-        // belongs to the deploy thread. Init this thread's wasm env + use a fresh exec_env on it.
-        liteWasmEnsureThreadEnv();
-        env = wasm_runtime_create_exec_env(s.inst, 64 * 1024);
-        if (!env) return;
-        t_liteWasmCurEnv = env;
-        outer = true;
-    }
+    LiteWasmEnvScope envScope(s);
+    if (!envScope.ok) return;
+    const wasm_exec_env_t env = envScope.env;
 
     const uint32_t wIn     = s.ioBase;
     const uint32_t wOut    = s.ioBase + LITE_WASM_IN_SZ;
@@ -168,15 +211,10 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
         t0 = std::chrono::steady_clock::now();
     }
 
-    // ctx base in: the contract's inline qpi.h accessors (invocationReward/invocator/originator/contractIndex)
-    // read these fields directly. QpiContext has no pointers/vtable + m256i is align-8 -> layout is identical
-    // wasm32/x64, so a raw copy of the base populates them.
-    if (ctx && s.ctxOff) copyMem(wasm_runtime_addr_app_to_native(s.inst, s.ctxOff), ctx, sizeof(QPI::QpiContext));
-
-    // input in + zero output. State is not passed in: it's resident in the wasm linear memory (contractStates[idx]
-    // aliases it) and the contract mutates it in place.
-    if (inSize) copyMem(wasm_runtime_addr_app_to_native(s.inst, wIn), input, inSize);
-    setMem(wasm_runtime_addr_app_to_native(s.inst, wOut), outSize ? outSize : 1, 0);
+    // ctx base + input copied into linear memory, output zeroed. The contract's inline qpi.h accessors read the
+    // ctx fields directly (QpiContext has no pointers/vtable + m256i is align-8 -> identical wasm32/x64 layout).
+    // State is NOT passed in — it's resident in linear memory (contractStates[idx] aliases it), mutated in place.
+    liteWasmMarshalIn(s, ctx, input, inSize, outSize, wIn, wOut);
 
     // protect the state region RO so the contract's writes fault -> dirty-page capture (write calls only).
     if (dbgWrite && dbgState) liteWasmDirtyBegin(dbgState, s.stateSize);
@@ -199,11 +237,9 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     // restore state RW + build the changed-byte diff from the dirtied pages.
     if (dbgWrite && dbgState) liteWasmDirtyEnd(te, dbgState, s.stateSize);
 
-    // output out; state is resident (nothing to copy out). Refresh contractStates[idx] in case the linear-mem
-    // base moved (memory.grow), then flag dirty so the digest re-hashes.
-    if (outSize) copyMem(output, wasm_runtime_addr_app_to_native(s.inst, wOut), outSize);
-    contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(s.inst, s.stateOff);
-    if (kind != LITE_KIND_FUNCTION) g_liteHostServices.markDirty(idx);   // procedures + system procedures write state
+    // output copied out; state is resident (nothing to copy). marshalOut refreshes contractStates[idx] (the
+    // linear-mem base can move on memory.grow) + flags the slot dirty for write calls so the digest re-hashes.
+    liteWasmMarshalOut(s, idx, kind, output, outSize, wOut);
 
     if (dbg) {   // finish + publish the debug trace entry (output + timing + trap; state diff already built)
         te.ok = s.lastTrap.empty(); te.trap = s.lastTrap;
@@ -212,9 +248,7 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
         cc.trace = nullptr;
         liteWasmTraceCommit(te);
     }
-
-    if (outer) { wasm_runtime_set_user_data(env, nullptr); wasm_runtime_destroy_exec_env(env); t_liteWasmCurEnv = nullptr; }
-    else       { wasm_runtime_set_user_data(env, savedUD); wasm_runtime_set_module_inst(env, savedInst); }
+    // envScope dtor restores/destroys the exec_env (outer) or restores the borrowed env's inst + user_data.
 }
 
 // libffi closure trampoline: core calls it as a native USER_FUNCTION/USER_PROCEDURE; we recover (idx,it,kind)
