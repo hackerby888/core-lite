@@ -45,6 +45,7 @@ void qLogger::processRequestLog(unsigned long long processorNumber, Peer* peer, 
             {
                 char* rBuffer = responseBuffers[processorNumber];
                 logBuffer.getMany(rBuffer, startFrom, length);
+                Qlogging::onServeLogBytes(request->fromID, toID, rBuffer, length);
                 enqueueResponse(peer, (unsigned int)(length), RespondLog::type(), header->dejavu(), rBuffer);
             }
             else
@@ -81,6 +82,7 @@ void qLogger::processRequestTxLogInfo(unsigned long long processorNumber, Peer* 
             BlobInfo info = tx.getLogIdInfo(processorNumber, request->tick, request->txId);
             resp.fromLogId = info.startIndex;
             resp.length = info.length;
+            Qlogging::onServeTxRange(request->tick, resp.fromLogId, resp.length);
         }
         else
         {
@@ -114,6 +116,7 @@ void qLogger::processRequestTickTxLogInfo(unsigned long long processorNumber, Pe
         if (request->tick <= lastUpdatedTick)
         {
             tx.getTickLogIdInfo((TickBlobInfo*)resp, request->tick);
+            Qlogging::onServeTickRanges(request->tick, (TickBlobInfo*)resp);
         }
         else
         {
