@@ -7936,6 +7936,7 @@ static void logInfo()
         appendNumber(message, prefetchDepth, FALSE);
     }
 #endif
+    SuperPrefetch::appendStatus(message);
     // Next-tick blocking-state indicator: shows what the tick processor is
     // currently waiting for. Combined with the XXX:YYY vote count in the
     // prefix, this lets an operator diagnose stuck-tick causes at a glance:

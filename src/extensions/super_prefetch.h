@@ -4,10 +4,6 @@
 // per-IP slot, then deep-pulls up to DEPTH ticks ahead (beyond depth-20 prefetch).
 
 #include <chrono>
-#include <cstring>
-#include <string>
-
-void logColorToScreen(std::string type, std::string msg); // defined in qubic.cpp (single TU)
 
 namespace SuperPrefetch
 {
@@ -66,14 +62,12 @@ static unsigned int gSlotCap = 4;
 struct Slot { bool active; unsigned int peerAddrU32; unsigned long long leaseExpiryMs; };
 static Slot slots[MAX_SLOTS] = {};
 static volatile char slotsLock = 0;
-static volatile long long statGrants = 0, statDenied = 0, statReleased = 0;
 
 // Asker: granted sources indexed by peer slot (written on request-processor threads, read on main).
 static constexpr unsigned int NUM_PEERS = NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS;
 struct Source { bool active; bool granted; unsigned int peerAddrU32; unsigned short depth; unsigned long long lastSentMs; };
 static Source sources[NUM_PEERS] = {};
 static volatile char sourcesLock = 0;
-static int prevGrantedLogged = 0; // main-thread only, for transition logging
 
 static inline unsigned long long nowMs()
 {
@@ -180,7 +174,7 @@ inline void serverOnRequest(Peer* peer, RequestResponseHeader* header)
     const unsigned int cap = gSlotCap <= MAX_SLOTS ? gSlotCap : MAX_SLOTS;
     const unsigned short depth = req->desiredDepth < DEPTH ? req->desiredDepth : DEPTH;
 
-    bool granted = false, newGrant = false;
+    bool granted = false;
     ACQUIRE(slotsLock);
     int mine = -1, freeSlot = -1;
     unsigned int active = 0;
@@ -207,14 +201,9 @@ inline void serverOnRequest(Peer* peer, RequestResponseHeader* header)
         slots[freeSlot].active = true;
         slots[freeSlot].peerAddrU32 = addr;
         slots[freeSlot].leaseExpiryMs = now + LEASE_MS;
-        granted = newGrant = true;
+        granted = true;
     }
     RELEASE(slotsLock);
-
-    if (newGrant)
-        _InterlockedIncrement64(&statGrants);
-    else if (!granted)
-        _InterlockedIncrement64(&statDenied);
 
     RespondSuperPrefetch resp{};
     resp.granted = granted ? 1 : 0;
@@ -231,42 +220,76 @@ inline void serverOnDone(Peer* peer, RequestResponseHeader* header)
     ACQUIRE(slotsLock);
     for (unsigned int i = 0; i < MAX_SLOTS; i++)
         if (slots[i].active && slots[i].peerAddrU32 == addr)
-        {
             slots[i] = Slot{};
-            _InterlockedIncrement64(&statReleased);
-        }
     RELEASE(slotsLock);
 }
 
-// Reclaim lapsed slots + log status deltas. Main thread.
+// Reclaim slots whose holder stopped renewing (dead peer). Main thread.
 inline void serverTick()
 {
     if (!gEnabled)
         return;
     const unsigned long long now = nowMs();
-    unsigned int active = 0;
     ACQUIRE(slotsLock);
     for (unsigned int i = 0; i < MAX_SLOTS; i++)
-    {
         if (slots[i].active && slots[i].leaseExpiryMs < now)
-        {
             slots[i] = Slot{};
-            _InterlockedIncrement64(&statReleased);
-        }
-        if (slots[i].active)
-            active++;
-    }
     RELEASE(slotsLock);
+}
 
-    static unsigned int prevActive = 0;
-    static long long prevGrants = 0;
-    if (active != prevActive || statGrants != prevGrants)
+// Append " SP serve=N(ips) pull=M(ips)" to the periodic status line (main thread):
+// provider slots we serve + consumer sources we pull from. Omitted when idle.
+inline void appendStatus(CHAR16* message)
+{
+    if (!gEnabled)
+        return;
+    unsigned int serve = 0, pull = 0;
+    ACQUIRE(slotsLock);
+    for (unsigned int i = 0; i < MAX_SLOTS; i++)
+        if (slots[i].active) serve++;
+    RELEASE(slotsLock);
+    ACQUIRE(sourcesLock);
+    for (unsigned int i = 0; i < NUM_PEERS; i++)
+        if (sources[i].active && sources[i].granted) pull++;
+    RELEASE(sourcesLock);
+    if (!serve && !pull)
+        return;
+
+    appendText(message, L" SP serve=");
+    appendNumber(message, serve, FALSE);
+    if (serve)
     {
-        logColorToScreen("INFO", "super-prefetch: serving " + std::to_string(active) + " slot(s) (grants "
-            + std::to_string(statGrants) + ", denied " + std::to_string(statDenied)
-            + ", released " + std::to_string(statReleased) + ")");
-        prevActive = active;
-        prevGrants = statGrants;
+        appendText(message, L"(");
+        bool first = true;
+        ACQUIRE(slotsLock);
+        for (unsigned int i = 0; i < MAX_SLOTS; i++)
+            if (slots[i].active)
+            {
+                if (!first) appendText(message, L" ");
+                IPv4Address a; a.u32 = slots[i].peerAddrU32;
+                appendIPv4Address(message, a);
+                first = false;
+            }
+        RELEASE(slotsLock);
+        appendText(message, L")");
+    }
+    appendText(message, L" pull=");
+    appendNumber(message, pull, FALSE);
+    if (pull)
+    {
+        appendText(message, L"(");
+        bool first = true;
+        ACQUIRE(sourcesLock);
+        for (unsigned int i = 0; i < NUM_PEERS; i++)
+            if (sources[i].active && sources[i].granted)
+            {
+                if (!first) appendText(message, L" ");
+                IPv4Address a; a.u32 = sources[i].peerAddrU32;
+                appendIPv4Address(message, a);
+                first = false;
+            }
+        RELEASE(sourcesLock);
+        appendText(message, L")");
     }
 }
 
@@ -316,7 +339,6 @@ inline void requesterTick()
     unsigned short grantedIdx[NUM_PEERS];
     unsigned short doneIdx[NUM_PEERS];
     unsigned int nHandshake = 0, nGranted = 0, nDone = 0;
-    bool doStop = false;
 
     ACQUIRE(sourcesLock);
     for (unsigned int i = 0; i < NUM_PEERS; i++)
@@ -332,7 +354,6 @@ inline void requesterTick()
                 doneIdx[nDone++] = (unsigned short)i;
         for (unsigned int i = 0; i < NUM_PEERS; i++)
             sources[i] = Source{};
-        doStop = (nDone > 0);
     }
     else if (behind >= TRIGGER_TICKS_BEHIND)
     {
@@ -378,14 +399,6 @@ inline void requesterTick()
         for (unsigned int d = SHALLOW_DEPTH + 1; d <= DEPTH; d++, rr++)
             deepPullTick(&peers[grantedIdx[rr % nGranted]], myTick + d);
     }
-
-    const int grantedNow = (behind >= TRIGGER_TICKS_BEHIND) ? (int)nGranted : 0;
-    if (doStop && prevGrantedLogged != 0)
-        logColorToScreen("INFO", "super-prefetch: caught up (<" + std::to_string(STOP_TICKS_BEHIND) + " behind), released slots");
-    else if (behind >= TRIGGER_TICKS_BEHIND && grantedNow != prevGrantedLogged)
-        logColorToScreen("INFO", "super-prefetch: " + std::to_string(behind) + " ticks behind, "
-            + std::to_string(grantedNow) + " granted source(s), pulling +" + std::to_string(DEPTH));
-    prevGrantedLogged = grantedNow;
 }
 
 } // namespace SuperPrefetch
