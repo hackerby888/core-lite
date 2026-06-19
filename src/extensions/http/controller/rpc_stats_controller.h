@@ -1,6 +1,7 @@
 #pragma once
 #include "../utils.h"
 #include "extensions/utils.h"
+#include "extensions/qlogging_health.h"
 
 #include <cmath>
 #include <drogon/HttpController.h>
@@ -19,7 +20,44 @@ public:
     ADD_METHOD_TO(RpcStatsController::txStats, "/v1/tx-stats", Get);
     ADD_METHOD_TO(RpcStatsController::tickBench, "/v1/tick-bench", Get);
     ADD_METHOD_TO(RpcStatsController::peerStats, "/v1/peer-stats", Get);
+    ADD_METHOD_TO(RpcStatsController::loggingHealth, "/v1/logging-health", Get);
     METHOD_LIST_END
+
+    // Per-tick logging self-check counters (zero-range / logId-mismatch / bad-bytes).
+    // Query: reset=1 clears the anomaly counters after reading.
+    inline void loggingHealth(const HttpRequestPtr &req,
+                              std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        using namespace std;
+        Json::Value result;
+        Json::Value data;
+        const unsigned long long zr = Qlogging::gZeroRangeTicks.load(memory_order_relaxed);
+        const unsigned long long mm = Qlogging::gLogIdMismatch.load(memory_order_relaxed);
+        const unsigned long long by = Qlogging::gBadLogBytes.load(memory_order_relaxed);
+        data["enabled"] = Qlogging::gEnabled;
+        data["ticksChecked"] = Json::UInt64(Qlogging::gTicksChecked.load(memory_order_relaxed));
+        data["zeroRangeTicks"] = Json::UInt64(zr);
+        data["logIdMismatch"] = Json::UInt64(mm);
+        data["badLogBytes"] = Json::UInt64(by);
+        data["healthy"] = (zr == 0 && mm == 0 && by == 0);
+        data["lastBadTick"] = Json::UInt(Qlogging::gLastBadTick.load(memory_order_relaxed));
+        unsigned int kind = Qlogging::gLastBadKind.load(memory_order_relaxed);
+        data["lastBadKind"] = Json::UInt(kind);
+        data["lastBadKindName"] = Qlogging::kindName(kind);
+#if ENABLED_LOGGING
+        data["lastUpdatedTick"] = Json::UInt(logger.lastUpdatedTick);
+#endif
+        data["currentTick"] = system.tick;
+
+        if (req->getParameter("reset") == "1" || req->getParameter("reset") == "true")
+        {
+            Qlogging::gZeroRangeTicks.store(0, memory_order_relaxed);
+            Qlogging::gLogIdMismatch.store(0, memory_order_relaxed);
+            Qlogging::gBadLogBytes.store(0, memory_order_relaxed);
+        }
+        result["data"] = data;
+        cb(HttpResponse::newHttpJsonResponse(result));
+    }
 
     // Peer connection state + disconnect-reason counters (why handshaked peers drop).
     inline void peerStats(const HttpRequestPtr &req,
