@@ -119,6 +119,7 @@
 #include "contract_core/qpi_spectrum_impl.h"
 
 #include "logging/logging.h"
+#include "extensions/qlogging_health.h"
 #include "logging/net_msg_impl.h"
 
 #include "ticking/ticking.h"
@@ -170,7 +171,6 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
-#include "extensions/qlogging_health.h"
 #include "extensions/test_invalid_solution.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
