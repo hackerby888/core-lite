@@ -16,19 +16,28 @@ static bool gEnabled = true;
 // Bound getBlobInfo calls per scan (tick critical path / serve path).
 static constexpr unsigned int CALL_BUDGET = 128;
 
-// kind: 1=zero-range 2=logId-mismatch 3=bad-bytes
+// kind: 1=zero-range 2=logId-mismatch 3=bad-bytes 4=duplicate-logId 5=logId-gap
 static std::atomic<unsigned long long> gTicksChecked{0};
 static std::atomic<unsigned long long> gZeroRangeTicks{0};
 static std::atomic<unsigned long long> gLogIdMismatch{0};
 static std::atomic<unsigned long long> gBadLogBytes{0};
+static std::atomic<unsigned long long> gLogIdDup{0};
+static std::atomic<unsigned long long> gLogIdGap{0};
 static std::atomic<unsigned int> gLastBadTick{0};
 static std::atomic<unsigned int> gLastBadKind{0};
+
+// Cross-tick cursor: the logId the next committed tick must start at (global ids
+// are dense/sequential). Ordered with the per-tick commit; atomic for visibility.
+static std::atomic<unsigned long long> gExpectedNextLogId{0};
+static std::atomic<unsigned int> gSeqLastTick{0};
 
 // Serve-path counters: anomalies in data we were about to return to a peer.
 static std::atomic<unsigned long long> gServeChecks{0};
 static std::atomic<unsigned long long> gServeZeroRange{0};
 static std::atomic<unsigned long long> gServeLogIdMismatch{0};
 static std::atomic<unsigned long long> gServeBadBytes{0};
+static std::atomic<unsigned long long> gServeLogIdDup{0};
+static std::atomic<unsigned long long> gServeLogIdGap{0};
 static std::atomic<unsigned int> gLastServeBadTick{0};
 
 static void markBad(unsigned int tick, unsigned int kind)
@@ -67,15 +76,18 @@ static bool checkLogId(unsigned long long id, unsigned int tick, unsigned int& o
     return true;
 }
 
-struct ScanResult { bool zero; unsigned int mismatch; unsigned int badBytes; };
+struct ScanResult { bool zero; bool dup; bool gap; unsigned int mismatch; unsigned int badBytes; long long minId; long long maxEnd; };
 
 // Inspect a tick's per-tx ranges (the RespondAllLogIdRangesFromTick / TickBlobInfo
-// shape): all-zero page, length==0 slots, and per-id header cross-check.
+// shape): all-zero page, length==0 slots, per-id header cross-check, and that the
+// non-empty ranges tile a contiguous logId span with no overlap (a logId in two
+// slots) or gap -- Sum(length) must equal (maxEnd - minId).
 static ScanResult scanRanges(const long long* fromLogId, const long long* length, unsigned int T)
 {
-    ScanResult r{ false, 0, 0 };
+    ScanResult r{ false, false, false, 0, 0, -1, -1 };
     bool allZero = true;
     unsigned int calls = 0;
+    unsigned long long sumLen = 0;
     for (int i = 0; i < LOG_TX_PER_TICK; i++)
     {
         const long long from = fromLogId[i];
@@ -85,6 +97,10 @@ static ScanResult scanRanges(const long long* fromLogId, const long long* length
         // length 0 is never legitimate (addLogId sets >=1; empty slot is -1).
         if (len == 0) { r.zero = true; continue; }
         if (from < 0 || len < 0) continue; // empty / default
+
+        sumLen += (unsigned long long)len;
+        if (r.minId < 0 || from < r.minId) r.minId = from;
+        if (from + len > r.maxEnd) r.maxEnd = from + len;
 
         if (calls < CALL_BUDGET)
         {
@@ -102,6 +118,15 @@ static ScanResult scanRanges(const long long* fromLogId, const long long* length
     // A real empty tick reads back all -1/-1; every slot 0/0 means the page
     // returned zeros instead of the committed ranges -- the "all 0s" report.
     if (allZero) r.zero = true;
+    // Valid ranges densely tile [minId, maxEnd): Sum(length) == span. More than
+    // the span means a logId is claimed twice (overlap); less means the ids are
+    // not linear -- a gap inside the tick.
+    if (r.minId >= 0)
+    {
+        const unsigned long long span = (unsigned long long)(r.maxEnd - r.minId);
+        if (sumLen > span) r.dup = true;
+        else if (sumLen < span) r.gap = true;
+    }
     return r;
 }
 
@@ -121,6 +146,30 @@ static void validateTick(unsigned int T)
     if (r.mismatch) { gLogIdMismatch.fetch_add(r.mismatch, std::memory_order_relaxed); markBad(T, 2); }
     if (r.badBytes) { gBadLogBytes.fetch_add(r.badBytes, std::memory_order_relaxed); markBad(T, 3); }
     if (r.zero) { gZeroRangeTicks.fetch_add(1, std::memory_order_relaxed); markBad(T, 1); }
+    if (r.dup) { gLogIdDup.fetch_add(1, std::memory_order_relaxed); markBad(T, 4); }
+    if (r.gap) { gLogIdGap.fetch_add(1, std::memory_order_relaxed); markBad(T, 5); }
+
+    // Cross-tick uniqueness + linearity: the global logId space is dense, so this
+    // tick must begin exactly where the previous tick's ids ended. A lower start
+    // means a logId was reused (overlap); a higher start means the sequence is not
+    // linear -- a gap. Only compare when we checked T-1 right before (so the cursor
+    // is trustworthy) and not at an epoch reset where logId restarts at 0; otherwise
+    // just seed the cursor. (Calls are ordered by updateTick, one per tick; atomics
+    // carry the value across processor threads.)
+    const unsigned int prevTick = gSeqLastTick.load(std::memory_order_relaxed);
+    const bool contiguous = (prevTick != 0) && (T == prevTick + 1) && (T != logger.tickBegin);
+    unsigned long long expected = gExpectedNextLogId.load(std::memory_order_relaxed);
+    if (r.minId >= 0)
+    {
+        if (contiguous)
+        {
+            if ((unsigned long long)r.minId < expected) { gLogIdDup.fetch_add(1, std::memory_order_relaxed); markBad(T, 4); }
+            else if ((unsigned long long)r.minId > expected) { gLogIdGap.fetch_add(1, std::memory_order_relaxed); markBad(T, 5); }
+        }
+        expected = (unsigned long long)r.maxEnd;
+    }
+    gExpectedNextLogId.store(expected, std::memory_order_relaxed);
+    gSeqLastTick.store(T, std::memory_order_relaxed);
 }
 
 // Serve-path hooks: validate the bytes/ranges a log request is about to return.
@@ -134,7 +183,9 @@ static void onServeTickRanges(unsigned int T, const qLogger::TickBlobInfo* resp)
     if (r.mismatch) gServeLogIdMismatch.fetch_add(r.mismatch, std::memory_order_relaxed);
     if (r.badBytes) gServeBadBytes.fetch_add(r.badBytes, std::memory_order_relaxed);
     if (r.zero) gServeZeroRange.fetch_add(1, std::memory_order_relaxed);
-    if (r.zero || r.mismatch || r.badBytes) gLastServeBadTick.store(T, std::memory_order_relaxed);
+    if (r.dup) gServeLogIdDup.fetch_add(1, std::memory_order_relaxed);
+    if (r.gap) gServeLogIdGap.fetch_add(1, std::memory_order_relaxed);
+    if (r.zero || r.mismatch || r.badBytes || r.dup || r.gap) gLastServeBadTick.store(T, std::memory_order_relaxed);
 }
 
 static void onServeTxRange(unsigned int T, long long fromLogId, long long length)
@@ -189,6 +240,8 @@ static const char* kindName(unsigned int kind)
     case 1: return "zero-range";
     case 2: return "logId-mismatch";
     case 3: return "bad-bytes";
+    case 4: return "duplicate-logId";
+    case 5: return "logId-gap";
     default: return "none";
     }
 }
@@ -199,10 +252,14 @@ static void appendStatus(CHAR16* message)
     const unsigned long long zr = gZeroRangeTicks.load(std::memory_order_relaxed);
     const unsigned long long mm = gLogIdMismatch.load(std::memory_order_relaxed);
     const unsigned long long by = gBadLogBytes.load(std::memory_order_relaxed);
+    const unsigned long long dp = gLogIdDup.load(std::memory_order_relaxed);
+    const unsigned long long gp = gLogIdGap.load(std::memory_order_relaxed);
     const unsigned long long sv = gServeZeroRange.load(std::memory_order_relaxed)
         + gServeLogIdMismatch.load(std::memory_order_relaxed)
-        + gServeBadBytes.load(std::memory_order_relaxed);
-    if (zr == 0 && mm == 0 && by == 0 && sv == 0)
+        + gServeBadBytes.load(std::memory_order_relaxed)
+        + gServeLogIdDup.load(std::memory_order_relaxed)
+        + gServeLogIdGap.load(std::memory_order_relaxed);
+    if (zr == 0 && mm == 0 && by == 0 && dp == 0 && gp == 0 && sv == 0)
     {
         appendText(message, L" LogHC ok");
         return;
@@ -216,6 +273,10 @@ static void appendStatus(CHAR16* message)
     appendNumber(message, mm, TRUE);
     appendText(message, L" by=");
     appendNumber(message, by, TRUE);
+    appendText(message, L" dp=");
+    appendNumber(message, dp, TRUE);
+    appendText(message, L" gp=");
+    appendNumber(message, gp, TRUE);
     appendText(message, L" sv=");
     appendNumber(message, sv, TRUE);
     appendText(message, L" @");

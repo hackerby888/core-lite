@@ -34,15 +34,21 @@ public:
         const unsigned long long zr = Qlogging::gZeroRangeTicks.load(memory_order_relaxed);
         const unsigned long long mm = Qlogging::gLogIdMismatch.load(memory_order_relaxed);
         const unsigned long long by = Qlogging::gBadLogBytes.load(memory_order_relaxed);
+        const unsigned long long dp = Qlogging::gLogIdDup.load(memory_order_relaxed);
+        const unsigned long long gp = Qlogging::gLogIdGap.load(memory_order_relaxed);
         const unsigned long long szr = Qlogging::gServeZeroRange.load(memory_order_relaxed);
         const unsigned long long smm = Qlogging::gServeLogIdMismatch.load(memory_order_relaxed);
         const unsigned long long sby = Qlogging::gServeBadBytes.load(memory_order_relaxed);
+        const unsigned long long sdp = Qlogging::gServeLogIdDup.load(memory_order_relaxed);
+        const unsigned long long sgp = Qlogging::gServeLogIdGap.load(memory_order_relaxed);
         data["enabled"] = Qlogging::gEnabled;
         data["ticksChecked"] = Json::UInt64(Qlogging::gTicksChecked.load(memory_order_relaxed));
         data["zeroRangeTicks"] = Json::UInt64(zr);
         data["logIdMismatch"] = Json::UInt64(mm);
         data["badLogBytes"] = Json::UInt64(by);
-        data["healthy"] = (zr == 0 && mm == 0 && by == 0 && szr == 0 && smm == 0 && sby == 0);
+        data["logIdDuplicate"] = Json::UInt64(dp);
+        data["logIdGap"] = Json::UInt64(gp);
+        data["healthy"] = (zr == 0 && mm == 0 && by == 0 && dp == 0 && gp == 0 && szr == 0 && smm == 0 && sby == 0 && sdp == 0 && sgp == 0);
         data["lastBadTick"] = Json::UInt(Qlogging::gLastBadTick.load(memory_order_relaxed));
         unsigned int kind = Qlogging::gLastBadKind.load(memory_order_relaxed);
         data["lastBadKind"] = Json::UInt(kind);
@@ -53,6 +59,8 @@ public:
         serve["zeroRange"] = Json::UInt64(szr);
         serve["logIdMismatch"] = Json::UInt64(smm);
         serve["badBytes"] = Json::UInt64(sby);
+        serve["logIdDuplicate"] = Json::UInt64(sdp);
+        serve["logIdGap"] = Json::UInt64(sgp);
         serve["lastBadTick"] = Json::UInt(Qlogging::gLastServeBadTick.load(memory_order_relaxed));
         data["serve"] = serve;
 #if ENABLED_LOGGING
@@ -65,9 +73,13 @@ public:
             Qlogging::gZeroRangeTicks.store(0, memory_order_relaxed);
             Qlogging::gLogIdMismatch.store(0, memory_order_relaxed);
             Qlogging::gBadLogBytes.store(0, memory_order_relaxed);
+            Qlogging::gLogIdDup.store(0, memory_order_relaxed);
+            Qlogging::gLogIdGap.store(0, memory_order_relaxed);
             Qlogging::gServeZeroRange.store(0, memory_order_relaxed);
             Qlogging::gServeLogIdMismatch.store(0, memory_order_relaxed);
             Qlogging::gServeBadBytes.store(0, memory_order_relaxed);
+            Qlogging::gServeLogIdDup.store(0, memory_order_relaxed);
+            Qlogging::gServeLogIdGap.store(0, memory_order_relaxed);
         }
         result["data"] = data;
         cb(HttpResponse::newHttpJsonResponse(result));
