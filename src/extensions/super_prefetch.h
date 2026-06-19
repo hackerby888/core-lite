@@ -243,14 +243,17 @@ inline void appendStatus(CHAR16* message)
 {
     if (!gEnabled)
         return;
+    // Snapshot each set under a single brief lock so the printed count and the
+    // listed IPs stay consistent, and no formatting runs while holding the lock.
+    unsigned int serveAddrs[MAX_SLOTS], pullAddrs[NUM_PEERS];
     unsigned int serve = 0, pull = 0;
     ACQUIRE(slotsLock);
     for (unsigned int i = 0; i < MAX_SLOTS; i++)
-        if (slots[i].active) serve++;
+        if (slots[i].active) serveAddrs[serve++] = slots[i].peerAddrU32;
     RELEASE(slotsLock);
     ACQUIRE(sourcesLock);
     for (unsigned int i = 0; i < NUM_PEERS; i++)
-        if (sources[i].active && sources[i].granted) pull++;
+        if (sources[i].active && sources[i].granted) pullAddrs[pull++] = sources[i].peerAddrU32;
     RELEASE(sourcesLock);
     if (!serve && !pull)
         return;
@@ -260,17 +263,12 @@ inline void appendStatus(CHAR16* message)
     if (serve)
     {
         appendText(message, L"(");
-        bool first = true;
-        ACQUIRE(slotsLock);
-        for (unsigned int i = 0; i < MAX_SLOTS; i++)
-            if (slots[i].active)
-            {
-                if (!first) appendText(message, L" ");
-                IPv4Address a; a.u32 = slots[i].peerAddrU32;
-                appendIPv4Address(message, a);
-                first = false;
-            }
-        RELEASE(slotsLock);
+        for (unsigned int k = 0; k < serve; k++)
+        {
+            if (k) appendText(message, L" ");
+            IPv4Address a; a.u32 = serveAddrs[k];
+            appendIPv4Address(message, a);
+        }
         appendText(message, L")");
     }
     appendText(message, L" pull=");
@@ -278,17 +276,12 @@ inline void appendStatus(CHAR16* message)
     if (pull)
     {
         appendText(message, L"(");
-        bool first = true;
-        ACQUIRE(sourcesLock);
-        for (unsigned int i = 0; i < NUM_PEERS; i++)
-            if (sources[i].active && sources[i].granted)
-            {
-                if (!first) appendText(message, L" ");
-                IPv4Address a; a.u32 = sources[i].peerAddrU32;
-                appendIPv4Address(message, a);
-                first = false;
-            }
-        RELEASE(sourcesLock);
+        for (unsigned int k = 0; k < pull; k++)
+        {
+            if (k) appendText(message, L" ");
+            IPv4Address a; a.u32 = pullAddrs[k];
+            appendIPv4Address(message, a);
+        }
         appendText(message, L")");
     }
 }
