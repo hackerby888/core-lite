@@ -8,10 +8,23 @@
 // bad bytes" reports; counts surface on /v1/logging-health and the status line.
 
 #include <atomic>
+#include <cstdio>
 
 namespace Qlogging
 {
 static bool gEnabled = true;
+
+// Every distinct malformed tick is kept here for later investigation: a bounded
+// in-memory ring (queried via /v1/logging-bad-ticks) plus an append to an on-disk
+// file in the node working dir so the record survives a restart.
+static constexpr unsigned int BAD_RING = 4096;
+static const char* BAD_TICK_FILE = "logging_health_bad_ticks.log";
+struct BadTickRec { unsigned int tick; unsigned int kindMask; unsigned int sourceMask; unsigned long long seq; };
+static BadTickRec gBadTicks[BAD_RING];
+static std::atomic<unsigned int> gBadStored{0};   // distinct ticks held in the ring
+static std::atomic<unsigned long long> gBadEvents{0}; // total flag events (incl. repeats)
+static std::atomic<unsigned int> gBadDropped{0};  // distinct ticks beyond ring capacity
+static std::atomic_flag gBadLock = ATOMIC_FLAG_INIT;
 
 // Bound getBlobInfo calls per scan (tick critical path / serve path).
 static constexpr unsigned int CALL_BUDGET = 128;
@@ -44,6 +57,67 @@ static void markBad(unsigned int tick, unsigned int kind)
 {
     gLastBadTick.store(tick, std::memory_order_relaxed);
     gLastBadKind.store(kind, std::memory_order_relaxed);
+}
+
+static void badLock() { while (gBadLock.test_and_set(std::memory_order_acquire)) {} }
+static void badUnlock() { gBadLock.clear(std::memory_order_release); }
+
+// Append a newly-seen malformed tick to the on-disk record (called under gBadLock,
+// once per distinct tick). Best-effort: a failed open just skips persistence.
+static void appendBadTickFile(const BadTickRec& rec)
+{
+    FILE* f = fopen(BAD_TICK_FILE, "a");
+    if (!f) return;
+    const char* src = (rec.sourceMask == 3) ? "both" : ((rec.sourceMask & 2) ? "serve" : "commit");
+    fprintf(f, "tick=%u kindMask=0x%02x source=%s epoch=%u seq=%llu\n",
+            rec.tick, rec.kindMask, src, (unsigned)system.epoch, rec.seq);
+    fclose(f);
+}
+
+// Record a malformed tick. Dedups by tick (accumulating the kind/source bitmask)
+// so the ring holds every distinct bad tick. Thread-safe (tick + serve threads).
+static void recordBad(unsigned int tick, unsigned int kind, bool serve)
+{
+    const unsigned long long ev = gBadEvents.fetch_add(1, std::memory_order_relaxed) + 1;
+    const unsigned int kbit = 1u << kind;
+    const unsigned int sbit = serve ? 2u : 1u;
+    badLock();
+    unsigned int n = gBadStored.load(std::memory_order_relaxed);
+    for (unsigned int i = 0; i < n; i++)
+    {
+        if (gBadTicks[i].tick == tick)
+        {
+            gBadTicks[i].kindMask |= kbit;
+            gBadTicks[i].sourceMask |= sbit;
+            badUnlock();
+            return;
+        }
+    }
+    if (n < BAD_RING)
+    {
+        gBadTicks[n] = BadTickRec{ tick, kbit, sbit, ev };
+        appendBadTickFile(gBadTicks[n]);
+        gBadStored.store(n + 1, std::memory_order_relaxed);
+    }
+    else
+    {
+        gBadDropped.fetch_add(1, std::memory_order_relaxed);
+    }
+    badUnlock();
+}
+
+static void flagCommit(unsigned int tick, unsigned int kind) { markBad(tick, kind); recordBad(tick, kind, false); }
+static void flagServe(unsigned int tick, unsigned int kind) { gLastServeBadTick.store(tick, std::memory_order_relaxed); recordBad(tick, kind, true); }
+
+// Snapshot the bad-tick ring into out[0..max) for the HTTP reader. Returns count copied.
+static unsigned int copyBadTicks(BadTickRec* out, unsigned int max)
+{
+    badLock();
+    unsigned int n = gBadStored.load(std::memory_order_relaxed);
+    if (n > max) n = max;
+    for (unsigned int i = 0; i < n; i++) out[i] = gBadTicks[i];
+    badUnlock();
+    return n;
 }
 
 #if ENABLED_LOGGING
@@ -143,11 +217,11 @@ static void validateTick(unsigned int T)
     logger.tx.getTickLogIdInfo(&tb, T);
 
     ScanResult r = scanRanges(tb.fromLogId, tb.length, T);
-    if (r.mismatch) { gLogIdMismatch.fetch_add(r.mismatch, std::memory_order_relaxed); markBad(T, 2); }
-    if (r.badBytes) { gBadLogBytes.fetch_add(r.badBytes, std::memory_order_relaxed); markBad(T, 3); }
-    if (r.zero) { gZeroRangeTicks.fetch_add(1, std::memory_order_relaxed); markBad(T, 1); }
-    if (r.dup) { gLogIdDup.fetch_add(1, std::memory_order_relaxed); markBad(T, 4); }
-    if (r.gap) { gLogIdGap.fetch_add(1, std::memory_order_relaxed); markBad(T, 5); }
+    if (r.mismatch) { gLogIdMismatch.fetch_add(r.mismatch, std::memory_order_relaxed); flagCommit(T, 2); }
+    if (r.badBytes) { gBadLogBytes.fetch_add(r.badBytes, std::memory_order_relaxed); flagCommit(T, 3); }
+    if (r.zero) { gZeroRangeTicks.fetch_add(1, std::memory_order_relaxed); flagCommit(T, 1); }
+    if (r.dup) { gLogIdDup.fetch_add(1, std::memory_order_relaxed); flagCommit(T, 4); }
+    if (r.gap) { gLogIdGap.fetch_add(1, std::memory_order_relaxed); flagCommit(T, 5); }
 
     // Cross-tick uniqueness + linearity: the global logId space is dense, so this
     // tick must begin exactly where the previous tick's ids ended. A lower start
@@ -163,8 +237,8 @@ static void validateTick(unsigned int T)
     {
         if (contiguous)
         {
-            if ((unsigned long long)r.minId < expected) { gLogIdDup.fetch_add(1, std::memory_order_relaxed); markBad(T, 4); }
-            else if ((unsigned long long)r.minId > expected) { gLogIdGap.fetch_add(1, std::memory_order_relaxed); markBad(T, 5); }
+            if ((unsigned long long)r.minId < expected) { gLogIdDup.fetch_add(1, std::memory_order_relaxed); flagCommit(T, 4); }
+            else if ((unsigned long long)r.minId > expected) { gLogIdGap.fetch_add(1, std::memory_order_relaxed); flagCommit(T, 5); }
         }
         expected = (unsigned long long)r.maxEnd;
     }
@@ -185,22 +259,24 @@ static void onServeTickRanges(unsigned int T, const qLogger::TickBlobInfo* resp)
     if (r.zero) gServeZeroRange.fetch_add(1, std::memory_order_relaxed);
     if (r.dup) gServeLogIdDup.fetch_add(1, std::memory_order_relaxed);
     if (r.gap) gServeLogIdGap.fetch_add(1, std::memory_order_relaxed);
-    if (r.zero || r.mismatch || r.badBytes || r.dup || r.gap) gLastServeBadTick.store(T, std::memory_order_relaxed);
+    if (r.zero) flagServe(T, 1);
+    if (r.mismatch) flagServe(T, 2);
+    if (r.badBytes) flagServe(T, 3);
+    if (r.dup) flagServe(T, 4);
+    if (r.gap) flagServe(T, 5);
 }
 
 static void onServeTxRange(unsigned int T, long long fromLogId, long long length)
 {
     if (!gEnabled) return;
     gServeChecks.fetch_add(1, std::memory_order_relaxed);
-    if (length == 0) { gServeZeroRange.fetch_add(1, std::memory_order_relaxed); gLastServeBadTick.store(T, std::memory_order_relaxed); return; }
+    if (length == 0) { gServeZeroRange.fetch_add(1, std::memory_order_relaxed); flagServe(T, 1); return; }
     if (fromLogId < 0 || length < 0) return; // -1 empty / -3 not generated
-    bool bad = false;
     unsigned int kind = 0;
     if (!checkLogId((unsigned long long)fromLogId, T, kind))
-    { if (kind == 2) gServeLogIdMismatch.fetch_add(1, std::memory_order_relaxed); else gServeBadBytes.fetch_add(1, std::memory_order_relaxed); bad = true; }
+    { if (kind == 2) gServeLogIdMismatch.fetch_add(1, std::memory_order_relaxed); else gServeBadBytes.fetch_add(1, std::memory_order_relaxed); flagServe(T, kind); }
     if (length > 1 && !checkLogId((unsigned long long)(fromLogId + length - 1), T, kind))
-    { if (kind == 2) gServeLogIdMismatch.fetch_add(1, std::memory_order_relaxed); else gServeBadBytes.fetch_add(1, std::memory_order_relaxed); bad = true; }
-    if (bad) gLastServeBadTick.store(T, std::memory_order_relaxed);
+    { if (kind == 2) gServeLogIdMismatch.fetch_add(1, std::memory_order_relaxed); else gServeBadBytes.fetch_add(1, std::memory_order_relaxed); flagServe(T, kind); }
 }
 
 // Walk the exact buffer assembled for a RequestLog response: each entry's header

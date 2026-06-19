@@ -21,7 +21,47 @@ public:
     ADD_METHOD_TO(RpcStatsController::tickBench, "/v1/tick-bench", Get);
     ADD_METHOD_TO(RpcStatsController::peerStats, "/v1/peer-stats", Get);
     ADD_METHOD_TO(RpcStatsController::loggingHealth, "/v1/logging-health", Get);
+    ADD_METHOD_TO(RpcStatsController::loggingBadTicks, "/v1/logging-bad-ticks", Get);
     METHOD_LIST_END
+
+    // Full list of distinct malformed ticks held for investigation (also appended
+    // to logging_health_bad_ticks.log in the node working dir). Query: limit=N.
+    inline void loggingBadTicks(const HttpRequestPtr &req,
+                                std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        using namespace std;
+        Json::Value result;
+        unsigned int stored = Qlogging::gBadStored.load(memory_order_relaxed);
+        std::vector<Qlogging::BadTickRec> buf(stored ? stored : 1);
+        unsigned int n = Qlogging::copyBadTicks(buf.data(), stored);
+
+        long long limit = -1;
+        if (req->getParameter("limit") != "")
+            limit = std::stoll(req->getParameter("limit"));
+
+        Json::Value arr(Json::arrayValue);
+        for (unsigned int i = 0; i < n; i++)
+        {
+            if (limit >= 0 && (long long)arr.size() >= limit) break;
+            const auto &r = buf[i];
+            Json::Value e;
+            e["tick"] = Json::UInt(r.tick);
+            e["kindMask"] = Json::UInt(r.kindMask);
+            const char *src = (r.sourceMask == 3) ? "both" : ((r.sourceMask & 2) ? "serve" : "commit");
+            e["source"] = src;
+            e["seq"] = Json::UInt64(r.seq);
+            Json::Value kinds(Json::arrayValue);
+            for (unsigned int k = 1; k <= 5; k++)
+                if (r.kindMask & (1u << k)) kinds.append(Qlogging::kindName(k));
+            e["kinds"] = kinds;
+            arr.append(e);
+        }
+        result["stored"] = Json::UInt(stored);
+        result["events"] = Json::UInt64(Qlogging::gBadEvents.load(memory_order_relaxed));
+        result["dropped"] = Json::UInt(Qlogging::gBadDropped.load(memory_order_relaxed));
+        result["badTicks"] = arr;
+        cb(HttpResponse::newHttpJsonResponse(result));
+    }
 
     // Per-tick logging self-check counters (zero-range / logId-mismatch / bad-bytes).
     // Query: reset=1 clears the anomaly counters after reading.
@@ -53,6 +93,9 @@ public:
         unsigned int kind = Qlogging::gLastBadKind.load(memory_order_relaxed);
         data["lastBadKind"] = Json::UInt(kind);
         data["lastBadKindName"] = Qlogging::kindName(kind);
+        data["badTicksStored"] = Json::UInt(Qlogging::gBadStored.load(memory_order_relaxed));
+        data["badTicksEvents"] = Json::UInt64(Qlogging::gBadEvents.load(memory_order_relaxed));
+        data["badTicksDropped"] = Json::UInt(Qlogging::gBadDropped.load(memory_order_relaxed));
 
         Json::Value serve;
         serve["checks"] = Json::UInt64(Qlogging::gServeChecks.load(memory_order_relaxed));
