@@ -10,6 +10,11 @@ jobs:
     with:
       configuration: Release
 
+  build-linux-avx512:
+    uses: ./.github/workflows/linux-build-avx512.yml
+    with:
+      configuration: Release
+
   build-windows:
     uses: ./.github/workflows/windows-build.yml
     with:

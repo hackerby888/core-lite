@@ -64,7 +64,7 @@
 
 // #define INCLUDE_CONTRACT_TEST_EXAMPLES
 
-#define NO_GGWP
+// #define OLD_QRAFFLE
 
 // contract_def.h needs to be included first to make sure that contracts have minimal access
 #include "contract_core/contract_def.h"
@@ -275,7 +275,7 @@ static unsigned int numberOfTransactions = 0;
 static unsigned long long spectrumChangeFlags[SPECTRUM_CAPACITY / (sizeof(unsigned long long) * 8)];
 
 static unsigned long long mainLoopNumerator = 0, mainLoopDenominator = 0;
-static unsigned char contractProcessorState = 0;
+static volatile unsigned char contractProcessorState = 0;
 static unsigned int contractProcessorPhase;
 static const Transaction* contractProcessorTransaction = 0; // does not have signature in some cases, see notifyContractOfIncomingTransfer()
 static int contractProcessorTransactionMoneyflew = 0;
@@ -325,6 +325,7 @@ static volatile unsigned int minerScores[MAX_NUMBER_OF_MINERS + 1];
 static volatile m256i minerPublicKeysRollback[MAX_NUMBER_OF_MINERS + 1];
 static volatile unsigned int minerScoresRollback[MAX_NUMBER_OF_MINERS + 1];
 static volatile unsigned int numberOfMiners = NUMBER_OF_COMPUTORS;
+static unsigned int numberOfMinersRollback = NUMBER_OF_COMPUTORS;
 static m256i competitorPublicKeys[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
 static unsigned int competitorScores[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
 static bool competitorComputorStatuses[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
@@ -508,6 +509,9 @@ void logToConsole(const CHAR16* message)
         outputStringToConsole(timestampedMessage);
 #endif
 }
+
+#include "extensions/missing_tx_debug.h"
+#include "extensions/peer_reaper.h"
 
 
 static inline bool isMainMode()
@@ -960,6 +964,9 @@ static void processBroadcastTick(Peer* peer, RequestResponseHeader* header)
 
 #include "optimizations/opt_config.h"
 #include "optimizations/opt_eager_tx_fetch.h"
+#include "extensions/fast_tx_window.h"
+
+static FastTxWindow fastTxWindow;
 
 static void processBroadcastFutureTickData(Peer* peer, RequestResponseHeader* header)
 {
@@ -1027,6 +1034,7 @@ static void processBroadcastFutureTickData(Peer* peer, RequestResponseHeader* he
                 addDebugMessage(dbgMsg1);
 #endif
 
+                bool accepted = false;
                 ts.tickData.acquireLock();
                 TickData& td = ts.tickData.getByTickInCurrentEpoch(request->tickData.tick);
                 if (td.epoch != INVALIDATED_TICK_DATA)
@@ -1042,6 +1050,7 @@ static void processBroadcastFutureTickData(Peer* peer, RequestResponseHeader* he
                                 copyMem(&td, &request->tickData, sizeof(TickData));
                                 peer->lastActiveTick = max(peer->lastActiveTick, peer->getDejavuTick(header->dejavu()));
                                 peer->peerReportedTick = max(peer->peerReportedTick, request->tickData.tick);
+                                accepted = true;
 
                                 if (memcmp(&td, &request->tickData, sizeof(TickData)) != 0)
                                 {
@@ -1087,6 +1096,7 @@ static void processBroadcastFutureTickData(Peer* peer, RequestResponseHeader* he
                             copyMem(&td, &request->tickData, sizeof(TickData));
                             peer->lastActiveTick = max(peer->lastActiveTick, peer->getDejavuTick(header->dejavu()));
                             peer->peerReportedTick = max(peer->peerReportedTick, request->tickData.tick);
+                            accepted = true;
 
 #if USE_EAGER_TX_FETCH
                             ts.tickData.releaseLock();
@@ -1097,6 +1107,8 @@ static void processBroadcastFutureTickData(Peer* peer, RequestResponseHeader* he
                     }
                 }
                 ts.tickData.releaseLock();
+                if (accepted)
+                    TxSlotIndex::build(request->tickData.tick, request->tickData.transactionDigests);
             }
         }
     }
@@ -1106,6 +1118,7 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
 {
     Transaction* request = header->getPayload<Transaction>();
     const unsigned int transactionSize = request->totalSize();
+    TxStats::onReceive();
 
 #if !defined(NDEBUG) && 1
     // TODO: remove this debug code when the OM pipeline is fully stable
@@ -1126,12 +1139,21 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
 #if !defined(NDEBUG) && 1
             appendText(dbgMsg, L" verified");
 #endif
+            TxStats::onValid(request->tick);
             if (header->isDejavuZero())
             {
                 enqueueResponse(NULL, header);
             }
 
-            pendingTxsPool.add(request);
+            if (isMainMode())
+                pendingTxsPool.add(request, true);
+            else
+            {
+                if (!fastTxWindow.add(request, system.tick))
+                {
+                    return;
+                }
+            }
 
             unsigned int tickIndex = ts.tickToIndexCurrentEpoch(request->tick);
             ts.tickData.acquireLock();
@@ -1140,24 +1162,35 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
             {
                 KangarooTwelve(request, transactionSize, digest, sizeof(digest));
                 auto* tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
-                for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
+                int mtxSlot = TxSlotIndex::lookup(request->tick, *(const m256i*)digest);
+                bool mtxStored = false, mtxFull = false;
+                if (mtxSlot == -2) // index not built yet: linear fallback keeps result correct
                 {
-                    if (digest == ts.tickData[tickIndex].transactionDigests[i])
+                    for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
                     {
-                        ts.tickTransactions.acquireLock();
-                        if (!tsReqTickTransactionOffsets[i])
-                        {
-                            if (ts.nextTickTransactionOffset + transactionSize <= ts.tickTransactions.storageSpaceCurrentEpoch)
-                            {
-                                tsReqTickTransactionOffsets[i] = ts.nextTickTransactionOffset;
-                                copyMem(ts.tickTransactions(ts.nextTickTransactionOffset), request, transactionSize);
-                                ts.nextTickTransactionOffset += transactionSize;
-                            }
-                        }
-                        ts.tickTransactions.releaseLock();
-                        break;
+                        if (digest == ts.tickData[tickIndex].transactionDigests[i]) { mtxSlot = (int)i; break; }
                     }
                 }
+                if (mtxSlot >= 0)
+                {
+                    unsigned int i = (unsigned int)mtxSlot;
+                    ts.tickTransactions.acquireLock();
+                    const bool mtxWasEmpty = !tsReqTickTransactionOffsets[i];
+                    if (!tsReqTickTransactionOffsets[i])
+                    {
+                        if (ts.nextTickTransactionOffset + transactionSize <= ts.tickTransactions.storageSpaceCurrentEpoch)
+                        {
+                            tsReqTickTransactionOffsets[i] = ts.nextTickTransactionOffset;
+                            copyMem(ts.tickTransactions(ts.nextTickTransactionOffset), request, transactionSize);
+                            ts.nextTickTransactionOffset += transactionSize;
+                        }
+                    }
+                    ts.tickTransactions.releaseLock();
+                    mtxStored = mtxWasEmpty && tsReqTickTransactionOffsets[i];
+                    mtxFull = mtxWasEmpty && !tsReqTickTransactionOffsets[i];
+                }
+                // missingTxDebug_onBroadcast(request->tick, *(const m256i*)digest, mtxSlot, mtxStored, mtxFull);
+                if (mtxStored) TxStats::onStored(request->tick);
             }
             ts.tickData.releaseLock();
 
@@ -2005,6 +2038,7 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
     RequestResponseHeader* header = (RequestResponseHeader*)processor->buffer;
     while (!shutDownNode)
     {
+        PinScope _pinScope; // release swap-page pins taken while handling this request
         checkinTime(processorNumber);
         std::this_thread::sleep_for(std::chrono::microseconds(50));
         // in epoch transition, wait here
@@ -2309,6 +2343,7 @@ static void contractProcessor(void*, unsigned long long processorNumber)
     enableAVX();
 
     PROFILE_SCOPE();
+    PinScope _pinScope; // release any swap-page pins taken during this contract execution
 
     //const unsigned long long processorNumber = getRunningProcessorID();
 
@@ -2668,6 +2703,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
 
                     if (!isRevalidation)
                     {
+                        gSolutionTxReturned[transactionIndex] = true; // deposit return applied; for reprocess undo
                         const QuTransfer quTransfer = { m256i::zero(), transaction->sourcePublicKey, transaction->amount };
                         logger.logQuTransfer(quTransfer);
                     }
@@ -2872,6 +2908,16 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
     const m256i& transactionDigest = nextTickData.transactionDigests[transactionIndex];
     const m256i& dataLock = nextTickData.timelock;
 
+    // Reject transactions whose source is a smart-contract address ({contractIndex, 0, 0, 0}).
+    // No legitimate keypair maps to such an address, so it can never be a real signer. Some of
+    // these addresses are even low-order FourQ points whose signatures are forgeable (e.g. the
+    // QX contract address {1,0,0,0} is the identity point), which would let an attacker move
+    // funds "from" a contract. Never process such a transaction.
+    if (isPublicKeyOfContract(transaction->sourcePublicKey))
+    {
+        return;
+    }
+
 #ifdef TESTNET
     // Record the tx with digest
     ts.transactionsDigestAccess.acquireLock();
@@ -2963,6 +3009,7 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
 
                 case MiningSolutionTransaction::transactionType():
                 {
+                    gSolutionTxPaid[transactionIndex] = true; // deposit paid; reaching here means decreaseEnergy succeeded
                     if (transaction->amount >= MiningSolutionTransaction::minAmount()
                         && transaction->inputSize >= MiningSolutionTransaction::minInputSize())
                     {
@@ -3249,6 +3296,7 @@ static bool makeAndBroadcastExecutionFeeTransaction(int i, BroadcastFutureTickDa
 static void processTick(unsigned long long processorNumber)
 {
     PROFILE_SCOPE();
+    TickBench::Scope _btTotal(TickBench::TICK_TOTAL);
 
 #ifdef TESTNET
     if (tickDelay > 0) {
@@ -3319,10 +3367,12 @@ static void processTick(unsigned long long processorNumber)
     }
 
     PROFILE_NAMED_SCOPE_BEGIN("processTick(): BEGIN_TICK");
+    unsigned long long _btBeginTickStart = __rdtsc();
     logger.registerNewTx(system.tick, logger.SC_BEGIN_TICK_TX);
     contractProcessorPhase = BEGIN_TICK;
     contractProcessorState = 1;
     WAIT_WHILE(contractProcessorState);
+    TickBench::add(TickBench::BEGIN_TICK, _btBeginTickStart, __rdtsc());
     PROFILE_SCOPE_END();
 
     latestIncomingTransferTickPreservePubkeys.clear();
@@ -3343,6 +3393,7 @@ static void processTick(unsigned long long processorNumber)
         // Only apply skipping compute solution when in Mainnet with Aux node (except for last tick)
         if (isMainMode() || isTestnet() || isLastTickInEpoch()) {
             PROFILE_NAMED_SCOPE_BEGIN("processTick(): pre-scan solutions");
+            unsigned long long _bPrescanStart = __rdtsc();
             // reset solution task queue
             score->resetTaskQueue();
             // pre-scan any solution tx and add them to solution task queue
@@ -3379,11 +3430,13 @@ static void processTick(unsigned long long processorNumber)
                 }
             }
 
+            TickBench::add(TickBench::PRESCAN_SOLUTIONS, _bPrescanStart, __rdtsc());
             PROFILE_SCOPE_END();
             {
                 // Process solutions in this tick and store in cache. In parallel, score->tryProcessSolution() is called by
                 // request processors to speed up solution processing.
                 PROFILE_NAMED_SCOPE("processTick(): process solutions");
+                TickBench::Scope _bProcSol(TickBench::PROCESS_SOLUTIONS);
                 score->startProcessTaskQueue();
                 while (!score->isTaskQueueProcessed()) {
                     score->tryProcessSolution(processorNumber);
@@ -3396,13 +3449,17 @@ static void processTick(unsigned long long processorNumber)
 
         // Setup spectrum rollback data
         setMem(spectrumDataRollback, sizeof(spectrumDataRollback), 0);
+        setMem(gSolutionTxPaid, sizeof(gSolutionTxPaid), 0);
+        setMem(gSolutionTxReturned, sizeof(gSolutionTxReturned), 0);
         resourceTestingDigestRollback = resourceTestingDigest;
 
         copyMem((void*)minerPublicKeysRollback, (void*)minerPublicKeys, sizeof(minerPublicKeys));
         copyMem((void*)minerScoresRollback, (void*)minerScores, sizeof(minerScores));
+        numberOfMinersRollback = numberOfMiners;
 
         // Process all transaction of the tick
         PROFILE_NAMED_SCOPE_BEGIN("processTick(): process transactions");
+        unsigned long long _bProcTxsStart = __rdtsc();
         unsigned int nTickLeaderTx = 0;
         unsigned int nProtocolTx = 0;
         unsigned int nContractTx = 0;
@@ -3569,6 +3626,7 @@ static void processTick(unsigned long long processorNumber)
                 revenueOnTick(tickOffset, gTxObservation);
             }
         }
+        TickBench::add(TickBench::PROCESS_TXS, _bProcTxsStart, __rdtsc());
         PROFILE_SCOPE_END();
     }
     else
@@ -3632,10 +3690,13 @@ static void processTick(unsigned long long processorNumber)
     }
 
     // Generate subscription queries (may create queries that immediately timeout if the network was stuck)
-    oracleEngine.generateSubscriptionQueries();
+    {
+        TickBench::Scope _bOracle(TickBench::ORACLE);
+        oracleEngine.generateSubscriptionQueries();
 
-    // Check for oracle query timeouts (may schedule notification)
-    oracleEngine.processTimeouts();
+        // Check for oracle query timeouts (may schedule notification)
+        oracleEngine.processTimeouts();
+    }
 
     // Notify contracts about successfully obtained oracle replies and about errors (using contract processor)
     const OracleNotificationData* oracleNotification = oracleEngine.getNotification();
@@ -3660,6 +3721,7 @@ static void processTick(unsigned long long processorNumber)
     const OracleQueryMetadata* finishedUserQuery = oracleEngine.getFinishedUserQuery();
     while (finishedUserQuery)
     {
+        PinScope _pinScope; // release this query's tickTransaction/txOffset swap-page pins each iteration
         if (finishedUserQuery->interfaceIndex == OI::DogeShareValidation::oracleInterfaceIndex)
         {
             // Look up query tx to get query data.
@@ -3758,13 +3820,16 @@ static void processTick(unsigned long long processorNumber)
     }
 
     PROFILE_NAMED_SCOPE_BEGIN("processTick(): END_TICK");
+    unsigned long long _bEndTickStart = __rdtsc();
     logger.registerNewTx(system.tick, logger.SC_END_TICK_TX);
     contractProcessorPhase = END_TICK;
     contractProcessorState = 1;
     WAIT_WHILE(contractProcessorState);
+    TickBench::add(TickBench::END_TICK, _bEndTickStart, __rdtsc());
     PROFILE_SCOPE_END();
 
     PROFILE_NAMED_SCOPE_BEGIN("processTick(): get spectrum digest");
+    unsigned long long _bDigSpecStart = __rdtsc();
     unsigned int digestIndex;
     ACQUIRE(spectrumLock);
     for (digestIndex = 0; digestIndex < SPECTRUM_CAPACITY; digestIndex++)
@@ -3796,13 +3861,17 @@ static void processTick(unsigned long long processorNumber)
 
     etalonTick.saltedSpectrumDigest = spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1];
     RELEASE(spectrumLock);
+    TickBench::add(TickBench::DIGEST_SPECTRUM, _bDigSpecStart, __rdtsc());
     PROFILE_SCOPE_END();
 
-    getUniverseDigest(etalonTick.saltedUniverseDigest);
-
-    if (isMainMode() || isSystemAtSecurityTick() || isNextTickIsSecurityTick() || isLastTickInEpoch() || isThereQearnTx)
     {
-        getComputerDigest(etalonTick.saltedComputerDigest);
+        TickBench::Scope _bDigUC(TickBench::DIGEST_UNIVERSE_COMPUTER);
+        getUniverseDigest(etalonTick.saltedUniverseDigest);
+
+        if (isMainMode() || isSystemAtSecurityTick() || isNextTickIsSecurityTick() || isLastTickInEpoch() || isThereQearnTx)
+        {
+            getComputerDigest(etalonTick.saltedComputerDigest);
+        }
     }
 
 #if !defined(NDEBUG) && 1
@@ -4347,9 +4416,11 @@ static void beginEpoch()
 static void endEpoch()
 {
     logger.registerNewTx(system.tick, logger.SC_END_EPOCH_TX);
+    logToConsole(L"endEpoch: [1/5] running contract END_EPOCH procedures...");
     contractProcessorPhase = END_EPOCH;
     contractProcessorState = 1;
     WAIT_WHILE(contractProcessorState);
+    logToConsole(L"endEpoch: [1/5] contract END_EPOCH procedures done");
 
     // treating endEpoch as a tick, start updating etalonTick:
     // this is the last tick of an epoch, should we set prevResourceTestingDigest to zero? nodes that start from scratch (for the new epoch)
@@ -4361,6 +4432,7 @@ static void endEpoch()
     etalonTick.prevTransactionBodyDigest = etalonTick.saltedTransactionBodyDigest;
 
     // Handle IPO
+    logToConsole(L"endEpoch: [2/5] finishing IPOs...");
     finishIPOs();
 
     system.initialMillisecond = etalonTick.millisecond;
@@ -4375,27 +4447,7 @@ static void endEpoch()
     // Only issue qus if the max supply is not yet reached
     if (spectrumInfo.totalAmount + ISSUANCE_RATE <= MAX_SUPPLY)
     {
-        // Compute revenue scores of computors
-        unsigned long long revenueScore[NUMBER_OF_COMPUTORS];
-        setMem(revenueScore, sizeof(revenueScore), 0);
-        for (unsigned int tick = system.initialTick; tick < system.tick; tick++)
-        {
-            ts.tickData.acquireLock();
-            TickData& td = ts.tickData.getByTickInCurrentEpoch(tick);
-            if (td.epoch == system.epoch)
-            {
-                unsigned int numberOfTransactions = 0;
-                for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
-                {
-                    if (!isZero(td.transactionDigests[transactionIndex]))
-                    {
-                        numberOfTransactions++;
-                    }
-                }
-                revenueScore[tick % NUMBER_OF_COMPUTORS] += gTxRevenuePoints[numberOfTransactions];
-            }
-            ts.tickData.releaseLock();
-        }
+        logToConsole(L"endEpoch: [3/5] computing revenue (V2/multi-dim) + distributing to computors...");
 
         // Collect mining scores for V2
         for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
@@ -4415,25 +4467,10 @@ static void endEpoch()
         }
         computeRevenueV2(gEpochRevenueData);
 
-        // Multi dimension revenue in shadow mode
+        // Multi-dimension revenue: computed for offline comparison; paid to computors
+        // only when USE_REVENUE_MULTI_DIMENSION is set (see src/revenue.h).
         gMultiDimRevenue.totalTicks = system.tick - system.initialTick;
         computeMultiDimRevenue();
-
-        // Save data of custom mining.
-        {
-            for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
-            {
-                gRevenueComponents.voteScore[i] = voteCounter.getVoteCount(i);
-                gRevenueComponents.txScore[i] = revenueScore[i];
-            }
-            setMem(gRevenueComponents.customMiningScore, sizeof(gRevenueComponents.customMiningScore), 0);
-            computeRevenue(
-                gRevenueComponents.txScore,
-                gRevenueComponents.voteScore,
-                gRevenueComponents.customMiningScore,
-                gRevenueComponents.revenue);
-        }
-
 
         // Get revenue donation data by calling contract GQMPROP::GetRevenueDonation()
         QpiContextUserFunctionCall qpiContext(GQMPROP::__contract_index);
@@ -4447,10 +4484,10 @@ static void endEpoch()
         for (unsigned int computorIndex = 0; computorIndex < NUMBER_OF_COMPUTORS; computorIndex++)
         {
             // Compute initial computor revenue, reducing arbitrator revenue
-#if USE_REVENUE_V2
-            long long revenue = gEpochRevenueData.v2Revenue[computorIndex];
+#if USE_REVENUE_MULTI_DIMENSION
+            long long revenue = gMultiDimRevenue.revenue[computorIndex];
 #else
-            long long revenue = gRevenueComponents.revenue[computorIndex];
+            long long revenue = gEpochRevenueData.v2Revenue[computorIndex];
 #endif
             arbitratorRevenue -= revenue;
 
@@ -4494,6 +4531,7 @@ static void endEpoch()
     }
 
     // Reorganize spectrum hash map (also updates spectrumInfo)
+    logToConsole(L"endEpoch: [4/5] reorganizing spectrum hash map...");
     {
         ACQUIRE(spectrumLock);
 
@@ -4502,7 +4540,9 @@ static void endEpoch()
         RELEASE(spectrumLock);
     }
 
+    logToConsole(L"endEpoch: [5/5] reorganizing universe/assets...");
     assetsEndEpoch();
+    logToConsole(L"endEpoch: [5/5] universe/assets done");
     {
         // this is the last logging event of the epoch
         // a hint message for 3rd party services the end of the epoch
@@ -4970,10 +5010,13 @@ static bool loadAllNodeStates()
     long long mdSize = load(MULTIDIM_REVENUE_SNAPSHOT_FILE_NAME, sizeof(gMultiDimRevenue), (unsigned char*)&gMultiDimRevenue, directory);
     if (mdSize != sizeof(gMultiDimRevenue))
     {
-        // SHADOW: gMultiDimRevenue is computed but not applied to balances, so zero+continue is safe.
-        // TODO: when applied this must return false
+#if USE_REVENUE_MULTI_DIMENSION
+        logToConsole(L"Failed to load multi dim revenue snapshot");
+        return false;
+#else
         logToConsole(L"Multi dim revenue snapshot missing/mismatch (shadow mode), zeroing");
         setMem(&gMultiDimRevenue, sizeof(gMultiDimRevenue), 0);
+#endif
     }
 
     // update own computor indices
@@ -5406,6 +5449,31 @@ static void prepareNextTickTransactions()
     {
         // Checks if any of the missing transactions is available in the pending transaction pool and remove unknownTransaction flag if found
 
+        if (!isMainMode())
+        {
+            // AUX: resolve still-unknown next-tick txs from the fast window, O(1) per slot.
+            for (unsigned int j = 0; j < NUMBER_OF_TRANSACTIONS_PER_TICK; j++)
+            {
+                if (!(unknownTransactions[j >> 6] & (1ULL << (j & 63))))
+                    continue;
+                const Transaction* fwTx = fastTxWindow.lookup(nextTick, nextTickData.transactionDigests[j], system.tick);
+                if (!fwTx)
+                    continue;
+                auto* fwOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(nextTick);
+                const unsigned int fwSize = fwTx->totalSize();
+                ts.tickTransactions.acquireLock();
+                if (ts.nextTickTransactionOffset + fwSize <= ts.tickTransactions.storageSpaceCurrentEpoch)
+                {
+                    fwOffsets[j] = ts.nextTickTransactionOffset;
+                    copyMem(ts.tickTransactions(ts.nextTickTransactionOffset), (void*)fwTx, fwSize);
+                    ts.nextTickTransactionOffset += fwSize;
+                    numberOfKnownNextTickTransactions++;
+                }
+                ts.tickTransactions.releaseLock();
+                unknownTransactions[j >> 6] &= ~(1ULL << (j & 63));
+            }
+        }
+        else {
         unsigned int numPendingTickTxs = pendingTxsPool.getNumberOfPendingTickTxs(nextTick);
         pendingTxsPool.acquireLock();
         for (unsigned int i = 0; i < numPendingTickTxs; ++i)
@@ -5454,6 +5522,7 @@ static void prepareNextTickTransactions()
             }
         }
         pendingTxsPool.releaseLock();
+        }
 
         // At this point unknownTransactions is set to 1 for all transactions that are unknown
         // Update requestedTickTransactions the list of txs that not exist in memory so the MAIN loop can try to fetch them from peers
@@ -5476,6 +5545,9 @@ static void prepareNextTickTransactions()
             }
         }
     }
+
+    // missingTxDebug_reportMissingSet(nextTick, unknownTransactions);
+
     nextTickTransactionsSemaphore = 0;
 }
 
@@ -5788,6 +5860,7 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
     // first rollback the miner scores data
     copyMem((void*)minerPublicKeys, (void*)minerPublicKeysRollback, sizeof(minerPublicKeysRollback));
     copyMem((void*)minerScores, (void*)minerScoresRollback, sizeof(minerScoresRollback));
+    numberOfMiners = numberOfMinersRollback;
 
     auto tsCurrentTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(system.tick);
 
@@ -5876,22 +5949,40 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                         appendText(message, nonceChars);
                         logToConsole(message);
 
-                        // First, revert the spectrum changes made by this transaction
+                        // Undo this solution tx's optimistic deposit payment and return, then replay the balance-gated path.
                         ACQUIRE(spectrumLock);
-                        spectrum[spectrumIndex].incomingAmount -= transaction->amount;
-                        spectrum[spectrumIndex].numberOfIncomingTransfers--;
+                        if (gSolutionTxReturned[transactionIndex]) // optimistic deposit return existed
+                        {
+                            spectrum[spectrumIndex].incomingAmount -= transaction->amount;
+                            spectrum[spectrumIndex].numberOfIncomingTransfers--;
+                            spectrumInfo.totalAmount -= transaction->amount;
+                        }
+                        if (gSolutionTxPaid[transactionIndex]) // optimistic deposit payment existed
+                        {
+                            spectrum[spectrumIndex].outgoingAmount -= transaction->amount;
+                            spectrum[spectrumIndex].numberOfOutgoingTransfers--;
+                            spectrumInfo.totalAmount += transaction->amount;
+                        }
                         spectrum[spectrumIndex].latestIncomingTransferTick = spectrumDataRollback[transactionIndex].latestIncomingTransferTick;
-
-                        spectrumInfo.totalAmount -= transaction->amount;
                         auto backupNumberOfIncomingTransfers = spectrum[spectrumIndex].numberOfIncomingTransfers;
                         RELEASE(spectrumLock);
 
-                        // Then, process the transaction again
-                        processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber, true);
+                        // Replay deposit payment (balance-gated) then re-score; mirrors the solution branch of processTickTransaction().
+                        if (decreaseEnergy(spectrumIndex, transaction->amount))
+                        {
+                            // Skip dedup re-submissions (minerSolutionFlags set in a prior tick) -> stay burned, no return.
+                            if (gSolutionTxReturned[transactionIndex])
+                            {
+                                processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber, true);
+                            }
+                        }
 
-                        // if the numberOfIncomingTransfers after != previous (correct sol) -> we need to preserve latestIncomingTransferTick to avoid later incorrect sol reset it.
+                        // A good solution re-adds the return; preserve its tick so a later same-source undo can't reset it.
+                        // Re-resolve the index: the good-path increaseEnergy may have triggered reorganizeSpectrum().
+                        const int spectrumIndexAfter = ::spectrumIndex(transaction->sourcePublicKey);
                         ACQUIRE(spectrumLock);
-                        if (spectrum[spectrumIndex].numberOfIncomingTransfers != backupNumberOfIncomingTransfers)
+                        if (spectrumIndexAfter >= 0
+                            && spectrum[spectrumIndexAfter].numberOfIncomingTransfers != backupNumberOfIncomingTransfers)
                         {
                             latestIncomingTransferTickPreservePubkeys.push_back(transaction->sourcePublicKey);
                         }
@@ -6198,6 +6289,20 @@ static void tickProcessor(void*, unsigned long long processorNumber)
     while (!shutDownNode)
     {
         PROFILE_NAMED_SCOPE("tickProcessor(): loop iteration");
+        if (tlPinArena.count != 0) // leaked swap pins from a prior iteration: a missing/removed PinScope boundary
+        {
+            static bool loggedPinLeak = false;
+            if (!loggedPinLeak)
+            {
+                loggedPinLeak = true;
+                CHAR16 pinLeakMsg[128];
+                setText(pinLeakMsg, L"WARN: swap pin arena not drained at tickProcessor loop top (leaked=");
+                appendNumber(pinLeakMsg, (unsigned long long)tlPinArena.count, false);
+                appendText(pinLeakMsg, L") - missing PinScope, swap cache will starve");
+                logToConsole(pinLeakMsg);
+            }
+        }
+        PinScope _pinScope; // release swap-page pins taken during this tick-processing iteration
 
         checkinTime(processorNumber);
 
@@ -6773,12 +6878,25 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                 bool isBeginEpoch = false;
                                 if (epochTransitionState == 1)
                                 {
+                                    {
+                                        CHAR16 etMsg[192];
+                                        setText(etMsg, L"=== EPOCH TRANSITION: start | epoch ");
+                                        appendNumber(etMsg, system.epoch, FALSE);
+                                        appendText(etMsg, L" -> ");
+                                        appendNumber(etMsg, system.epoch + 1, FALSE);
+                                        appendText(etMsg, L" | last tick of epoch ");
+                                        appendNumber(etMsg, system.tick - 1, FALSE);
+                                        logToConsole(etMsg);
+                                    }
 
                                     // wait until all request processors are in waiting state
+                                    logToConsole(L"EPOCH TRANSITION: waiting for request processors to park...");
                                     WAIT_WHILE(epochTransitionWaitingRequestProcessors < nRequestProcessorIDs);
 
                                     // end current epoch
+                                    logToConsole(L"EPOCH TRANSITION: running endEpoch() (revenue/IPO/spectrum reorg)...");
                                     endEpoch();
+                                    logToConsole(L"EPOCH TRANSITION: endEpoch() done");
 
                                     // Save the file of revenue. This blocking save can be called from any thread
                                     // Revenue v2 data
@@ -6795,12 +6913,15 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                     commonBuffers.releaseBuffer(reorgBuffer);
 
                                     // instruct main loop to save system and wait until it is done
+                                    logToConsole(L"EPOCH TRANSITION: saving system state...");
                                     systemMustBeSaved = true;
                                     WAIT_WHILE(systemMustBeSaved);
                                     epochTransitionState = 2;
 
+                                    logToConsole(L"EPOCH TRANSITION: running beginEpoch()...");
                                     beginEpoch();
                                     isBeginEpoch = true;
+                                    logToConsole(L"EPOCH TRANSITION: beginEpoch() done");
 
                                     // Some debug checks that we are ready for the next epoch
                                     ASSERT(system.numberOfSolutions == 0);
@@ -6816,6 +6937,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                     ASSERT(minimumComputorScore == 0 && minimumCandidateScore == 0);
 
                                     // instruct main loop to save files and wait until it is done
+                                    logToConsole(L"EPOCH TRANSITION: saving spectrum/universe/computer...");
                                     spectrumMustBeSaved = true;
                                     universeMustBeSaved = true;
                                     computerMustBeSaved = true;
@@ -6829,6 +6951,16 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                     getComputerDigest(etalonTick.saltedComputerDigest);
 
                                     epochTransitionState = 0;
+                                    {
+                                        CHAR16 etMsg[192];
+                                        setText(etMsg, L"=== EPOCH TRANSITION: COMPLETE | now epoch ");
+                                        appendNumber(etMsg, system.epoch, FALSE);
+                                        appendText(etMsg, L" | initialTick ");
+                                        appendNumber(etMsg, system.initialTick, FALSE);
+                                        appendText(etMsg, L" | tick ");
+                                        appendNumber(etMsg, system.tick, FALSE);
+                                        logToConsole(etMsg);
+                                    }
                                 }
                                 ASSERT(epochTransitionWaitingRequestProcessors >= 0 && epochTransitionWaitingRequestProcessors <= nRequestProcessorIDs);
 
@@ -7162,6 +7294,9 @@ static bool initialize()
             return false;
 
         if (!pendingTxsPool.init())
+            return false;
+
+        if (!fastTxWindow.init())
             return false;
 
         setMem(spectrumChangeFlags, sizeof(spectrumChangeFlags), 0);
@@ -7623,6 +7758,8 @@ static void deinitialize()
     ts.deinit();
 
     pendingTxsPool.deinit();
+
+    fastTxWindow.deinit();
 
     if (score)
     {
@@ -8739,6 +8876,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             logToConsole(L"Init complete! Entering main loop ...");
             while (!shutDownNode)
             {
+                PinScope _pinScope; // release swap-page pins taken during this main-loop iteration
                 if (criticalSituation == 1)
                 {
                     logToConsole(L"CRITICAL SITUATION #1!!!");
@@ -8756,6 +8894,17 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 
                     PROFILE_NAMED_SCOPE("main loop: updateTime()");
                     updateTime();
+                }
+
+                // Swap VM pin/cache stats: print one VM per ~second so operators can watch pin
+                // pressure (pinnedHighWater vs cache size) without flooding the console.
+                static unsigned long long swapStatsTick = 0;
+                static int swapStatsVmIndex = 0;
+                if (curTimeTick - swapStatsTick >= frequency)
+                {
+                    swapStatsTick = curTimeTick;
+                    const int swapVmCount = ts.printSwapVmStat(swapStatsVmIndex);
+                    swapStatsVmIndex = (swapStatsVmIndex + 1) % swapVmCount;
                 }
 
                 if (contractProcessorState == 1)
@@ -8871,6 +9020,11 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                         {
                             closePeer(&peers[i], ORACLE_MACHINE_GRACEFULL_CLOSE_RETIRES);
                         }
+                    }
+                    else
+                    {
+                        // reap dead/zombie regular-outgoing peers (incoming slots no-op inside)
+                        PeerReaper::checkSlot(i, frequency);
                     }
 
                 }
@@ -9406,13 +9560,19 @@ void processArgs(int argc, const char* argv[]) {
         ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
         ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
-        ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"));
+        ("swap-dirty-track", "Auto-track dirty SwapVM cache pages via mprotect+SIGSEGV (Linux only): skip the writeback (and compression) for pages never modified since load. Trades a small mprotect/fault cost for less disk I/O. Off by default.")
+        ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
+        ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"));
     auto result = options.parse(argc, argv);
 
 #ifdef __linux__
     if (result.count("swap-compression")) {
         gSwapCompressionEnabled = true;
         logColorToScreen("INFO", "Swap compression enabled: SwapVM disk pages will be compressed with blosc2 on save/load");
+    }
+    if (result.count("swap-dirty-track")) {
+        gSwapDirtyTrackEnabled = true;
+        logColorToScreen("INFO", "Swap dirty tracking enabled: clean SwapVM cache pages skip writeback on eviction");
     }
 #endif
 
@@ -9466,6 +9626,13 @@ void processArgs(int argc, const char* argv[]) {
         logColorToScreen("INFO", "Security tick set to " + std::to_string(securityTick));
     }
 
+    {
+        int mi = result["max-inbound"].as<int>();
+        if (mi >= 0) {
+            maxInboundAccepts = mi > NUMBER_OF_INCOMING_CONNECTIONS ? NUMBER_OF_INCOMING_CONNECTIONS : mi;
+            logColorToScreen("INFO", "Max inbound accepts capped at " + std::to_string(maxInboundAccepts));
+        }
+    }
     if (result.count("auto-flush-stuck-seconds")) {
         autoFlushStuckSeconds = result["auto-flush-stuck-seconds"].as<int>();
         if (autoFlushStuckSeconds < 0) autoFlushStuckSeconds = 0;
@@ -9701,7 +9868,11 @@ void watchAndCheckin()
 #endif
 
 #ifdef __linux__
-void signalHandler(int sig) {
+void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
+    // Component B fast path: a write to an armed read-only SwapVM cache page faults here. Mark the
+    // slot dirty, restore write access, and resume the store. Any other fault hits the crash path below.
+    if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr))
+        return;
     boost::stacktrace::safe_dump_to("crash.dump");
     // Send to server in a child process
     pid_t pid = fork();
@@ -9741,7 +9912,8 @@ void signalHandler(int sig) {
 void setupSignalHandlers() {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = signalHandler;
+    sa.sa_sigaction = signalHandler;       // SA_SIGINFO form: handler receives siginfo_t* (si_addr)
+    sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
 
     // Common crash signals to catch:

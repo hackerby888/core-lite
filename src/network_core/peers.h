@@ -4,6 +4,7 @@
 #pragma once
 
 #include <vector>
+#include <atomic>
 
 #include <lib/platform_common/processor.h>
 #include <lib/platform_efi/uefi.h>
@@ -178,6 +179,8 @@ static Peer peers[NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTION
 static volatile long long numberOfReceivedBytes = 0, prevNumberOfReceivedBytes = 0;
 static volatile long long numberOfTransmittedBytes = 0, prevNumberOfTransmittedBytes = 0;
 static int numberOfAcceptedIncommingConnection = 0;
+// Max incoming slots allowed to arm Accept() (--max-inbound / /set-max-inbound); default = all.
+static int maxInboundAccepts = NUMBER_OF_INCOMING_CONNECTIONS;
 
 static volatile char publicPeersLock = 0;
 static unsigned int numberOfPublicPeers = 0;
@@ -255,7 +258,9 @@ static bool isPrivateIp(const unsigned char address[4])
     return false;
 }
 
-static void closePeer(Peer* peer, int closeGracefullyRetries = 0)
+#include "extensions/peer_disc_stats.h"
+
+static void closePeer(Peer* peer, int closeGracefullyRetries = 0, unsigned int discReason = PeerDisc::OTHER)
 {
     PROFILE_SCOPE();
     ASSERT(isMainProcessor());
@@ -264,6 +269,7 @@ static void closePeer(Peer* peer, int closeGracefullyRetries = 0)
         if (!peer->isClosing)
         {
             peer->isClosing = TRUE;
+            PeerDisc::note(discReason, (unsigned int)(peer - peers));
             if (peer->isOracleMachineNode())
             {
                 // Track close time for OM nodes to enable reconnection cooldown
@@ -357,7 +363,11 @@ static void push(Peer* peer, RequestResponseHeader* requestResponseHeader)
     // The sending buffer may queue multiple messages, each of which may need to transmitted in many small packets.
     if (peer->tcp4Protocol && peer->isConnectedAccepted && !peer->isClosing)
     {
-        if (peer->dataToTransmitSize + requestResponseHeader->size() > BUFFER_SIZE)
+        // Read the size exactly once: re-reading requestResponseHeader->size() while the
+        // source is concurrently mutated would make the copy length, the cursor advance and
+        // the copied header disagree, producing a malformed frame in the outgoing buffer.
+        const unsigned int msgSize = requestResponseHeader->size();
+        if (peer->dataToTransmitSize + msgSize > BUFFER_SIZE)
         {
             // Buffer is full, which indicates a problem
 #ifndef NDEBUG
@@ -368,7 +378,7 @@ static void push(Peer* peer, RequestResponseHeader* requestResponseHeader)
                 appendText(debugMessage, L" | dataToTransmitSize: ");
                 appendNumber(debugMessage, peer->dataToTransmitSize, true);
                 appendText(debugMessage, L" | requestResponseHeader->size(): ");
-                appendNumber(debugMessage, requestResponseHeader->size(), true);
+                appendNumber(debugMessage, msgSize, true);
                 addDebugMessage(debugMessage);
             }
 #endif
@@ -377,8 +387,8 @@ static void push(Peer* peer, RequestResponseHeader* requestResponseHeader)
         else
         {
             // Add message to buffer
-            copyMem(&peer->dataToTransmit[peer->dataToTransmitSize], requestResponseHeader, requestResponseHeader->size());
-            peer->dataToTransmitSize += requestResponseHeader->size();
+            copyMem(&peer->dataToTransmit[peer->dataToTransmitSize], requestResponseHeader, msgSize);
+            peer->dataToTransmitSize += msgSize;
             peer->trackDejavu(requestResponseHeader->dejavu());
             _InterlockedIncrement64(&numberOfDisseminatedRequests);
         }
@@ -392,7 +402,9 @@ static void pushCustom(RequestResponseHeader* requestResponseHeader, int numberO
     unsigned short numberOfSuitablePeers = 0;
     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
     {
-        if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && peers[i].exchangedPublicPeers && !peers[i].isClosing)
+        // Outbound (dialed) peers are request-eligible once connected, before ExchangePublicPeers arrives.
+        if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted
+            && (i < NUMBER_OF_OUTGOING_CONNECTIONS || peers[i].exchangedPublicPeers) && !peers[i].isClosing)
         {
             if ((filterFullNode && peers[i].isFullNode()) || (!filterFullNode))
             {
@@ -497,7 +509,7 @@ static void pushPreferringAtOrAbove(
     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
     {
         if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted
-            && peers[i].exchangedPublicPeers && !peers[i].isClosing)
+            && (i < NUMBER_OF_OUTGOING_CONNECTIONS || peers[i].exchangedPublicPeers) && !peers[i].isClosing)
         {
             if (peers[i].peerReportedTick >= targetTick)
                 qualified[numQualified++] = i;
@@ -819,7 +831,7 @@ static bool peerConnectionNewlyEstablished(unsigned int i)
                 peers[i].connectAcceptToken.CompletionToken.Status = -1;
                 penalizePublicPeerRejectedConnection(peers[i].address);
 
-                closePeer(&peers[i]);
+                closePeer(&peers[i], 0, PeerDisc::CONNECT_REJECT);
 
             }
             else
@@ -927,11 +939,16 @@ static void processReceivedData(unsigned int i, unsigned int salt)
     {
         if (peers[i].receiveToken.CompletionToken.Status != -1)
         {
+            // Pair with the release fence in receiveProcessor: we read Status above and
+            // DataLength below, so acquire here to guarantee the receive thread's DataLength
+            // store is visible (otherwise a stale, buffer-sized DataLength over-advances the
+            // cursor into zero-filled memory and the parser reads size()==0).
+            std::atomic_thread_fence(std::memory_order_acquire);
             peers[i].isReceiving = FALSE;
             if (peers[i].receiveToken.CompletionToken.Status)
             {
                 peers[i].receiveToken.CompletionToken.Status = -1;
-                closePeer(&peers[i]);
+                closePeer(&peers[i], 0, PeerDisc::RECV_ERR);
             }
             else
             {
@@ -942,8 +959,18 @@ static void processReceivedData(unsigned int i, unsigned int salt)
                 }
                 else
                 {
-                    numberOfReceivedBytes += peers[i].receiveData.DataLength;
-                    *((unsigned long long*) & peers[i].receiveData.FragmentTable[0].FragmentBuffer) += peers[i].receiveData.DataLength;
+                    // Defensive: never advance the receive cursor past the end of the buffer,
+                    // even if a bogus DataLength were ever observed. recv is already capped to
+                    // this same free space, so this clamp is a no-op in normal operation.
+                    const unsigned long long usedBefore = ((unsigned long long)peers[i].receiveData.FragmentTable[0].FragmentBuffer) - ((unsigned long long)peers[i].receiveBuffer);
+                    unsigned int receivedLen = peers[i].receiveData.DataLength;
+                    if (receivedLen > BUFFER_SIZE - usedBefore)
+                    {
+                        receivedLen = (unsigned int)(BUFFER_SIZE - usedBefore);
+                    }
+                    numberOfReceivedBytes += receivedLen;
+                    PeerDisc::noteRx(i, receivedLen);
+                    *((unsigned long long*) & peers[i].receiveData.FragmentTable[0].FragmentBuffer) += receivedLen;
 
                     // Parse every complete packet in place, advancing a read cursor per packet.
                     const unsigned int totalReceivedSize = (unsigned int)(((unsigned long long)peers[i].receiveData.FragmentTable[0].FragmentBuffer) - ((unsigned long long)peers[i].receiveBuffer));
@@ -955,13 +982,28 @@ static void processReceivedData(unsigned int i, unsigned int salt)
                         RequestResponseHeader* requestResponseHeader = (RequestResponseHeader*)((char*)peers[i].receiveBuffer + readOffset);
                         if (requestResponseHeader->size() < sizeof(RequestResponseHeader))
                         {
+                            // TODO: remove this tolerate on epoch 218
+                            // TOLERATE TRAILING ZERO PADDING: other nodes run old buggy code that
+                            // can append zero bytes past their real messages. A valid frame never
+                            // starts with a zero size field (min message size is
+                            // sizeof(RequestResponseHeader)), so a zero here is padding, not a frame.
+                            // Skip the zero run and resync instead of forgetting the (un-updatable) peer.
+                            if (requestResponseHeader->size() == 0)
+                            {
+                                const unsigned char* p = (const unsigned char*)peers[i].receiveBuffer;
+                                unsigned int z = readOffset;
+                                while (z < totalReceivedSize && p[z] == 0) z++;
+                                _InterlockedIncrement64(&numberOfDiscardedRequests);
+                                readOffset = z;
+                                continue; // re-check loop condition; resync at next non-zero byte
+                            }
                             // protocol violation -> forget peer
                             setText(message, L"Forgetting ");
                             appendIPv4Address(message, peers[i].address);
                             appendText(message, L"...");
                             logToConsole(message);
                             forgetPublicPeer(peers[i].address);
-                            closePeer(&peers[i]);
+                            closePeer(&peers[i], 0, PeerDisc::PROTO_VIOLATION);
                             peerForgotten = true;
                             break;
                         }
@@ -1070,7 +1112,7 @@ static void receiveData(unsigned int i, unsigned int salt)
                     if ((status = peers[i].tcp4Protocol->GetModeData(peers[i].tcp4Protocol, &state, NULL, NULL, NULL, NULL))
                         || state == Tcp4StateClosed)
                     {
-                        closePeer(&peers[i]);
+                        closePeer(&peers[i], 0, PeerDisc::RECV_FIN_POLL);
                     }
                     else
                     {
@@ -1083,7 +1125,7 @@ static void receiveData(unsigned int i, unsigned int salt)
                                 logStatusToConsole(L"EFI_TCP4_PROTOCOL.Receive() fails", status, __LINE__);
                             }
 
-                            closePeer(&peers[i]);
+                            closePeer(&peers[i], 0, PeerDisc::RECV_INIT_FAIL);
                         }
                         else
                         {
@@ -1124,7 +1166,7 @@ static void processTransmittedData(unsigned int i, unsigned int salt)
             {
                 // transmission error
                 peers[i].transmitToken.CompletionToken.Status = -1;
-                closePeer(&peers[i]);
+                closePeer(&peers[i], 0, PeerDisc::XMIT_ERR);
             }
             else
             {
@@ -1137,6 +1179,7 @@ static void processTransmittedData(unsigned int i, unsigned int salt)
                 {
                     // success
                     numberOfTransmittedBytes += peers[i].transmitData.DataLength;
+                    PeerDisc::noteTx(i, peers[i].transmitData.DataLength);
 
                     // Update OM activity time on successful transmit so the inactivity
                     // timer doesn't kill connections that are actively sending queries
@@ -1164,7 +1207,7 @@ static void transmitData(unsigned int i, unsigned int salt)
             if ((status = peers[i].tcp4Protocol->GetModeData(peers[i].tcp4Protocol, &state, NULL, NULL, NULL, NULL))
                 || state == Tcp4StateClosed)
             {
-                closePeer(&peers[i]);
+                closePeer(&peers[i], 0, PeerDisc::XMIT_GETMODE);
             }
             else
             {
@@ -1174,7 +1217,7 @@ static void transmitData(unsigned int i, unsigned int salt)
                 if (status = peers[i].tcp4Protocol->Transmit(peers[i].tcp4Protocol, &peers[i].transmitToken))
                 {
                     logStatusToConsole(L"EFI_TCP4_PROTOCOL.Transmit() fails", status, __LINE__);
-                    closePeer(&peers[i]);
+                    closePeer(&peers[i], 0, PeerDisc::XMIT_INIT_FAIL);
                 }
                 else
                 {
@@ -1296,8 +1339,8 @@ static void peerReconnectIfInactive(unsigned int i, unsigned short port)
         else
         {
             // incoming connection:
-            // accept connections if peer list is not static
-            if (!listOfPeersIsStatic)
+            // accept connections if peer list is not static and inbound cap not reached
+            if (!listOfPeersIsStatic && (i - NUMBER_OF_OUTGOING_CONNECTIONS) < (unsigned int)maxInboundAccepts)
             {
                 peers[i].isIncommingConnection = TRUE;
                 peers[i].receiveData.FragmentTable[0].FragmentBuffer = peers[i].receiveBuffer;

@@ -281,6 +281,7 @@ private:
             unsigned int tick = 0;
             for (tick = toTick; tick >= lastCheckTransactionOffset; tick--)
             {
+                PinScope _pinScope; // release this tick's swap-page pins before the next iteration
                 for (int idx = NUMBER_OF_TRANSACTIONS_PER_TICK - 1; idx >= 0; idx--)
                 {
                     if (this->tickTransactionOffsets(tick, idx))
@@ -639,6 +640,7 @@ public:
         // Rebuild the transaction digest hashmap
         for (auto i = metaData.tickBegin; i < metaData.tickEnd && rebuildTxHashmap; i++)
         {
+            PinScope _pinScope; // release this tick's swap-page pins before the next iteration
             TickData *tickData = TickDataAccess::getByTickIfNotEmpty(i);
             if (!tickData)
             {
@@ -696,6 +698,51 @@ public:
 #else
         return tickDataSize;
 #endif
+    }
+
+#ifdef USE_SWAP
+    // Format one swap VM's pin/cache stats into a single console line.
+    template <class VM>
+    static void formatSwapVmStat(const CHAR16* name, const VM& vm)
+    {
+        CHAR16 m[256];
+        setText(m, (CHAR16*)L"[swapvm ");
+        appendText(m, (CHAR16*)name);
+        appendText(m, (CHAR16*)L"] pin ");
+        appendNumber(m, (unsigned long long)vm.getPinnedNow(), false);
+        appendText(m, (CHAR16*)L"/");
+        appendNumber(m, (unsigned long long)VM::getNumCachePage(), false);
+        appendText(m, (CHAR16*)L" hiwater ");
+        appendNumber(m, (unsigned long long)vm.getPinnedHighWater(), false);
+        appendText(m, (CHAR16*)L" allPinnedWaits ");
+        appendNumber(m, vm.getAllPinnedWaits(), false);
+        appendText(m, (CHAR16*)L" hit ");
+        appendNumber(m, vm.getCacheHits(), false);
+        appendText(m, (CHAR16*)L" miss ");
+        appendNumber(m, vm.getCacheMisses(), false);
+        appendText(m, (CHAR16*)L" cleanEvict ");
+        appendNumber(m, vm.getCleanEvicts(), false);
+        appendText(m, (CHAR16*)L" dirtyEvict ");
+        appendNumber(m, vm.getDirtyEvicts(), false);
+        logToConsole(m);
+    }
+#endif
+
+    // Print pin/cache stats for one swap VM, cycling `which` 0..(count-1) across calls so the
+    // main loop can emit one line at a time. Returns the number of swap VMs.
+    static int printSwapVmStat(int which)
+    {
+#ifdef USE_SWAP
+        switch (((which % 5) + 5) % 5)
+        {
+        case 0: formatSwapVmStat((CHAR16*)L"tickData",  tickDataSwapVM); break;
+        case 1: formatSwapVmStat((CHAR16*)L"ticks",     ticksSwapVM); break;
+        case 2: formatSwapVmStat((CHAR16*)L"tx",        tickTransactionsSwapVM); break;
+        case 3: formatSwapVmStat((CHAR16*)L"txOffsets", tickTransactionOffsetsSwapVM); break;
+        case 4: formatSwapVmStat((CHAR16*)L"txDigest",  tickTransactionsDigestSwapVM); break;
+        }
+#endif
+        return 5;
     }
 
     static unsigned long long getTicksSize()
@@ -843,6 +890,7 @@ public:
             qVirtualCommit(oldTicksPtr, tickCount * NUMBER_OF_COMPUTORS * sizeof(Tick));
 
             for (auto i = tickIndex; i < tickIndex + tickCount; i++) {
+                PinScope _pinScope; // release this tick's swap-page pins before the next iteration
                 TickData &tickData =  TickStorage::tickData[i];
                 copyMem(oldTickDataPtr + (i - tickIndex), &tickData, sizeof(TickData));
 
@@ -863,6 +911,7 @@ public:
 
                 for (unsigned int tickId = oldTickBegin; tickId < oldTickEnd; ++tickId)
                 {
+                    PinScope _pinScope; // bound swap-page pins during epoch-transition copy
                     const unsigned long long* tickOffsets = TickTransactionOffsetsAccess::getByTickInCurrentEpoch(tickId);
                     unsigned long long* tickOffsetsPrevEp = TickTransactionOffsetsAccess::getByTickInPreviousEpoch(tickId);
                     for (unsigned int transactionIdx = 0; transactionIdx < NUMBER_OF_TRANSACTIONS_PER_TICK; ++transactionIdx)
@@ -921,6 +970,7 @@ public:
                 const unsigned long long offsetDelta = (tickTransactionsSizeCurrentEpoch + keepTransactionSizesSum) - nextTickTransactionOffset + oldTickTransactionsPadding;
                 for (unsigned int tickId = oldTickBegin; tickId < oldTickEnd; ++tickId)
                 {
+                    PinScope _pinScope; // bound swap-page pins during epoch-transition copy
                     const unsigned long long* tickOffsets = TickTransactionOffsetsAccess::getByTickInCurrentEpoch(tickId);
                     unsigned long long* tickOffsetsPrevEp = TickTransactionOffsetsAccess::getByTickInPreviousEpoch(tickId);
                     for (unsigned int transactionIdx = 0; transactionIdx < NUMBER_OF_TRANSACTIONS_PER_TICK; ++transactionIdx)
@@ -974,6 +1024,7 @@ public:
             }
 
 #ifdef USE_SWAP
+            releaseThreadPins(); // drain pins before reset() zeroes pinCount; else a stale arena entry makes a later access skip its pin -> dangle
             tickDataSwapVM.reset();
             ticksSwapVM.reset();
             tickTransactionsSwapVM.reset();
@@ -983,6 +1034,7 @@ public:
 
 #ifndef NDEBUG
             for (unsigned int tickIndex = 0; tickIndex < MAX_NUMBER_OF_TICKS_PER_EPOCH; tickIndex++) {
+                PinScope _pinScope; // release this tick's swap-page pins each iteration (debug consistency scan over the whole epoch)
                 TickData &tickData = TickStorage::tickData[tickIndex];
                 ASSERT(isAllBytesZero(&tickData, sizeof(tickData)));
 
@@ -1053,6 +1105,7 @@ public:
         // Check previous epoch data
         for (unsigned int tickId = oldTickBegin; tickId < oldTickEnd; ++tickId)
         {
+            PinScope _pinScope; // bound swap-page pins during consistency scan
             const TickData& tickData = TickDataAccess::getByTickInPreviousEpoch(tickId);
             ASSERT(tickData.epoch == 0 || tickData.epoch == INVALIDATED_TICK_DATA || (tickData.tick == tickId));
             if (!(tickData.epoch == 0 || tickData.epoch == INVALIDATED_TICK_DATA || (tickData.tick == tickId))) {
@@ -1113,6 +1166,7 @@ public:
         unsigned long long lastTransactionEndOffset = FIRST_TICK_TRANSACTION_OFFSET;
         for (unsigned int tickId = tickBegin; tickId < tickEnd; ++tickId)
         {
+            PinScope _pinScope; // bound swap-page pins during consistency scan
             const TickData& tickData = TickDataAccess::getByTickInCurrentEpoch(tickId);
             ASSERT(tickData.epoch == 0 || tickData.epoch == INVALIDATED_TICK_DATA || (tickData.tick == tickId));
             if (!(tickData.epoch == 0 || tickData.epoch == INVALIDATED_TICK_DATA || (tickData.tick == tickId))) {
@@ -1486,6 +1540,8 @@ public:
 
         void insertTransaction(const m256i& digest, const unsigned long long offset)
         {
+            PinScope _pinScope; // release this insert's random digest-page pins; transient, must not pile up to the tick boundary
+
             // Zero digest. No further process
             if (isZero(digest))
             {

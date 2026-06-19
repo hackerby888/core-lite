@@ -7,6 +7,12 @@
 
 #include <cstring>
 #include <random>
+#include <thread>
+#include <atomic>
+#include <vector>
+#if defined(__linux__)
+#include <csignal>
+#endif
 
 #include "network_messages/transactions.h"
 
@@ -275,6 +281,7 @@ TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_IndexModeRandomAccess) {
     }
 
     for (int i = 0; i < 1024 * 128 * 64; i++) {
+        PinScope _pinScope; // release this iteration's page pin (no work-unit boundary in tests)
         auto randomRange = m256i::randomValue().m256i_u64[0] % (1024*128*64);
         if (randomRange != 1 && randomRange != 1000 && randomRange != 1'000'000) {
             TxHashMapEntry& entry = test_vm.getRef(randomRange);
@@ -314,6 +321,7 @@ TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_IndexModeLinearAccess) {
     test_vm.init();
 
     for (unsigned long long i = 0; i < 1024 * 128 * 64; i++) {
+        PinScope _pinScope; // release this iteration's page pin (no work-unit boundary in tests)
         TxHashMapEntry& entry = test_vm.getRef(i);
         entry.digest = m256i::zero();
         entry.digest.m256i_u64[0] = i;
@@ -321,10 +329,45 @@ TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_IndexModeLinearAccess) {
     }
 
     for (unsigned long long i = 0; i < 1024 * 128 * 64; i++) {
+        PinScope _pinScope; // release this iteration's page pin (no work-unit boundary in tests)
         TxHashMapEntry& entry = test_vm.getRef(i);
         EXPECT_TRUE(entry.digest.m256i_u64[0] == i);
         EXPECT_TRUE(entry.offset == i);
     }
+}
+
+// Reproduces the epoch-transition pin-leak: a thread holds pin "notes" in its arena, the VM is
+// reset() (as beginEpoch does), then the thread keeps working. Without the generation guard, the
+// stale notes (a) suppress fresh pins (under-pin) and (b) make pinnedNow drift; with it, a reset
+// cleanly invalidates the stale notes.
+TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_ResetInvalidatesStalePins) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+
+    releaseThreadPins(); // start from a clean arena
+
+    struct E { unsigned long long a, b; };
+    SwapVirtualMemory<E, wcharToNumber(L"rsta"), wcharToNumber(L"data"), 64, 8, INDEX_MODE, 0> vm;
+    vm.init();
+
+    // Pin two distinct pages and DON'T release them (simulating a thread that holds notes across
+    // the reset, like an in-flight HTTP request during an epoch transition).
+    vm.getRef(0);    // page 0
+    vm.getRef(64);   // page 1
+    EXPECT_EQ(vm.getPinnedNow(), 2);
+
+    // Epoch transition: reset wipes the cache + pin counters (but cannot touch this thread's arena).
+    vm.reset();
+    EXPECT_EQ(vm.getPinnedNow(), 0);
+
+    // Fresh access to the SAME page must take a real pin again (stale note must not suppress it).
+    vm.getRef(0);
+    EXPECT_EQ(vm.getPinnedNow(), 1); // without the generation guard this would wrongly be 0
+
+    // Releasing everything (the one fresh pin + the two stale notes) must land back at exactly 0,
+    // not underflow or leave a phantom pinned slot.
+    releaseThreadPins();
+    EXPECT_EQ(vm.getPinnedNow(), 0);
 }
 
 
@@ -453,3 +496,106 @@ TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_TestCacheBuffer)
         }
     }
 }
+
+namespace {
+struct E16 { unsigned long long a, b; }; // 16 bytes; pageCapacity 256 -> pageSize 4096 (one OS page)
+}
+
+// Component A: every page must survive eviction+reload even though the working set (64 pages) far
+// exceeds the cache (4 slots). Small + fast, exercising the IO-outside-the-lock evict/load path.
+TEST(TestSwapVirtualMemory, IndexEvictReloadIntegritySmall) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    SwapVirtualMemory<E16, wcharToNumber(L"evrl"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+    vm.init();
+    const unsigned long long NPAGES = 64, CAP = 256;
+    for (unsigned long long p = 0; p < NPAGES; p++) {
+        PinScope _;
+        E16& e = vm.getRef(p * CAP);
+        e.a = p + 1; e.b = (p + 1) * 7;
+    }
+    for (unsigned long long p = 0; p < NPAGES; p++) {
+        PinScope _;
+        E16& e = vm.getRef(p * CAP);
+        EXPECT_EQ(e.a, p + 1);
+        EXPECT_EQ(e.b, (p + 1) * 7);
+    }
+}
+
+// Component A: cache hits must keep working (no corruption, no deadlock) while another thread churns
+// misses that evict+load under released memLock. A churner walks 200 pages (constant eviction) while
+// four hitters hammer the resident sentinel page 0; page 0 is only ever written 0xABCD, so any other
+// value read back signals a torn evict/reload.
+TEST(TestSwapVirtualMemory, ConcurrentHitsDuringMiss) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    SwapVirtualMemory<E16, wcharToNumber(L"chdm"), wcharToNumber(L"data"), 256, 8, INDEX_MODE, 0> vm;
+    vm.init();
+    const unsigned long long CAP = 256;
+    { PinScope _; vm.getRef(0).a = 0xABCD; }
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> errors{0};
+    std::thread churner([&]{
+        unsigned long long p = 1;
+        while (!stop.load(std::memory_order_relaxed)) {
+            PinScope _;
+            vm.getRef(p * CAP).a = p;
+            p = (p % 200) + 1;
+        }
+    });
+    std::vector<std::thread> hitters;
+    for (int t = 0; t < 4; t++) hitters.emplace_back([&]{
+        for (int i = 0; i < 100000; i++) {
+            PinScope _;
+            if (vm.getRef(0).a != 0xABCD) errors++;
+        }
+    });
+    for (auto& h : hitters) h.join();
+    stop = true; churner.join();
+    EXPECT_EQ(errors.load(), 0);
+}
+
+#if defined(__linux__)
+// Component B: with dirty tracking on, a page only read since load is evicted without a writeback
+// (clean), while a written page is written back and survives. Tests install the SIGSEGV fast path
+// that the node installs in signalHandler (the test binary has no handler of its own).
+TEST(TestSwapVirtualMemory, DirtyTrackSkipsCleanWriteback) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+
+    struct sigaction sa, oldSa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = [](int sig, siginfo_t* si, void*) {
+        if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr)) return;
+        signal(SIGSEGV, SIG_DFL); raise(SIGSEGV);
+    };
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &oldSa);
+    gSwapDirtyTrackEnabled = true;
+
+    {
+        SwapVirtualMemory<E16, wcharToNumber(L"dtyt"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+        vm.init();
+        const unsigned long long CAP = 256;
+        for (unsigned long long p = 0; p < 16; p++) {
+            PinScope _;
+            E16& e = vm.getRef(p * CAP);
+            if (p % 2 == 0) e.a = p + 100;                          // written -> dirty
+            else { volatile unsigned long long r = e.a; (void)r; }  // read only -> clean
+        }
+        EXPECT_GT(vm.getCleanEvicts(), 0u);
+        EXPECT_GT(vm.getDirtyEvicts(), 0u);
+        for (unsigned long long p = 0; p < 16; p++) {
+            PinScope _;
+            E16& e = vm.getRef(p * CAP);
+            if (p % 2 == 0) EXPECT_EQ(e.a, p + 100);  // dirty page written back + reloaded
+            else EXPECT_EQ(e.a, 0u);                  // clean page never written -> reloads as zero
+        }
+    }
+
+    gSwapDirtyTrackEnabled = false;
+    sigaction(SIGSEGV, &oldSa, nullptr);
+}
+#endif

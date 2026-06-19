@@ -30,6 +30,9 @@
 #include <queue>
 #endif
 
+#include <atomic>
+#include <memory>
+
 static volatile bool listOfPeersIsStaticLiteNode = false;
 
 #define ACQUIRE_NO_SPINNING(lock) while (_InterlockedCompareExchange8(&lock, 1, 0)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -155,6 +158,8 @@ bool isNextTickIsSecurityTick()
 ////////// Skip Solution Transaction Verification Feature \\\\\\\\\\
 
 static inline EntityRecord spectrumDataRollback[NUMBER_OF_TRANSACTIONS_PER_TICK];
+static inline bool gSolutionTxPaid[NUMBER_OF_TRANSACTIONS_PER_TICK];     // optimistic decreaseEnergy succeeded for the solution tx at this index
+static inline bool gSolutionTxReturned[NUMBER_OF_TRANSACTIONS_PER_TICK]; // optimistic deposit-return increaseEnergy applied for the solution tx at this index
 unsigned int resourceTestingDigestRollback = 0;
 
 uint32_t getCurrentCpuIndex() {
@@ -295,7 +300,12 @@ void setMem(void* buffer, unsigned long long size, unsigned char value)
 
 void copyMem(void* destination, const void* source, unsigned long long length)
 {
-    memcpy(destination, source, length);
+    // Must match UEFI EFI_BOOT_SERVICES.CopyMem semantics, which explicitly support
+    // overlapping source/destination. The original (bare-metal) code relies on this —
+    // e.g. processReceivedData() compacts its receive buffer in place with overlapping
+    // ranges. memcpy() is UB on overlap (glibc corrupts large copies), which left zeroed
+    // bytes mid-stream and made the parser read size()==0 and force-forget valid peers.
+    memmove(destination, source, length);
 }
 
 bool allocatePool(unsigned long long size, void** buffer)
@@ -390,7 +400,9 @@ struct Overload {
 
     inline static std::vector<std::thread> threads;
     inline static std::unordered_map<unsigned long long, SOCKET> incomingSocketMap;
-    inline static std::unordered_map<unsigned long long, TcpData> tcpDataMap;
+    // shared_ptr ownership: detached connect/accept threads capture the element by value so it
+    // survives a concurrent DestroyChild() erase (was a use-after-free on epoch-end teardown).
+    inline static std::unordered_map<unsigned long long, std::shared_ptr<TcpData>> tcpDataMap;
     inline static std::unordered_map<unsigned long long, EventData> eventDataMap;
     inline static std::unordered_map<unsigned long long, bool> isReceiveThreadSetupMap;
     inline static std::unordered_map<unsigned long long, bool> isSendThreadSetupMap;
@@ -398,6 +410,7 @@ struct Overload {
     inline static EventQueue<ReceiveRequest> receiveQueue;
 
     inline static std::mutex networkingLock;
+    inline static std::mutex eventMapLock; // guards eventDataMap (CreateEvent/CloseEvent vs startThread callback lookup on AP worker threads)
 
     // Directly call the setup function without using custom stack.
     static void startThread(EFI_AP_PROCEDURE procedure, void* data, unsigned long long ProcessorNumber, EFI_EVENT WaitEvent, unsigned long long TimeoutInMicroseconds) {
@@ -458,13 +471,24 @@ struct Overload {
 
         // call the event call back
         if (WaitEvent) {
-            auto it = eventDataMap.find((unsigned long long)WaitEvent);
-            if (it != eventDataMap.end()) {
-                EventData& eventData = it->second;
-                if (eventData.notifyFunction) {
+            // Copy the callback out under the lock, then release before invoking it: the callback may
+            // re-enter CloseEvent (which takes eventMapLock), so holding it here would self-deadlock.
+            void* context = nullptr;
+            void (*notifyFunction)(void*, void*) = nullptr;
+            bool found = false;
+            {
+                std::lock_guard<std::mutex> lock(eventMapLock);
+                auto it = eventDataMap.find((unsigned long long)WaitEvent);
+                if (it != eventDataMap.end()) {
+                    found = true;
+                    context = it->second.context;
+                    notifyFunction = reinterpret_cast<void (*)(void*, void*)>(it->second.notifyFunction);
+                }
+            }
+            if (found) {
+                if (notifyFunction) {
                     // Call the notify function with the context
-                    void (*notifyFunction)(void*, void*) = reinterpret_cast<void (*)(void*, void*)>(eventData.notifyFunction);
-                    notifyFunction(WaitEvent, eventData.context);
+                    notifyFunction(WaitEvent, context);
                 }
             }
             else {
@@ -544,7 +568,9 @@ struct Overload {
             *Interface = new EFI_TCP4_PROTOCOL;
             // Check if this is a incomming socket and set socket instance if it is
             if (incomingSocketMap.contains((unsigned long long)Handle)) {
-                TcpData& tcpData = tcpDataMap[(unsigned long long) * Interface];
+                auto tcpDataPtr = std::make_shared<TcpData>();
+                tcpDataMap[(unsigned long long) * Interface] = tcpDataPtr;
+                TcpData& tcpData = *tcpDataPtr;
                 tcpData.socket = incomingSocketMap[(unsigned long long)Handle];
 
                 incomingSocketMap.erase((unsigned long long)Handle);
@@ -583,7 +609,10 @@ struct Overload {
             eventData.event = *Event;
             eventData.context = NotifyContext;
             eventData.notifyFunction = NotifyFunction;
-            eventDataMap[(unsigned long long) * Event] = eventData;
+            {
+                std::lock_guard<std::mutex> lock(eventMapLock);
+                eventDataMap[(unsigned long long) * Event] = eventData;
+            }
             return EFI_SUCCESS;
         }
 
@@ -595,7 +624,10 @@ struct Overload {
             eventData.event = *Event;
             eventData.context = NotifyContext;
             eventData.notifyFunction = NotifyFunction;
-            eventDataMap[(unsigned long long) * Event] = eventData;
+            {
+                std::lock_guard<std::mutex> lock(eventMapLock);
+                eventDataMap[(unsigned long long) * Event] = eventData;
+            }
             return EFI_SUCCESS;
         }
 
@@ -604,6 +636,7 @@ struct Overload {
     }
 
     static EFI_STATUS CloseEvent(IN EFI_EVENT Event) {
+        std::lock_guard<std::mutex> lock(eventMapLock);
         auto it = eventDataMap.find((unsigned long long)Event);
         if (it != eventDataMap.end()) {
             delete (unsigned long long*)Event; // Free the allocated memory for the event
@@ -752,7 +785,7 @@ struct Overload {
 		// Remove tcp4Protocol data from handle
         unsigned long long key = *(unsigned long long*)ChildHandle;
 		if (tcpDataMap.contains(key)) {
-			TcpData& tcpData = tcpDataMap[key];
+			TcpData& tcpData = *tcpDataMap[key];
 			if (tcpData.socket != INVALID_SOCKET) {
 				closesocket(tcpData.socket);
 				tcpData.socket = INVALID_SOCKET;
@@ -789,7 +822,7 @@ struct Overload {
         TcpData* tcpData = nullptr;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpData = &tcpDataMap[key];
+            tcpData = tcpDataMap[key].get();
         }
         else {
             logToConsole(L"No Tcp Data For This Connect!");
@@ -817,7 +850,7 @@ struct Overload {
         TcpData* tcpData = nullptr;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpData = &tcpDataMap[key];
+            tcpData = tcpDataMap[key].get();
         }
         else {
             logToConsole(L"No Tcp Data For This Connect!");
@@ -855,7 +888,7 @@ struct Overload {
 
         if (Tcp4State) {
 			if (tcpDataMap.contains((unsigned long long)This)) {
-				TcpData& tcpData = tcpDataMap[(unsigned long long)This];
+				TcpData& tcpData = *tcpDataMap[(unsigned long long)This];
 				if (tcpData.socket == INVALID_SOCKET) {
 					*Tcp4State = Tcp4StateClosed;
 				}
@@ -871,7 +904,9 @@ struct Overload {
 				    pfd.events = POLLIN | POLLERR | POLLHUP;
 				    int ret = poll(&pfd, 1, 0);
 #endif
-                    if (ret > 0 && (pfd.revents & (POLLERR | POLLHUP))) {
+                    // On POLLHUP with data still readable, stay Established so recv() drains it first (clean close on EOF).
+                    const bool closed = (pfd.revents & POLLERR) || ((pfd.revents & POLLHUP) && !(pfd.revents & POLLIN));
+                    if (ret > 0 && closed) {
                         *Tcp4State = Tcp4StateClosed;
                         tcpData.connectStatus = ConnectStatus::Error;
                     }
@@ -961,24 +996,25 @@ struct Overload {
         }
 
         unsigned long long key = (unsigned long long)This;
-        tcpDataMap.emplace(key, data);
+        tcpDataMap.emplace(key, std::make_shared<TcpData>(data));
         return EFI_SUCCESS;
     }
 
     // Note: Only global tcp4Protocol call this function, peers don't call
     static EFI_STATUS Accept(IN void* This, IN EFI_TCP4_LISTEN_TOKEN* ListenToken, IN void* peer) {
-        TcpData* tcpData = nullptr;
+        std::shared_ptr<TcpData> tcpDataPtr;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpData = &tcpDataMap[key];
+            tcpDataPtr = tcpDataMap[key];
         }
         else {
             logToConsole(L"No Tcp Data For Global Tcp Connect!");
             return EFI_UNSUPPORTED;
         }
 
-        // accept in a thread
-        std::thread acceptThread([tcpData, ListenToken, peer]() {
+        // accept in a thread (capture shared_ptr by value so tcpData survives a concurrent DestroyChild)
+        std::thread acceptThread([tcpDataPtr, ListenToken, peer]() {
+            TcpData* tcpData = tcpDataPtr.get();
             sockaddr_in addr{};
             addr.sin_family = AF_INET;
             addr.sin_port = htons(tcpData->configData.AccessPoint.StationPort);
@@ -1040,10 +1076,13 @@ struct Overload {
 
     static EFI_STATUS Connect(IN void* This, IN EFI_TCP4_CONNECTION_TOKEN* ConnectionToken) {
         static std::map<int, long long> latestConnectTimestampMap; // map of <ip, timestamp>
+        static std::mutex latestConnectTimestampMapMutex;          // guards latestConnectTimestampMap (concurrent detached connect threads)
+        std::shared_ptr<TcpData> tcpDataPtr;
         TcpData* tcpData = nullptr;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpData = &tcpDataMap[key];
+            tcpDataPtr = tcpDataMap[key];
+            tcpData = tcpDataPtr.get();
         }
         else {
             logToConsole(L"No Tcp Data For This Connect!");
@@ -1067,12 +1106,18 @@ struct Overload {
         #endif
 
         unsigned int ipInNumber = *(unsigned int*)tcpData->configData.AccessPoint.RemoteAddress.Addr;
-        // connect in a thread
-        std::thread connectThread([tcpData, serverAddr, ConnectionToken, ipInNumber]() {
+        // connect in a thread (capture shared_ptr by value so tcpData survives a concurrent DestroyChild)
+        std::thread connectThread([tcpDataPtr, serverAddr, ConnectionToken, ipInNumber]() {
+            TcpData* tcpData = tcpDataPtr.get();
             auto now = std::chrono::system_clock::now();
             long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-            if (ms - latestConnectTimestampMap[ipInNumber] < 2'000) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5'000));
+            long long lastTs;
+            {
+                std::lock_guard<std::mutex> g(latestConnectTimestampMapMutex);
+                lastTs = latestConnectTimestampMap[ipInNumber];
+            }
+            if (ms - lastTs < 2'000) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             tcpData->connectStatus = ConnectStatus::Connecting;
             if (connect(tcpData->socket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
@@ -1088,7 +1133,10 @@ struct Overload {
 #endif
             }
 
-            latestConnectTimestampMap[ipInNumber] = ms;
+            {
+                std::lock_guard<std::mutex> g(latestConnectTimestampMapMutex);
+                latestConnectTimestampMap[ipInNumber] = ms;
+            }
             });
         connectThread.detach();
 
@@ -1102,14 +1150,13 @@ struct Overload {
             TransmitRequest request = transmitQueue.pop();
             int totalSentBytes = 0;
             auto& fragment = request.token->Packet.TxData->FragmentTable[0];
-            auto startTime = std::chrono::high_resolution_clock::now();
-            auto endTime = std::chrono::high_resolution_clock::now();
-            unsigned long long totalNanoseconds = 0;
+            // Abort a send only after 5s of zero progress (not total time) so big transfers aren't cut mid-stream.
+            constexpr unsigned long long NO_PROGRESS_TIMEOUT_NS = 5'000'000'000ULL;
+            auto lastProgress = std::chrono::high_resolution_clock::now();
             while ((unsigned int)totalSentBytes < fragment.FragmentLength)
             {
-                endTime = std::chrono::high_resolution_clock::now();
-                totalNanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count();
-                if (totalNanoseconds > 1'000'000'000) { // 1 seconds timeout
+                auto now = std::chrono::high_resolution_clock::now();
+                if ((unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(now - lastProgress).count() > NO_PROGRESS_TIMEOUT_NS) {
                     request.token->CompletionToken.Status = EFI_TIMEOUT;
                     break;
                 }
@@ -1117,6 +1164,7 @@ struct Overload {
                 if (n > 0)
                 {
                     totalSentBytes += n;
+                    lastProgress = now;
                 } else if (n == 0)
                 {
                     // connection closed
@@ -1166,10 +1214,21 @@ struct Overload {
         while (true)
         {
             ReceiveRequest request = receiveQueue.pop();
-            auto n = recv(request.socket, (char *)request.token->Packet.RxData->FragmentTable[0].FragmentBuffer, BUFFER_SIZE, MSG_DONTWAIT);
+            // Read at most the free space the caller reserved in its receive buffer
+            // (receiveData() sets this in FragmentLength = BUFFER_SIZE - bytesAlreadyBuffered).
+            // Passing BUFFER_SIZE here overruns peers[i].receiveBuffer whenever it already
+            // holds a partial message, clobbering the adjacent peer's buffer — which then
+            // parses as malformed (size() < header) and gets force-forgotten.
+            const unsigned int maxReceiveSize = (unsigned int)request.token->Packet.RxData->FragmentTable[0].FragmentLength;
+            auto n = recv(request.socket, (char *)request.token->Packet.RxData->FragmentTable[0].FragmentBuffer, maxReceiveSize, MSG_DONTWAIT);
             if (n > 0)
             {
                 request.token->Packet.RxData->DataLength = n;
+                // Publish DataLength before Status. The main loop reads Status first, then
+                // DataLength; without this barrier it can observe SUCCESS together with the
+                // stale, buffer-sized DataLength pre-set in receiveData(), over-advancing the
+                // receive cursor into zero-filled buffer so the parser reads size()==0.
+                std::atomic_thread_fence(std::memory_order_release);
                 request.token->CompletionToken.Status = EFI_SUCCESS;
             }
             else if (n == 0)
@@ -1183,6 +1242,7 @@ struct Overload {
 				if (err == WSAEWOULDBLOCK)
 				{
 					request.token->Packet.RxData->DataLength = 0;
+					std::atomic_thread_fence(std::memory_order_release);
 					request.token->CompletionToken.Status = EFI_SUCCESS;
 					continue;
 				}
@@ -1194,6 +1254,7 @@ struct Overload {
                 if (errno == EWOULDBLOCK || errno == EAGAIN)
                 {
                     request.token->Packet.RxData->DataLength = 0;
+                    std::atomic_thread_fence(std::memory_order_release);
                     request.token->CompletionToken.Status = EFI_SUCCESS;
                     continue;
                 }

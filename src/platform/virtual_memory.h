@@ -12,6 +12,7 @@
 #include <lib/platform_common/sleep.h>
 
 #include "extensions/zipper.h"
+#include "extensions/swapvm_dirty_track.h" // gSwapDirtyTrackEnabled + SIGSEGV fast path + pool registry
 
 #ifdef __linux__
 // Runtime toggle for SwapVM page compression (blosc2); off unless --swap-compression is passed.
@@ -33,6 +34,77 @@ inline constexpr const T& min(const T& left, const T& right)
 // bounded retry: 100ms, 200ms, 400ms, 800ms, 1600ms (~3.1s max)
 static constexpr int SWAPVM_IO_MAX_ATTEMPTS = 5;
 static constexpr unsigned int SWAPVM_IO_INITIAL_DELAY_MS = 100;
+
+// ============================================================================
+//  Thread-local page pinning (keeps swap-cache pages resident across use)
+// ============================================================================
+//
+// SwapVirtualMemory hands out raw pointers/references into a cache page (getRef/getPtr).
+// Such a pointer would dangle if its page were evicted while still in use (by another
+// op on the same VM or by another thread). To keep the upstream `T*`/`T&` API unchanged,
+// we don't wrap the pointer; instead each access *pins* its cache slot in a thread-local
+// arena, and the pins are released in bulk at well-defined work-unit boundaries:
+//   - request processor: after each handled message
+//   - tick processor / main / contract loops: each iteration
+//   - long streaming loops (epoch transition, save, consistency): per iteration via PinScope
+//   - lite HTTP handlers: per request via PinScope
+// While pinned, a slot is never chosen for eviction. The invariant the boundaries rely on:
+// no tick-storage pointer is used across the boundary that releases its pin (these pointers
+// are function-local — vended and consumed within one unit). Under-sizing numCachePage shows
+// up as the "all pages pinned" wait + counters, i.e. loud, not silent corruption.
+struct ThreadPinArena
+{
+    static constexpr int CAP = 512; // >> total cache slots across all swap VMs
+    void* vm[CAP];
+    void (*unpin[CAP])(void*, int, unsigned long long);
+    int slot[CAP];
+    unsigned long long gen[CAP]; // VM generation when this pin was taken; stale across reset()
+    int count = 0;
+
+    // Already pinned by this thread in the current generation? (repeated access to the same page
+    // is a no-op). Entries from an older generation never match — reset() bumped the generation,
+    // so a stale note must not suppress a fresh pin.
+    bool contains(void* v, int s, unsigned long long g) const
+    {
+        for (int i = 0; i < count; i++)
+            if (vm[i] == v && slot[i] == s && gen[i] == g)
+                return true;
+        return false;
+    }
+    void add(void* v, void (*u)(void*, int, unsigned long long), int s, unsigned long long g)
+    {
+        if (count < CAP)
+        {
+            vm[count] = v; unpin[count] = u; slot[count] = s; gen[count] = g; count++;
+        }
+        // If CAP is ever exceeded the access still proceeds; the page just isn't pinned. CAP is
+        // sized far above the total number of cache slots so this cannot happen in practice.
+    }
+    // Release pins added since `savepoint` (default: all of this thread's pins). The unpin thunk
+    // checks the generation, so notes left stale by a reset() are dropped harmlessly.
+    void releaseDownTo(int savepoint)
+    {
+        while (count > savepoint)
+        {
+            --count;
+            unpin[count](vm[count], slot[count], gen[count]);
+        }
+    }
+};
+inline thread_local ThreadPinArena tlPinArena;
+
+// Release every pin held by the current thread. Call at work-unit boundaries.
+inline void releaseThreadPins() { tlPinArena.releaseDownTo(0); }
+
+// RAII savepoint: releases only the pins taken during its lifetime. Use reset() to release
+// per loop iteration without disturbing pins held by an enclosing scope.
+struct PinScope
+{
+    int savepoint;
+    PinScope() : savepoint(tlPinArena.count) {}
+    void reset() { tlPinArena.releaseDownTo(savepoint); }
+    ~PinScope() { tlPinArena.releaseDownTo(savepoint); }
+};
 
 // an util to use disk as RAM to reduce hardware requirement for qubic core node
 // this VirtualMemory doesn't (yet) support amend operation. That means data stay persisted once they are written
@@ -57,7 +129,40 @@ protected:
     unsigned long long currentId; // total items in this array, aka: latest item index + 1
     unsigned long long currentPageId; // current page index that's written on
 
-    volatile char memLock; // every read/write needs a memory lock, can optimize later
+    // Reader/writer spinlock: memLock is the writer byte, memReaders counts shared holders. Cache-hit
+    // fast paths take shared (lockShared); every mutator takes exclusive (acquireMemLock).
+    volatile char memLock;
+    volatile long memReaders = 0;
+
+    // Exclusive: claim the writer byte, then drain shared readers. The claim pumps IO while waiting
+    // (a writer ahead may be parked in asyncLoad() under the lock — the documented deadlock). The
+    // drain does NOT: shared holders are hit-path/unpin only, never do IO, so they always finish on
+    // their own — a plain spin suffices.
+    void acquireMemLock()
+    {
+        acquireLockWithIOPump(memLock);
+        while (memReaders)
+            _mm_pause();
+    }
+
+    // Shared, writer-preferring. The seq_cst inc + re-read of memLock is the Dekker handshake vs
+    // acquireMemLock's claim-then-drain: a writer never runs while a reader is live.
+    void lockShared()
+    {
+        for (;;)
+        {
+            while (memLock)
+                _mm_pause();
+            _InterlockedIncrement(&memReaders);
+            if (!memLock)
+                return;
+            _InterlockedDecrement(&memReaders);
+        }
+    }
+    void unlockShared()
+    {
+        _InterlockedDecrement(&memReaders);
+    }
 
     void generatePageName(CHAR16 pageName[64], unsigned long long page_id)
     {
@@ -250,6 +355,7 @@ protected:
         currentId = 0;
         currentPageId = 0;
         memLock = 0;
+        memReaders = 0;
     }
 
 public:
@@ -260,7 +366,7 @@ public:
 
     bool init()
     {
-        ACQUIRE(memLock);
+        acquireMemLock();
         if (currentPage == NULL)
         {
             if (!allocPoolWithErrorLog(L"VirtualMemory.Page", pageSize * (numCachePage + 1), (void**)&currentPage, __LINE__))
@@ -334,7 +440,7 @@ public:
     // return number of items has been copied
     unsigned long long getMany(T* dst, unsigned long long offset, unsigned long long numItems)
     {
-        ACQUIRE(memLock);
+        acquireMemLock();
         ASSERT(offset + numItems - 1 < currentId);
         if (offset + numItems - 1 >= currentId)
         {
@@ -359,7 +465,7 @@ public:
         unsigned long long r_page_id = rhs / pageCapacity;
         unsigned long long he = min(rhs + pageCapacity, offset + numItems); // head end
         unsigned long long n_item = he - hs; // copy [hs, he)
-        ACQUIRE(memLock);
+        acquireMemLock();
         int cache_page_idx = loadPageToCache(r_page_id);
         if (cache_page_idx == -1)
         {
@@ -381,7 +487,7 @@ public:
             for (bs = he; bs + pageCapacity <= p_end; bs += pageCapacity)
             {
                 r_page_id = bs / pageCapacity;
-                ACQUIRE(memLock);
+                acquireMemLock();
                 cache_page_idx = loadPageToCache(r_page_id);
                 if (cache_page_idx == -1)
                 {
@@ -403,7 +509,7 @@ public:
         {
             r_page_id = bs / pageCapacity;
             n_item = p_end - bs; // copy [bs, p_end)
-            ACQUIRE(memLock);
+            acquireMemLock();
             int cache_page_idx = loadPageToCache(r_page_id);
             if (cache_page_idx == -1)
             {
@@ -427,7 +533,7 @@ public:
     // return number of items has been copied
     unsigned long long appendMany(T* src, unsigned long long numItems)
     {
-        ACQUIRE(memLock);
+        acquireMemLock();
         unsigned long long c_bytes = 0;
         unsigned long long p_start = currentId;
         unsigned long long p_end = currentId + numItems;
@@ -476,7 +582,7 @@ public:
     T get(unsigned long long index)
     {
         T result;
-        ACQUIRE(memLock);
+        acquireMemLock();
         if (index >= currentId) // out of bound
         {
             setMem(&result, sizeof(T), 0);
@@ -504,7 +610,7 @@ public:
     // if index is not in cache it will load the page to most outdated cache
     void getOne(unsigned long long index, T* result)
     {
-        ACQUIRE(memLock);
+        acquireMemLock();
         if (index >= currentId) // out of bound
         {
             setMem(result, sizeof(T), 0);
@@ -540,7 +646,7 @@ public:
     void append(const T& data)
     {
         ASSERT(currentPage != NULL);
-        ACQUIRE(memLock);
+        acquireMemLock();
         copyMem(&currentPage[currentId % pageCapacity], &data, sizeof(T));
         currentId++;
         tryPersistingPage();
@@ -561,7 +667,7 @@ public:
         }
         CHAR16 pageName[64];
         generatePageName(pageName, pageId);
-        ACQUIRE(memLock);
+        acquireMemLock();
         bool success = (asyncRemoveFile(pageName, pageDir)) == 0;
         RELEASE(memLock);
         return success;
@@ -636,7 +742,7 @@ public:
 
     unsigned long long dumpVMState(unsigned char* buffer)
     {
-        ACQUIRE(memLock);
+        acquireMemLock();
         unsigned long long ret = 0;
         copyMem(buffer, currentPage, pageSize);
         ret += pageSize;
@@ -655,7 +761,7 @@ public:
 
     unsigned long long loadVMState(unsigned char* buffer)
     {
-        ACQUIRE(memLock);
+        acquireMemLock();
         unsigned long long ret = 0;
         copyMem(currentPage, buffer, pageSize);
         ret += pageSize;
@@ -698,6 +804,10 @@ class SwapVirtualMemory : private VirtualMemory<T, prefixName, pageDirectory, pa
     using VMBase::cachePageId;
     using VMBase::lastAccessedTimestamp;
     using VMBase::memLock;
+    using VMBase::memReaders;
+    using VMBase::acquireMemLock;
+    using VMBase::lockShared;
+    using VMBase::unlockShared;
     using VMBase::generatePageName;
     using VMBase::findCachePage;
     using VMBase::loadPageToCache;
@@ -714,6 +824,73 @@ private:
     static constexpr unsigned long long INVALID_PAGE_ID = -1;
     static constexpr unsigned long long isPageWrittenToDiskSize = sizeof(bool) * MAX_PAGE;
 
+    // Threads referencing the page in this slot (via the pin arena); pinCount>0 is never evicted.
+    // Atomic inc/dec: pin/unpin run concurrently under the shared lock.
+    volatile long pinCount[numCachePage + 1] = {};
+
+    // Monitoring. pinnedNow is atomic (concurrent pin/unpin); the rest best-effort (lock-free reads).
+    volatile long pinnedNow = 0;            // slots currently pinned
+    volatile long pinnedHighWater = 0;      // max slots pinned at once since start
+    unsigned long long allPinnedWaits = 0;  // times eviction had to wait for a pin (should be 0)
+    unsigned long long cacheHits = 0;       // page accesses served from cache
+    unsigned long long cacheMisses = 0;     // page accesses that loaded from disk
+
+    // Bumped by reset() (exclusive); pins from an older generation are stale (slot was reused), so
+    // unpin and the dedup check ignore them.
+    unsigned long long generation = 0;
+
+    // In-flight load coordination: a miss does its disk IO with memLock RELEASED so cache hits don't
+    // stall, reserving the victim by stamping cachePageId=LOADING_PAGE_ID (find/eviction skip it).
+    // loadingTarget[] = page coming in (dedup duplicate loads); evictingPage[] = page being written
+    // back (a misser of it waits, vs reading stale disk). Both transient: INVALID on init/reset.
+    static constexpr unsigned long long LOADING_PAGE_ID = (unsigned long long)-2;
+    unsigned long long loadingTarget[numCachePage + 1];
+    unsigned long long evictingPage[numCachePage + 1];
+
+    // Per-slot dirty byte (mprotect auto-dirty). Set by the SIGSEGV fast path on the first write after
+    // a slot is armed RO; read at eviction to skip the writeback for clean slots. Only meaningful when
+    // gSwapDirtyTrackEnabled (else every occupied victim is treated as dirty).
+    volatile unsigned char dirtyFlags[numCachePage + 1] = {};
+    unsigned long long cleanEvicts = 0; // victims evicted with no writeback (clean) -- the saving
+    unsigned long long dirtyEvicts = 0; // victims that needed a writeback
+
+    // Bytes between cache slots when the pool is page-aligned for dirty tracking (== pageSize; slots
+    // stay contiguous). 0 => not page-aligned (non-Linux, or pageSize not a whole number of OS pages)
+    // => dirty tracking is off for this VM and eviction writes back every occupied victim.
+    unsigned long long cacheSlotStride = 0;
+
+    // Pin a slot for this thread (under shared or exclusive). Idempotent per thread (arena dedup).
+    void pinSlotForThread(int slot)
+    {
+        const unsigned long long g = generation;
+        if (tlPinArena.contains(this, slot, g))
+            return;
+        if (_InterlockedIncrement(&pinCount[slot]) == 1)
+        {
+            const long now = _InterlockedIncrement(&pinnedNow);
+            if (now > pinnedHighWater)
+                pinnedHighWater = now;
+        }
+        tlPinArena.add(this, &SwapVirtualMemory::unpinThunk, slot, g);
+    }
+    void unpinSlotInternal(int slot, unsigned long long gen)
+    {
+        // Shared: concurrent with other unpins/pins (pinCount atomic), exclusive of reset/eviction —
+        // which is why the generation read below can be plain.
+        lockShared();
+        // gen mismatch => pin predates a reset() that cleared the slot; drop it, don't hit a fresh pin.
+        if (gen == generation && slot >= 0 && slot <= (int)numCachePage && pinCount[slot] > 0)
+        {
+            if (_InterlockedDecrement(&pinCount[slot]) == 0)
+                _InterlockedDecrement(&pinnedNow);
+        }
+        unlockShared();
+    }
+    static void unpinThunk(void* self, int slot, unsigned long long gen)
+    {
+        ((SwapVirtualMemory*)self)->unpinSlotInternal(slot, gen);
+    }
+
     // used for offset mode
     T* pageExtraBytesBuffer;
     bool* pageHasExtraBytes; // if this page has extra bytes
@@ -725,17 +902,10 @@ private:
     static constexpr unsigned long long pageHasExtraBytesBufferSize = sizeof(bool) * MAX_PAGE;
     static constexpr unsigned long long lastestPageExtraBytesOffsetAccessedBufferSize = sizeof(unsigned long long) * MAX_PAGE;
 
-    void writePageToDisk(unsigned long long pageId)
+    void writePageToDisk(unsigned long long pageId, int cache_idx)
     {
         CHAR16 pageName[64];
         generatePageName(pageName, pageId);
-
-        int cache_idx = findCachePage(pageId);
-        if (cache_idx == -1)
-        {
-            logToConsole(L"Error in writeCachePageToDisk: page not found on cache");
-            return;
-        }
         unsigned char *pageBuffer = (unsigned char*)cache[cache_idx];
 
         // bounded retry on save() failure
@@ -803,37 +973,100 @@ private:
         isPageWrittenToDisk[pageId] = true;
     }
 
-    int loadPageToCacheAndTryToPersist(unsigned long long pageId)
+    // Slot currently loading pageId (cachePageId stamped LOADING_PAGE_ID), else -1. Same-page dedup.
+    int findInflightLoad(unsigned long long pageId)
     {
-        int cache_page_id = findCachePage(pageId);
+        for (int i = 0; i <= numCachePage; i++)
+            if (cachePageId[i] == LOADING_PAGE_ID && loadingTarget[i] == pageId)
+                return i;
+        return -1;
+    }
+    // Slot currently writing pageId back to disk, else -1. A loader of pageId must wait for this
+    // (its in-RAM copy is the authoritative one until the writeback lands) instead of reading stale disk.
+    int findInflightWriteback(unsigned long long pageId)
+    {
+        for (int i = 0; i <= numCachePage; i++)
+            if (evictingPage[i] == pageId)
+                return i;
+        return -1;
+    }
+    // Any slot mid-IO (reserved LOADING while its disk IO runs unlocked).
+    bool anyInflightIO()
+    {
+        for (int i = 0; i <= numCachePage; i++)
+            if (cachePageId[i] == LOADING_PAGE_ID)
+                return true;
+        return false;
+    }
 
-        if (cache_page_id != -1)
+    // Component B mprotect machinery. All slot-protection is a no-op unless gSwapDirtyTrackEnabled.
+#if defined(__linux__)
+    // Page-align the cache pool so each slot is its own mprotect region, slots still contiguous at
+    // pageSize stride. Only when pageSize is a whole number of OS pages; else leave it to VMBase::init
+    // (dirty tracking off, cacheSlotStride==0). Pre-setting currentPage makes VMBase::init skip its alloc.
+    bool allocPageAlignedCachePool()
+    {
+        if (currentPage != NULL)
+            return true;
+        const unsigned long long ps = (unsigned long long)sysconf(_SC_PAGESIZE);
+        if (pageSize % ps != 0)
+            return true; // not page-strided -> per-slot mprotect can't isolate slots; leave to base alloc
+        cacheSlotStride = pageSize;
+        const unsigned long long poolBytes = pageSize * (numCachePage + 1);
+        void* aligned = aligned_alloc((size_t)ps, (size_t)poolBytes);
+        if (aligned == NULL)
+            return false;
+        setMem(aligned, poolBytes, 0);
+        currentPage = (T*)aligned;
+        for (int i = 0; i <= numCachePage; i++)
+            cache[i] = (T*)((char*)aligned + (unsigned long long)i * pageSize);
+        return true;
+    }
+    void registerDirtyTrackPool()
+    {
+        if (cacheSlotStride) // only register pools we actually page-aligned
+            SwapDirtyTrack::registerPool((unsigned char**)&currentPage, cacheSlotStride, numCachePage + 1, dirtyFlags);
+    }
+    void mprotectSlot(int slot, int prot)
+    {
+        if (gSwapDirtyTrackEnabled && cacheSlotStride)
+            mprotect((void*)cache[slot], cacheSlotStride, prot);
+    }
+#endif
+    void unprotectSlotForLoad(int slot) // make the slot writable so an fread can land in it
+    {
+#if defined(__linux__)
+        mprotectSlot(slot, PROT_READ | PROT_WRITE);
+#endif
+    }
+    void armSlotAfterLoad(int slot) // mark clean + write-protect: the next write to it faults -> dirty
+    {
+#if defined(__linux__)
+        if (gSwapDirtyTrackEnabled && cacheSlotStride)
         {
-            return cache_page_id;
-        }
-        CHAR16 pageName[64];
-        generatePageName(pageName, pageId);
-        cache_page_id = getMostOutdatedCachePageExceptCurrentPage();
-        if (cachePageId[cache_page_id] != INVALID_PAGE_ID)
-        {
-            writePageToDisk(cachePageId[cache_page_id]);
-        }
-#if false
-        auto sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
-        lastAccessedTimestamp[cache_page_id] = now_ms();
-#else
-#if !defined(NDEBUG)
-        {
-            CHAR16 debugMsg[128];
-            setText(debugMsg, L"Trying to load OLD page: ");
-            appendNumber(debugMsg, pageId, true);
-            addDebugMessage(debugMsg);
+            dirtyFlags[slot] = 0;
+            mprotectSlot(slot, PROT_READ);
         }
 #endif
+    }
+    void unprotectWholePool() // drop write-protection on the whole pool + clear dirty (before reset's bulk setMem)
+    {
+#if defined(__linux__)
+        if (gSwapDirtyTrackEnabled && cacheSlotStride && currentPage != NULL)
+            mprotect((void*)cache[0], cacheSlotStride * (numCachePage + 1), PROT_READ | PROT_WRITE);
+#endif
+        setMem((void*)dirtyFlags, sizeof(dirtyFlags), 0);
+    }
+
+    // Read pageId's bytes into cache[slot] (decompress if enabled), or zero-fill if never written.
+    // Returns false on exhausted IO retries. Runs with memLock RELEASED (slot is reserved LOADING).
+    bool loadPageBytesIntoSlot(unsigned long long pageId, int slot)
+    {
+        CHAR16 pageName[64];
+        generatePageName(pageName, pageId);
         unsigned long long sz = 0;
         if (isPageWrittenToDisk[pageId])
         {
-            // bounded retry on load() failure
             unsigned int delayMs = SWAPVM_IO_INITIAL_DELAY_MS;
             for (int attempt = 0; attempt < SWAPVM_IO_MAX_ATTEMPTS; attempt++)
             {
@@ -851,7 +1084,7 @@ private:
                             std::vector<unsigned char> decompressed = Zipper::unzip(tmp.data(), (size_t)compressedSize, 4);
                             if (decompressed.size() == pageSize)
                             {
-                                copyMem(cache[cache_page_id], decompressed.data(), pageSize);
+                                copyMem(cache[slot], decompressed.data(), pageSize);
                                 sz = pageSize;
                             }
                         }
@@ -860,17 +1093,44 @@ private:
                 else
 #endif
                 {
-                    sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
+                    sz = load(pageName, pageSize, (unsigned char*)cache[slot], pageDir);
                 }
                 if (sz == pageSize)
                     break;
 
-                setText(message, L"swapVM loadPage failed (attempt ");
+                // Loud exact cause (missing vs size-mismatch + full path) so a torn/missing .pg is hand-recoverable.
+                long long onDiskSize = getFileSize((CHAR16*)pageName, (CHAR16*)pageDir);
+                bool compOn = false;
+#ifdef __linux__
+                compOn = gSwapCompressionEnabled;
+#endif
+                setText(message, L"swapVM load FAILED page ");
+                appendNumber(message, pageId, true);
+                appendText(message, L" | file ");
+                appendText(message, pageDir);
+                appendText(message, L"/");
+                appendText(message, (CHAR16*)pageName);
+                appendText(message, L" | wantPageBytes ");
+                appendNumber(message, (unsigned long long)pageSize, false);
+                appendText(message, L" | onDisk ");
+                if (onDiskSize < 0)
+                {
+                    appendText(message, L"MISSING(not found)");
+                }
+                else
+                {
+                    appendNumber(message, (unsigned long long)onDiskSize, false);
+                    if (!compOn && (unsigned long long)onDiskSize != pageSize)
+                        appendText(message, L" SIZE_MISMATCH");
+                }
+                appendText(message, L" | readReturned ");
+                appendNumber(message, (unsigned long long)sz, false);
+                appendText(message, L" | compression ");
+                appendText(message, compOn ? L"on" : L"off");
+                appendText(message, L" | attempt ");
                 appendNumber(message, (unsigned long long)(attempt + 1), false);
                 appendText(message, L"/");
                 appendNumber(message, (unsigned long long)SWAPVM_IO_MAX_ATTEMPTS, false);
-                appendText(message, L") page ");
-                appendNumber(message, pageId, true);
                 logToConsole(message);
 
                 if (attempt + 1 < SWAPVM_IO_MAX_ATTEMPTS)
@@ -883,53 +1143,160 @@ private:
         else
         {
             sz = pageSize;
-            setMem(cache[cache_page_id], pageSize, 0);
+            setMem(cache[slot], pageSize, 0);
         }
         if (sz != pageSize)
         {
-#if !defined(NDEBUG)
-            addDebugMessage(L"Failed to load virtualMemory from disk");
-#endif
-            return -1;
+            setText(message, L"swapVM load GAVE UP (node will fatal) page ");
+            appendNumber(message, pageId, true);
+            appendText(message, L" file ");
+            appendText(message, pageDir);
+            appendText(message, L"/");
+            appendText(message, (CHAR16*)pageName);
+            logToConsole(message);
         }
-        lastAccessedTimestamp[cache_page_id] = now_ms();
-#endif
-        cachePageId[cache_page_id] = pageId;
-#if !defined(NDEBUG)
-        {
-            CHAR16 debugMsg[128];
-            unsigned long long tmp = prefixName;
-            debugMsg[0] = L'[';
-            copyMem(debugMsg + 1, &tmp, 8);
-            debugMsg[5] = L']';
-            debugMsg[6] = L' ';
-            debugMsg[7] = 0;
-            appendText(debugMsg, L"Load complete. Page ");
-            appendNumber(debugMsg, pageId, true);
-            appendText(debugMsg, L" is loaded into slot ");
-            appendNumber(debugMsg, cache_page_id, true);
-            addDebugMessage(debugMsg);
-        }
-#endif
-        return cache_page_id;
+        return sz == pageSize;
     }
 
-    // return the most outdated cache page
+    // Load pageId into a cache slot (returns its index). Entered/returned holding memLock; the evict
+    // writeback + load run with it RELEASED (victim reserved via LOADING_PAGE_ID, skipped by
+    // find/eviction) so concurrent cache hits don't stall behind this miss's ~16MB disk IO.
+    int loadPageToCacheAndTryToPersist(unsigned long long pageId)
+    {
+        for (;;)
+        {
+            int cache_page_id = findCachePage(pageId);
+            if (cache_page_id != -1)
+            {
+                cacheHits++;
+                return cache_page_id;
+            }
+
+            // Another thread is already loading pageId, or writing it back: wait for it rather than
+            // start a duplicate load / read a stale on-disk copy. Bounded by one IO, per-page.
+            if (findInflightLoad(pageId) != -1 || findInflightWriteback(pageId) != -1)
+            {
+                RELEASE(memLock);
+                sleepMilliseconds(1);
+                acquireMemLock();
+                continue;
+            }
+
+            cacheMisses++;
+
+            int victim = getMostOutdatedCachePageExceptCurrentPage();
+            if (victim == -1)
+            {
+                allPinnedWaits++;
+                // Surface pin-exhaustion immediately (not only at the 5s fatal) so an operator can
+                // tell "stuck on swap-VM pins" apart from normal slow processing.
+                CHAR16 pinMsg[160];
+                setText(pinMsg, L"WARNING: swapVM all cache pages pinned, waiting for a free slot (pin leak or numCachePage too small) | prefix ");
+                appendText(pinMsg, pageDir);
+                logToConsole(pinMsg);
+            }
+            int allPinnedWaitMs = 0;
+            bool inflightAppeared = false;
+            while (victim == -1)
+            {
+                RELEASE(memLock);
+                sleepMilliseconds(1);
+                acquireMemLock();
+                int rechecked = findCachePage(pageId);
+                if (rechecked != -1)
+                {
+                    cacheHits++;
+                    return rechecked;
+                }
+                if (findInflightLoad(pageId) != -1 || findInflightWriteback(pageId) != -1)
+                {
+                    inflightAppeared = true; // another loader took pageId; fall back to the dedup wait
+                    break;
+                }
+                victim = getMostOutdatedCachePageExceptCurrentPage();
+                ++allPinnedWaitMs;
+                if (allPinnedWaitMs % 1000 == 0 && allPinnedWaitMs < 5000) // heartbeat once per second while waiting
+                {
+                    CHAR16 pinMsg[160];
+                    setText(pinMsg, L"swapVM still waiting for a free cache page (");
+                    appendNumber(pinMsg, (unsigned long long)(allPinnedWaitMs / 1000), FALSE);
+                    appendText(pinMsg, L"s) | prefix ");
+                    appendText(pinMsg, pageDir);
+                    logToConsole(pinMsg);
+                }
+                if (allPinnedWaitMs > 5000) // ~5s
+                {
+                    setText(message, L"Fatal: swapVM all cache pages pinned (numCachePage too small) | prefix ");
+                    appendText(message, pageDir);
+                    logToConsole(message);
+                    exit(1);
+                }
+            }
+            if (inflightAppeared)
+                continue;
+
+            // Reserve the victim under the lock; do the disk IO with the lock RELEASED.
+            const unsigned long long oldPage = cachePageId[victim];
+            // Component B: skip the writeback for a slot never modified since load. Tracking off
+            // (or non-Linux) => slotDirty is always true => write back every occupied victim (Component A).
+            const bool slotDirty = !gSwapDirtyTrackEnabled || dirtyFlags[victim];
+            const bool needWriteback = (oldPage != INVALID_PAGE_ID) && slotDirty;
+            if (oldPage != INVALID_PAGE_ID)
+                (needWriteback ? dirtyEvicts : cleanEvicts)++;
+            cachePageId[victim] = LOADING_PAGE_ID;                    // hide from find/eviction
+            loadingTarget[victim] = pageId;
+            evictingPage[victim] = needWriteback ? oldPage : INVALID_PAGE_ID;
+            const unsigned long long savedGeneration = generation;
+
+            RELEASE(memLock);
+            if (needWriteback)
+                writePageToDisk(oldPage, victim);
+            unprotectSlotForLoad(victim);                            // RW so the fread can land
+            const bool loadOk = loadPageBytesIntoSlot(pageId, victim);
+            armSlotAfterLoad(victim);                                // clean + RO: next write faults
+            acquireMemLock();
+
+            // reset() during our IO bumped the generation and cleared the slot + in-flight state:
+            // our reservation is void, the victim may already belong to someone else -> retry fresh,
+            // touching nothing.
+            if (generation != savedGeneration)
+                continue;
+
+            loadingTarget[victim] = INVALID_PAGE_ID;
+            evictingPage[victim] = INVALID_PAGE_ID;
+            if (!loadOk)
+            {
+                cachePageId[victim] = INVALID_PAGE_ID;
+                return -1;
+            }
+            cachePageId[victim] = pageId;                            // publish: now findable
+            lastAccessedTimestamp[victim] = now_ms();
+            return victim;
+        }
+    }
+
+    // return the most outdated cache page that is neither the current page nor pinned.
+    // returns -1 if every eligible slot is pinned (caller waits for a pin to be released).
     int getMostOutdatedCachePageExceptCurrentPage()
     {
-        int min_index = 0;
+        int min_index = -1;
         for (int i = 0; i <= numCachePage; i++)
         {
-            if (lastAccessedTimestamp[i] == 0 && cachePageId[i] != currentPageId)
+            if (cachePageId[i] == currentPageId) // skip current page
+                continue;
+            if (cachePageId[i] == LOADING_PAGE_ID) // skip slots reserved for an in-flight load
+                continue;
+            if (pinCount[i] > 0)                 // skip pinned pages (still referenced)
+                continue;
+            if (lastAccessedTimestamp[i] == 0)
             {
                 return i;
             }
-            if ((lastAccessedTimestamp[i] < lastAccessedTimestamp[min_index]) || (lastAccessedTimestamp[i] == lastAccessedTimestamp[min_index] && cachePageId[i] < cachePageId[min_index]))
+            if (min_index == -1
+                || (lastAccessedTimestamp[i] < lastAccessedTimestamp[min_index])
+                || (lastAccessedTimestamp[i] == lastAccessedTimestamp[min_index] && cachePageId[i] < cachePageId[min_index]))
             {
-                if (cachePageId[i] != currentPageId) // skip current page
-                {
-                    min_index = i;
-                }
+                min_index = i;
             }
         }
         return min_index;
@@ -941,6 +1308,33 @@ public:
     }
 
     void reset() {
+        // Invalidate all pin bookkeeping atomically w.r.t. concurrent pinners. Bumping the
+        // generation here is what makes other threads' stale pin notes (e.g. HTTP request
+        // threads that pinned tickData and aren't drained at this point) harmless: their later
+        // release sees gen != generation and is dropped, instead of mis-decrementing a fresh pin.
+        acquireMemLock();
+        // Wait out in-flight swap IO before teardown (HTTP threads run it unlocked and aren't parked):
+        // an fwrite racing the pool-zero below tears the .pg and strands a stale written-flag.
+        for (int drainMs = 0; anyInflightIO(); )
+        {
+            RELEASE(memLock);
+            sleepMilliseconds(1);
+            acquireMemLock();
+            if (++drainMs > 5000)
+            {
+                setText(message, L"Fatal: swapVM reset drain timeout (in-flight IO leak) | prefix ");
+                appendText(message, pageDir);
+                logToConsole(message);
+                exit(1);
+            }
+        }
+        generation++;
+        setMem((void*)pinCount, sizeof(pinCount), 0);
+        setMem(loadingTarget, sizeof(loadingTarget), 0xff); // INVALID_PAGE_ID
+        setMem(evictingPage, sizeof(evictingPage), 0xff);
+        pinnedNow = 0; // cumulative stats (hits/misses/highWater/waits) are kept across resets
+        RELEASE(memLock);
+        unprotectWholePool(); // RW + clear dirty so the base's bulk pool-zero below cannot fault
         VMBase::reset();
         setMem(isPageWrittenToDisk, isPageWrittenToDiskSize, 0);
         if (mode == SwapMode::OFFSET_MODE) {
@@ -948,8 +1342,18 @@ public:
             setMem(pageHasExtraBytes, pageHasExtraBytesBufferSize, 0);
             setMem(lastestPageExtraBytesOffsetAccessed, lastestPageExtraBytesOffsetAccessedBufferSize, 0xff);
         }
-        VMBase::deinit();
-        VMBase::init();
+        // Keep the cache pool across reset (only refresh pageDir's epoch): reset doesn't wait for
+        // unparked HTTP readers, so freeing+realloc'ing it would dangle a ref they still hold
+        // (VMBase::reset already zeroed it in place; init() keeps it since currentPage != NULL).
+        if (pageDir != NULL)
+        {
+            freePool(pageDir);
+            pageDir = NULL;
+        }
+        VMBase::init(); // pool kept (currentPage != NULL); pageDir re-alloc'd for the new epoch
+#if defined(__linux__)
+        armSlotAfterLoad(0); // re-arm slot 0: VMBase::init's reset set cachePageId[0]=0 again
+#endif
     }
 
     bool init()
@@ -969,7 +1373,17 @@ public:
         {
             return false;
         }
+        setMem(loadingTarget, sizeof(loadingTarget), 0xff); // INVALID_PAGE_ID
+        setMem(evictingPage, sizeof(evictingPage), 0xff);
+#if defined(__linux__)
+        if (!allocPageAlignedCachePool())
+            return false;
+#endif
         bool ok = VMBase::init();
+#if defined(__linux__)
+        registerDirtyTrackPool();
+        armSlotAfterLoad(0); // slot 0 holds page 0 at init (cachePageId[0]=0) without taking the load/arm path
+#endif
         return ok;
     }
 
@@ -981,19 +1395,44 @@ public:
             return false;
         }
 
+        setMem(loadingTarget, sizeof(loadingTarget), 0xff); // INVALID_PAGE_ID
+        setMem(evictingPage, sizeof(evictingPage), 0xff);
+#if defined(__linux__)
+        if (!allocPageAlignedCachePool())
+            return false;
+#endif
         bool ok = VMBase::init();
+#if defined(__linux__)
+        registerDirtyTrackPool();
+        armSlotAfterLoad(0); // slot 0 holds page 0 at init (cachePageId[0]=0) without taking the load/arm path
+#endif
         return ok;
     }
 
     T& getRef(unsigned long long index)
     requires (mode == SwapMode::INDEX_MODE)
     {
-        static T empty;
-        ACQUIRE(memLock);
+        const unsigned long long requested_page_id = index / pageCapacity;
 
-        unsigned long long requested_page_id = index / pageCapacity;
+        // Fast path: shared lock, cache hit only. Identity/contents are stable under shared (eviction
+        // is exclusive), so the pin keeps the returned ref valid after unlockShared().
+        lockShared();
+        int cache_page_idx = findCachePage(requested_page_id);
+        if (cache_page_idx != -1)
+        {
+            cacheHits++; // best-effort stat
+            pinSlotForThread(cache_page_idx);
+            lastAccessedTimestamp[cache_page_idx] = now_ms(); // refresh LRU on hit (racy write, harmless)
+            T& resultRef = cache[cache_page_idx][index % pageCapacity];
+            unlockShared();
+            return resultRef;
+        }
+        unlockShared();
+
+        // Slow path: miss -> exclusive (may evict + load).
+        acquireMemLock();
         currentPageId = requested_page_id > currentPageId ? requested_page_id : currentPageId;
-        int cache_page_idx = loadPageToCacheAndTryToPersist(requested_page_id);
+        cache_page_idx = loadPageToCacheAndTryToPersist(requested_page_id);
         if (cache_page_idx == -1)
         {
             setText(message, L"Fatal Error: Invalid cache page index | Line ");
@@ -1002,22 +1441,38 @@ public:
             // Exit program
             exit(1);
         }
+        pinSlotForThread(cache_page_idx); // keep page resident until this thread's next boundary
         T& resultRef = cache[cache_page_idx][index % pageCapacity];
         RELEASE(memLock);
         return resultRef;
     }
 
-    // NOTE: if getPtr is used, all other operations need to be SEQUENCE even they are reading operations (get, getMany)
-    // because reading operations may flush the page T* live into disk and change cache page state
+    // The returned pointer stays valid until the current thread's next pin-release boundary,
+    // because getRef/getPtr pin the cache slot in the thread-local arena (see releaseThreadPins).
     T* getPtr(unsigned long long index)
     requires (mode == SwapMode::INDEX_MODE)
     {
-        static T* result = nullptr;
-        ACQUIRE(memLock);
-		result = nullptr;
-        unsigned long long requested_page_id = index / pageCapacity;
+        const unsigned long long requested_page_id = index / pageCapacity;
+
+        // Fast path: shared lock, cache hit only (see getRef). result is a plain local — a static
+        // would be read after unlock and could return another thread's pointer.
+        lockShared();
+        int cache_page_idx = findCachePage(requested_page_id);
+        if (cache_page_idx != -1)
+        {
+            cacheHits++; // best-effort stat
+            pinSlotForThread(cache_page_idx);
+            lastAccessedTimestamp[cache_page_idx] = now_ms(); // refresh LRU on hit (racy write, harmless)
+            T* result = &cache[cache_page_idx][index % pageCapacity];
+            unlockShared();
+            return result;
+        }
+        unlockShared();
+
+        // Slow path: miss -> exclusive (may evict + load).
+        acquireMemLock();
         currentPageId = requested_page_id > currentPageId ? requested_page_id : currentPageId;
-        int cache_page_idx = loadPageToCacheAndTryToPersist(requested_page_id);
+        cache_page_idx = loadPageToCacheAndTryToPersist(requested_page_id);
         if (cache_page_idx == -1)
         {
             setText(message, L"Fatal Error: Invalid cache page index | Line ");
@@ -1036,21 +1491,51 @@ public:
             // Exit program
             exit(1);
         }
-        result = &cache[cache_page_idx][index % pageCapacity];
+        pinSlotForThread(cache_page_idx); // keep page resident until this thread's next boundary
+        T* result = &cache[cache_page_idx][index % pageCapacity];
         RELEASE(memLock);
         return result;
     }
 
+    // Monitoring getters. Read lock-free on purpose (stats only — a stale read is harmless).
+    // pinnedHighWater approaching getNumCachePage() means raise numCachePage.
+    int getPinnedNow() const { return pinnedNow; }
+    int getPinnedHighWater() const { return pinnedHighWater; }
+    unsigned long long getAllPinnedWaits() const { return allPinnedWaits; }
+    unsigned long long getCacheHits() const { return cacheHits; }
+    unsigned long long getCacheMisses() const { return cacheMisses; }
+    unsigned long long getCleanEvicts() const { return cleanEvicts; } // writeback skipped (clean victim)
+    unsigned long long getDirtyEvicts() const { return dirtyEvicts; }
+    static constexpr unsigned long long getNumCachePage() { return numCachePage; }
+
     T* operator[](unsigned long long offset)
     requires (mode == SwapMode::OFFSET_MODE)
     {
-        static T* result = nullptr;
-        ACQUIRE(memLock);
-		result = nullptr;
-        unsigned long long pageId = offset / maxBytesPerPage;
-        unsigned long long offsetInPage = offset % maxBytesPerPage;
-        long long lastElementLength = 0;
+        const unsigned long long pageId = offset / maxBytesPerPage;
+        const unsigned long long offsetInPage = offset % maxBytesPerPage;
 
+        // Fast path: shared, in-page hit only. Straddle (mutates per-page state) + miss go exclusive.
+        if (maxBytesPerPage - offsetInPage >= maxBytesPerElement)
+        {
+            lockShared();
+            int idx = findCachePage(pageId);
+            if (idx != -1)
+            {
+                cacheHits++; // best-effort stat
+                pinSlotForThread(idx);
+                lastAccessedTimestamp[idx] = now_ms(); // refresh LRU on hit (racy write, harmless)
+                T* hit = (T*)((unsigned char*)cache[idx] + offsetInPage);
+                unlockShared();
+                return hit;
+            }
+            unlockShared();
+        }
+
+        // Slow path: miss or page-straddle -> exclusive.
+        T* result = nullptr;
+        long long lastElementLength = 0;
+        acquireMemLock();
+        currentPageId = pageId > currentPageId ? pageId : currentPageId;
         int cache_page_idx = loadPageToCacheAndTryToPersist(pageId);
         if (cache_page_idx == -1)
         {
@@ -1090,6 +1575,7 @@ public:
         }
 
         normal_access:
+        pinSlotForThread(cache_page_idx);
         unsigned char *pageBuffer = (unsigned char*)cache[cache_page_idx];
         result = (T*)(pageBuffer + offsetInPage);
         RELEASE(memLock);
@@ -1120,7 +1606,15 @@ public:
 
     unsigned long long dumpVMState(unsigned char* buffer)
     {
-        ACQUIRE(memLock);
+        acquireMemLock();
+        // Drain in-flight IO so a slot isn't snapshotted mid-fread; a slot still LOADING after the
+        // bounded wait is captured as LOADING and normalized to INVALID on load (consistent fallback).
+        for (int drainMs = 0; anyInflightIO() && drainMs < 1000; drainMs++)
+        {
+            RELEASE(memLock);
+            sleepMilliseconds(1);
+            acquireMemLock();
+        }
         unsigned long long ret = 0;
         for (int i = 0; i <= numCachePage; i++)
         {
@@ -1165,7 +1659,7 @@ public:
 
     unsigned long long loadVMState(unsigned char* buffer)
     {
-        ACQUIRE(memLock);
+        acquireMemLock();
         unsigned long long ret = 0;
         for (int i = 0; i <= numCachePage; i++)
         {
@@ -1200,6 +1694,14 @@ public:
         copyMem(cachePageId, buffer, sizeof(cachePageId));
         buffer += sizeof(cachePageId);
         ret += sizeof(cachePageId);
+
+        // In-flight markers are transient and unserialized; a snapshot may have caught a slot mid-load.
+        // Treat any such slot as empty and clear the in-flight arrays.
+        for (int i = 0; i <= numCachePage; i++)
+            if (cachePageId[i] == LOADING_PAGE_ID)
+                cachePageId[i] = INVALID_PAGE_ID;
+        setMem(loadingTarget, sizeof(loadingTarget), 0xff);
+        setMem(evictingPage, sizeof(evictingPage), 0xff);
 
         currentPageId = *((unsigned long long*)buffer);
         buffer += 8;

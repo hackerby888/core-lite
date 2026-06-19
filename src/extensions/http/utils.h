@@ -176,6 +176,7 @@ public:
         TickData localTickData;
         for (unsigned int tick = system.initialTick; tick <= system.tick; tick++)
         {
+            PinScope _pinScope; // release this tick's swap-page pin each iteration (full-epoch scan)
             TickStorage::tickData.acquireLock();
             TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
             if (tickData)
@@ -206,18 +207,26 @@ public:
     static void fetch(const std::string &url, const std::string &path, const drogon::HttpMethod method, const Json::Value &body, const std::map<std::string, std::string> &headers = {}, std::function<void(drogon::ReqResult &result, const drogon::HttpResponsePtr &resp)> callback = nullptr)
     {
         auto client = drogon::HttpClient::newHttpClient(url);
-        auto req = drogon::HttpRequest::newHttpJsonRequest(body); // Helper for JSON
+
+        // Serialize per-call: newHttpJsonRequest() shares a process-wide static StreamWriterBuilder that this background thread races against drogon's loop threads (SIGSEGV in newStreamWriter()).
+        auto req = drogon::HttpRequest::newHttpRequest();
         req->setMethod(method);
         req->setPath(path);
+        if (!body.isNull())
+        {
+            Json::StreamWriterBuilder jsonWriter;
+            jsonWriter["commentStyle"] = "None";
+            jsonWriter["indentation"] = "";
+            req->setBody(Json::writeString(jsonWriter, body));
+        }
 
-        // Set headers
         for (const auto& header : headers) {
             req->addHeader(header.first, header.second);
         }
-        // Set type to application/json
         req->addHeader("Content-Type", "application/json");
 
-        client->sendRequest(req, [&](drogon::ReqResult _result, const drogon::HttpResponsePtr &_resp) {
+        // Capture client + callback by value: the request is async and outlives this frame, so by-reference captures dangle on completion.
+        client->sendRequest(req, [client, callback](drogon::ReqResult _result, const drogon::HttpResponsePtr &_resp) {
             if (callback != nullptr)
             {
                 callback(_result, _resp);
