@@ -54,7 +54,5 @@ enum NetworkMessageType : unsigned char
     REQUEST_TX_STATUS = 201, // tx addon only
     RESPOND_TX_STATUS = 202, // tx addon only
     SPECIAL_COMMAND = 255,
-    // lite-extension reservations (types defined as constexpr in the extension headers):
-    //   230/231 LiteCheckin (src/extensions/lite_checkin.h)
-    //   232/233/234 super-prefetch request/respond/done (src/extensions/super_prefetch.h)
+    // lite-extension reservations (constexpr in extension headers): 230/231 LiteCheckin, 232/233/234 super-prefetch.
 };

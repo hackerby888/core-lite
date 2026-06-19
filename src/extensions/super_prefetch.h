@@ -1,29 +1,13 @@
 #pragma once
 
-// Cooperative deep catch-up between lite nodes ("super-prefetch").
-//
-// A node >= TRIGGER ticks behind asks the lite peers it is already connected to
-// for a leased slot; while granted it pulls up to DEPTH ticks ahead from that
-// peer, beyond the normal depth-20 prefetch (opt_future_tick_prefetch). A node
-// being asked grants at most a small, per-IP, leased slot set, so a swarm of
-// behind-nodes cannot conscript it into unbounded deep serving. The slot is a
-// cooperative signal, not a serve-path gate: an honest asker that is denied (or
-// whose slot lapses) simply stops deep-pulling that peer and keeps the normal
-// depth-20 behavior, so ungranted/upstream peers are never refused normal data.
-//
-// Messages live in the lite 230+ range upstream never speaks, so any peer using
-// them is a lite node and the per-IP slot cap + lease is the abuse bound.
-//
-// Wiring (mirrors lite_checkin.h): one #include in qubic.cpp after overload.h;
-// three dispatch cases (REQUEST -> serverOnRequest, RESPOND -> requesterOnRespond,
-// DONE -> serverOnDone); two main-loop calls each tick-request period
-// (requesterTick + serverTick); CLI --no-super-prefetch / --super-prefetch-slots.
+// Super-prefetch: a node >= TRIGGER ticks behind asks lite peers for a leased
+// per-IP slot, then deep-pulls up to DEPTH ticks ahead (beyond depth-20 prefetch).
 
 #include <chrono>
 #include <cstring>
 #include <string>
 
-void logColorToScreen(std::string type, std::string msg); // defined later in qubic.cpp (single TU)
+void logColorToScreen(std::string type, std::string msg); // defined in qubic.cpp (single TU)
 
 namespace SuperPrefetch
 {
@@ -70,8 +54,7 @@ struct WireSuperPrefetch { RequestResponseHeader header; RequestSuperPrefetch bo
 struct WireSuperPrefetchDone { RequestResponseHeader header; RequestSuperPrefetchDone body; };
 #pragma pack(pop)
 
-// Reused request types keep their NATURAL layout so the payload size equals the
-// server's sizeof() expectation (checkPayloadSize) — do not pack these.
+// Natural layout (NOT packed): payload size must equal the server's sizeof() (checkPayloadSize).
 struct WireRequestTickData { RequestResponseHeader header; RequestTickData body; };
 struct WireRequestQuorumTick { RequestResponseHeader header; RequestQuorumTick body; };
 struct WireRequestTickTxs { RequestResponseHeader header; RequestTickTransactions body; };
@@ -98,13 +81,7 @@ static inline unsigned long long nowMs()
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-static inline std::string ipStr(unsigned int u32)
-{
-    const unsigned char* b = (const unsigned char*)&u32;
-    return std::to_string(b[0]) + "." + std::to_string(b[1]) + "." + std::to_string(b[2]) + "." + std::to_string(b[3]);
-}
-
-// ---- send helpers (main thread only: push() appends to the peer TX buffer) ----
+// push() is main-thread only; these run from requesterTick.
 
 static void sendHandshake(Peer* peer, unsigned int askerTick)
 {
@@ -127,9 +104,8 @@ static void sendDone(Peer* peer, unsigned int finalTick)
     push(peer, &m.header);
 }
 
-// Pull tickData + votes + missing txs for one future tick from a granted source.
-// Mirrors opt_future_tick_prefetch's per-tick request construction and guards,
-// but targets a specific peer instead of pushPreferringAtOrAbove.
+// Request tickData + votes + missing txs for one future tick from a granted peer
+// (mirrors opt_future_tick_prefetch's construction, targeted at one peer).
 static void deepPullTick(Peer* peer, unsigned int futureTick)
 {
     if (!ts.tickInCurrentEpochStorage(futureTick))
