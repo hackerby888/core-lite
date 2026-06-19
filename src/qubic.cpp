@@ -170,6 +170,7 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
+#include "extensions/super_prefetch.h"
 #include "extensions/test_invalid_solution.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
@@ -2323,6 +2324,25 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
                 case LiteCheckin::RequestLiteCheckin::type():
                 {
                     LiteCheckin::processRequest(peer, header);
+                }
+                break;
+
+                /* lite-extension: super-prefetch handshake between lite nodes */
+                case SuperPrefetch::RequestSuperPrefetch::type():
+                {
+                    SuperPrefetch::serverOnRequest(peer, header);
+                }
+                break;
+
+                case SuperPrefetch::RespondSuperPrefetch::type():
+                {
+                    SuperPrefetch::requesterOnRespond(peer, header);
+                }
+                break;
+
+                case SuperPrefetch::RequestSuperPrefetchDone::type():
+                {
+                    SuperPrefetch::serverOnDone(peer, header);
                 }
                 break;
 
@@ -9181,6 +9201,10 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     // Prefetch all transactions for future ticks that already have tickData
                     opt_future_tick_prefetch::requestFutureTickTransactions(prefetchDepth);
 #endif
+
+                    // Deep cooperative catch-up between lite nodes (super-prefetch).
+                    SuperPrefetch::requesterTick();
+                    SuperPrefetch::serverTick();
                 }
 
                 // Add messages from response queue to sending buffer
@@ -9561,6 +9585,8 @@ void processArgs(int argc, const char* argv[]) {
         ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
         ("swap-dirty-track", "Auto-track dirty SwapVM cache pages via mprotect+SIGSEGV (Linux only): skip the writeback (and compression) for pages never modified since load. Trades a small mprotect/fault cost for less disk I/O. Off by default.")
+        ("no-super-prefetch", "Disable cooperative deep catch-up (super-prefetch) between lite nodes. On by default: a node >=128 ticks behind asks lite peers for a leased slot to pull 64 ticks ahead.")
+        ("super-prefetch-slots", "Max concurrent super-prefetch sessions this node serves to peers (1 per peer IP, leased). Default 4.", cxxopts::value<int>()->default_value("4"))
         ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"));
     auto result = options.parse(argc, argv);
@@ -9575,6 +9601,15 @@ void processArgs(int argc, const char* argv[]) {
         logColorToScreen("INFO", "Swap dirty tracking enabled: clean SwapVM cache pages skip writeback on eviction");
     }
 #endif
+
+    if (result.count("no-super-prefetch")) {
+        SuperPrefetch::gEnabled = false;
+        logColorToScreen("INFO", "Super-prefetch disabled");
+    }
+    if (result.count("super-prefetch-slots")) {
+        int superPrefetchSlots = result["super-prefetch-slots"].as<int>();
+        SuperPrefetch::gSlotCap = superPrefetchSlots < 0 ? 0 : (unsigned int)superPrefetchSlots;
+    }
 
     if (result.count("peers")) {
         std::string peersStr = result["peers"].as<std::string>();
