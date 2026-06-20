@@ -78,26 +78,39 @@ namespace tickFork
     inline unsigned int gForkWindowK = 32;
     inline unsigned int gCheckpointTick = 0;
 
+    // Park the request processors at their liteForkRequestPark point (the swap-writer quiesce shared by the
+    // fork snapshot and the shadow commit). Returns false if a processor fails to park before the deadline.
+    // Leaves gForkQuiesceRequest set on success; the caller releases via unparkRequestProcessors().
+    inline bool parkRequestProcessors(long long timeoutNs)
+    {
+        gForkParked.store(0, std::memory_order_release);
+        gForkParkGen.fetch_add(1, std::memory_order_acq_rel);   // open a new park generation
+        gForkQuiesceRequest = true;
+        long long deadline = tickForkNowNs() + timeoutNs;
+        while (gForkParked.load(std::memory_order_acquire) < nRequestProcessorIDs)
+        {
+            if (tickForkNowNs() > deadline) return false;
+            std::this_thread::yield();
+        }
+        return true;
+    }
+    inline void unparkRequestProcessors()
+    {
+        gForkQuiesceRequest = false;
+    }
+
     // Establish a fresh checkpoint at system.tick: park request procs, pipe, arm shadow, ask BSP to fork.
     inline void establishCheckpoint()
     {
         if (gForkBench) { gForkWindowStartNs = tickForkNowNs(); gForkRssBeforeKb = tickForkRssKb(); }
         tickForkLog("checkpoint -> request BSP fork");
-        gForkParked.store(0, std::memory_order_release);
-        gForkParkGen.fetch_add(1, std::memory_order_acq_rel);   // open a new park generation
-        gForkQuiesceRequest = true;
         // Bounded: a wedged request processor must not hang the fork. On timeout, score this tick strict.
-        long long parkDeadline = tickForkNowNs() + 5000000000LL;
-        while (gForkParked.load(std::memory_order_acquire) < nRequestProcessorIDs)
+        if (!parkRequestProcessors(5000000000LL))
         {
-            if (tickForkNowNs() > parkDeadline)
-            {
-                gForkQuiesceRequest = false;
-                gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
-                tickForkLog("park barrier timeout -> scoring this tick strict (no fork)");
-                return;
-            }
-            std::this_thread::yield();
+            unparkRequestProcessors();
+            gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
+            tickForkLog("park barrier timeout -> scoring this tick strict (no fork)");
+            return;
         }
 
         // If the fork cannot be set up, score this tick strict so the optimistic pass cannot diverge
@@ -146,8 +159,21 @@ namespace tickFork
     inline void retireCheckpoint()
     {
         tickForkLog("window complete -> commit shadow + reap checkpoint");
-        ts.drainSwapIoForFork(1000);   // finish in-flight unlocked writebacks to /s/ before commit renames them (else orphan/torn page)
+        // commit() renames /s/<page> -> real. Window page writes run as unlocked miss-IO on the request
+        // processors + RPC handlers; a writeback racing the rename strands an orphan/torn /s page + a stale
+        // real file (wrong serve / boot exit(1) on the next USE_SWAP reload). Quiesce both swap-writer sets
+        // exactly as the fork does (park request procs + gRpcDispatchLock + drain) so none can start new IO.
+        if (!parkRequestProcessors(5000000000LL))
+            tickForkLog("warn: request-proc park timed out before commit (committing under RPC lock + drain)");
+#if !defined(NO_RPC)
+        gRpcDispatchLock.lock();
+#endif
+        if (!ts.drainSwapIoForFork(1000)) tickForkLog("warn: swap in-flight IO drain timed out before commit");
         gShadow.commit();
+#if !defined(NO_RPC)
+        gRpcDispatchLock.unlock();
+#endif
+        unparkRequestProcessors();
         kill(gChildPid.load(), SIGKILL);
         int st; waitpid(gChildPid.load(), &st, 0);
         close(gPipe[1]); gPipe[1] = -1;
@@ -160,7 +186,14 @@ namespace tickFork
         (void)processorNumber;
         if (gReRunStrict) return;                   // replaying the window strict: never fork
         if (forceVerifySolutions) return;           // -fv = strict-all mode: no trick/rollback/fork
-        if (isMainMode()) return;
+        if (isMainMode())
+        {
+            // AUX->MAIN with a live checkpoint: verdict() is MAIN-gated and never retires the window, so it
+            // would leak the child (COW RSS -> OOM/SIGTERM) and leave the shadow armed forever (every MAIN
+            // write diverts to /s, real frozen). Commit the optimistic state we already advanced + reap.
+            if (gChildPid >= 0) retireCheckpoint();
+            return;
+        }
 
         // Last tick of the epoch: verdict() is skipped here (same gate as main's reprocess path) and the
         // next tick runs beginEpoch. Never let a window span the boundary — retire any live checkpoint

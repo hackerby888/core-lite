@@ -522,6 +522,33 @@ TEST(TestSwapVirtualMemory, IndexEvictReloadIntegritySmall) {
     }
 }
 
+// Child-promote reinit: resetPinsForChildPromote must clear the inherited locks/pins/LOADING slots
+// without corrupting cache content, and drainInflightIO must report idle afterwards. Every page (cached
+// or evicted) must still read back correctly, and the absence of an orphan LOADING slot is proven by
+// the re-read completing (a leftover LOADING page would dedup-wait forever).
+TEST(TestSwapVirtualMemory, ForkReinitResetPinsAndDrain) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    SwapVirtualMemory<E16, wcharToNumber(L"frst"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+    vm.init();
+    const unsigned long long NPAGES = 64, CAP = 256;
+    for (unsigned long long p = 0; p < NPAGES; p++) {
+        PinScope _;
+        E16& e = vm.getRef(p * CAP);
+        e.a = p + 1; e.b = (p + 1) * 7;
+    }
+
+    vm.resetPinsForChildPromote();
+    EXPECT_TRUE(vm.drainInflightIO(100));   // no in-flight IO after reset -> idle
+
+    for (unsigned long long p = 0; p < NPAGES; p++) {
+        PinScope _;
+        E16& e = vm.getRef(p * CAP);
+        EXPECT_EQ(e.a, p + 1);
+        EXPECT_EQ(e.b, (p + 1) * 7);
+    }
+}
+
 // Cache hits must keep working (no corruption, no deadlock) while another thread churns
 // misses that evict+load under released memLock. A churner walks 200 pages (constant eviction) while
 // four hitters hammer the resident sentinel page 0; page 0 is only ever written 0xABCD, so any other

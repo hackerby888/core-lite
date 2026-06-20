@@ -44,8 +44,10 @@ inline std::atomic<unsigned> gForkParkGen{ 0 };   // bumped per fork window; see
 #include <mutex>
 #include <new>
 #include <thread>
+#include <chrono>
 #include <filesystem>
 #include <utility>
+#include <cstdlib>
 
 // Called by request processors at loop top; parks while a fork window is set up.
 static inline void liteForkRequestPark()
@@ -151,24 +153,37 @@ public:
         return it->second.data();
     }
 
-    // Quorum match: move diverted pages into their real dirs.
+    // Quorum match: move diverted pages into their real dirs. A failed rename is NOT benign: an evicted
+    // page's only current copy is its /s/ file (it is no longer resident, despite the prior "RAM is
+    // authoritative" claim), so the next arm() purge or the following snapshot would lose it -> silent
+    // corruption / boot exit(1). Mirror the swap writeback: bounded retry, then fatal so restart reloads
+    // the last good snapshot + re-syncs rather than persisting a stale on-disk page.
     void commit()
     {
         std::lock_guard<std::mutex> g(mtx);
         if (gForkBench && !written.empty()) { fprintf(stderr, "[SHADOW] commit %zu diverted page(s) -> real\n", written.size()); fflush(stderr); }
-        size_t failed = 0;
         for (const auto& [real, name] : written)
         {
-            std::error_code ec;
-            std::filesystem::rename(real + "/s/" + name, real + "/" + name, ec);
-            if (ec) failed++;
-        }
-        if (failed)
-        {
-            // Match path: RAM state is authoritative and correct; only the on-disk copy is stale, which
-            // bites only a later USE_SWAP reload. Loud so a failing disk is visible to the operator.
-            fprintf(stderr, "[SHADOW] commit: %zu page(s) failed to persist (disk error); RAM state is authoritative\n", failed);
-            fflush(stderr);
+            const std::string from = real + "/s/" + name;
+            const std::string to = real + "/" + name;
+            unsigned int delayMs = 100;   // mirrors SWAPVM_IO_INITIAL_DELAY_MS
+            bool ok = false;
+            for (int attempt = 0; attempt < 5; attempt++)   // mirrors SWAPVM_IO_MAX_ATTEMPTS
+            {
+                std::error_code ec;
+                std::filesystem::rename(from, to, ec);
+                if (!ec) { ok = true; break; }
+                fprintf(stderr, "[SHADOW] commit rename failed (attempt %d/5) %s -> %s: %s\n",
+                        attempt + 1, from.c_str(), to.c_str(), ec.message().c_str());
+                fflush(stderr);
+                if (attempt + 1 < 5) { std::this_thread::sleep_for(std::chrono::milliseconds(delayMs)); delayMs *= 2; }
+            }
+            if (!ok)
+            {
+                fprintf(stderr, "[SHADOW] FATAL: commit could not persist %s (disk failure) -> exit for restart from snapshot\n", to.c_str());
+                fflush(stderr);
+                exit(1);
+            }
         }
         clearWindow();
     }
