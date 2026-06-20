@@ -176,6 +176,7 @@ public:
         TickData localTickData;
         for (unsigned int tick = system.initialTick; tick <= system.tick; tick++)
         {
+            PinScope _pinScope; // release this tick's swap-page pin each iteration (full-epoch scan)
             TickStorage::tickData.acquireLock();
             TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
             if (tickData)

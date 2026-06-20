@@ -720,6 +720,10 @@ public:
         appendNumber(m, vm.getCacheHits(), false);
         appendText(m, (CHAR16*)L" miss ");
         appendNumber(m, vm.getCacheMisses(), false);
+        appendText(m, (CHAR16*)L" cleanEvict ");
+        appendNumber(m, vm.getCleanEvicts(), false);
+        appendText(m, (CHAR16*)L" dirtyEvict ");
+        appendNumber(m, vm.getDirtyEvicts(), false);
         logToConsole(m);
     }
 #endif
@@ -789,6 +793,24 @@ public:
         tickTransactionOffsetsSwapVM.resetPinsForChildPromote();
         tickTransactionsDigestSwapVM.resetPinsForChildPromote();
         releaseThreadPins();   // clear the surviving thread's stale arena (pinCount now 0 -> guarded no-op)
+#endif
+    }
+
+    // Wait out in-flight unlocked swap miss-IO across all swap VMs before a fork() / shadow commit
+    // (neither runs reset()'s drain). Caller must have parked/locked the new-IO sources first.
+    static bool drainSwapIoForFork(int timeoutMs)
+    {
+#ifdef USE_SWAP
+        bool ok = true;
+        ok &= tickDataSwapVM.drainInflightIO(timeoutMs);
+        ok &= ticksSwapVM.drainInflightIO(timeoutMs);
+        ok &= tickTransactionsSwapVM.drainInflightIO(timeoutMs);
+        ok &= tickTransactionOffsetsSwapVM.drainInflightIO(timeoutMs);
+        ok &= tickTransactionsDigestSwapVM.drainInflightIO(timeoutMs);
+        return ok;
+#else
+        (void)timeoutMs;
+        return true;
 #endif
     }
 
@@ -1045,6 +1067,7 @@ public:
 
 #ifndef NDEBUG
             for (unsigned int tickIndex = 0; tickIndex < MAX_NUMBER_OF_TICKS_PER_EPOCH; tickIndex++) {
+                PinScope _pinScope; // release this tick's swap-page pins each iteration (debug consistency scan over the whole epoch)
                 TickData &tickData = TickStorage::tickData[tickIndex];
                 ASSERT(isAllBytesZero(&tickData, sizeof(tickData)));
 

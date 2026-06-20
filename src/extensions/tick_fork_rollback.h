@@ -146,6 +146,7 @@ namespace tickFork
     inline void retireCheckpoint()
     {
         tickForkLog("window complete -> commit shadow + reap checkpoint");
+        ts.drainSwapIoForFork(1000);   // finish in-flight unlocked writebacks to /s/ before commit renames them (else orphan/torn page)
         gShadow.commit();
         kill(gChildPid.load(), SIGKILL);
         int st; waitpid(gChildPid.load(), &st, 0);

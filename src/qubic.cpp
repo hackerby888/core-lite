@@ -3636,6 +3636,7 @@ static void processTick(unsigned long long processorNumber)
     const OracleQueryMetadata* finishedUserQuery = oracleEngine.getFinishedUserQuery();
     while (finishedUserQuery)
     {
+        PinScope _pinScope; // release this query's tickTransaction/txOffset swap-page pins each iteration
         if (finishedUserQuery->interfaceIndex == OI::DogeShareValidation::oracleInterfaceIndex)
         {
             // Look up query tx to get query data.
@@ -4376,9 +4377,11 @@ static void beginEpoch()
 static void endEpoch()
 {
     logger.registerNewTx(system.tick, logger.SC_END_EPOCH_TX);
+    logToConsole(L"endEpoch: [1/5] running contract END_EPOCH procedures...");
     contractProcessorPhase = END_EPOCH;
     contractProcessorState = 1;
     WAIT_WHILE(contractProcessorState);
+    logToConsole(L"endEpoch: [1/5] contract END_EPOCH procedures done");
 
     // treating endEpoch as a tick, start updating etalonTick:
     // this is the last tick of an epoch, should we set prevResourceTestingDigest to zero? nodes that start from scratch (for the new epoch)
@@ -4390,6 +4393,7 @@ static void endEpoch()
     etalonTick.prevTransactionBodyDigest = etalonTick.saltedTransactionBodyDigest;
 
     // Handle IPO
+    logToConsole(L"endEpoch: [2/5] finishing IPOs...");
     finishIPOs();
 
     system.initialMillisecond = etalonTick.millisecond;
@@ -4404,6 +4408,7 @@ static void endEpoch()
     // Only issue qus if the max supply is not yet reached
     if (spectrumInfo.totalAmount + ISSUANCE_RATE <= MAX_SUPPLY)
     {
+        logToConsole(L"endEpoch: [3/5] computing revenue (V2/multi-dim) + distributing to computors...");
 
         // Collect mining scores for V2
         for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
@@ -4487,6 +4492,7 @@ static void endEpoch()
     }
 
     // Reorganize spectrum hash map (also updates spectrumInfo)
+    logToConsole(L"endEpoch: [4/5] reorganizing spectrum hash map...");
     {
         ACQUIRE(spectrumLock);
 
@@ -4495,7 +4501,9 @@ static void endEpoch()
         RELEASE(spectrumLock);
     }
 
+    logToConsole(L"endEpoch: [5/5] reorganizing universe/assets...");
     assetsEndEpoch();
+    logToConsole(L"endEpoch: [5/5] universe/assets done");
     {
         // this is the last logging event of the epoch
         // a hint message for 3rd party services the end of the epoch
@@ -6620,12 +6628,25 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                 bool isBeginEpoch = false;
                                 if (epochTransitionState == 1)
                                 {
+                                    {
+                                        CHAR16 etMsg[192];
+                                        setText(etMsg, L"=== EPOCH TRANSITION: start | epoch ");
+                                        appendNumber(etMsg, system.epoch, FALSE);
+                                        appendText(etMsg, L" -> ");
+                                        appendNumber(etMsg, system.epoch + 1, FALSE);
+                                        appendText(etMsg, L" | last tick of epoch ");
+                                        appendNumber(etMsg, system.tick - 1, FALSE);
+                                        logToConsole(etMsg);
+                                    }
 
                                     // wait until all request processors are in waiting state
+                                    logToConsole(L"EPOCH TRANSITION: waiting for request processors to park...");
                                     WAIT_WHILE(epochTransitionWaitingRequestProcessors < nRequestProcessorIDs);
 
                                     // end current epoch
+                                    logToConsole(L"EPOCH TRANSITION: running endEpoch() (revenue/IPO/spectrum reorg)...");
                                     endEpoch();
+                                    logToConsole(L"EPOCH TRANSITION: endEpoch() done");
 
                                     // Save the file of revenue. This blocking save can be called from any thread
                                     // Revenue v2 data
@@ -6642,12 +6663,15 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                     commonBuffers.releaseBuffer(reorgBuffer);
 
                                     // instruct main loop to save system and wait until it is done
+                                    logToConsole(L"EPOCH TRANSITION: saving system state...");
                                     systemMustBeSaved = true;
                                     WAIT_WHILE(systemMustBeSaved);
                                     epochTransitionState = 2;
 
+                                    logToConsole(L"EPOCH TRANSITION: running beginEpoch()...");
                                     beginEpoch();
                                     isBeginEpoch = true;
+                                    logToConsole(L"EPOCH TRANSITION: beginEpoch() done");
 
                                     // Some debug checks that we are ready for the next epoch
                                     ASSERT(system.numberOfSolutions == 0);
@@ -6663,6 +6687,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                     ASSERT(minimumComputorScore == 0 && minimumCandidateScore == 0);
 
                                     // instruct main loop to save files and wait until it is done
+                                    logToConsole(L"EPOCH TRANSITION: saving spectrum/universe/computer...");
                                     spectrumMustBeSaved = true;
                                     universeMustBeSaved = true;
                                     computerMustBeSaved = true;
@@ -6676,6 +6701,16 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                     getComputerDigest(etalonTick.saltedComputerDigest);
 
                                     epochTransitionState = 0;
+                                    {
+                                        CHAR16 etMsg[192];
+                                        setText(etMsg, L"=== EPOCH TRANSITION: COMPLETE | now epoch ");
+                                        appendNumber(etMsg, system.epoch, FALSE);
+                                        appendText(etMsg, L" | initialTick ");
+                                        appendNumber(etMsg, system.initialTick, FALSE);
+                                        appendText(etMsg, L" | tick ");
+                                        appendNumber(etMsg, system.tick, FALSE);
+                                        logToConsole(etMsg);
+                                    }
                                 }
                                 ASSERT(epochTransitionWaitingRequestProcessors >= 0 && epochTransitionWaitingRequestProcessors <= nRequestProcessorIDs);
 
@@ -8567,6 +8602,10 @@ static void bspForkPoint()
 #if !defined(NO_RPC)
     gRpcDispatchLock.lock();   // drain in-flight RPC dispatches so no handler holds a node lock at fork
 #endif
+    Overload::eventMapLock.lock();   // eventDataMap is guarded only by this; hold it so the child snapshots a consistent map (a non-surviving AP worker mid CloseEvent would otherwise leave it torn + locked)
+    // Wait out unlocked swap miss-IO (reset()/snapshot drain it; fork() is a third teardown boundary
+    // that didn't) so the child can't inherit an orphan LOADING cache slot. resetPinsForChildPromote backstops a straggler.
+    if (!ts.drainSwapIoForFork(1000)) tickForkLog("warn: swap in-flight IO drain timed out before fork");
     if (gForkBench) gForkQuiesceNs = tickForkNowNs() - q0;
 
     tickForkLog("BSP fork: locks held, calling fork() now");   // if no 'fork() returned' follows -> fork() itself stalled
@@ -8597,6 +8636,7 @@ static void bspForkPoint()
 #if !defined(NO_RPC)
     gRpcDispatchLock.unlock();
 #endif
+    Overload::eventMapLock.unlock();   // child reinits it (placement-new) in resetForChildPromote
     if (pid < 0) tickForkLog("fork() failed -> parent strict fallback (no checkpoint)");
     tickFork::gChildPid = pid;   // >=0 on success, -1 on failure
     tickFork::gForkRequest = false;
@@ -9119,6 +9159,10 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     closeAllPeers(true);
 
                     logToConsole(L"Saving node state...");
+#ifdef __linux__
+                    // should retire/kill the child and commit pages before saving snapshot
+                    if (tickFork::gChildPid.load() >= 0) tickFork::retireCheckpoint();
+#endif
                     saveAllNodeStates();
 #ifdef ENABLE_PROFILING
                     gProfilingDataCollector.writeToFile();
@@ -9390,6 +9434,7 @@ void processArgs(int argc, const char* argv[]) {
         ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
         ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
+        ("swap-dirty-track", "Auto-track dirty SwapVM cache pages via mprotect+SIGSEGV (Linux only): skip the writeback (and compression) for pages never modified since load. Trades a small mprotect/fault cost for less disk I/O. Off by default.")
         ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
         ("rollback-mode", "DEPRECATED: AUX wrong-solution tick rollback is always fork-on-BSP child-promote now; accepted but ignored", cxxopts::value<std::string>()->default_value("fork"))
         ("verify-fork-rollback", "TEST: assert the fork re-run reproduces the quorum digest", cxxopts::value<bool>())
@@ -9414,6 +9459,10 @@ void processArgs(int argc, const char* argv[]) {
     if (result.count("swap-compression")) {
         gSwapCompressionEnabled = true;
         logColorToScreen("INFO", "Swap compression enabled: SwapVM disk pages will be compressed with blosc2 on save/load");
+    }
+    if (result.count("swap-dirty-track")) {
+        gSwapDirtyTrackEnabled = true;
+        logColorToScreen("INFO", "Swap dirty tracking enabled: clean SwapVM cache pages skip writeback on eviction");
     }
 #endif
 
@@ -9762,7 +9811,11 @@ void watchAndCheckin()
 #endif
 
 #ifdef __linux__
-void signalHandler(int sig) {
+void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
+    // Component B fast path: a write to an armed read-only SwapVM cache page faults here. Mark the
+    // slot dirty, restore write access, and resume the store. Any other fault hits the crash path below.
+    if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr))
+        return;
     boost::stacktrace::safe_dump_to("crash.dump");
     // Send to server in a child process
     pid_t pid = fork();
@@ -9802,7 +9855,8 @@ void signalHandler(int sig) {
 void setupSignalHandlers() {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = signalHandler;
+    sa.sa_sigaction = signalHandler;       // SA_SIGINFO form: handler receives siginfo_t* (si_addr)
+    sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
 
     // Common crash signals to catch:

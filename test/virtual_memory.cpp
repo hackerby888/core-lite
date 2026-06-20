@@ -7,6 +7,12 @@
 
 #include <cstring>
 #include <random>
+#include <thread>
+#include <atomic>
+#include <vector>
+#if defined(__linux__)
+#include <csignal>
+#endif
 
 #include "network_messages/transactions.h"
 
@@ -490,3 +496,106 @@ TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_TestCacheBuffer)
         }
     }
 }
+
+namespace {
+struct E16 { unsigned long long a, b; }; // 16 bytes; pageCapacity 256 -> pageSize 4096 (one OS page)
+}
+
+// Every page must survive eviction+reload even though the working set (64 pages) far
+// exceeds the cache (4 slots). Small + fast, exercising the IO-outside-the-lock evict/load path.
+TEST(TestSwapVirtualMemory, IndexEvictReloadIntegritySmall) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    SwapVirtualMemory<E16, wcharToNumber(L"evrl"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+    vm.init();
+    const unsigned long long NPAGES = 64, CAP = 256;
+    for (unsigned long long p = 0; p < NPAGES; p++) {
+        PinScope _;
+        E16& e = vm.getRef(p * CAP);
+        e.a = p + 1; e.b = (p + 1) * 7;
+    }
+    for (unsigned long long p = 0; p < NPAGES; p++) {
+        PinScope _;
+        E16& e = vm.getRef(p * CAP);
+        EXPECT_EQ(e.a, p + 1);
+        EXPECT_EQ(e.b, (p + 1) * 7);
+    }
+}
+
+// Cache hits must keep working (no corruption, no deadlock) while another thread churns
+// misses that evict+load under released memLock. A churner walks 200 pages (constant eviction) while
+// four hitters hammer the resident sentinel page 0; page 0 is only ever written 0xABCD, so any other
+// value read back signals a torn evict/reload.
+TEST(TestSwapVirtualMemory, ConcurrentHitsDuringMiss) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    SwapVirtualMemory<E16, wcharToNumber(L"chdm"), wcharToNumber(L"data"), 256, 8, INDEX_MODE, 0> vm;
+    vm.init();
+    const unsigned long long CAP = 256;
+    { PinScope _; vm.getRef(0).a = 0xABCD; }
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> errors{0};
+    std::thread churner([&]{
+        unsigned long long p = 1;
+        while (!stop.load(std::memory_order_relaxed)) {
+            PinScope _;
+            vm.getRef(p * CAP).a = p;
+            p = (p % 200) + 1;
+        }
+    });
+    std::vector<std::thread> hitters;
+    for (int t = 0; t < 4; t++) hitters.emplace_back([&]{
+        for (int i = 0; i < 100000; i++) {
+            PinScope _;
+            if (vm.getRef(0).a != 0xABCD) errors++;
+        }
+    });
+    for (auto& h : hitters) h.join();
+    stop = true; churner.join();
+    EXPECT_EQ(errors.load(), 0);
+}
+
+#if defined(__linux__)
+// With dirty tracking on, a page only read since load is evicted without a writeback
+// (clean), while a written page is written back and survives. Tests install the SIGSEGV fast path
+// that the node installs in signalHandler (the test binary has no handler of its own).
+TEST(TestSwapVirtualMemory, DirtyTrackSkipsCleanWriteback) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+
+    struct sigaction sa, oldSa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = [](int sig, siginfo_t* si, void*) {
+        if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr)) return;
+        signal(SIGSEGV, SIG_DFL); raise(SIGSEGV);
+    };
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &oldSa);
+    gSwapDirtyTrackEnabled = true;
+
+    {
+        SwapVirtualMemory<E16, wcharToNumber(L"dtyt"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+        vm.init();
+        const unsigned long long CAP = 256;
+        for (unsigned long long p = 0; p < 16; p++) {
+            PinScope _;
+            E16& e = vm.getRef(p * CAP);
+            if (p % 2 == 0) e.a = p + 100;                          // written -> dirty
+            else { volatile unsigned long long r = e.a; (void)r; }  // read only -> clean
+        }
+        EXPECT_GT(vm.getCleanEvicts(), 0u);
+        EXPECT_GT(vm.getDirtyEvicts(), 0u);
+        for (unsigned long long p = 0; p < 16; p++) {
+            PinScope _;
+            E16& e = vm.getRef(p * CAP);
+            if (p % 2 == 0) EXPECT_EQ(e.a, p + 100);  // dirty page written back + reloaded
+            else EXPECT_EQ(e.a, 0u);                  // clean page never written -> reloads as zero
+        }
+    }
+
+    gSwapDirtyTrackEnabled = false;
+    sigaction(SIGSEGV, &oldSa, nullptr);
+}
+#endif

@@ -284,6 +284,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
         const unsigned int scanHi = hasTickHint ? scanLo : system.tick;
         for (unsigned int tick = scanLo; tick <= scanHi && !found; tick++)
         {
+            PinScope _pinScope; // release this tick's swap-page pin each iteration (a full-epoch scan would otherwise exhaust the cache -> exit(1))
             TickStorage::tickData.acquireLock();
             TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
             if (tickData)
@@ -394,6 +395,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
             std::vector<std::vector<unsigned char>> matchedBufs;
             for (unsigned int tick = system.initialTick; tick <= system.tick; tick++)
             {
+                PinScope _pinScope; // release this tick's swap-page pins each iteration
                 TickData localTickData;
                 TickStorage::tickData.acquireLock();
                 TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
@@ -427,6 +429,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
             }
             for (auto &buf : matchedBufs)
             {
+                PinScope _pinScope; // transactionToJson(forceToBeProcessed=true) pins the tx's tickData page; release per iteration
                 transactions.append(HttpUtils::transactionToJson(reinterpret_cast<Transaction *>(buf.data())));
             }
 
@@ -592,7 +595,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
         std::string direction = (*json).get("direction", "both").asString();
         const bool wantIn  = (direction == "in"  || direction == "both");
         const bool wantOut = (direction == "out" || direction == "both");
-        const unsigned int limit = (*json).get("limit", 50).asUInt();
+        const unsigned int limit = std::min((*json).get("limit", 50).asUInt(), 1000u); // cap result size (also bounds hits.reserve below)
 
         Json::Value transactions(Json::arrayValue);
         // pair of (buf, direction); walk newest tick → oldest, stop at limit.
@@ -602,6 +605,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
 
         for (unsigned int tick = system.tick; tick + 1 > system.initialTick && hits.size() < limit; tick--)
         {
+            PinScope _pinScope; // release this tick's swap-page pins each iteration
             TickData localTickData;
             TickStorage::tickData.acquireLock();
             TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
@@ -638,6 +642,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
 
         for (auto &h : hits)
         {
+            PinScope _pinScope; // transactionToJson pins the tx's tickData page; release per iteration
             Json::Value txJson = HttpUtils::transactionToJson(reinterpret_cast<Transaction *>(h.buf.data()));
             txJson["direction"] = h.dir;
             transactions.append(txJson);
@@ -710,6 +715,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
 
         for (unsigned int tick = toTick; tick + 1 > fromTick; tick--)
         {
+            PinScope _pinScope; // release this tick's swap-page pins each iteration (a full-range scan would otherwise exhaust the cache -> exit(1))
             TickData localTickData;
             TickStorage::tickData.acquireLock();
             TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
@@ -1636,6 +1642,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
                 TickData scanLocal;
                 for (unsigned long long t = tickLo; t <= tickHi && !found; t++)
                 {
+                    PinScope _pinScope; // release this tick's swap-page pins each iteration (a wide scan would otherwise exhaust the cache -> exit(1))
                     TickStorage::tickData.acquireLock();
                     TickData *td = TickStorage::tickData.getByTickIfNotEmpty((unsigned int)t);
                     if (td) copyMem(&scanLocal, td, sizeof(TickData));
@@ -1738,6 +1745,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
                 // Refresh per-tick caches when tick changes.
                 if (headerTick != cachedTick)
                 {
+                    PinScope _pinScope; // release this tick's refresh swap-page pins (scanning many ticks would otherwise exhaust the cache)
                     cachedTick = headerTick;
                     setMem(&cachedTickData, sizeof(TickData), 0);
                     TickStorage::tickData.acquireLock();

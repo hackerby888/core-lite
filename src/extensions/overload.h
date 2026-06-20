@@ -380,12 +380,15 @@ struct Overload {
 
     inline static std::vector<std::thread> threads;
     inline static std::unordered_map<unsigned long long, SOCKET> incomingSocketMap;
-    inline static std::unordered_map<unsigned long long, TcpData> tcpDataMap;
+    // shared_ptr: detached connect/accept threads capture the element by value so it survives a
+    // concurrent DestroyChild() erase (was a use-after-free on epoch-end teardown).
+    inline static std::unordered_map<unsigned long long, std::shared_ptr<TcpData>> tcpDataMap;
     inline static std::unordered_map<unsigned long long, EventData> eventDataMap;
     inline static std::unordered_map<unsigned long long, bool> isReceiveThreadSetupMap;
     inline static std::unordered_map<unsigned long long, bool> isSendThreadSetupMap;
 
     inline static std::mutex networkingLock;
+    inline static std::mutex eventMapLock; // guards eventDataMap (CreateEvent/CloseEvent on main vs callback lookup on AP worker threads)
 
     // After a fork the promoted child inherits the parent's TCP maps + socket fds but none of the
     // per-socket worker threads (only the calling thread survives fork). Drop the per-peer state
@@ -394,11 +397,10 @@ struct Overload {
     static void resetForChildPromote()
     {
         const unsigned long long listenKey = (unsigned long long)peerTcp4Protocol;
-        TcpData listenData{};
-        bool haveListen = false;
-        if (auto it = tcpDataMap.find(listenKey); it != tcpDataMap.end()) { listenData = it->second; haveListen = true; }
+        std::shared_ptr<TcpData> listenData;
+        if (auto it = tcpDataMap.find(listenKey); it != tcpDataMap.end()) listenData = it->second;
 
-        for (auto& kv : tcpDataMap) if (kv.first != listenKey && kv.second.socket != INVALID_SOCKET) closesocket(kv.second.socket);
+        for (auto& kv : tcpDataMap) if (kv.first != listenKey && kv.second && kv.second->socket != INVALID_SOCKET) closesocket(kv.second->socket);
         for (auto& kv : incomingSocketMap) if (kv.second != INVALID_SOCKET) closesocket(kv.second);
         tcpDataMap.clear();
         incomingSocketMap.clear();
@@ -407,11 +409,14 @@ struct Overload {
         isSendThreadSetupMap.clear();
         // The kept listen socket's inherited per-socket worker refs are stale (threads gone); null
         // them so the next op lazy-spawns fresh workers.
-        listenData.sendIo.reset();
-        listenData.recvIo.reset();
-        if (haveListen) tcpDataMap.emplace(listenKey, listenData);
+        if (listenData) {
+            listenData->sendIo.reset();
+            listenData->recvIo.reset();
+            tcpDataMap.emplace(listenKey, listenData);
+        }
 
         new (&networkingLock) std::mutex();
+        new (&eventMapLock) std::mutex();
     }
 
     // Signal a TcpData's per-socket send/recv workers to exit. Each worker holds its own shared_ptr,
@@ -488,13 +493,23 @@ struct Overload {
 
         // call the event call back
         if (WaitEvent) {
-            auto it = eventDataMap.find((unsigned long long)WaitEvent);
-            if (it != eventDataMap.end()) {
-                EventData& eventData = it->second;
-                if (eventData.notifyFunction) {
-                    // Call the notify function with the context
-                    void (*notifyFunction)(void*, void*) = reinterpret_cast<void (*)(void*, void*)>(eventData.notifyFunction);
-                    notifyFunction(WaitEvent, eventData.context);
+            void* notifyFn = nullptr;
+            void* ctx = nullptr;
+            bool found = false;
+            {
+                // Copy under lock, call the callback outside it (the callback may re-enter Create/CloseEvent).
+                std::lock_guard<std::mutex> lk(eventMapLock);
+                auto it = eventDataMap.find((unsigned long long)WaitEvent);
+                if (it != eventDataMap.end()) {
+                    notifyFn = it->second.notifyFunction;
+                    ctx = it->second.context;
+                    found = true;
+                }
+            }
+            if (found) {
+                if (notifyFn) {
+                    void (*notifyFunction)(void*, void*) = reinterpret_cast<void (*)(void*, void*)>(notifyFn);
+                    notifyFunction(WaitEvent, ctx);
                 }
             }
             else {
@@ -574,7 +589,8 @@ struct Overload {
             *Interface = new EFI_TCP4_PROTOCOL;
             // Check if this is a incomming socket and set socket instance if it is
             if (incomingSocketMap.contains((unsigned long long)Handle)) {
-                TcpData& tcpData = tcpDataMap[(unsigned long long) * Interface];
+                tcpDataMap[(unsigned long long) * Interface] = std::make_shared<TcpData>();
+                TcpData& tcpData = *tcpDataMap[(unsigned long long) * Interface];
                 tcpData.socket = incomingSocketMap[(unsigned long long)Handle];
 
                 incomingSocketMap.erase((unsigned long long)Handle);
@@ -613,7 +629,7 @@ struct Overload {
             eventData.event = *Event;
             eventData.context = NotifyContext;
             eventData.notifyFunction = NotifyFunction;
-            eventDataMap[(unsigned long long) * Event] = eventData;
+            { std::lock_guard<std::mutex> lk(eventMapLock); eventDataMap[(unsigned long long) * Event] = eventData; }
             return EFI_SUCCESS;
         }
 
@@ -625,7 +641,7 @@ struct Overload {
             eventData.event = *Event;
             eventData.context = NotifyContext;
             eventData.notifyFunction = NotifyFunction;
-            eventDataMap[(unsigned long long) * Event] = eventData;
+            { std::lock_guard<std::mutex> lk(eventMapLock); eventDataMap[(unsigned long long) * Event] = eventData; }
             return EFI_SUCCESS;
         }
 
@@ -634,6 +650,7 @@ struct Overload {
     }
 
     static EFI_STATUS CloseEvent(IN EFI_EVENT Event) {
+        std::lock_guard<std::mutex> lk(eventMapLock);
         auto it = eventDataMap.find((unsigned long long)Event);
         if (it != eventDataMap.end()) {
             delete (unsigned long long*)Event; // Free the allocated memory for the event
@@ -782,7 +799,7 @@ struct Overload {
 		// Remove tcp4Protocol data from handle
         unsigned long long key = *(unsigned long long*)ChildHandle;
 		if (tcpDataMap.contains(key)) {
-			TcpData& tcpData = tcpDataMap[key];
+			TcpData& tcpData = *tcpDataMap[key];
 			// Signal per-socket workers to exit; shared_ptr keeps PerSocketIo alive until they do.
 			auto signalIo = [](std::shared_ptr<PerSocketIo>& io) {
 				if (!io) return;
@@ -827,10 +844,10 @@ struct Overload {
     }
 
     static EFI_STATUS Transmit(IN void* This, IN EFI_TCP4_IO_TOKEN* Token) {
-        TcpData* tcpData = nullptr;
+        std::shared_ptr<TcpData> tcpData;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpData = &tcpDataMap[key];
+            tcpData = tcpDataMap[key];
         }
         else {
             logToConsole(L"No Tcp Data For This Connect!");
@@ -866,10 +883,10 @@ struct Overload {
     }
 
     static EFI_STATUS Receive(IN void* This, IN EFI_TCP4_IO_TOKEN* Token) {
-        TcpData* tcpData = nullptr;
+        std::shared_ptr<TcpData> tcpData;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpData = &tcpDataMap[key];
+            tcpData = tcpDataMap[key];
         }
         else {
             logToConsole(L"No Tcp Data For This Connect!");
@@ -919,7 +936,7 @@ struct Overload {
 
         if (Tcp4State) {
 			if (tcpDataMap.contains((unsigned long long)This)) {
-				TcpData& tcpData = tcpDataMap[(unsigned long long)This];
+				TcpData& tcpData = *tcpDataMap[(unsigned long long)This];
 				if (tcpData.socket == INVALID_SOCKET) {
 					*Tcp4State = Tcp4StateClosed;
 				}
@@ -974,13 +991,13 @@ struct Overload {
             // Teardown via Configure(NULL): shutdown socket so in-flight send/recv abort and
             // isTransmitting can clear (else slot stuck isClosing). fd closed in DestroyChild.
             auto it = tcpDataMap.find((unsigned long long)This);
-            if (it != tcpDataMap.end()) {
-                it->second.connectStatus = ConnectStatus::Disconnected;
-                if (it->second.socket != INVALID_SOCKET) {
+            if (it != tcpDataMap.end() && it->second) {
+                it->second->connectStatus = ConnectStatus::Disconnected;
+                if (it->second->socket != INVALID_SOCKET) {
 #ifdef _MSC_VER
-                    shutdown(it->second.socket, SD_BOTH);
+                    shutdown(it->second->socket, SD_BOTH);
 #else
-                    shutdown(it->second.socket, SHUT_RDWR);
+                    shutdown(it->second->socket, SHUT_RDWR);
 #endif
                 }
             }
@@ -1047,24 +1064,26 @@ struct Overload {
             // Transmit/Receive lazy-spawns workers bound to the NEW socket (emplace alone would no-op).
             if (key == (unsigned long long)peerTcp4Protocol)
                 return EFI_SUCCESS;
-            signalPerSocketWorkers(it->second);
-            if (it->second.socket != INVALID_SOCKET) {
-                closesocket(it->second.socket);
-                it->second.socket = INVALID_SOCKET;
+            signalPerSocketWorkers(*it->second);
+            if (it->second->socket != INVALID_SOCKET) {
+                closesocket(it->second->socket);
+                it->second->socket = INVALID_SOCKET;
             }
-            it->second = data;
+            // New shared_ptr (not in-place assign): a detached thread still holding the old one keeps
+            // the old TcpData alive until it exits.
+            it->second = std::make_shared<TcpData>(data);
             return EFI_SUCCESS;
         }
-        tcpDataMap.emplace(key, data);
+        tcpDataMap.emplace(key, std::make_shared<TcpData>(data));
         return EFI_SUCCESS;
     }
 
     // Note: Only global tcp4Protocol call this function, peers don't call
     static EFI_STATUS Accept(IN void* This, IN EFI_TCP4_LISTEN_TOKEN* ListenToken, IN void* peer) {
-        TcpData* tcpData = nullptr;
+        std::shared_ptr<TcpData> tcpData;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpData = &tcpDataMap[key];
+            tcpData = tcpDataMap[key];
         }
         else {
             logToConsole(L"No Tcp Data For Global Tcp Connect!");
@@ -1133,10 +1152,10 @@ struct Overload {
     }
 
     static EFI_STATUS Connect(IN void* This, IN EFI_TCP4_CONNECTION_TOKEN* ConnectionToken) {
-        TcpData* tcpData = nullptr;
+        std::shared_ptr<TcpData> tcpData;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpData = &tcpDataMap[key];
+            tcpData = tcpDataMap[key];
         }
         else {
             logToConsole(L"No Tcp Data For This Connect!");

@@ -108,6 +108,15 @@ public:
     void arm()
     {
         std::lock_guard<std::mutex> g(mtx);
+        // Purge any orphan /s/ pages left on disk by a prior window (failed commit-rename / crash /
+        // commit race) so this window starts from a clean divert dir. Clear shadowDir too so ensure()
+        // recreates the dirs fresh on the next writeDir.
+        for (const auto& kv : shadowDir)
+        {
+            std::error_code ec;
+            std::filesystem::remove_all(kv.first + "/s", ec);
+        }
+        shadowDir.clear();
         written.clear();
         gShadowPoisoned.store(false, std::memory_order_release);
         active.store(true, std::memory_order_release);
@@ -132,8 +141,12 @@ public:
     {
         if (!active.load(std::memory_order_acquire)) return realDir;
         std::lock_guard<std::mutex> g(mtx);
-        auto it = shadowDir.find(wchar_to_string(realDir));
+        std::string realUtf8 = wchar_to_string(realDir);
+        auto it = shadowDir.find(realUtf8);
         if (it == shadowDir.end()) return realDir;
+        // Divert to /s/ ONLY if this window actually wrote the page (the `written` set) — not merely
+        // because a /s/ file exists on disk, which could be a stale orphan from a prior window.
+        if (!written.count({ realUtf8, wchar_to_string(pageName) })) return realDir;
         if (getFileSize((CHAR16*)pageName, it->second.data()) < 0) return realDir;
         return it->second.data();
     }

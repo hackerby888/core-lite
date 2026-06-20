@@ -2525,6 +2525,7 @@ public:
         uint64_t storageBytesUsed = 8;
         for (uint32_t queryIndex = 0; queryIndex < oracleQueryCount; ++queryIndex)
         {
+            PinScope _pinScope; // release per-query swap-page pins each iteration (debug+UEFI-only consistency check)
             const OracleQueryMetadata& oqm = queries[queryIndex];
             ASSERT(oqm.interfaceIndex < OI::oracleInterfacesCount);
             ASSERT(oqm.queryId);

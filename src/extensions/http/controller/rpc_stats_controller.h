@@ -238,17 +238,18 @@ public:
         data["currentTick"] = system.tick;
         data["ticksInCurrentEpoch"] = system.tick - system.initialTick;
         unsigned int emptyTicks = 0;
+        // Per-iteration lock + PinScope: a whole-epoch scan must not hold tickDataLock across the loop
+        // (starves the tick processor) nor accumulate a swap-page pin per tick (exhausts the cache -> exit(1)).
+        for (unsigned int tick = system.initialTick; tick < system.tick; tick++)
         {
+            PinScope _pinScope;
             TickStorage::tickData.acquireLock();
-           for (unsigned int tick = system.initialTick; tick < system.tick; tick++)
-           {
-               TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
-               if (!tickData)
-               {
-                   emptyTicks++;
-               }
-           }
+            const bool empty = (TickStorage::tickData.getByTickIfNotEmpty(tick) == nullptr);
             TickStorage::tickData.releaseLock();
+            if (empty)
+            {
+                emptyTicks++;
+            }
         }
         data["emptyTicksInCurrentEpoch"] = emptyTicks;
         data["epochTickQuality"] = system.tick - system.initialTick == 0 ? 0 : std::roundf((float)(system.tick - system.initialTick - emptyTicks) / (float)(system.tick - system.initialTick) * 100000.0f) / 100000.0f;
