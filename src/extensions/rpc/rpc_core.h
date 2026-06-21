@@ -19,6 +19,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include "json/json.h"
+#include "extensions/fork_census.h"   // SmartSharedMutex (census-aware gRpcDispatchLock)
 
 // ---------------- request / response ----------------
 struct RpcReq
@@ -178,7 +179,7 @@ inline std::atomic<bool> gRpcNodeReady{ false };
 
 // Fork-safety: dispatch takes a SHARED lock; bspForkPoint takes it EXCLUSIVE before fork() so no
 // handler holds a node lock at fork. Reinit in the child.
-inline std::shared_mutex gRpcDispatchLock;
+inline SmartSharedMutex gRpcDispatchLock{ "gRpcDispatchLock" };
 
 inline void rpcUnixHandleConn(int c)
 {
@@ -208,7 +209,7 @@ inline void rpcUnixHandleConn(int c)
         // detached thread with no tickProcessor PinScope, so without this the pins leak permanently
         // (thread_local arena dies unreleased) until the swapVM hits "all cache pages pinned".
         PinScope _pinScope;
-        std::shared_lock<std::shared_mutex> g(gRpcDispatchLock);
+        std::shared_lock<SmartSharedMutex> g(gRpcDispatchLock);
         resp = gRpc.dispatch(req);
     }
 

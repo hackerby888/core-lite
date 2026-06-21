@@ -82,7 +82,7 @@ private:
 
     static std::mutex& clientStatsMutex()
     {
-        static std::mutex m;
+        static std::mutex m;   // SMARTMUTEX-EXEMPT: HTTP per-client stats; non-consensus, runs only in the drogon/sidecar HTTP thread
         return m;
     }
 

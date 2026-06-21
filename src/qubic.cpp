@@ -84,6 +84,7 @@
 #include "platform/m256.h"
 #include "platform/concurrency.h"
 #include "platform/concurrency_impl.h"
+#include "extensions/fork_census.h"   // SmartMutex/SmartSharedMutex (census-aware; before overload.h/rpc_core.h)
 // TODO: Use "long long" instead of "int" for DB indices
 
 
@@ -525,6 +526,7 @@ static inline bool isMainMode()
 static bool isLastTickInEpoch();
 // These headers reference logToConsole/isMainMode (above), so include them after.
 #include "extensions/supervisor_shim.h"
+#include "extensions/fork_stats.h"          // unforkable-tick counters + durable log (used by tick_fork_rollback + bspForkPoint)
 #include "extensions/tick_fork_rollback.h"
 #include "extensions/rpc/rpc_routes.h"
 #include "extensions/missing_tx_debug.h"
@@ -8580,7 +8582,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
         _exit(71);
     }
 #if defined(__linux__) && !defined(NO_RPC)
-    new (&gRpcDispatchLock) std::shared_mutex();   // inherited locked across fork; reset (like networkingLock)
+    new (&gRpcDispatchLock) SmartSharedMutex("gRpcDispatchLock");   // inherited locked across fork; reset (like networkingLock)
     if (gRpcUnixListenFd >= 0) { close(gRpcUnixListenFd); gRpcUnixListenFd = -1; }  // close inherited listener (else +1 fd/promote)
     gRpcUnixRunning = false;                       // inherited unix-server thread is gone; re-bind the socket
     rpcUnixStart(rpcUnixPath(httpPort));
@@ -8607,6 +8609,32 @@ static void bspForkPoint()
     // that didn't) so the child can't inherit an orphan LOADING cache slot. resetPinsForChildPromote backstops a straggler.
     if (!ts.drainSwapIoForFork(1000)) tickForkLog("warn: swap in-flight IO drain timed out before fork");
     if (gForkBench) gForkQuiesceNs = tickForkNowNs() - q0;
+
+    // Fork-eligibility gate (no lock list): if any thread but this BSP still holds a node lock (spin via
+    // the census, mutex via SmartMutex), the child would inherit it locked -> skip the fork and run this
+    // tick strict instead (degrade, never crash). Bounded wait first for a handler about to release.
+    if (gForkCensus)
+    {
+        long long censusDeadline = tickForkNowNs() + 50000000LL;   // 50ms grace for a transient holder
+        while (forkCensusSumExcept() != 0 && tickForkNowNs() < censusDeadline)
+            _mm_pause();
+        if (forkCensusSumExcept() != 0)
+        {
+            const char* off = forkCensusOffender();
+            Overload::networkingLock.unlock();
+#if !defined(NO_RPC)
+            gRpcDispatchLock.unlock();
+#endif
+            Overload::eventMapLock.unlock();
+            ForkStats::onForkSkipped(ForkStats::CENSUS, (unsigned)system.tick, off ? off : "?");
+            fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n",
+                    off ? off : "?", (unsigned)system.tick);
+            fflush(stderr);
+            tickFork::gChildPid = -1;       // route establishCheckpoint to its existing strict fallback
+            tickFork::gForkRequest = false;
+            return;
+        }
+    }
 
     tickForkLog("BSP fork: locks held, calling fork() now");   // if no 'fork() returned' follows -> fork() itself stalled
     long long f0 = gForkBench ? tickForkNowNs() : 0;
@@ -8637,7 +8665,11 @@ static void bspForkPoint()
     gRpcDispatchLock.unlock();
 #endif
     Overload::eventMapLock.unlock();   // child reinits it (placement-new) in resetForChildPromote
-    if (pid < 0) tickForkLog("fork() failed -> parent strict fallback (no checkpoint)");
+    if (pid < 0)
+    {
+        tickForkLog("fork() failed -> parent strict fallback (no checkpoint)");
+        ForkStats::onForkSkipped(ForkStats::FORK_FAIL, (unsigned)system.tick, "");
+    }
     tickFork::gChildPid = pid;   // >=0 on success, -1 on failure
     tickFork::gForkRequest = false;
 }
@@ -9442,6 +9474,7 @@ void processArgs(int argc, const char* argv[]) {
         ("fork-force-match", "TEST: force the fork verdict to take the match branch (commit + kill child)", cxxopts::value<bool>())
         ("fork-force-mismatch", "TEST: force the fork verdict to take the mismatch branch (promote child + parent _exit)", cxxopts::value<bool>())
         ("fork-bench", "TEST: print per-fork timing + RSS", cxxopts::value<bool>())
+        ("no-fork-census", "Disable the fork-eligibility lock census (default on; gate enforcement only)", cxxopts::value<bool>())
         ("fork-force-rollback-every", "TEST: force a fork + single-tick rollback (to tick-1) every N ticks (0=off)", cxxopts::value<unsigned int>()->default_value("0"))
         ("fbis-count", "TEST: number of solution txs to inject per tick (with --fbis)", cxxopts::value<int>()->default_value("1"))
         ("fbis-same", "TEST: inject all --fbis solutions from one computor (drains it -> out-of-qus)", cxxopts::value<bool>())
@@ -9491,6 +9524,10 @@ void processArgs(int argc, const char* argv[]) {
     if (result.count("fork-bench")) {
         gForkBench = true;
         logColorToScreen("INFO", "TEST: per-fork timing + RSS benchmark enabled");
+    }
+    if (result.count("no-fork-census")) {
+        gForkCensus = false;
+        logColorToScreen("INFO", "fork-eligibility census DISABLED (--no-fork-census)");
     }
     if (result.count("fork-force-rollback-every")) {
         gForkForceRollbackEvery = result["fork-force-rollback-every"].as<unsigned int>();

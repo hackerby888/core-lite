@@ -6,12 +6,17 @@
 #include "platform/file_io.h"        // CHAR16, createDir, getFileSize, setText (via console_logging.h)
 #include "extensions/disk_shadow.h"  // gShadow, DiskShadow (must precede virtual_memory.h; not included here)
 #include "extensions/swapvm_dirty_track.h"
+#include "platform/concurrency.h"    // fork-eligibility census (forkCensusEnter/Leave/SumExcept/Offender)
+#include "extensions/fork_census.h"  // SmartMutex / SmartSharedMutex
+#include "extensions/fork_stats.h"   // ForkStats (unforkable-tick counters + durable log)
 
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
+#include <thread>
+#include <atomic>
 #if defined(__linux__)
 #include <cstdlib>   // posix_memalign, free
 #endif
@@ -252,3 +257,117 @@ TEST(ForkRollbackDirtyTrack, OverflowGuardCapsPoolCount)
 }
 
 #endif // __linux__
+
+// ---------------------------------------------------------------------------------------------------
+// Fork-eligibility census: the choke-point that replaces a hand-maintained lock list.
+// ---------------------------------------------------------------------------------------------------
+
+// 11. A lock held by the CALLING thread is excluded (BSP self-exclusion); a lock held by ANOTHER
+//     thread is counted and named; once that thread exits, its slot frees and the count returns to 0
+//     (proves the global-slot design does not dangle on a short-lived thread).
+TEST(ForkCensus, SelfExcludedOtherCounted)
+{
+    forkCensusEnter("selfHeld");
+    EXPECT_EQ(forkCensusSumExcept(), 0);   // only this thread holds -> excluded from its own gate view
+    forkCensusLeave();
+    EXPECT_EQ(forkCensusSumExcept(), 0);
+
+    std::atomic<bool> held{ false }, release{ false };
+    std::thread t([&] {
+        forkCensusEnter("otherThreadLock");
+        held.store(true, std::memory_order_release);
+        while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+        forkCensusLeave();
+    });
+    while (!held.load(std::memory_order_acquire)) std::this_thread::yield();
+
+    EXPECT_GE(forkCensusSumExcept(), 1);                 // the other thread's held lock is visible
+    const char* off = forkCensusOffender();
+    ASSERT_NE(off, nullptr);
+    EXPECT_NE(std::string(off).find("otherThreadLock"), std::string::npos);
+
+    release.store(true, std::memory_order_release);
+    t.join();
+    EXPECT_EQ(forkCensusSumExcept(), 0);                 // slot freed at thread exit; no dangling read
+    EXPECT_EQ(forkCensusOffender(), nullptr);
+}
+
+// 12. SmartMutex / SmartSharedMutex (incl. the shared path RPC handlers take) feed the same census, so
+//     a non-AP mutex holder trips the gate exactly like a spin-lock. Verified cross-thread.
+TEST(ForkCensus, SmartMutexCounted)
+{
+    SmartMutex sm{ "smTest" };
+    SmartSharedMutex ss{ "ssTest" };
+
+    // exclusive SmartMutex held by another thread is counted
+    {
+        std::atomic<bool> held{ false }, release{ false };
+        std::thread t([&] {
+            std::lock_guard<SmartMutex> g(sm);
+            held.store(true, std::memory_order_release);
+            while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+        });
+        while (!held.load(std::memory_order_acquire)) std::this_thread::yield();
+        EXPECT_GE(forkCensusSumExcept(), 1);
+        release.store(true, std::memory_order_release);
+        t.join();
+        EXPECT_EQ(forkCensusSumExcept(), 0);
+    }
+    // shared SmartSharedMutex held by another thread is counted (the gRpcDispatchLock shared path)
+    {
+        std::atomic<bool> held{ false }, release{ false };
+        std::thread t([&] {
+            std::shared_lock<SmartSharedMutex> g(ss);
+            held.store(true, std::memory_order_release);
+            while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+        });
+        while (!held.load(std::memory_order_acquire)) std::this_thread::yield();
+        EXPECT_GE(forkCensusSumExcept(), 1);
+        release.store(true, std::memory_order_release);
+        t.join();
+        EXPECT_EQ(forkCensusSumExcept(), 0);
+    }
+}
+
+// 13. ForkStats: recorders move the counters and append the COMPLETE record (one durable line per
+//     unforkable tick, not a ring).
+TEST(ForkStatsTest, CountersAndDurableLog)
+{
+    std::filesystem::remove(ForkStats::kLogPath);
+
+    unsigned long long total0 = ForkStats::forksSkippedTotal.load();
+    unsigned long long census0 = ForkStats::skipByReason[ForkStats::CENSUS].load();
+    unsigned long long ok0 = ForkStats::forksOk.load();
+    unsigned long long mm0 = ForkStats::mismatches.load();
+
+    ForkStats::onForkOk();
+    ForkStats::onVerdict(true);   // mismatch
+    ForkStats::onForkSkipped(ForkStats::CENSUS, 1001, "spectrumLock @ x");
+    ForkStats::onForkSkipped(ForkStats::CENSUS, 1002, "tickDataLock @ y");
+    ForkStats::onForkSkipped(ForkStats::PARK_TIMEOUT, 1003, "");
+
+    EXPECT_EQ(ForkStats::forksOk.load() - ok0, 1u);
+    EXPECT_EQ(ForkStats::mismatches.load() - mm0, 1u);
+    EXPECT_EQ(ForkStats::forksSkippedTotal.load() - total0, 3u);
+    EXPECT_EQ(ForkStats::skipByReason[ForkStats::CENSUS].load() - census0, 2u);
+    EXPECT_EQ(ForkStats::lastSkipTick.load(), 1003u);
+    EXPECT_EQ(ForkStats::lastSkipReason.load(), (int)ForkStats::PARK_TIMEOUT);
+
+    // durable log holds every skipped tick (3 lines), with tick + reason
+    std::string all = ForkStats::readLogAll();
+    int lines = 0;
+    for (char c : all) if (c == '\n') lines++;
+    EXPECT_EQ(lines, 3);
+    EXPECT_NE(all.find("tick=1001"), std::string::npos);
+    EXPECT_NE(all.find("tick=1002"), std::string::npos);
+    EXPECT_NE(all.find("tick=1003"), std::string::npos);
+    EXPECT_NE(all.find("reason=census"), std::string::npos);
+    EXPECT_NE(all.find("reason=park_timeout"), std::string::npos);
+
+    // summary JSON reflects the counters
+    std::string js = ForkStats::summaryJson();
+    EXPECT_NE(js.find("\"forksSkippedTotal\""), std::string::npos);
+    EXPECT_NE(js.find("\"lastUnforkable\""), std::string::npos);
+
+    std::filesystem::remove(ForkStats::kLogPath);
+}

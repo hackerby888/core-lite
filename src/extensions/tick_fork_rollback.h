@@ -104,11 +104,13 @@ namespace tickFork
     {
         if (gForkBench) { gForkWindowStartNs = tickForkNowNs(); gForkRssBeforeKb = tickForkRssKb(); }
         tickForkLog("checkpoint -> request BSP fork");
+        ForkStats::onForkRequested();
         // Bounded: a wedged request processor must not hang the fork. On timeout, score this tick strict.
         if (!parkRequestProcessors(5000000000LL))
         {
             unparkRequestProcessors();
             gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
+            ForkStats::onForkSkipped(ForkStats::PARK_TIMEOUT, (unsigned)system.tick, "");
             tickForkLog("park barrier timeout -> scoring this tick strict (no fork)");
             return;
         }
@@ -119,6 +121,7 @@ namespace tickFork
         {
             gForkQuiesceRequest = false;
             gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
+            ForkStats::onForkSkipped(ForkStats::PIPE_FAIL, (unsigned)system.tick, "");
             tickForkLog("pipe() failed -> scoring this tick strict (no fork)");
             return;
         }
@@ -151,6 +154,7 @@ namespace tickFork
         close(gPipe[0]);                            // parent keeps the write end across the window
         gForkQuiesceRequest = false;                // release request processors
         gCheckpointTick = (unsigned)system.tick;
+        ForkStats::onForkOk();
         tickForkLog("parent: checkpoint forked, optimistic processTick ahead");
     }
 
@@ -249,6 +253,8 @@ namespace tickFork
                 gForkRssBeforeKb / 1024, rssNow / 1024, (rssNow - gForkRssBeforeKb) / 1024);
             fflush(stderr);
         }
+
+        ForkStats::onVerdict(mismatch);
 
         if (!mismatch)
         {

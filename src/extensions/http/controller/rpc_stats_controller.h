@@ -1,6 +1,7 @@
 #pragma once
 #include "../utils.h"
 #include "extensions/utils.h"
+#include "extensions/fork_stats.h"   // ForkStats (unforkable-tick observability)
 
 #include <cmath>
 #include <drogon/HttpController.h>
@@ -19,7 +20,47 @@ public:
     ADD_METHOD_TO(RpcStatsController::txStats, "/v1/tx-stats", Get);
     ADD_METHOD_TO(RpcStatsController::tickBench, "/v1/tick-bench", Get);
     ADD_METHOD_TO(RpcStatsController::peerStats, "/v1/peer-stats", Get);
+    ADD_METHOD_TO(RpcStatsController::forkStats, "/v1/fork-stats", Get);
+    ADD_METHOD_TO(RpcStatsController::unforkableTicks, "/v1/unforkable-ticks", Get);
     METHOD_LIST_END
+
+    // Fork-rollback observability: summary counters; the complete record is unforkableTicks.
+    inline void forkStats(const HttpRequestPtr &req,
+                          std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        using namespace std;
+        Json::Value result;
+        result["forksRequested"] = Json::UInt64(ForkStats::forksRequested.load(memory_order_relaxed));
+        result["forksOk"] = Json::UInt64(ForkStats::forksOk.load(memory_order_relaxed));
+        result["forksSkippedTotal"] = Json::UInt64(ForkStats::forksSkippedTotal.load(memory_order_relaxed));
+        Json::Value skip;
+        skip["census"] = Json::UInt64(ForkStats::skipByReason[ForkStats::CENSUS].load(memory_order_relaxed));
+        skip["parkTimeout"] = Json::UInt64(ForkStats::skipByReason[ForkStats::PARK_TIMEOUT].load(memory_order_relaxed));
+        skip["pipeFail"] = Json::UInt64(ForkStats::skipByReason[ForkStats::PIPE_FAIL].load(memory_order_relaxed));
+        skip["forkFail"] = Json::UInt64(ForkStats::skipByReason[ForkStats::FORK_FAIL].load(memory_order_relaxed));
+        result["skip"] = skip;
+        result["matches"] = Json::UInt64(ForkStats::matches.load(memory_order_relaxed));
+        result["mismatches"] = Json::UInt64(ForkStats::mismatches.load(memory_order_relaxed));
+        Json::Value last;
+        int lr = ForkStats::lastSkipReason.load(memory_order_relaxed);
+        const char *off = ForkStats::lastOffender.load(memory_order_relaxed);
+        last["tick"] = Json::UInt(ForkStats::lastSkipTick.load(memory_order_relaxed));
+        last["reason"] = lr >= 0 ? ForkStats::reasonName(lr) : "";
+        last["offender"] = off ? off : "";
+        result["lastUnforkable"] = last;
+        cb(HttpResponse::newHttpJsonResponse(result));
+    }
+
+    // Complete durable record of every unforkable tick (not a recent ring).
+    inline void unforkableTicks(const HttpRequestPtr &req,
+                                std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        (void)req;
+        auto resp = HttpResponse::newHttpResponse();
+        resp->setContentTypeCode(CT_TEXT_PLAIN);
+        resp->setBody(ForkStats::readLogAll());
+        cb(resp);
+    }
 
     // Peer connection state + disconnect-reason counters (why handshaked peers drop).
     inline void peerStats(const HttpRequestPtr &req,

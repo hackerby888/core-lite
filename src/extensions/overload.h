@@ -49,6 +49,7 @@ static volatile bool listOfPeersIsStaticLiteNode = false;
 #undef CreateEvent
 #define CreateEvent CreateEvent
 #include "platform/console_logging.h"
+#include "extensions/fork_census.h"   // SmartMutex (census-aware networkingLock/eventMapLock)
 
 //////////// Custom Data \\\\\\\\\\\
 
@@ -353,7 +354,7 @@ enum class ConnectStatus
 struct Overload {
 
     struct PerSocketIo {
-        std::mutex mtx;
+        std::mutex mtx;   // SMARTMUTEX-EXEMPT: per-socket IO lock, dropped via tcpDataMap.clear() in resetForChildPromote; never held over node state
         std::condition_variable cv;
         EFI_TCP4_IO_TOKEN* pendingToken = nullptr;
         bool hasPending = false;
@@ -387,8 +388,8 @@ struct Overload {
     inline static std::unordered_map<unsigned long long, bool> isReceiveThreadSetupMap;
     inline static std::unordered_map<unsigned long long, bool> isSendThreadSetupMap;
 
-    inline static std::mutex networkingLock;
-    inline static std::mutex eventMapLock; // guards eventDataMap (CreateEvent/CloseEvent on main vs callback lookup on AP worker threads)
+    inline static SmartMutex networkingLock{ "networkingLock" };   // census-aware: a non-AP holder at fork trips the gate
+    inline static SmartMutex eventMapLock{ "eventMapLock" };       // guards eventDataMap (CreateEvent/CloseEvent on main vs callback lookup on AP worker threads)
 
     // After a fork the promoted child inherits the parent's TCP maps + socket fds but none of the
     // per-socket worker threads (only the calling thread survives fork). Drop the per-peer state
@@ -415,8 +416,8 @@ struct Overload {
             tcpDataMap.emplace(listenKey, listenData);
         }
 
-        new (&networkingLock) std::mutex();
-        new (&eventMapLock) std::mutex();
+        new (&networkingLock) SmartMutex("networkingLock");
+        new (&eventMapLock) SmartMutex("eventMapLock");
     }
 
     // Signal a TcpData's per-socket send/recv workers to exit. Each worker holds its own shared_ptr,
@@ -498,7 +499,7 @@ struct Overload {
             bool found = false;
             {
                 // Copy under lock, call the callback outside it (the callback may re-enter Create/CloseEvent).
-                std::lock_guard<std::mutex> lk(eventMapLock);
+                std::lock_guard<SmartMutex> lk(eventMapLock);
                 auto it = eventDataMap.find((unsigned long long)WaitEvent);
                 if (it != eventDataMap.end()) {
                     notifyFn = it->second.notifyFunction;
@@ -579,7 +580,7 @@ struct Overload {
     }
 
     static EFI_STATUS OpenProtocol(IN EFI_HANDLE Handle, IN EFI_GUID* Protocol, OUT void** Interface OPTIONAL, IN EFI_HANDLE AgentHandle, IN EFI_HANDLE ControllerHandle, IN unsigned int Attributes) {
-        std::lock_guard<std::mutex> lock(networkingLock);
+        std::lock_guard<SmartMutex> lock(networkingLock);
 
         if (Handle == nullptr || Protocol == nullptr || Interface == nullptr) {
             return EFI_INVALID_PARAMETER;
@@ -629,7 +630,7 @@ struct Overload {
             eventData.event = *Event;
             eventData.context = NotifyContext;
             eventData.notifyFunction = NotifyFunction;
-            { std::lock_guard<std::mutex> lk(eventMapLock); eventDataMap[(unsigned long long) * Event] = eventData; }
+            { std::lock_guard<SmartMutex> lk(eventMapLock); eventDataMap[(unsigned long long) * Event] = eventData; }
             return EFI_SUCCESS;
         }
 
@@ -641,7 +642,7 @@ struct Overload {
             eventData.event = *Event;
             eventData.context = NotifyContext;
             eventData.notifyFunction = NotifyFunction;
-            { std::lock_guard<std::mutex> lk(eventMapLock); eventDataMap[(unsigned long long) * Event] = eventData; }
+            { std::lock_guard<SmartMutex> lk(eventMapLock); eventDataMap[(unsigned long long) * Event] = eventData; }
             return EFI_SUCCESS;
         }
 
@@ -650,7 +651,7 @@ struct Overload {
     }
 
     static EFI_STATUS CloseEvent(IN EFI_EVENT Event) {
-        std::lock_guard<std::mutex> lk(eventMapLock);
+        std::lock_guard<SmartMutex> lk(eventMapLock);
         auto it = eventDataMap.find((unsigned long long)Event);
         if (it != eventDataMap.end()) {
             delete (unsigned long long*)Event; // Free the allocated memory for the event
@@ -1141,7 +1142,7 @@ struct Overload {
             // At this point we dont know the tcp4Protocol for this peer (tcp4Protocol will be inititialzed in peerConnectionNewlyEstablished())
             // so we map the clientSocket to the handle to process it later in peerConnectionNewlyEstablished()
             {
-                std::lock_guard<std::mutex> lock(networkingLock);
+                std::lock_guard<SmartMutex> lock(networkingLock);
                 incomingSocketMap[(unsigned long long)ListenToken->NewChildHandle] = clientSocket;
             }
             ListenToken->CompletionToken.Status = EFI_SUCCESS;

@@ -11,6 +11,7 @@
 #include <cmath>
 #include <algorithm>
 #include "extensions/rpc/rpc_core.h"
+#include "extensions/fork_stats.h"   // ForkStats (unforkable-tick observability)
 #include "extensions/http/controller/explorer_assets.generated.h"
 
 // Parse a JSON request body; null on failure (mirrors drogon req->getJsonObject()).
@@ -284,6 +285,25 @@ RPC_ROUTE("GET", "/v1/tx-stats")
     data["perTick"] = perTick;
     result["data"] = data;
     return jsonResp(result);
+}
+
+// Fork-rollback observability. Summary counters; the COMPLETE unforkable-tick record is on disk.
+RPC_ROUTE("GET", "/v1/fork-stats")
+{
+    (void)req;
+    RpcResp r;
+    r.body = ForkStats::summaryJson();   // contentType defaults to application/json
+    return r;
+}
+
+// The full durable record of every unforkable tick (not a recent ring) — one line per skipped fork.
+RPC_ROUTE("GET", "/v1/unforkable-ticks")
+{
+    (void)req;
+    RpcResp r;
+    r.contentType = "text/plain";
+    r.body = ForkStats::readLogAll();
+    return r;
 }
 
 RPC_ROUTE("GET", "/v1/issuers/:issuerIdentity/assets/:assetName/owners")

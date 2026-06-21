@@ -50,7 +50,7 @@ struct RateLimitBucket
     std::chrono::steady_clock::time_point lastSeen{};
 };
 
-inline std::mutex& rateLimitMutex() { static std::mutex m; return m; }
+inline std::mutex& rateLimitMutex() { static std::mutex m; return m; }   // SMARTMUTEX-EXEMPT: HTTP rate-limit map; non-consensus, runs only in the drogon/sidecar HTTP thread
 inline std::unordered_map<std::string, RateLimitBucket>& rateLimitBuckets()
 {
     static std::unordered_map<std::string, RateLimitBucket> b;

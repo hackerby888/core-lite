@@ -63,7 +63,7 @@ static inline void liteForkRequestPark()
 
 class DiskShadow
 {
-    std::mutex mtx;
+    std::mutex mtx;   // SMARTMUTEX-EXEMPT: shadow-dir lock, owner-reinit in reinitForChildPromote; provably not held across fork()
     std::map<std::string, std::vector<CHAR16>> shadowDir;     // real dir (utf8) -> shadow dir buffer
     std::set<std::pair<std::string, std::string>> written;   // (real dir utf8, page name utf8)
 
