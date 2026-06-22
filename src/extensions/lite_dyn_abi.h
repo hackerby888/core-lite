@@ -84,6 +84,8 @@ struct LiteHostServices {
     long long      (*numberOfShares)(const void* ctx, const void* asset, const void* ownSel, const void* posSel);
     long long      (*numberOfPossessedShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, unsigned short ownMgmt, unsigned short posMgmt);
     long long      (*transferShareOwnershipAndPossession)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, const void* newOwner32);
+    long long      (*acquireShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned short srcOwnMgmt, unsigned short srcPosMgmt, long long offeredFee);
+    long long      (*releaseShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned short dstOwnMgmt, unsigned short dstPosMgmt, long long offeredFee);
     unsigned char  (*distributeDividends)(const void* ctx, long long amountPerShare);
     // inter-contract calls (late-bound): run the callee's DEPLOYED code via the host dispatch tables.
     // returns 0 (NoCallError) on success, else an InterContractCallError code.

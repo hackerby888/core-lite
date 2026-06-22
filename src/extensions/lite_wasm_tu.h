@@ -56,6 +56,8 @@ LH_IMPORT(issueAsset)     long long lh_issueAsset(unsigned long long name, const
 LH_IMPORT(numberOfShares) long long lh_numberOfShares(const void* asset, const void* ownSel, const void* posSel);
 LH_IMPORT(numberOfPossessedShares) long long lh_numberOfPossessedShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, unsigned int om, unsigned int pm);
 LH_IMPORT(transferShareOwnershipAndPossession) long long lh_transferShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, const void* newOwner32);
+LH_IMPORT(acquireShares) long long lh_acquireShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned int srcOwnMgmt, unsigned int srcPosMgmt, long long offeredFee);
+LH_IMPORT(releaseShares) long long lh_releaseShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned int dstOwnMgmt, unsigned int dstPosMgmt, long long offeredFee);
 LH_IMPORT(distributeDividends) unsigned int lh_distributeDividends(long long amountPerShare);
 LH_IMPORT(liteCallFunction) int lh_liteCallFunction(unsigned int calleeIdx, unsigned int inputType, const void* in, unsigned int inSize, void* out, unsigned int outSize);
 LH_IMPORT(liteInvokeProcedure) int lh_liteInvokeProcedure(unsigned int calleeIdx, unsigned int inputType, const void* in, unsigned int inSize, void* out, unsigned int outSize, long long invocationReward);
@@ -120,6 +122,8 @@ long long QPI::QpiContextProcedureCall::issueAsset(unsigned long long n, const Q
 long long QPI::QpiContextFunctionCall::numberOfShares(const QPI::Asset& a, const QPI::AssetOwnershipSelect& o, const QPI::AssetPossessionSelect& p) const { return lh_numberOfShares(&a, &o, &p); }
 long long QPI::QpiContextFunctionCall::numberOfPossessedShares(unsigned long long n, const m256i& iss, const m256i& ow, const m256i& po, unsigned short om, unsigned short pm) const { return lh_numberOfPossessedShares(n, &iss, &ow, &po, om, pm); }
 long long QPI::QpiContextProcedureCall::transferShareOwnershipAndPossession(unsigned long long n, const m256i& iss, const m256i& ow, const m256i& po, long long sh, const m256i& no) const { return lh_transferShares(n, &iss, &ow, &po, sh, &no); }
+long long QPI::QpiContextProcedureCall::acquireShares(const QPI::Asset& asset, const m256i& ow, const m256i& po, long long sh, unsigned short so, unsigned short sp, long long fee) const { return lh_acquireShares(asset.assetName, &asset.issuer, &ow, &po, sh, so, sp, fee); }
+long long QPI::QpiContextProcedureCall::releaseShares(const QPI::Asset& asset, const m256i& ow, const m256i& po, long long sh, unsigned short dno, unsigned short dp, long long fee) const { return lh_releaseShares(asset.assetName, &asset.issuer, &ow, &po, sh, dno, dp, fee); }
 bool QPI::QpiContextProcedureCall::distributeDividends(long long a) const { return lh_distributeDividends(a); }
 QPI::uint16 QPI::QpiContextProcedureCall::setShareholderProposal(QPI::uint16 idx, const QPI::Array<QPI::uint8, 1024>& proposalDataBuffer, QPI::sint64 reward) const { return (QPI::uint16)lh_liteSetShareholderProposal(idx, &proposalDataBuffer, reward); }
 bool QPI::QpiContextProcedureCall::setShareholderVotes(QPI::uint16 idx, const QPI::ProposalMultiVoteDataV1& voteData, QPI::sint64 reward) const { return lh_liteSetShareholderVotes(idx, &voteData, sizeof(voteData), reward) != 0; }
