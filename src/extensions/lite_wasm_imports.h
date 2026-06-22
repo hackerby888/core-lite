@@ -121,6 +121,15 @@ static int64_t  w_issueAsset(wasm_exec_env_t e, uint64_t name, uint32_t iss, uin
 static int64_t  w_transferShares(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t own, uint32_t pos, int64_t shares, uint32_t no) { LWC; LWTRACE("transferShares", "name=" + std::to_string(name) + " shares=" + std::to_string(shares)); return g_liteHostServices.transferShareOwnershipAndPossession(cc->ctx, name, A2N(iss), A2N(own), A2N(pos), shares, A2N(no)); }
 static int64_t  w_acquireShares(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t own, uint32_t pos, int64_t shares, uint32_t so, uint32_t sp, int64_t fee) { LWC; LWTRACE("acquireShares", "name=" + std::to_string(name) + " shares=" + std::to_string(shares)); return g_liteHostServices.acquireShares(cc->ctx, name, A2N(iss), A2N(own), A2N(pos), shares, (unsigned short)so, (unsigned short)sp, fee); }
 static int64_t  w_releaseShares(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t own, uint32_t pos, int64_t shares, uint32_t dno, uint32_t dp, int64_t fee) { LWC; LWTRACE("releaseShares", "name=" + std::to_string(name) + " shares=" + std::to_string(shares)); return g_liteHostServices.releaseShares(cc->ctx, name, A2N(iss), A2N(own), A2N(pos), shares, (unsigned short)dno, (unsigned short)dp, fee); }
+static uint32_t w_dayOfWeek(wasm_exec_env_t e, uint32_t y, uint32_t m, uint32_t d) { LWC; return g_liteHostServices.dayOfWeek(cc->ctx, (unsigned char)y, (unsigned char)m, (unsigned char)d); }
+static uint32_t w_signatureValidity(wasm_exec_env_t e, uint32_t ent, uint32_t dig, uint32_t sig) { LWC; return g_liteHostServices.signatureValidity(cc->ctx, A2N(ent), A2N(dig), A2N(sig)); }
+static int64_t  w_bidInIPO(wasm_exec_env_t e, uint32_t idx, int64_t price, uint32_t qty) { LWC; return g_liteHostServices.bidInIPO(cc->ctx, idx, price, qty); }
+static void     w_ipoBidId(wasm_exec_env_t e, uint32_t idx, uint32_t bid, uint32_t out) { LWC; g_liteHostServices.ipoBidId(cc->ctx, idx, bid, A2N(out)); }
+static int64_t  w_ipoBidPrice(wasm_exec_env_t e, uint32_t idx, uint32_t bid) { LWC; return g_liteHostServices.ipoBidPrice(cc->ctx, idx, bid); }
+static void     w_computeMiningFunction(wasm_exec_env_t e, uint32_t s, uint32_t pk, uint32_t n, uint32_t out) { LWC; g_liteHostServices.computeMiningFunction(cc->ctx, A2N(s), A2N(pk), A2N(n), A2N(out)); }
+static void     w_initMiningSeed(wasm_exec_env_t e, uint32_t s) { LWC; g_liteHostServices.initMiningSeed(cc->ctx, A2N(s)); }
+static uint32_t w_getOracleQueryStatus(wasm_exec_env_t e, int64_t q) { LWC; return g_liteHostServices.getOracleQueryStatus(cc->ctx, q); }
+static uint32_t w_unsubscribeOracle(wasm_exec_env_t e, int32_t sub) { LWC; return g_liteHostServices.unsubscribeOracle(cc->ctx, sub); }
 static uint32_t w_distributeDividends(wasm_exec_env_t e, int64_t a) { LWC; LWTRACE("distributeDividends", std::to_string(a)); return g_liteHostServices.distributeDividends(cc->ctx, a); }
 static int32_t  w_liteCallFunction(wasm_exec_env_t e, uint32_t idx, uint32_t it, uint32_t in, uint32_t inSize, uint32_t out, uint32_t outSize) { LWC; LWTRACE("callFunction", "-> " + std::to_string(idx) + "/" + std::to_string(it)); return g_liteHostServices.liteCallFunction(cc->ctx, idx, (unsigned short)it, A2N(in), inSize, A2N(out), outSize); }
 static int32_t  w_liteInvokeProcedure(wasm_exec_env_t e, uint32_t idx, uint32_t it, uint32_t in, uint32_t inSize, uint32_t out, uint32_t outSize, int64_t reward) { LWC; LWTRACE("invokeProcedure", "-> " + std::to_string(idx) + "/" + std::to_string(it) + " reward " + std::to_string(reward)); return g_liteHostServices.liteInvokeProcedure(cc->ctx, idx, (unsigned short)it, A2N(in), inSize, A2N(out), outSize, reward); }
@@ -178,6 +187,15 @@ static int32_t  w_liteSetShareholderVotes(wasm_exec_env_t e, uint32_t idx, uint3
     HQ("transferShareOwnershipAndPossession", transferShareOwnershipAndPossession, w_transferShares, "(IiiiIi)I") \
     HQ("acquireShares",                       acquireShares,       w_acquireShares,              "(IiiiIiiI)I") \
     HQ("releaseShares",                       releaseShares,       w_releaseShares,              "(IiiiIiiI)I") \
+    HQ("dayOfWeek",                           dayOfWeek,           w_dayOfWeek,                  "(iii)i")   \
+    HQ("signatureValidity",                   signatureValidity,   w_signatureValidity,          "(iii)i")   \
+    HQ("bidInIPO",                            bidInIPO,            w_bidInIPO,                   "(iIi)I")   \
+    HQ("ipoBidId",                            ipoBidId,            w_ipoBidId,                   "(iii)")    \
+    HQ("ipoBidPrice",                         ipoBidPrice,         w_ipoBidPrice,                "(ii)I")    \
+    HQ("computeMiningFunction",               computeMiningFunction, w_computeMiningFunction,    "(iiii)")   \
+    HQ("initMiningSeed",                      initMiningSeed,      w_initMiningSeed,             "(i)")      \
+    HQ("getOracleQueryStatus",                getOracleQueryStatus, w_getOracleQueryStatus,      "(I)i")     \
+    HQ("unsubscribeOracle",                   unsubscribeOracle,   w_unsubscribeOracle,          "(i)i")     \
     HQ("distributeDividends",                 distributeDividends, w_distributeDividends,        "(I)i")     \
     HQ("liteCallFunction",                    liteCallFunction,    w_liteCallFunction,           "(iiiiii)i")  \
     HQ("liteInvokeProcedure",                 liteInvokeProcedure, w_liteInvokeProcedure,        "(iiiiiiI)i") \

@@ -86,6 +86,15 @@ struct LiteHostServices {
     long long      (*transferShareOwnershipAndPossession)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, const void* newOwner32);
     long long      (*acquireShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned short srcOwnMgmt, unsigned short srcPosMgmt, long long offeredFee);
     long long      (*releaseShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned short dstOwnMgmt, unsigned short dstPosMgmt, long long offeredFee);
+    unsigned char  (*dayOfWeek)(const void* ctx, unsigned char year, unsigned char month, unsigned char day);
+    unsigned char  (*signatureValidity)(const void* ctx, const void* entity32, const void* digest32, const void* signature64);
+    long long      (*bidInIPO)(const void* ctx, unsigned int ipoContractIndex, long long price, unsigned int quantity);
+    void           (*ipoBidId)(const void* ctx, unsigned int ipoContractIndex, unsigned int ipoBidIndex, void* out32);
+    long long      (*ipoBidPrice)(const void* ctx, unsigned int ipoContractIndex, unsigned int ipoBidIndex);
+    void           (*computeMiningFunction)(const void* ctx, const void* miningSeed32, const void* publicKey32, const void* nonce32, void* out32);
+    void           (*initMiningSeed)(const void* ctx, const void* miningSeed32);
+    unsigned char  (*getOracleQueryStatus)(const void* ctx, long long queryId);
+    unsigned char  (*unsubscribeOracle)(const void* ctx, int oracleSubscriptionId);
     unsigned char  (*distributeDividends)(const void* ctx, long long amountPerShare);
     // inter-contract calls (late-bound): run the callee's DEPLOYED code via the host dispatch tables.
     // returns 0 (NoCallError) on success, else an InterContractCallError code.

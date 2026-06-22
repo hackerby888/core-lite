@@ -81,6 +81,15 @@ static LiteHostServices g_liteHostServices = {
     .transferShareOwnershipAndPossession = +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, long long s, const void* no) -> long long { return ((QPI::QpiContextProcedureCall*)c)->transferShareOwnershipAndPossession(n, *(const m256i*)i, *(const m256i*)o, *(const m256i*)p, s, *(const m256i*)no); },
     .acquireShares = +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, long long s, unsigned short so, unsigned short sp, long long f) -> long long { return ((QPI::QpiContextProcedureCall*)c)->acquireShares(QPI::Asset{*(const m256i*)i, n}, *(const m256i*)o, *(const m256i*)p, s, so, sp, f); },
     .releaseShares = +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, long long s, unsigned short dno, unsigned short dp, long long f) -> long long { return ((QPI::QpiContextProcedureCall*)c)->releaseShares(QPI::Asset{*(const m256i*)i, n}, *(const m256i*)o, *(const m256i*)p, s, dno, dp, f); },
+    .dayOfWeek = +[](const void* c, unsigned char y, unsigned char m, unsigned char d) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->dayOfWeek(y, m, d); },
+    .signatureValidity = +[](const void* c, const void* e, const void* d, const void* s) -> unsigned char { return (unsigned char)((QPI::QpiContextFunctionCall*)c)->signatureValidity(*(const m256i*)e, *(const m256i*)d, *(const QPI::Array<QPI::sint8, 64>*)s); },
+    .bidInIPO = +[](const void* c, unsigned int i, long long p, unsigned int q) -> long long { return ((QPI::QpiContextProcedureCall*)c)->bidInIPO(i, p, q); },
+    .ipoBidId = +[](const void* c, unsigned int i, unsigned int b, void* o) -> void { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->ipoBidId(i, b); },
+    .ipoBidPrice = +[](const void* c, unsigned int i, unsigned int b) -> long long { return ((QPI::QpiContextFunctionCall*)c)->ipoBidPrice(i, b); },
+    .computeMiningFunction = +[](const void* c, const void* s, const void* p, const void* n, void* o) -> void { *(m256i*)o = ((QPI::QpiContextFunctionCall*)c)->computeMiningFunction(*(const m256i*)s, *(const m256i*)p, *(const m256i*)n); },
+    .initMiningSeed = +[](const void* c, const void* s) -> void { ((QPI::QpiContextFunctionCall*)c)->initMiningSeed(*(const m256i*)s); },
+    .getOracleQueryStatus = +[](const void* c, long long q) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->getOracleQueryStatus(q); },
+    .unsubscribeOracle = +[](const void* c, int s) -> unsigned char { return (unsigned char)((QPI::QpiContextProcedureCall*)c)->unsubscribeOracle(s); },
     .distributeDividends = +[](const void* c, long long a) -> unsigned char { return (unsigned char)((QPI::QpiContextProcedureCall*)c)->distributeDividends(a); },
     // liteCallFunction: run the callee's DEPLOYED function (table dispatch) under a nested context.
     .liteCallFunction = +[](const void* cc, unsigned int idx, unsigned short it, const void* in, unsigned int, void* out, unsigned int) -> int {

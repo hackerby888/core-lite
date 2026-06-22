@@ -58,6 +58,15 @@ LH_IMPORT(numberOfPossessedShares) long long lh_numberOfPossessedShares(unsigned
 LH_IMPORT(transferShareOwnershipAndPossession) long long lh_transferShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, const void* newOwner32);
 LH_IMPORT(acquireShares) long long lh_acquireShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned int srcOwnMgmt, unsigned int srcPosMgmt, long long offeredFee);
 LH_IMPORT(releaseShares) long long lh_releaseShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned int dstOwnMgmt, unsigned int dstPosMgmt, long long offeredFee);
+LH_IMPORT(dayOfWeek) unsigned int lh_dayOfWeek(unsigned int year, unsigned int month, unsigned int day);
+LH_IMPORT(signatureValidity) unsigned int lh_signatureValidity(const void* entity32, const void* digest32, const void* signature64);
+LH_IMPORT(bidInIPO) long long lh_bidInIPO(unsigned int ipoContractIndex, long long price, unsigned int quantity);
+LH_IMPORT(ipoBidId) void lh_ipoBidId(unsigned int ipoContractIndex, unsigned int ipoBidIndex, void* out32);
+LH_IMPORT(ipoBidPrice) long long lh_ipoBidPrice(unsigned int ipoContractIndex, unsigned int ipoBidIndex);
+LH_IMPORT(computeMiningFunction) void lh_computeMiningFunction(const void* miningSeed32, const void* publicKey32, const void* nonce32, void* out32);
+LH_IMPORT(initMiningSeed) void lh_initMiningSeed(const void* miningSeed32);
+LH_IMPORT(getOracleQueryStatus) unsigned int lh_getOracleQueryStatus(long long queryId);
+LH_IMPORT(unsubscribeOracle) unsigned int lh_unsubscribeOracle(int oracleSubscriptionId);
 LH_IMPORT(distributeDividends) unsigned int lh_distributeDividends(long long amountPerShare);
 LH_IMPORT(liteCallFunction) int lh_liteCallFunction(unsigned int calleeIdx, unsigned int inputType, const void* in, unsigned int inSize, void* out, unsigned int outSize);
 LH_IMPORT(liteInvokeProcedure) int lh_liteInvokeProcedure(unsigned int calleeIdx, unsigned int inputType, const void* in, unsigned int inSize, void* out, unsigned int outSize, long long invocationReward);
@@ -124,6 +133,15 @@ long long QPI::QpiContextFunctionCall::numberOfPossessedShares(unsigned long lon
 long long QPI::QpiContextProcedureCall::transferShareOwnershipAndPossession(unsigned long long n, const m256i& iss, const m256i& ow, const m256i& po, long long sh, const m256i& no) const { return lh_transferShares(n, &iss, &ow, &po, sh, &no); }
 long long QPI::QpiContextProcedureCall::acquireShares(const QPI::Asset& asset, const m256i& ow, const m256i& po, long long sh, unsigned short so, unsigned short sp, long long fee) const { return lh_acquireShares(asset.assetName, &asset.issuer, &ow, &po, sh, so, sp, fee); }
 long long QPI::QpiContextProcedureCall::releaseShares(const QPI::Asset& asset, const m256i& ow, const m256i& po, long long sh, unsigned short dno, unsigned short dp, long long fee) const { return lh_releaseShares(asset.assetName, &asset.issuer, &ow, &po, sh, dno, dp, fee); }
+unsigned char QPI::QpiContextFunctionCall::dayOfWeek(unsigned char year, unsigned char month, unsigned char day) const { return (unsigned char)lh_dayOfWeek(year, month, day); }
+QPI::bit QPI::QpiContextFunctionCall::signatureValidity(const m256i& entity, const m256i& digest, const QPI::Array<QPI::sint8, 64>& signature) const { return lh_signatureValidity(&entity, &digest, &signature) != 0; }
+long long QPI::QpiContextProcedureCall::bidInIPO(unsigned int ipoContractIndex, long long price, unsigned int quantity) const { return lh_bidInIPO(ipoContractIndex, price, quantity); }
+m256i QPI::QpiContextFunctionCall::ipoBidId(unsigned int ipoContractIndex, unsigned int ipoBidIndex) const { m256i r; lh_ipoBidId(ipoContractIndex, ipoBidIndex, &r); return r; }
+long long QPI::QpiContextFunctionCall::ipoBidPrice(unsigned int ipoContractIndex, unsigned int ipoBidIndex) const { return lh_ipoBidPrice(ipoContractIndex, ipoBidIndex); }
+m256i QPI::QpiContextFunctionCall::computeMiningFunction(const m256i miningSeed, const m256i publicKey, const m256i nonce) const { m256i r; lh_computeMiningFunction(&miningSeed, &publicKey, &nonce, &r); return r; }
+void QPI::QpiContextFunctionCall::initMiningSeed(const m256i miningSeed) const { lh_initMiningSeed(&miningSeed); }
+unsigned char QPI::QpiContextFunctionCall::getOracleQueryStatus(long long queryId) const { return (unsigned char)lh_getOracleQueryStatus(queryId); }
+bool QPI::QpiContextProcedureCall::unsubscribeOracle(int oracleSubscriptionId) const { return lh_unsubscribeOracle(oracleSubscriptionId) != 0; }
 bool QPI::QpiContextProcedureCall::distributeDividends(long long a) const { return lh_distributeDividends(a); }
 QPI::uint16 QPI::QpiContextProcedureCall::setShareholderProposal(QPI::uint16 idx, const QPI::Array<QPI::uint8, 1024>& proposalDataBuffer, QPI::sint64 reward) const { return (QPI::uint16)lh_liteSetShareholderProposal(idx, &proposalDataBuffer, reward); }
 bool QPI::QpiContextProcedureCall::setShareholderVotes(QPI::uint16 idx, const QPI::ProposalMultiVoteDataV1& voteData, QPI::sint64 reward) const { return lh_liteSetShareholderVotes(idx, &voteData, sizeof(voteData), reward) != 0; }
