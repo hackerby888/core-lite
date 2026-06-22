@@ -67,6 +67,10 @@ LH_IMPORT(computeMiningFunction) void lh_computeMiningFunction(const void* minin
 LH_IMPORT(initMiningSeed) void lh_initMiningSeed(const void* miningSeed32);
 LH_IMPORT(getOracleQueryStatus) unsigned int lh_getOracleQueryStatus(long long queryId);
 LH_IMPORT(unsubscribeOracle) unsigned int lh_unsubscribeOracle(int oracleSubscriptionId);
+LH_IMPORT(queryOracle) long long lh_queryOracle(unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int notificationProcId, unsigned int timeoutMillisec, long long fee);
+LH_IMPORT(subscribeOracle) int lh_subscribeOracle(unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int notificationProcId, unsigned int periodMillisec, unsigned int notifyPrev, long long fee);
+LH_IMPORT(getOracleQuery) unsigned int lh_getOracleQuery(long long queryId, void* out, unsigned int size);
+LH_IMPORT(getOracleReply) unsigned int lh_getOracleReply(long long queryId, void* out, unsigned int size);
 LH_IMPORT(distributeDividends) unsigned int lh_distributeDividends(long long amountPerShare);
 LH_IMPORT(liteCallFunction) int lh_liteCallFunction(unsigned int calleeIdx, unsigned int inputType, const void* in, unsigned int inSize, void* out, unsigned int outSize);
 LH_IMPORT(liteInvokeProcedure) int lh_liteInvokeProcedure(unsigned int calleeIdx, unsigned int inputType, const void* in, unsigned int inSize, void* out, unsigned int outSize, long long invocationReward);
@@ -142,6 +146,14 @@ m256i QPI::QpiContextFunctionCall::computeMiningFunction(const m256i miningSeed,
 void QPI::QpiContextFunctionCall::initMiningSeed(const m256i miningSeed) const { lh_initMiningSeed(&miningSeed); }
 unsigned char QPI::QpiContextFunctionCall::getOracleQueryStatus(long long queryId) const { return (unsigned char)lh_getOracleQueryStatus(queryId); }
 bool QPI::QpiContextProcedureCall::unsubscribeOracle(int oracleSubscriptionId) const { return lh_unsubscribeOracle(oracleSubscriptionId) != 0; }
+template <typename OracleInterface, typename ContractStateType, typename LocalsType>
+QPI::sint64 QPI::QpiContextProcedureCall::__qpiQueryOracle(const typename OracleInterface::OracleQuery& query, void (*)(const QPI::QpiContextProcedureCall&, ContractStateType&, QPI::OracleNotificationInput<OracleInterface>&, QPI::NoData&, LocalsType&), unsigned int notificationProcId, unsigned int timeoutMillisec) const { return lh_queryOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), notificationProcId, timeoutMillisec, OracleInterface::getQueryFee(query)); }
+template <typename OracleInterface, typename ContractStateType, typename LocalsType>
+QPI::sint32 QPI::QpiContextProcedureCall::__qpiSubscribeOracle(const typename OracleInterface::OracleQuery& query, void (*)(const QPI::QpiContextProcedureCall&, ContractStateType&, QPI::OracleNotificationInput<OracleInterface>&, QPI::NoData&, LocalsType&), unsigned int notificationProcId, unsigned int notificationPeriodInMilliseconds, bool notifyWithPreviousReply) const { return lh_subscribeOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), notificationProcId, notificationPeriodInMilliseconds, notifyWithPreviousReply ? 1u : 0u, OracleInterface::getSubscriptionFee(query, notificationPeriodInMilliseconds)); }
+template <typename OracleInterface>
+bool QPI::QpiContextFunctionCall::getOracleQuery(QPI::sint64 queryId, typename OracleInterface::OracleQuery& query) const { return lh_getOracleQuery(queryId, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery)) != 0; }
+template <typename OracleInterface>
+bool QPI::QpiContextFunctionCall::getOracleReply(QPI::sint64 queryId, typename OracleInterface::OracleReply& reply) const { return lh_getOracleReply(queryId, &reply, (unsigned int)sizeof(typename OracleInterface::OracleReply)) != 0; }
 bool QPI::QpiContextProcedureCall::distributeDividends(long long a) const { return lh_distributeDividends(a); }
 QPI::uint16 QPI::QpiContextProcedureCall::setShareholderProposal(QPI::uint16 idx, const QPI::Array<QPI::uint8, 1024>& proposalDataBuffer, QPI::sint64 reward) const { return (QPI::uint16)lh_liteSetShareholderProposal(idx, &proposalDataBuffer, reward); }
 bool QPI::QpiContextProcedureCall::setShareholderVotes(QPI::uint16 idx, const QPI::ProposalMultiVoteDataV1& voteData, QPI::sint64 reward) const { return lh_liteSetShareholderVotes(idx, &voteData, sizeof(voteData), reward) != 0; }
@@ -165,6 +177,13 @@ void QPI::QpiContextForInit::__registerUserProcedure(USER_PROCEDURE fn, unsigned
         unsigned short inSize, unsigned short outSize, unsigned int localsSize) const {
     if (g_wasmTuEntryCount >= LITE_MAX_USER_ENTRIES) return;
     g_wasmTuEntries[g_wasmTuEntryCount++] = { it, 1 /*PROCEDURE*/, inSize, outSize, localsSize, (void*)fn };
+}
+// Notification procedures (oracle reply callbacks) are dispatched by their synthetic procedureId; the lite
+// dispatch matches on the low 16 bits, so store that as the entry's inputType (qpi.h REGISTER_USER_PROCEDURE_NOTIFICATION).
+void QPI::QpiContextForInit::__registerUserProcedureNotification(USER_PROCEDURE fn, unsigned int procedureId,
+        unsigned short inSize, unsigned short outSize, unsigned int localsSize) const {
+    if (g_wasmTuEntryCount >= LITE_MAX_USER_ENTRIES) return;
+    g_wasmTuEntries[g_wasmTuEntryCount++] = { (unsigned short)procedureId, 1 /*PROCEDURE*/, inSize, outSize, localsSize, (void*)fn };
 }
 
 // ---- exported entry points the node calls (compiled when the contract type is defined) ----
