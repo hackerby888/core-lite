@@ -60,7 +60,11 @@ inline void onForkSkipped(int reason, unsigned int tick, const char* offender)
     char ts[32] = { 0 };
     time_t now = time(nullptr);
     struct tm tmv;
+#if defined(_WIN32)
+    gmtime_s(&tmv, &now);
+#else
     gmtime_r(&now, &tmv);
+#endif
     strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmv);
     fprintf(f, "%s tick=%u reason=%s offender=%s\n", ts, tick, reasonName(reason), offender ? offender : "");
     fclose(f);
