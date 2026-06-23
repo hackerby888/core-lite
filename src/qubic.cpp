@@ -8557,6 +8557,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     gShadow.reinitForChildPromote();   // inherited mtx may be held by a non-surviving thread
     gShadow.purgeOrphans();   // drop the parent's optimistic shadow; real page files are pristine
     ts.resetSwapPinsForChildPromote();   // drop swapVM pins leaked by non-surviving parent threads (else cache slots stay pinned -> fatal)
+    forkCensusResetForChildPromote();   // drop dead parent threads' census slots (else gCount grows per promote -> gOverflow -> forks disabled)
     gReRunStrict = true;                          // re-run strict from the checkpoint tick ...
     gReRunStrictUntilTick = strictUntilTick;      // ... through the mismatch tick (the window), then optimistic
     Overload::resetForChildPromote();  // drop inherited per-peer TCP state, keep the listen socket
@@ -8607,7 +8608,7 @@ static void bspForkPoint()
     Overload::eventMapLock.lock();   // eventDataMap is guarded only by this; hold it so the child snapshots a consistent map (a non-surviving AP worker mid CloseEvent would otherwise leave it torn + locked)
     // Wait out unlocked swap miss-IO (reset()/snapshot drain it; fork() is a third teardown boundary
     // that didn't) so the child can't inherit an orphan LOADING cache slot. resetPinsForChildPromote backstops a straggler.
-    if (!ts.drainSwapIoForFork(1000)) tickForkLog("warn: swap in-flight IO drain timed out before fork");
+    if (!ts.drainSwapIoForFork(tickFork::gForkQuiesceTimeoutMs)) tickForkLog("warn: swap in-flight IO drain timed out before fork");
     if (gForkBench) gForkQuiesceNs = tickForkNowNs() - q0;
 
     // Fork-eligibility gate (no lock list): if any thread but this BSP still holds a node lock (spin via
@@ -8615,8 +8616,8 @@ static void bspForkPoint()
     // tick strict instead (degrade, never crash). Bounded wait first for a handler about to release.
     if (gForkCensus)
     {
-        long long censusDeadline = tickForkNowNs() + 50000000LL;   // 50ms grace for a transient holder
-        while (forkCensusSumExcept() != 0 && tickForkNowNs() < censusDeadline)
+        long long censusDeadlineMs = tickForkNowMs() + 50;   // 50ms grace for a transient holder
+        while (forkCensusSumExcept() != 0 && tickForkNowMs() < censusDeadlineMs)
             _mm_pause();
         if (forkCensusSumExcept() != 0)
         {

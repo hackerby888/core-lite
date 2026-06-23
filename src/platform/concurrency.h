@@ -33,7 +33,8 @@ static long _InterlockedCompareExchange(volatile long *target, long exchange, lo
 // Counts node locks each thread holds (via ACQUIRE/RELEASE/TRY_ACQUIRE + SmartMutex in fork_census.h).
 // bspForkPoint verifies nobody but itself holds one before fork() (else it skips the fork and runs the
 // tick strict, no crash) -> the child never inherits a held lock. Global slots, not thread_local
-// pointers, so a short-lived thread can't dangle the gate read. ACQUIRE_WITHOUT_DEBUG_LOGGING is raw.
+// pointers, so a short-lived thread can't dangle the gate read. ACQUIRE_WITHOUT_DEBUG_LOGGING skips only
+// the busy-wait logger, not the census, so debugLogLock/mLock are counted too (balanced by RELEASE).
 inline thread_local int tlLockSlot = -1;   // this thread's census slot; -1 until first acquire
 
 namespace ForkCensus
@@ -134,24 +135,41 @@ namespace ForkCensus
                 return gSlots[i].what.load(std::memory_order_relaxed);
         return nullptr;
     }
+
+    // Fork child: dead parent threads' slots are never freed (Unreg runs only on a real thread exit), so
+    // reset the registry — else gCount grows per promote into a permanent gOverflow latch that kills all
+    // future forks. Single-threaded here (before spawnAPs).
+    inline void resetForChildPromote()
+    {
+        for (int i = 0; i < MAX_THREADS; i++)
+        {
+            gSlots[i].depth.store(0, std::memory_order_relaxed);
+            gSlots[i].what.store(nullptr, std::memory_order_relaxed);
+            gSlots[i].live.store(0, std::memory_order_relaxed);
+        }
+        gCount.store(0, std::memory_order_release);
+        gOverflow.store(false, std::memory_order_release);
+        ::tlLockSlot = -1;   // surviving thread re-claims a fresh slot on its next ACQUIRE
+    }
 }
 
 inline void forkCensusEnter(const char* what) { ForkCensus::enter(what); }
 inline void forkCensusLeave() { ForkCensus::leave(); }
 inline int forkCensusSumExcept() { return ForkCensus::sumExceptSelf(); }
 inline const char* forkCensusOffender() { return ForkCensus::offenderName(); }
+inline void forkCensusResetForChildPromote() { ForkCensus::resetForChildPromote(); }
 
 // Gates the fork-eligibility enforcement in bspForkPoint (counting itself is always on, ~free).
 // Disable with --no-fork-census.
 inline bool gForkCensus = true;
 
 // Acquire lock, may block
-#define ACQUIRE_WITHOUT_DEBUG_LOGGING(lock) while (_InterlockedCompareExchange8(&lock, 1, 0)) _mm_pause()
+#define ACQUIRE_WITHOUT_DEBUG_LOGGING(lock) do { while (_InterlockedCompareExchange8(&lock, 1, 0)) _mm_pause(); forkCensusEnter(#lock " @ " __FILE__); } while (0)
 
 #ifdef NDEBUG
 
 // Acquire lock, may block
-#define ACQUIRE(lock) do { ACQUIRE_WITHOUT_DEBUG_LOGGING(lock); forkCensusEnter(#lock " @ " __FILE__); } while (0)
+#define ACQUIRE(lock) ACQUIRE_WITHOUT_DEBUG_LOGGING(lock)
 
 #else
 

@@ -48,6 +48,7 @@ inline std::atomic<unsigned> gForkParkGen{ 0 };   // bumped per fork window; see
 #include <filesystem>
 #include <utility>
 #include <cstdlib>
+#include <unistd.h>
 
 // Called by request processors at loop top; parks while a fork window is set up.
 static inline void liteForkRequestPark()
@@ -130,6 +131,7 @@ public:
     {
         if (!active.load(std::memory_order_acquire)) return realDir;
         std::lock_guard<std::mutex> g(mtx);
+        if (!active.load(std::memory_order_acquire)) return realDir;   // re-check under mtx: commit()/discard() may have closed the window in the check->lock gap
         std::string realUtf8 = wchar_to_string(realDir);
         CHAR16* sd = ensure(realUtf8, realDir);
         std::string pageUtf8 = wchar_to_string(pageName);
@@ -143,6 +145,7 @@ public:
     {
         if (!active.load(std::memory_order_acquire)) return realDir;
         std::lock_guard<std::mutex> g(mtx);
+        if (!active.load(std::memory_order_acquire)) return realDir;   // re-check under mtx (see writeDir)
         std::string realUtf8 = wchar_to_string(realDir);
         auto it = shadowDir.find(realUtf8);
         if (it == shadowDir.end()) return realDir;
@@ -182,7 +185,7 @@ public:
             {
                 fprintf(stderr, "[SHADOW] FATAL: commit could not persist %s (disk failure) -> exit for restart from snapshot\n", to.c_str());
                 fflush(stderr);
-                exit(1);
+                _exit(1);   // not exit(): skip atexit/global dtors that would deadlock under the held mtx + gRpcDispatchLock
             }
         }
         clearWindow();

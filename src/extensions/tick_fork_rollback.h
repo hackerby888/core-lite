@@ -7,6 +7,7 @@
 #ifdef __linux__
 
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <cstdio>
@@ -27,6 +28,8 @@ static inline long long tickForkNowNs()
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
 }
+// Monotonic ms for timeouts (the ns above is for bench precision).
+static inline long long tickForkNowMs() { return tickForkNowNs() / 1'000'000LL; }
 static inline long tickForkRssKb()
 {
     FILE* f = fopen("/proc/self/status", "r");
@@ -77,19 +80,22 @@ namespace tickFork
     // stays alive across the window; match keeps it, mismatch rewinds+replays strict, staleness commits.
     inline unsigned int gForkWindowK = 32;
     inline unsigned int gCheckpointTick = 0;
+    // Deadline to quiesce fork writers (park request processors + drain in-flight swap IO) before a fork
+    // snapshot / shadow commit. Shared by establish/retire/verdict + bspForkPoint.
+    inline constexpr int gForkQuiesceTimeoutMs = 5'000;
 
     // Park the request processors at their liteForkRequestPark point (the swap-writer quiesce shared by the
     // fork snapshot and the shadow commit). Returns false if a processor fails to park before the deadline.
     // Leaves gForkQuiesceRequest set on success; the caller releases via unparkRequestProcessors().
-    inline bool parkRequestProcessors(long long timeoutNs)
+    inline bool parkRequestProcessors(int timeoutMs)
     {
         gForkParked.store(0, std::memory_order_release);
         gForkParkGen.fetch_add(1, std::memory_order_acq_rel);   // open a new park generation
         gForkQuiesceRequest = true;
-        long long deadline = tickForkNowNs() + timeoutNs;
+        long long deadline = tickForkNowMs() + timeoutMs;
         while (gForkParked.load(std::memory_order_acquire) < nRequestProcessorIDs)
         {
-            if (tickForkNowNs() > deadline) return false;
+            if (tickForkNowMs() > deadline) return false;
             std::this_thread::yield();
         }
         return true;
@@ -106,7 +112,7 @@ namespace tickFork
         tickForkLog("checkpoint -> request BSP fork");
         ForkStats::onForkRequested();
         // Bounded: a wedged request processor must not hang the fork. On timeout, score this tick strict.
-        if (!parkRequestProcessors(5000000000LL))
+        if (!parkRequestProcessors(gForkQuiesceTimeoutMs))
         {
             unparkRequestProcessors();
             gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
@@ -125,16 +131,20 @@ namespace tickFork
             tickForkLog("pipe() failed -> scoring this tick strict (no fork)");
             return;
         }
+        // O_CLOEXEC: a fork+exec helper (crash-reporter curl, sidecar) must not inherit the verdict pipe and
+        // hold its write end open, or a live checkpoint child would never see EOF on a parent crash.
+        fcntl(gPipe[0], F_SETFD, fcntl(gPipe[0], F_GETFD) | FD_CLOEXEC);
+        fcntl(gPipe[1], F_SETFD, fcntl(gPipe[1], F_GETFD) | FD_CLOEXEC);
         gShadow.arm();                              // parent disk writes -> shadow for the whole window
         gChildPid = -2;
         gForkRequest = true;                        // BSP forks at its loop-top
         // The BSP handoff is synchronous and fast; only a wedged/dead main loop stalls here. Reclaiming
         // on timeout would race a late fork into a rogue promoted child, so treat a true stall as fatal
         // and let the supervisor restart the node from its snapshot.
-        long long forkDeadline = tickForkNowNs() + 30000000000LL;
+        long long forkDeadlineMs = tickForkNowMs() + 30'000;
         while (gChildPid == -2)
         {
-            if (tickForkNowNs() > forkDeadline)
+            if (tickForkNowMs() > forkDeadlineMs)
             {
                 tickForkLog("BSP fork handoff stalled -> fatal exit for supervisor restart");
                 _exit(70);
@@ -163,16 +173,21 @@ namespace tickFork
     inline void retireCheckpoint()
     {
         tickForkLog("window complete -> commit shadow + reap checkpoint");
-        // commit() renames /s/<page> -> real. Window page writes run as unlocked miss-IO on the request
-        // processors + RPC handlers; a writeback racing the rename strands an orphan/torn /s page + a stale
-        // real file (wrong serve / boot exit(1) on the next USE_SWAP reload). Quiesce both swap-writer sets
-        // exactly as the fork does (park request procs + gRpcDispatchLock + drain) so none can start new IO.
-        if (!parkRequestProcessors(5000000000LL))
-            tickForkLog("warn: request-proc park timed out before commit (committing under RPC lock + drain)");
+        // commit() renames /s/<page> -> real and MUST run with the swap writers stopped: a writeback racing
+        // the rename strands an orphan/torn /s page + a stale real file (wrong serve / boot exit(1) on the
+        // next USE_SWAP reload). Quiesce both writer sets as the fork does (park request procs +
+        // gRpcDispatchLock + drain). If they won't quiesce, do NOT rename under a live writer -> exit so the
+        // pristine checkpoint child promotes + re-derives this (already quorum-matched) window.
+        bool quiesced = parkRequestProcessors(gForkQuiesceTimeoutMs);
 #if !defined(NO_RPC)
         gRpcDispatchLock.lock();
 #endif
-        if (!ts.drainSwapIoForFork(1000)) tickForkLog("warn: swap in-flight IO drain timed out before commit");
+        quiesced &= ts.drainSwapIoForFork(gForkQuiesceTimeoutMs);
+        if (!quiesced)
+        {
+            tickForkLog("FATAL: swap writers did not quiesce before commit -> exit, checkpoint child takes over");
+            _exit(70);
+        }
         gShadow.commit();
 #if !defined(NO_RPC)
         gRpcDispatchLock.unlock();
@@ -269,6 +284,14 @@ namespace tickFork
         // Mismatch: rewind to the checkpoint and replay [gCheckpointTick, system.tick] strict (target
         // sent to the child); discard the window's diverts so the child reads pristine pages.
         tickForkLog("verdict MISMATCH: rewind to checkpoint + parent _exit");
+        // Stop swap writers before discard()+_exit (mirror retireCheckpoint): an unparked eviction could
+        // else land an optimistic page on a REAL file shared with the child and tear it on _exit. try_lock
+        // the RPC set + short park: never block the mandatory rollback exit on a wedged handler.
+        parkRequestProcessors(gForkQuiesceTimeoutMs);
+#if !defined(NO_RPC)
+        gRpcDispatchLock.try_lock();
+#endif
+        ts.drainSwapIoForFork(gForkQuiesceTimeoutMs);
         gShadow.discard();
         unsigned int target = (unsigned)system.tick;
         const char tag = 'P';
