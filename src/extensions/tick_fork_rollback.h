@@ -78,7 +78,7 @@ namespace tickFork
 
     // Checkpoint-and-replay: k ticks share one fork (amortizes the O(RSS) fork). The checkpoint child
     // stays alive across the window; match keeps it, mismatch rewinds+replays strict, staleness commits.
-    inline unsigned int gForkWindowK = 32;
+    inline unsigned int gForkWindowK = 64;
     inline unsigned int gCheckpointTick = 0;
     // Deadline to quiesce fork writers (park request processors + drain in-flight swap IO) before a fork
     // snapshot / shadow commit. Shared by establish/retire/verdict + bspForkPoint.
