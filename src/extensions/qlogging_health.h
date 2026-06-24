@@ -12,7 +12,7 @@
 
 namespace Qlogging
 {
-static bool gEnabled = true;
+static bool gEnabled = false;
 
 // Every distinct malformed tick is kept here for later investigation: a bounded
 // in-memory ring (queried via /v1/logging-bad-ticks) plus an append to an on-disk

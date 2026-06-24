@@ -9560,7 +9560,7 @@ void processArgs(int argc, const char* argv[]) {
 		("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
         ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
         ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the reprocessSolutionTransaction() rollback path", cxxopts::value<bool>())
-        ("no-log-healthcheck", "Disable the per-tick logging integrity self-check", cxxopts::value<bool>())
+        ("enable-log-healthcheck", "Enable the per-tick logging integrity self-check", cxxopts::value<bool>())
         ("s,security-tick", "Core will verify state after x tick, to reduce computational to the node", cxxopts::value<int>()->default_value("1"))
         ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
         ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
@@ -9809,9 +9809,9 @@ void processArgs(int argc, const char* argv[]) {
         logColorToScreen("INFO", "Force verify solutions enabled");
     }
 
-    if (result.count("no-log-healthcheck"))
+    if (result.count("enable-log-healthcheck"))
     {
-        Qlogging::gEnabled = false;
+        Qlogging::gEnabled = true;
         logColorToScreen("INFO", "Logging health self-check disabled");
     }
 
