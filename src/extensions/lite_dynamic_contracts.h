@@ -137,6 +137,7 @@ struct LiteDynSlot {
     bool armed = false;
     bool constructed = false;
     bool everInitialized = false; // INITIALIZE has run at least once -> upgrades skip it (preserve state)
+    bool needsMigrate = false;    // redeploy stashed old state to migrate; runs in the framed construct step
     unsigned char codeHash[32] = {};
     unsigned int activationTick = 0;
     unsigned int version = 0;
@@ -206,6 +207,8 @@ static bool liteDynUploadComplete() {
 // Defined later in the same TU (extensions/lite_wasm_contracts.h, included after this header in qubic.cpp).
 static bool liteWasmLoadFromBytes(unsigned int idx, const unsigned char* bytes, unsigned int len);
 static bool liteWasmIsWasm(unsigned int idx);
+static bool liteWasmHasPendingMigrate(unsigned int idx);
+static void liteWasmRunPendingMigrate(unsigned int idx);
 #endif
 
 [[maybe_unused]] static void liteDynOnDeploy(unsigned long long sessionId, unsigned int targetSlot,
@@ -238,6 +241,11 @@ static bool liteWasmIsWasm(unsigned int idx);
 #endif
     if (!loadOk)
         logToConsole(L"LITEDYN: ERROR load failed - slot armed but not runnable");
+#ifdef LITE_WASM_CONTRACTS
+    // Redeploy stashed old state for migration (load saw __migrate + a matching old-state size): run it in the
+    // framed construct step, overriding the constructed flag set above so __migrate transforms the old state.
+    if (loadOk && liteWasmHasPendingMigrate(targetSlot)) { s.needsMigrate = true; logToConsole(L"LITEDYN: migrate scheduled for next tick"); }
+#endif
     g_liteDynUpload.active = false;
 }
 
@@ -274,15 +282,23 @@ static bool liteWasmIsWasm(unsigned int idx);
 // ---------------------------------------------------------------------------
 static bool liteDynPendingForTick(unsigned int /*tick*/) {
     for (unsigned int i = 0; i < LITE_DYN_SLOT_COUNT; i++)
-        if (g_liteDynSlots[i].armed && !g_liteDynSlots[i].constructed) return true;
+        if (g_liteDynSlots[i].armed && (!g_liteDynSlots[i].constructed || g_liteDynSlots[i].needsMigrate)) return true;
     return false;
 }
 
 [[maybe_unused]] static void liteDynConstructPending() {
     for (unsigned int i = 0; i < LITE_DYN_SLOT_COUNT; i++) {
         LiteDynSlot& s = g_liteDynSlots[i];
-        if (!s.armed || s.constructed) continue;
+        if (!s.armed) continue;
         unsigned int contractIndex = LITEDYN0_CONTRACT_INDEX + i;
+#ifdef LITE_WASM_CONTRACTS
+        if (s.needsMigrate) {   // upgrade with a layout change: transform old state -> new via __migrate, then done
+            liteWasmRunPendingMigrate(contractIndex);
+            s.needsMigrate = false;
+            continue;           // slot is already constructed (everInitialized) — do NOT re-run INITIALIZE
+        }
+#endif
+        if (s.constructed) continue;
         // wasm slots patch contractSystemProcedures[][INITIALIZE] with a closure at load (lite_wasm_contracts.h),
         // so the normal path below runs INITIALIZE through the wasm engine — same as native.
         if (contractSystemProcedures[contractIndex][INITIALIZE]) {

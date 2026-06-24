@@ -31,6 +31,8 @@ void logColorToScreen(std::string type, std::string msg);   // defined later in 
 static bool    g_liteWasmReady = false;
 static ffi_cif g_liteWasmDispatchCif;                 // shared 5-pointer->void CIF for every dispatch closure
 static ffi_type* g_liteWasmCifArgs[5];
+static ffi_cif g_liteWasmMigrateCif;                  // 4-pointer->void CIF for the per-slot migrate closure
+static ffi_type* g_liteWasmMigrateCifArgs[4];
 
 // closure user_data: identifies which contract entry a trampoline stands for.
 struct LiteWasmEntryBind { uint32_t idx; uint16_t it; uint8_t kind; };
@@ -55,6 +57,12 @@ struct LiteWasmSlot {
     uint16_t             sysOutSize[LITE_SP_COUNT] = {};
     bool                 stubFreed = false;       // set once the slot's 1GB reserve is freed + contractStates[idx] aliased to the resident state
     std::string          lastTrap;                // reason of the most recent dispatch trap (cleared on success); surfaced via dyn-registry
+    bool                 hasMigrate = false;      // contract exports __migrate; a redeploy with matching old-state size runs it
+    uint32_t             migrateOldStateSize = 0, migrateLocalsSize = 0;
+    LiteWasmEntryBind    migBind = {};            // kind=3, it=0
+    ffi_closure*         migClosure = nullptr;
+    unsigned char*       pendingOldState = nullptr;   // old-state snapshot stashed at redeploy; migrated at construct, then freed
+    uint32_t             pendingOldStateSize = 0;
 };
 #define LITE_WASM_KIND_SYSPROC 2
 static LiteWasmSlot g_liteWasmSlots[LITE_DYN_SLOT_COUNT];
@@ -176,6 +184,39 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     LiteWasmSlot& s = g_liteWasmSlots[local];
     if (!s.loaded) return;
 
+    if (kind == 3) {   // MIGRATE (deploy-time, one-shot): old state arrives via `input`. Copy it into the arena,
+        // zero the new state, run __migrate. Self-contained — its sizes come from the migrate metadata, not the
+        // user/sysproc size tables, so it sits ahead of the per-call marshalling below.
+        const uint32_t oldSz = s.migrateOldStateSize;
+        if (oldSz > LITE_WASM_ARENA_SZ) {
+            logColorToScreen("ERROR", "LITEWASM migrate old-state exceeds arena idx=" + std::to_string(idx));
+            return;
+        }
+        LiteWasmEnvScope envScope(s);
+        if (!envScope.ok) return;
+        const wasm_exec_env_t env = envScope.env;
+        const uint32_t wLocals = s.ioBase + LITE_WASM_IN_SZ + LITE_WASM_OUT_SZ;
+        const uint32_t wArena  = wLocals + LITE_WASM_LOCALS_SZ;
+        LiteWasmCallCtx cc; cc.ctx = ctx;
+        // shift the bump-scratch base past the old blob so an acquireScratch inside __migrate can't clobber it.
+        cc.arenaBase = cc.arenaBump = wArena + ((oldSz + 15u) & ~15u); cc.arenaEnd = wArena + LITE_WASM_ARENA_SZ;
+        wasm_runtime_set_user_data(env, &cc);
+        if (ctx && s.ctxOff) copyMem(wasm_runtime_addr_app_to_native(s.inst, s.ctxOff), ctx, sizeof(QPI::QpiContext));
+        if (oldSz) copyMem(wasm_runtime_addr_app_to_native(s.inst, wArena), input /*oldState*/, oldSz);
+        setMem(wasm_runtime_addr_app_to_native(s.inst, s.stateOff), s.stateSize, 0);   // zero new state (match native)
+        setMem(wasm_runtime_addr_app_to_native(s.inst, wLocals), LITE_WASM_LOCALS_SZ, 0);
+        uint32_t margv[5] = { 3, 0, wArena, 0, wLocals };
+        if (!wasm_runtime_call_wasm(env, s.dispatchFn, 5, margv)) {
+            const char* ex = wasm_runtime_get_exception(s.inst);
+            s.lastTrap = std::string("MIGRATE") + (ex ? std::string(" — ") + ex : std::string(" — trap"));
+            logColorToScreen("ERROR", "LITEWASM migrate trap idx=" + std::to_string(idx) + " " + s.lastTrap);
+            wasm_runtime_clear_exception(s.inst);
+        } else { s.lastTrap.clear(); }
+        contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(s.inst, s.stateOff);   // memory.grow safety
+        g_liteHostServices.markDirty(idx);
+        return;   // envScope dtor restores/destroys the exec_env
+    }
+
     uint16_t inSize, outSize;
     if (!liteWasmResolveIO(idx, it, kind, s, inSize, outSize)) return;
 
@@ -260,6 +301,14 @@ static void liteWasmClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, v
                      *(const void**)args[0], *(void**)args[1], *(void**)args[2], *(void**)args[3], *(void**)args[4]);
 }
 
+// libffi trampoline for the native migrate slot: core calls it as MIGRATE_PROCEDURE(ctx, newState, oldState,
+// locals) — 4 pointers. Forward oldState (args[2]) as the dispatch `input`; newState is resident, locals zeroed.
+static void liteWasmMigrateClosureHandler(ffi_cif*, void* /*ret(void)*/, void** args, void* user)
+{
+    LiteWasmEntryBind* b = (LiteWasmEntryBind*)user;
+    liteWasmDispatch(b->idx, 0, 3, *(const void**)args[0], *(void**)args[1], *(void**)args[2], nullptr, *(void**)args[3]);
+}
+
 // RAII for a freshly loaded WAMR module set (mod + instance + exec_env). The dtor frees them in the correct
 // order (env -> inst -> mod); release() drops ownership once the handles have been handed to a slot. The loader
 // uses this so every early-return error path cleans up without a hand-written unwind, and the slot only ever
@@ -298,6 +347,8 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     if (s.mod)  { wasm_runtime_unload(s.mod);            s.mod = nullptr; }
     for (uint32_t k = 0; k < s.entryCount; k++)        if (s.closures[k])    { ffi_closure_free(s.closures[k]);    s.closures[k] = nullptr; }
     for (uint32_t sp = 0; sp < LITE_SP_COUNT; sp++)    if (s.sysClosures[sp]) { ffi_closure_free(s.sysClosures[sp]); s.sysClosures[sp] = nullptr; }
+    if (s.migClosure) { ffi_closure_free(s.migClosure); s.migClosure = nullptr; }
+    s.hasMigrate = false;
     s.entryCount = 0;
 }
 
@@ -376,10 +427,43 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     // macOS); plain = freePool the committed pool. (The old #else freePool'd the mmap stub -> darwin abort.)
     if (!s.stubFreed) { liteSCOnWasmTakeover(idx); s.stubFreed = true; }
     contractStates[idx] = (unsigned char*)wasm_runtime_addr_app_to_native(inst, s.stateOff);
-    if (prevState.p) {   // upgrade: restore the snapshot (copy the overlap — a new layout may differ in size)
-        uint32_t n = prevStateSize < s.stateSize ? prevStateSize : s.stateSize;
-        copyMem(contractStates[idx], prevState.p, n);
-        logColorToScreen("INFO", "LITEWASM: state preserved across upgrade — " + std::to_string(n) + " bytes");
+
+    // Migration metadata (optional exports — pre-migration contracts have none). Patch the native migrate table
+    // with a 4-pointer closure so a redeploy runs __migrate via the same QpiContextMigrateProcedureCall path
+    // native contracts use. Cleared first so a non-migrate upgrade resets it.
+    s.hasMigrate = false; s.migrateOldStateSize = 0; s.migrateLocalsSize = 0;
+    contractMigrateProcedures[idx] = nullptr; contractMigrateOldStateSizes[idx] = 0; contractMigrateLocalsSizes[idx] = 0;
+    { wasm_function_inst_t f_hasMig = wasm_runtime_lookup_function(inst, "has_migrate");
+      if (f_hasMig && liteWasmCallU32(env, f_hasMig)) {
+          wasm_function_inst_t f_migOld = wasm_runtime_lookup_function(inst, "migrate_old_state_size");
+          wasm_function_inst_t f_migLoc = wasm_runtime_lookup_function(inst, "migrate_locals_size");
+          s.migrateOldStateSize = f_migOld ? liteWasmCallU32(env, f_migOld) : 0;
+          s.migrateLocalsSize   = f_migLoc ? liteWasmCallU32(env, f_migLoc) : 0;
+          s.migBind = { idx, 0, (uint8_t)3 };
+          void* code = nullptr;
+          ffi_closure* cl = (ffi_closure*)ffi_closure_alloc(sizeof(ffi_closure), &code);
+          if (cl && ffi_prep_closure_loc(cl, &g_liteWasmMigrateCif, liteWasmMigrateClosureHandler, &s.migBind, code) == FFI_OK) {
+              s.migClosure = cl; s.hasMigrate = true;
+              contractMigrateProcedures[idx]    = (MIGRATE_PROCEDURE)code;
+              contractMigrateOldStateSizes[idx] = s.migrateOldStateSize;
+              contractMigrateLocalsSizes[idx]   = s.migrateLocalsSize;
+          } else if (cl) { ffi_closure_free(cl); logToConsole(L"LITEWASM: migrate closure alloc failed"); }
+      } }
+
+    if (prevState.p) {   // upgrade path
+        if (s.hasMigrate && s.migrateOldStateSize == prevStateSize) {
+            // defer to the framed construct step: stash the old bytes (steal from RAII), run __migrate there.
+            s.pendingOldState = prevState.p; s.pendingOldStateSize = prevStateSize; prevState.p = nullptr;
+            logColorToScreen("INFO", "LITEWASM: migrate pending — old state " + std::to_string(prevStateSize) + " bytes");
+        } else {   // no migrate (or declared OldStateData size mismatch): preserve the overlap, as before
+            uint32_t n = prevStateSize < s.stateSize ? prevStateSize : s.stateSize;
+            copyMem(contractStates[idx], prevState.p, n);
+            if (s.migrateOldStateSize && s.migrateOldStateSize != prevStateSize)
+                logColorToScreen("WARNING", "LITEWASM: migrate OldStateData size " + std::to_string(s.migrateOldStateSize)
+                                 + " != live state " + std::to_string(prevStateSize) + " — raw-preserved instead");
+            else
+                logColorToScreen("INFO", "LITEWASM: state preserved across upgrade — " + std::to_string(n) + " bytes");
+        }
     }
     { wasm_function_inst_t f_ctx = wasm_runtime_lookup_function(inst, "ctx_addr"); if (f_ctx) s.ctxOff = liteWasmCallU32(env, f_ctx); }
     s.entryCount = liteWasmCallU32(env, f_reg_count);
@@ -444,6 +528,23 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     return true;
 }
 
+// True if a redeploy stashed old state for this slot to migrate (set in load, consumed at construct).
+static inline bool liteWasmHasPendingMigrate(unsigned int idx) {
+    int l = liteWasmSlotLocal(idx);
+    return l >= 0 && g_liteWasmSlots[l].pendingOldState != nullptr;
+}
+// Run the deferred migration under the native migrate context (locals stack + state lock), then free the stash.
+// The context calls contractMigrateProcedures[idx] -> the migrate closure -> liteWasmDispatch(kind=3).
+[[maybe_unused]] static void liteWasmRunPendingMigrate(unsigned int idx) {
+    int l = liteWasmSlotLocal(idx);
+    if (l < 0 || !g_liteWasmSlots[l].pendingOldState) return;
+    LiteWasmSlot& s = g_liteWasmSlots[l];
+    QpiContextMigrateProcedureCall mctx(idx);
+    mctx.call(s.pendingOldState);
+    free(s.pendingOldState); s.pendingOldState = nullptr; s.pendingOldStateSize = 0;
+    logColorToScreen("INFO", "LITEWASM: migrate complete idx=" + std::to_string(idx));
+}
+
 // One-time WAMR bring-up at node boot (WASM_CONTRACTS.md §13.2). Registers the QPI import table (module
 // "lhost") + prepares the 5-pointer libffi dispatch CIF used by the per-(idx,it) closures (§13.3).
 [[maybe_unused]] static bool liteWasmRuntimeInit()
@@ -453,6 +554,11 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     for (int i = 0; i < 5; i++) g_liteWasmCifArgs[i] = &ffi_type_pointer;
     if (ffi_prep_cif(&g_liteWasmDispatchCif, FFI_DEFAULT_ABI, 5, &ffi_type_void, g_liteWasmCifArgs) != FFI_OK) {
         logToConsole(L"LITEWASM: libffi cif prep failed");
+        return false;
+    }
+    for (int i = 0; i < 4; i++) g_liteWasmMigrateCifArgs[i] = &ffi_type_pointer;
+    if (ffi_prep_cif(&g_liteWasmMigrateCif, FFI_DEFAULT_ABI, 4, &ffi_type_void, g_liteWasmMigrateCifArgs) != FFI_OK) {
+        logToConsole(L"LITEWASM: migrate cif prep failed");
         return false;
     }
 

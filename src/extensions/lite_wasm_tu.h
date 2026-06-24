@@ -283,6 +283,12 @@ unsigned int sysproc_out_size(unsigned int sp) {
     return 0;   // POST_* outputs are NoData
 }
 
+// Migration metadata: has_migrate() = 1 if the contract defines MIGRATE(); the sizes drive the host's
+// old-state copy + locals. Absent on contracts built before migration support (the host guard-reads them).
+LH_EXPORT(has_migrate)            unsigned int has_migrate()            { return CONTRACT_STATE_TYPE::__migrateEmpty ? 0u : 1u; }
+LH_EXPORT(migrate_old_state_size) unsigned int migrate_old_state_size() { return (unsigned int)CONTRACT_STATE_TYPE::__migrateOldStateSize; }
+LH_EXPORT(migrate_locals_size)    unsigned int migrate_locals_size()    { return (unsigned int)CONTRACT_STATE_TYPE::__migrateLocalsSize; }
+
 // kind/it select the entry; in/out/locals are linear-mem offsets (== ptrs in wasm32). The host has already
 // copied state -> g_wasmState and the input bytes -> inOff, and populated the ctx header at ctx_addr.
 LH_EXPORT(dispatch)
@@ -310,6 +316,13 @@ void dispatch(unsigned int kind, unsigned int it, unsigned int inOff, unsigned i
             case 11: LITE_WASM_SP_CALL(__setShareholderVotes);    break;
         }
         #undef LITE_WASM_SP_CALL
+        return;
+    }
+    if (kind == 3) {   // MIGRATE: in = old-state offset, lo = locals; out unused. The host copied the old
+        // state bytes to inOff and zeroed g_wasmState; run the new module's __migrate(newState, oldState, locals).
+        typedef void (*LiteWasmMigrate)(const QPI::QpiContextFunctionCall&, void*, void*, void*);
+        auto& mctx = *reinterpret_cast<QPI::QpiContextFunctionCall*>(&g_wasmCtxBuf[0]);
+        ((LiteWasmMigrate)(void*)CONTRACT_STATE_TYPE::__migrate)(mctx, &g_wasmState, in, lo);
         return;
     }
     auto& ctx = *reinterpret_cast<QPI::QpiContextFunctionCall*>(&g_wasmCtxBuf[0]);
