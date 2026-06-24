@@ -720,6 +720,10 @@ public:
         appendNumber(m, vm.getCacheHits(), false);
         appendText(m, (CHAR16*)L" miss ");
         appendNumber(m, vm.getCacheMisses(), false);
+        appendText(m, (CHAR16*)L" cleanEvict ");
+        appendNumber(m, vm.getCleanEvicts(), false);
+        appendText(m, (CHAR16*)L" dirtyEvict ");
+        appendNumber(m, vm.getDirtyEvicts(), false);
         logToConsole(m);
     }
 #endif
@@ -1030,6 +1034,7 @@ public:
 
 #ifndef NDEBUG
             for (unsigned int tickIndex = 0; tickIndex < MAX_NUMBER_OF_TICKS_PER_EPOCH; tickIndex++) {
+                PinScope _pinScope; // release this tick's swap-page pins each iteration (debug consistency scan over the whole epoch)
                 TickData &tickData = TickStorage::tickData[tickIndex];
                 ASSERT(isAllBytesZero(&tickData, sizeof(tickData)));
 

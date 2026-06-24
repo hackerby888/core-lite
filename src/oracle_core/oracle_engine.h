@@ -2525,6 +2525,7 @@ public:
         uint64_t storageBytesUsed = 8;
         for (uint32_t queryIndex = 0; queryIndex < oracleQueryCount; ++queryIndex)
         {
+            PinScope _pinScope; // release per-query swap-page pins each iteration (debug+UEFI-only consistency check)
             const OracleQueryMetadata& oqm = queries[queryIndex];
             ASSERT(oqm.interfaceIndex < OI::oracleInterfacesCount);
             ASSERT(oqm.queryId);
@@ -2780,6 +2781,12 @@ public:
     {
         LockGuard lockGuard(lock);
         copyMem(orp.computorRevPoints, revenuePoints, sizeof(revenuePoints));
+    }
+
+    // Lock-free per-element accessor for read-only stats. Caller must pass idx < NUMBER_OF_COMPUTORS.
+    uint64_t getRevenuePointUnsafe(unsigned int idx) const
+    {
+        return revenuePoints[idx];
     }
 
     void logStatus() const
