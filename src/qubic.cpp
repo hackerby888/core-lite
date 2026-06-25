@@ -9589,7 +9589,6 @@ void processArgs(int argc, const char* argv[]) {
         ("rpc-proxy", "INTERNAL: run as the RPC sidecar (drogon HTTP -> node unix-socket forwarder)", cxxopts::value<bool>())
         ("rpc-listen", "RPC sidecar HTTP listen port", cxxopts::value<int>()->default_value("41850"))
         ("rpc-node", "RPC sidecar: node http port used as the unix-socket key", cxxopts::value<int>()->default_value("41841"))
-        ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"))
         ("max-inbound-per-ip", "Max inbound connection slots from a single IP (0 = unlimited, default). Stops one peer flooding many slots.", cxxopts::value<int>()->default_value("0"))
         ("no-k12-state-cache", "Disable the incremental smart-contract state digest cache (Linux). Default on: only changed 8KB chunks are re-hashed via mprotect+SIGSEGV dirty tracking. Pass to fall back to full one-shot K12 every tick.")
         ("k12-state-cache-verify", "Self-check the K12 state-digest cache: each digest also runs the one-shot and stalls loudly on any mismatch. For soak/CI; small per-tick cost. Off by default.")
