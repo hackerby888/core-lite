@@ -141,8 +141,6 @@ Json::Value getCheckInData(const std::string& challenge = "")
 #endif
 
 static volatile bool forceDontCheckComputerDigest = false;
-static std::vector<int> forceDontUseSecurityTickChangeStack;
-static volatile bool forceDontUseSecurityTick = true;
 
 //////////// Go Behind Testnet Trick \\\\\\\\
 
@@ -152,34 +150,20 @@ static inline bool isTestnetGoBehindTrick = false;
 
 static inline unsigned long long tickDelay = 0;
 
-//////////// Security Tick Feature \\\\\\\\\\\\
-
-static inline unsigned long long securityTick = 1;
-
 //////////// HTTP Server Port \\\\\\\\\\\\
 
 static inline int httpPort = 41841;
 
+// Security-tick skip removed: every tick verifies state (cheap with the K12 state-digest cache).
+// A single tick can still be suppressed by the catch-up override.
 bool isSystemAtSecurityTick()
 {
-    if (forceDontCheckComputerDigest)
-    {
-        return false;
-    }
-    if (forceDontUseSecurityTick || securityTick == 0 || system.tick == system.initialTick)
-    {
-        return true;
-    }
-    return ((system.tick - system.initialTick) % securityTick == 0);
+    return !forceDontCheckComputerDigest;
 }
 
 bool isNextTickIsSecurityTick()
 {
-    if (securityTick == 0 || system.tick == system.initialTick)
-    {
-        return true;
-    }
-    return (((system.tick + 1) - system.initialTick) % securityTick == 0);
+    return true;
 }
 
 ////////// Skip Solution Transaction Verification Feature \\\\\\\\\\

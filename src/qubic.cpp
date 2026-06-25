@@ -193,6 +193,7 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/lite_dynamic_contracts.h"
 #include "extensions/lite_wasm_contracts.h"
 #include "extensions/test_invalid_solution.h"
+#include "extensions/k12_state_digest_cache.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
 #ifdef _WIN32
@@ -575,7 +576,7 @@ static void enableAVX()
 }
 
 // Should only be called from tick processor to avoid concurrent state changes, which can cause race conditions as detailed in FIXME below.
-static void getComputerDigest(m256i& digest)
+static void getComputerDigest(m256i& digest, bool bypassCache = false)
 {
     PROFILE_SCOPE();
 
@@ -605,7 +606,14 @@ static void getComputerDigest(m256i& digest)
 
                 // wasm slots: contractStates[idx] aliases the resident state, hashed at `size` (its real span).
                 const unsigned long long startTime = __rdtsc();
+#if defined(LITE_DYNAMIC_CONTRACTS)
                 liteSCDigest(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
+#else
+                if (!bypassCache && K12StateDigestCache::gK12StateDigestCacheEnabled && K12StateDigestCache::isCached(digestIndex))
+                    K12StateDigestCache::computeDigest(digestIndex, &contractStateDigests[digestIndex]);
+                else
+                    KangarooTwelve(contractStates[digestIndex], (unsigned int)size, &contractStateDigests[digestIndex], 32);
+#endif
                 const unsigned long long executionTime = __rdtsc() - startTime;
 
                 contractStateLock[digestIndex].releaseRead();
@@ -649,6 +657,15 @@ static void getComputerDigest(m256i& digest)
     contractStateChangeFlags[0] = 0;
 
     digest = contractStateDigests[(MAX_NUMBER_OF_CONTRACTS * 2 - 1) - 1];
+}
+
+// Quorum-mismatch recovery: rebuild every contract digest canonically (cache bypassed) and resync the
+// incremental cache, so a digest-cache error self-heals instead of forking the node.
+static void recomputeComputerDigestFull(m256i& digest)
+{
+    setMem(contractStateChangeFlags, MAX_NUMBER_OF_CONTRACTS / 8, 0xFF);
+    K12StateDigestCache::invalidateAll();
+    getComputerDigest(digest, /*bypassCache=*/true);
 }
 
 static void getSpectrumDigest(m256i& digest)
@@ -6377,6 +6394,10 @@ static void tickProcessor(void*, unsigned long long processorNumber)
     unsigned int latestProcessedTick = 0;
     while (!shutDownNode)
     {
+#ifdef TESTNET
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+#endif
+
         PROFILE_NAMED_SCOPE("tickProcessor(): loop iteration");
         if (tlPinArena.count != 0) // leaked swap pins from a prior iteration: a missing/removed PinScope boundary
         {
@@ -6850,6 +6871,30 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     gTickNumberOfComputors = tickNumberOfComputors;
                     gTickTotalNumberOfComputors = tickTotalNumberOfComputors;
 
+                    // K12 state-cache safety net: only at ticks where the computer digest is consensus-validated.
+                    // If enough computors voted but quorum doesn't match our etalon, an incremental-cache error
+                    // could be the cause, so recompute the computer digest canonically (cache bypassed) and re-tally
+                    // once. A genuine divergence recomputes to the same value and falls through to normal recovery.
+                    if (K12StateDigestCache::gK12StateDigestCacheEnabled
+                        && (isSystemAtSecurityTick() || isLastTickInEpoch())
+                        && tickNumberOfComputors < QUORUM && tickTotalNumberOfComputors >= QUORUM)
+                    {
+                        static unsigned int gK12RecheckedTick = 0;
+                        if (gK12RecheckedTick != system.tick)
+                        {
+                            gK12RecheckedTick = system.tick;
+                            const m256i before = etalonTick.saltedComputerDigest;
+                            recomputeComputerDigestFull(etalonTick.saltedComputerDigest);
+                            if (etalonTick.saltedComputerDigest != before)
+                            {
+                                logToConsole(L"K12 state-cache computer digest disagreed with quorum; recomputed canonically, re-tallying votes");
+                                updateVotesCount(tickNumberOfComputors, tickTotalNumberOfComputors, quorumComputerDigest);
+                                gTickNumberOfComputors = tickNumberOfComputors;
+                                gTickTotalNumberOfComputors = tickTotalNumberOfComputors;
+                            }
+                        }
+                    }
+
                     if (tickNumberOfComputors >= QUORUM)
                     {
                         tryForceEmptyNextTick();
@@ -7093,15 +7138,6 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                     logToConsole(message);
                                 }
 
-                                // Flip forceDontUseSecurityTick flag based on stack
-                                while (!forceDontUseSecurityTickChangeStack.empty())
-                                {
-                                    forceDontUseSecurityTickChangeStack.pop_back();
-                                    forceDontUseSecurityTick = !forceDontUseSecurityTick;
-                                    setText(message, L"forceDontUseSecurityTick is now ");;
-                                    appendText(message, forceDontUseSecurityTick ? L"ON" : L"OFF");
-                                    logToConsole(message);
-                                }
                             }
                         }
                     }
@@ -7444,7 +7480,15 @@ static bool initialize()
         for (unsigned int contractIndex = 0; contractIndex < contractCount; contractIndex++)
         {
             unsigned long long size = contractDescriptions[contractIndex].stateSize;
-            if (!liteSCAlloc(contractIndex, size))
+#if defined(LITE_DYNAMIC_CONTRACTS)
+            const bool contractStateAllocOk = liteSCAlloc(contractIndex, size);
+#else
+            // cached contracts need page-aligned state for per-chunk mprotect; off-path keeps the plain alloc
+            const bool contractStateAllocOk = K12StateDigestCache::wantsPageAlignedAlloc(size)
+                ? K12StateDigestCache::allocStatePool(size, (void**)&contractStates[contractIndex])
+                : allocPoolWithErrorLog(L"contractStates", size, (void**)&contractStates[contractIndex], __LINE__);
+#endif
+            if (!contractStateAllocOk)
             {
                 return false;
             }
@@ -7857,6 +7901,15 @@ static bool initialize()
     emptyTickResolver.clock = 0;
     emptyTickResolver.tick = 0;
     emptyTickResolver.lastTryClock = 0;
+
+    // contract states are now allocated, loaded and constructed; arm the per-chunk K12 digest cache
+#if defined(LITE_DYNAMIC_CONTRACTS)
+    // the userfaultfd contract-state engine (and the demand-zero contract-level path) own these buffers and
+    // already do incremental per-chunk digest caching; arming the mprotect cache on the same evictable, often
+    // non-page-aligned regions would fight fault delivery and re-hash evicted-to-zero chunks.
+    K12StateDigestCache::gK12StateDigestCacheEnabled = false;
+#endif
+    K12StateDigestCache::init();
 
     return true;
 }
@@ -8448,13 +8501,6 @@ static void processKeyPresses()
             logToConsole(L"Requesting for force skip checking computer digest for this tick.");
             forceDontCheckComputerDigest = true;
             break;
-        case 's':
-            forceDontUseSecurityTickChangeStack.push_back(1);
-            // forceDontUseSecurityTick = !forceDontUseSecurityTick;
-            // setText(message, L"forceDontUseSecurityTick is now ");;
-            // appendText(message, forceDontUseSecurityTick ? L"ON" : L"OFF");
-            logToConsole(message);
-            break;
         }
 
 
@@ -9025,6 +9071,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             logToConsole(L"Init complete! Entering main loop ...");
             while (!shutDownNode)
             {
+#ifdef TESTNET
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
+#endif
                 PinScope _pinScope; // release swap-page pins taken during this main-loop iteration
                 if (criticalSituation == 1)
                 {
@@ -9690,6 +9739,7 @@ void processArgs(int argc, const char* argv[]) {
     logColorToScreen("INFO", "Total RAM required " + std::to_string(getTotalRam() / (1024 * 1024 * 1024)) + " GB");
 
     cxxopts::Options options("Qubic Core Lite", "The lite version of Qubic Core that can run directly on the OS without a UEFI environment.");
+    options.allow_unrecognised_options();
     options.add_options()
         ("p,peers", "Public peers", cxxopts::value<std::string>())
         ("m,mode", "Core mode", cxxopts::value<std::string>())
@@ -9705,16 +9755,22 @@ void processArgs(int argc, const char* argv[]) {
 		("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
         ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
         ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the reprocessSolutionTransaction() rollback path", cxxopts::value<bool>())
-        ("s,security-tick", "Core will verify state after x tick, to reduce computational to the node", cxxopts::value<int>()->default_value("1"))
         ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
         ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
         ("swap-dirty-track", "Auto-track dirty SwapVM cache pages via mprotect+SIGSEGV (Linux only): skip the writeback (and compression) for pages never modified since load. Trades a small mprotect/fault cost for less disk I/O. Off by default.")
         ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
+        ("no-k12-state-cache", "Disable the incremental smart-contract state digest cache (Linux). Default on: only changed 8KB chunks are re-hashed via mprotect+SIGSEGV dirty tracking. Pass to fall back to full one-shot K12 every tick.")
+        ("k12-state-cache-verify", "Self-check the K12 state-digest cache: each digest also runs the one-shot and stalls loudly on any mismatch. For soak/CI; small per-tick cost. Off by default.")
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"))
         ("sc-evict-mode", "Contract-state engine eviction backend: 'compress' (in-RAM zstd, fast spawn; default) or 'disk' (per-contract file, lowest RAM, persistent). Testnet dynamic-contract only.", cxxopts::value<std::string>()->default_value("compress"))
         ("max-sc-mem", "Contract-state RAM cap in GB (testnet dynamic-contract); engine evicts cold chunks to stay under it.", cxxopts::value<unsigned long long>()->default_value("1"));
     auto result = options.parse(argc, argv);
+
+    auto unmatched = result.unmatched();
+    for (auto& u : unmatched) {
+        std::cerr << "Warning: unknown option: " << u << "\n";
+    }
 
 #ifdef LITE_SC_ENGINE
     if (result.count("sc-evict-mode")) {
@@ -9735,6 +9791,14 @@ void processArgs(int argc, const char* argv[]) {
     if (result.count("swap-dirty-track")) {
         gSwapDirtyTrackEnabled = true;
         logColorToScreen("INFO", "Swap dirty tracking enabled: clean SwapVM cache pages skip writeback on eviction");
+    }
+    if (result.count("no-k12-state-cache")) {
+        K12StateDigestCache::gK12StateDigestCacheEnabled = false;
+        logColorToScreen("INFO", "K12 state-digest cache disabled: full one-shot K12 every tick");
+    }
+    if (result.count("k12-state-cache-verify")) {
+        K12StateDigestCache::gK12StateDigestCacheVerify = true;
+        logColorToScreen("INFO", "K12 state-digest cache self-verify enabled: each digest also runs the one-shot");
     }
 #endif
 
@@ -9783,10 +9847,6 @@ void processArgs(int argc, const char* argv[]) {
         logColorToScreen("INFO", "Lite node operator ID: " + myOperatorId + (!isOperatorIdProvided ? " (default)" : ""));
     }
 
-    if (result.count("security-tick")) {
-        securityTick = result["security-tick"].as<int>();
-        logColorToScreen("INFO", "Security tick set to " + std::to_string(securityTick));
-    }
 
     {
         int mi = result["max-inbound"].as<int>();
@@ -10035,6 +10095,10 @@ void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
     // swap-dirty-track fast path: a write to an armed read-only SwapVM cache page faults here. Mark the
     // slot dirty, restore write access, and resume the store. Any other fault hits the crash path below.
     if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr))
+        return;
+    // A write to an armed read-only contract-state chunk faults here: mark the chunk dirty (needs si_addr),
+    // restore write access, resume the store. Only changed chunks are re-hashed on the next digest.
+    if (sig == SIGSEGV && si && K12StateDigestCache::tryMarkDirty(si->si_addr))
         return;
 #else
     (void)si;
