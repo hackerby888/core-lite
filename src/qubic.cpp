@@ -6128,6 +6128,10 @@ static void tickProcessor(void*, unsigned long long processorNumber)
     unsigned int latestProcessedTick = 0;
     while (!shutDownNode)
     {
+#ifdef TESTNET
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+#endif
+
         PROFILE_NAMED_SCOPE("tickProcessor(): loop iteration");
         if (tlPinArena.count != 0) // leaked swap pins from a prior iteration: a missing/removed PinScope boundary
         {
@@ -8880,6 +8884,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 #endif
             while (!shutDownNode)
             {
+#ifdef TESTNET
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
+#endif
                 PinScope _pinScope; // release swap-page pins taken during this main-loop iteration
 #ifdef __linux__
                 if (tickFork::gForkRequest) bspForkPoint();
@@ -9545,6 +9552,7 @@ void processArgs(int argc, const char* argv[]) {
     logColorToScreen("INFO", "Total RAM required " + std::to_string(getTotalRam() / (1024 * 1024 * 1024)) + " GB");
 
     cxxopts::Options options("Qubic Core Lite", "The lite version of Qubic Core that can run directly on the OS without a UEFI environment.");
+    options.allow_unrecognised_options();
     options.add_options()
         ("p,peers", "Public peers", cxxopts::value<std::string>())
         ("m,mode", "Core mode", cxxopts::value<std::string>())
@@ -9587,6 +9595,11 @@ void processArgs(int argc, const char* argv[]) {
         ("k12-state-cache-verify", "Self-check the K12 state-digest cache: each digest also runs the one-shot and stalls loudly on any mismatch. For soak/CI; small per-tick cost. Off by default.")
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"));
     auto result = options.parse(argc, argv);
+
+    auto unmatched = result.unmatched();
+    for (auto& u : unmatched) {
+        std::cerr << "Warning: unknown option: " << u << "\n";
+    }
 
 #ifdef __linux__
     if (result.count("swap-compression")) {
