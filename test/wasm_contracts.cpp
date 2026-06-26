@@ -7,6 +7,9 @@
 
 #include <cstring>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
 #include "gtest/gtest.h"
 #include "wasm_export.h"
 #include "wasm_contract_fixture.h"
@@ -111,6 +114,106 @@ TEST(WasmContracts, SystemProceduresMaskAndDispatch) {
     a[0] = KIND_SYSPROC; a[1] = SP_POST_INCOMING_TRANSFER; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
     w.call("dispatch", a, 5);
     EXPECT_EQ(((uint64_t*)w.nat(st))[1], 777u) << "input sysproc read its marshalled input";
+}
+
+// Cross-host state equivalence: load a qinit-BUILT wasm (env QINIT_WASM, e.g. the DigestProbe fixture) under the
+// node's WAMR, run INITIALIZE + Inc x QINIT_OPS, and print the post-op StateData bytes. The qinit driver
+// (cross-host.test.ts) runs the SAME wasm on its VirtualNode and asserts byte-equality — the proof that the TS
+// engine port marshals + mutates contract state identically to the node, which is what makes the state digest
+// (K12 of these bytes) match across hosts. A pure-state contract needs no real host services, so the few lhost
+// infra imports (beginFn/endFn/markDirty), the assert, and wasi fd_* are stubbed no-op here.
+namespace {
+void hs_void_i(wasm_exec_env_t, uint32_t) {}
+void hs_assert(wasm_exec_env_t, uint32_t, uint32_t, uint32_t) {}
+uint32_t hs_fd_write(wasm_exec_env_t, uint32_t, uint32_t, uint32_t, uint32_t) { return 0; }
+uint32_t hs_fd_close(wasm_exec_env_t, uint32_t) { return 0; }
+uint32_t hs_fd_seek(wasm_exec_env_t, uint32_t, uint64_t, uint32_t, uint32_t) { return 0; }
+} // namespace
+
+TEST(WasmContracts, CrossHostStateEquivalence) {
+    const char* path = getenv("QINIT_WASM");
+    if (!path) GTEST_SKIP() << "set QINIT_WASM to a qinit-built pure-state wasm (e.g. DigestProbe)";
+    const int ops = getenv("QINIT_OPS") ? atoi(getenv("QINIT_OPS")) : 1;
+
+    FILE* fp = fopen(path, "rb");
+    ASSERT_NE(fp, nullptr) << "open " << path;
+    fseek(fp, 0, SEEK_END);
+    long flen = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    std::vector<unsigned char> buf(flen);
+    ASSERT_EQ(fread(buf.data(), 1, flen, fp), (size_t)flen);
+    fclose(fp);
+
+    static char heap[32 * 1024 * 1024];
+    RuntimeInitArgs ia;
+    memset(&ia, 0, sizeof ia);
+    ia.mem_alloc_type = Alloc_With_Pool;
+    ia.mem_alloc_option.pool.heap_buf = heap;
+    ia.mem_alloc_option.pool.heap_size = sizeof heap;
+    ASSERT_TRUE(wasm_runtime_full_init(&ia));
+
+    static NativeSymbol lhostNs[] = {
+        { "beginFn", (void*)hs_void_i, "(i)", nullptr },
+        { "endFn", (void*)hs_void_i, "(i)", nullptr },
+        { "markDirty", (void*)hs_void_i, "(i)", nullptr },
+    };
+    static NativeSymbol envNs[] = {
+        { "_ZL21addDebugMessageAssertPKcS0_j", (void*)hs_assert, "(iii)", nullptr },
+    };
+    static NativeSymbol wasiNs[] = {
+        { "fd_write", (void*)hs_fd_write, "(iiii)i", nullptr },
+        { "fd_close", (void*)hs_fd_close, "(i)i", nullptr },
+        { "fd_seek", (void*)hs_fd_seek, "(iIii)i", nullptr },
+    };
+    ASSERT_TRUE(wasm_runtime_register_natives("lhost", lhostNs, 3));
+    ASSERT_TRUE(wasm_runtime_register_natives("env", envNs, 1));
+    ASSERT_TRUE(wasm_runtime_register_natives("wasi_snapshot_preview1", wasiNs, 3));
+
+    char err[256];
+    wasm_module_t mod = wasm_runtime_load(buf.data(), (uint32_t)flen, err, sizeof err);
+    ASSERT_NE(mod, nullptr) << err;
+    wasm_module_inst_t inst = wasm_runtime_instantiate(mod, 256 * 1024, 4 * 1024 * 1024, err, sizeof err);
+    ASSERT_NE(inst, nullptr) << err;
+    wasm_exec_env_t env = wasm_runtime_create_exec_env(inst, 256 * 1024);
+    ASSERT_NE(env, nullptr);
+
+    auto call = [&](const char* fn, uint32_t* a, uint32_t n) -> uint32_t {
+        wasm_function_inst_t f = wasm_runtime_lookup_function(inst, fn);
+        EXPECT_NE(f, nullptr) << fn;
+        EXPECT_TRUE(wasm_runtime_call_wasm(env, f, n, a)) << fn << ": " << wasm_runtime_get_exception(inst);
+        return a[0];
+    };
+
+    uint32_t a[5] = { 0 };
+    uint32_t io = call("io_base", a, 0);
+    a[0] = 0;
+    uint32_t st = call("state_addr", a, 0);
+    a[0] = 0;
+    uint32_t ss = call("state_size", a, 0);
+    const uint32_t IN = io, OUT = io + 64, LOCALS = io + 128;
+    enum { KIND_PROCEDURE = 1, KIND_SYSPROC = 2, SP_INITIALIZE = 0 };
+
+    a[0] = KIND_SYSPROC; a[1] = SP_INITIALIZE; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
+    call("dispatch", a, 5);
+    for (int i = 0; i < ops; i++) {
+        a[0] = KIND_PROCEDURE; a[1] = 1; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
+        call("dispatch", a, 5);
+    }
+
+    const unsigned char* s = (const unsigned char*)wasm_runtime_addr_app_to_native(inst, st);
+    std::string hex;
+    hex.reserve(ss * 2);
+    char b[3];
+    for (uint32_t i = 0; i < ss; i++) {
+        sprintf(b, "%02x", s[i]);
+        hex += b;
+    }
+    printf("CROSSHOST_STATE=%s\n", hex.c_str());
+
+    wasm_runtime_destroy_exec_env(env);
+    wasm_runtime_deinstantiate(inst);
+    wasm_runtime_unload(mod);
+    wasm_runtime_destroy();
 }
 
 #ifdef LITE_WASM_TRAP_BACKTRACE
