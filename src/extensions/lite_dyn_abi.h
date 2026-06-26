@@ -83,6 +83,10 @@ struct LiteHostServices {
     long long      (*issueAsset)(const void* ctx, unsigned long long name, const void* issuer32, signed char decimals, long long shares, unsigned long long unit);
     long long      (*numberOfShares)(const void* ctx, const void* asset, const void* ownSel, const void* posSel);
     long long      (*numberOfPossessedShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, unsigned short ownMgmt, unsigned short posMgmt);
+    // Enumerate matching asset records for the contract-side AssetOwnership/PossessionIterator (kind 0 = ownership,
+    // 1 = possession). Writes 80-byte records (owner[32], possessor[32], sint64 shares, uint16 ownMgmt, uint16
+    // posMgmt, pad[4]) to outBuf, returns the count (capped at maxEntries).
+    unsigned int   (*assetEnumerate)(const void* ctx, unsigned int kind, const void* issuance, const void* ownSel, const void* posSel, void* outBuf, unsigned int maxEntries);
     long long      (*transferShareOwnershipAndPossession)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, const void* newOwner32);
     long long      (*acquireShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned short srcOwnMgmt, unsigned short srcPosMgmt, long long offeredFee);
     long long      (*releaseShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned short dstOwnMgmt, unsigned short dstPosMgmt, long long offeredFee);

@@ -121,6 +121,7 @@ static int64_t  w_issueAsset(wasm_exec_env_t e, uint64_t name, uint32_t iss, uin
 static int64_t  w_transferShares(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t own, uint32_t pos, int64_t shares, uint32_t no) { LWC; LWTRACE("transferShares", "name=" + std::to_string(name) + " shares=" + std::to_string(shares)); return g_liteHostServices.transferShareOwnershipAndPossession(cc->ctx, name, A2N(iss), A2N(own), A2N(pos), shares, A2N(no)); }
 static int64_t  w_acquireShares(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t own, uint32_t pos, int64_t shares, uint32_t so, uint32_t sp, int64_t fee) { LWC; LWTRACE("acquireShares", "name=" + std::to_string(name) + " shares=" + std::to_string(shares)); return g_liteHostServices.acquireShares(cc->ctx, name, A2N(iss), A2N(own), A2N(pos), shares, (unsigned short)so, (unsigned short)sp, fee); }
 static int64_t  w_releaseShares(wasm_exec_env_t e, uint64_t name, uint32_t iss, uint32_t own, uint32_t pos, int64_t shares, uint32_t dno, uint32_t dp, int64_t fee) { LWC; LWTRACE("releaseShares", "name=" + std::to_string(name) + " shares=" + std::to_string(shares)); return g_liteHostServices.releaseShares(cc->ctx, name, A2N(iss), A2N(own), A2N(pos), shares, (unsigned short)dno, (unsigned short)dp, fee); }
+static uint32_t w_assetEnumerate(wasm_exec_env_t e, uint32_t kind, uint32_t iss, uint32_t own, uint32_t pos, uint32_t out, uint32_t maxN) { LWC; LWTRACE("assetEnumerate", "kind=" + std::to_string(kind)); return g_liteHostServices.assetEnumerate(cc->ctx, kind, A2N(iss), A2N(own), A2N(pos), A2N(out), maxN); }
 static uint32_t w_dayOfWeek(wasm_exec_env_t e, uint32_t y, uint32_t m, uint32_t d) { LWC; return g_liteHostServices.dayOfWeek(cc->ctx, (unsigned char)y, (unsigned char)m, (unsigned char)d); }
 static uint32_t w_signatureValidity(wasm_exec_env_t e, uint32_t ent, uint32_t dig, uint32_t sig) { LWC; return g_liteHostServices.signatureValidity(cc->ctx, A2N(ent), A2N(dig), A2N(sig)); }
 static int64_t  w_bidInIPO(wasm_exec_env_t e, uint32_t idx, int64_t price, uint32_t qty) { LWC; return g_liteHostServices.bidInIPO(cc->ctx, idx, price, qty); }
@@ -184,6 +185,7 @@ static int32_t  w_liteSetShareholderVotes(wasm_exec_env_t e, uint32_t idx, uint3
     HQ("issueAsset",                          issueAsset,     w_issueAsset,         "(IiiII)I")  \
     GQ("numberOfShares",                      numberOfShares,                       "(iii)I")    \
     GQ("numberOfPossessedShares",             numberOfPossessedShares,              "(Iiiiii)I") \
+    HQ("assetEnumerate",                      assetEnumerate,      w_assetEnumerate,             "(iiiiii)i") \
     HQ("transferShareOwnershipAndPossession", transferShareOwnershipAndPossession, w_transferShares, "(IiiiIi)I") \
     HQ("acquireShares",                       acquireShares,       w_acquireShares,              "(IiiiIiiI)I") \
     HQ("releaseShares",                       releaseShares,       w_releaseShares,              "(IiiiIiiI)I") \
