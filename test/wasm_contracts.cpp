@@ -128,6 +128,25 @@ void hs_assert(wasm_exec_env_t, uint32_t, uint32_t, uint32_t) {}
 uint32_t hs_fd_write(wasm_exec_env_t, uint32_t, uint32_t, uint32_t, uint32_t) { return 0; }
 uint32_t hs_fd_close(wasm_exec_env_t, uint32_t) { return 0; }
 uint32_t hs_fd_seek(wasm_exec_env_t, uint32_t, uint64_t, uint32_t, uint32_t) { return 0; }
+// Scratch (stack-locals frame) for contracts that use them (e.g. a Collection): back it with the WAMR app
+// heap — a real wasm-app pointer the contract writes through, freed on release. No node scratchpad needed.
+uint32_t hs_acquireScratch(wasm_exec_env_t e, uint64_t size, uint32_t initZero) {
+    wasm_module_inst_t inst = wasm_runtime_get_module_inst(e);
+    void* native = nullptr;
+    uint32_t off = (uint32_t)wasm_runtime_module_malloc(inst, (uint32_t)size, &native);
+    if (off && initZero && native) memset(native, 0, (size_t)size);
+    return off;
+}
+void hs_releaseScratch(wasm_exec_env_t e, uint32_t off) {
+    if (off) wasm_runtime_module_free(wasm_runtime_get_module_inst(e), off);
+}
+// Parse one hex byte pair; -1 on a non-hex nibble.
+int hexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
 } // namespace
 
 TEST(WasmContracts, CrossHostStateEquivalence) {
@@ -156,6 +175,8 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
         { "beginFn", (void*)hs_void_i, "(i)", nullptr },
         { "endFn", (void*)hs_void_i, "(i)", nullptr },
         { "markDirty", (void*)hs_void_i, "(i)", nullptr },
+        { "acquireScratch", (void*)hs_acquireScratch, "(Ii)i", nullptr },
+        { "releaseScratch", (void*)hs_releaseScratch, "(i)", nullptr },
     };
     static NativeSymbol envNs[] = {
         { "_ZL21addDebugMessageAssertPKcS0_j", (void*)hs_assert, "(iii)", nullptr },
@@ -165,7 +186,7 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
         { "fd_close", (void*)hs_fd_close, "(i)i", nullptr },
         { "fd_seek", (void*)hs_fd_seek, "(iIii)i", nullptr },
     };
-    ASSERT_TRUE(wasm_runtime_register_natives("lhost", lhostNs, 3));
+    ASSERT_TRUE(wasm_runtime_register_natives("lhost", lhostNs, 5));
     ASSERT_TRUE(wasm_runtime_register_natives("env", envNs, 1));
     ASSERT_TRUE(wasm_runtime_register_natives("wasi_snapshot_preview1", wasiNs, 3));
 
@@ -195,9 +216,35 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
 
     a[0] = KIND_SYSPROC; a[1] = SP_INITIALIZE; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
     call("dispatch", a, 5);
-    for (int i = 0; i < ops; i++) {
-        a[0] = KIND_PROCEDURE; a[1] = 1; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
-        call("dispatch", a, 5);
+
+    const char* script = getenv("QINIT_SCRIPT");
+    if (script && *script) {
+        // QINIT_SCRIPT = "it:inputhex;it:inputhex;..." — one procedure call per op, input marshalled into IN.
+        // Recompute the native IN pointer each op: a contract's scratch allocation can grow linear memory.
+        std::string s(script);
+        size_t p = 0;
+        while (p < s.size()) {
+            size_t semi = s.find(';', p);
+            std::string tok = s.substr(p, semi == std::string::npos ? std::string::npos : semi - p);
+            p = (semi == std::string::npos) ? s.size() : semi + 1;
+            if (tok.empty()) continue;
+            size_t colon = tok.find(':');
+            int it = atoi(tok.substr(0, colon).c_str());
+            std::string hex = colon == std::string::npos ? std::string() : tok.substr(colon + 1);
+            unsigned char* inN = (unsigned char*)wasm_runtime_addr_app_to_native(inst, IN);
+            memset(inN, 0, 64);
+            for (size_t i = 0; i + 1 < hex.size() && i / 2 < 64; i += 2) {
+                int hi = hexNibble(hex[i]), lo = hexNibble(hex[i + 1]);
+                if (hi >= 0 && lo >= 0) inN[i / 2] = (unsigned char)((hi << 4) | lo);
+            }
+            a[0] = KIND_PROCEDURE; a[1] = (uint32_t)it; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
+            call("dispatch", a, 5);
+        }
+    } else {
+        for (int i = 0; i < ops; i++) {
+            a[0] = KIND_PROCEDURE; a[1] = 1; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
+            call("dispatch", a, 5);
+        }
     }
 
     const unsigned char* s = (const unsigned char*)wasm_runtime_addr_app_to_native(inst, st);
