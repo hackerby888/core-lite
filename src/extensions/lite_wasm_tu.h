@@ -192,7 +192,14 @@ typedef void (*LiteWasmUserFn)(const QPI::QpiContextFunctionCall&, void*, void*,
 
 // 64K-page-aligned so each region sits on its own page(s): the debugger mprotect's the state region RO for
 // dirty-page diffing, so it must NOT share a page with ctx/io (64K covers any runtime page size incl. arm).
-alignas(65536) static CONTRACT_STATE_TYPE::StateData g_wasmState;   // resident state (= contractStates[idx])
+// Raw zero-init bytes, NOT a typed `static StateData` object: the node holds contract state as zero-initialized
+// raw memory (contractStates[] = memset 0) and the host copies state into this region before every call, so
+// default-constructing here is both pointless (immediately overwritten) and fragile — a StateData with any
+// member lacking a default ctor (e.g. QSWAP's uint128 accFeePerLPX64) would fail to compile. A char buffer has
+// static zero-init storage and runs no constructor; g_wasmState is a reference view over it, so &g_wasmState and
+// sizeof(g_wasmState) (= sizeof StateData) are unchanged for the state_addr/state_size exports below.
+alignas(65536) static unsigned char g_wasmStateBuf[sizeof(CONTRACT_STATE_TYPE::StateData)];   // resident state (= contractStates[idx])
+static CONTRACT_STATE_TYPE::StateData& g_wasmState = *reinterpret_cast<CONTRACT_STATE_TYPE::StateData*>(g_wasmStateBuf);
 alignas(65536) static unsigned char     g_wasmCtxBuf[256];   // QpiContext scalar header; host populates per call
 alignas(65536) static unsigned char     g_wasmIo[(64 * 1024) + (64 * 1024) + (32 * 1024) + (1024 * 1024 * 1024)];   // [in 64K|out 64K|locals 32K|arena 1GB]; MUST match LITE_WASM_*_SZ in lite_wasm_contracts.h
 
