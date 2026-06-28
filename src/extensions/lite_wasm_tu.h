@@ -201,7 +201,10 @@ typedef void (*LiteWasmUserFn)(const QPI::QpiContextFunctionCall&, void*, void*,
 alignas(65536) static unsigned char g_wasmStateBuf[sizeof(CONTRACT_STATE_TYPE::StateData)];   // resident state (= contractStates[idx])
 static CONTRACT_STATE_TYPE::StateData& g_wasmState = *reinterpret_cast<CONTRACT_STATE_TYPE::StateData*>(g_wasmStateBuf);
 alignas(65536) static unsigned char     g_wasmCtxBuf[256];   // QpiContext scalar header; host populates per call
-alignas(65536) static unsigned char     g_wasmIo[(64 * 1024) + (64 * 1024) + (32 * 1024) + (1024 * 1024 * 1024)];   // [in 64K|out 64K|locals 32K|arena 1GB]; MUST match LITE_WASM_*_SZ in lite_wasm_contracts.h
+#ifndef LITE_WASM_ARENA_SZ
+#define LITE_WASM_ARENA_SZ (1024 * 1024 * 1024)
+#endif
+alignas(65536) static unsigned char     g_wasmIo[(64 * 1024) + (64 * 1024) + (32 * 1024) + LITE_WASM_ARENA_SZ];   // [in 64K|out 64K|locals 32K|arena]; MUST match LITE_WASM_*_SZ in lite_wasm_contracts.h
 
 static bool g_wasmRegistered = false;
 static void liteWasmTuEnsureRegistered() {

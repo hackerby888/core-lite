@@ -25,7 +25,9 @@ void logColorToScreen(std::string type, std::string msg);   // defined later in 
 #define LITE_WASM_IN_SZ     (64u * 1024u)            // input  region (>= uint16 max 65535)
 #define LITE_WASM_OUT_SZ    (64u * 1024u)            // output region (>= uint16 max 65535)
 #define LITE_WASM_LOCALS_SZ (32u * 1024u)            // = MAX_SIZE_OF_CONTRACT_LOCALS
+#ifndef LITE_WASM_ARENA_SZ
 #define LITE_WASM_ARENA_SZ  (1024u * 1024u * 1024u)  // acquireScratch bump arena (matches native scratchpad)
+#endif
 #define LITE_WASM_IO_TOTAL  ((unsigned long long)LITE_WASM_IN_SZ + LITE_WASM_OUT_SZ + LITE_WASM_LOCALS_SZ + LITE_WASM_ARENA_SZ)
 
 static bool    g_liteWasmReady = false;
