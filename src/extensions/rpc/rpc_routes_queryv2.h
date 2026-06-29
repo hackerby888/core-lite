@@ -12,9 +12,9 @@
 #include <string>
 #include <fmt/format.h>
 #include "extensions/rpc/rpc_core.h"
-#include "extensions/http/controller/rpc_queryv2_controller.h"
+#include "extensions/http/queryv2_helpers.h"
 
-using QV2 = RpcQueryV2::RpcQueryV2Controller;
+namespace QV2 = RpcQueryV2;
 static constexpr int QV2_BAD = 3;   // RpcQueryV2::StatusCode::BadRequest
 static constexpr int QV2_NF  = 5;   // RpcQueryV2::StatusCode::NotFound
 
