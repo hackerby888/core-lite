@@ -9,8 +9,14 @@
 #include <filesystem>
 #include <system_error>
 #include "extensions/rpc/rpc_core.h"
+#include "extensions/http/utils.h"
+#include "extensions/tick_bench.h"
+#include "extensions/tx_stats.h"
 
-// ---- auth: mirrors http.h MiddleWare::PasscodeVerifier (passcode = p0-p1-p2-p3) ----
+// Was in http.h; the RPC routes reference it for passcode-gated endpoints.
+extern unsigned long long httpPasscodes[4];
+
+// ---- auth: passcode = p0-p1-p2-p3 ----
 static bool rpcPasscodeOk(const RpcReq& req)
 {
     std::string correct = std::to_string(httpPasscodes[0]) + "-" +

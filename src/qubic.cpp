@@ -271,6 +271,7 @@ static PendingTxsPool pendingTxsPool;
 #include "optimizations/opt_config.h"
 #include "optimizations/opt_eager_tx_fetch.h"
 #include "extensions/fast_tx_window.h"
+#include "extensions/tx_slot_index.h"
 
 static m256i uniqueNextTickTransactionDigests[NUMBER_OF_COMPUTORS];
 static m256i uniqueCurrentSpectrumDigests[NUMBER_OF_COMPUTORS];
@@ -399,7 +400,8 @@ static struct
     m256i id;
 } latestCreatedTickInfo;
 
-#include "extensions/http/http.h"
+unsigned long long httpPasscodes[4] = {};
+
 #include "extensions/rpc/rpc_core.h"
 #include "extensions/rpc/rpc_proxy.h"
 
@@ -9410,7 +9412,6 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 #ifdef ENABLE_PROFILING
             gProfilingDataCollector.writeToFile();
 #endif
-            QubicHttpServer::stop();
             setText(message, L"Qubic ");
             appendQubicVersion(message);
             appendText(message, L" is shut down.");
@@ -9584,8 +9585,6 @@ void processArgs(int argc, const char* argv[]) {
         ("fbis-count", "TEST: number of solution txs to inject per tick (with --fbis)", cxxopts::value<int>()->default_value("1"))
         ("fbis-same", "TEST: inject all --fbis solutions from one computor (drains it -> out-of-qus)", cxxopts::value<bool>())
         ("test-solution-threshold", "TEST: override the runtime solution threshold for the current epoch (0 = injected solutions validate)", cxxopts::value<int>()->default_value("-1"))
-        ("rpc-sidecar", "Deprecated no-op: the RPC sidecar process is now the default", cxxopts::value<bool>())
-        ("rpc-inprocess", "Serve RPC from the node process (in-process drogon) instead of the default sidecar", cxxopts::value<bool>())
         ("rpc-proxy", "INTERNAL: run as the RPC sidecar (drogon HTTP -> node unix-socket forwarder)", cxxopts::value<bool>())
         ("rpc-listen", "RPC sidecar HTTP listen port", cxxopts::value<int>()->default_value("41850"))
         ("rpc-node", "RPC sidecar: node http port used as the unix-socket key", cxxopts::value<int>()->default_value("41841"))
@@ -10051,10 +10050,7 @@ int main(int argc, const char* argv[]) {
 
     Overload::initializeUefi();
 #if defined(__linux__) && !defined(NO_RPC)
-    // Sidecar is the default. The node serves RPC in-process only when no sidecar was forked; the
-    // shim sets QUBIC_RPC_INPROCESS on every such path (--rpc-inprocess / QUBIC_NO_SUPERVISOR / fallback).
-    if (getenv("QUBIC_RPC_INPROCESS")) QubicHttpServer::start(httpPort);
-    rpcUnixStart(rpcUnixPath(httpPort));                 // node-side RPC dispatch over a unix socket
+    rpcUnixStart(rpcUnixPath(httpPort));
     watchAndCheckin();
 #endif
     auto status = (int)efi_main(ih, st);

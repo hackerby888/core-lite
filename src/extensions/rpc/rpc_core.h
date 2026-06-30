@@ -153,18 +153,26 @@ namespace rpcwire
         return writeAll(fd, (char*)&ml, 4) && writeAll(fd, meta.data(), ml)
             && writeAll(fd, (char*)&bl, 4) && writeAll(fd, body.data(), bl);
     }
-    inline bool readFrame(int fd, std::string& meta, std::string& body)
+    inline bool readFrame(int fd, std::string &meta, std::string &body)
     {
         uint32_t ml = 0, bl = 0;
-        if (!readAll(fd, (char*)&ml, 4)) return false;
-        if (ml > 16u * 1024 * 1024) return false;
-        meta.resize(ml); if (ml && !readAll(fd, &meta[0], ml)) return false;
-        if (!readAll(fd, (char*)&bl, 4)) return false;
-        if (bl > 256u * 1024 * 1024) return false;
-        body.resize(bl); if (bl && !readAll(fd, &body[0], bl)) return false;
+        if (!readAll(fd, (char *)&ml, 4))
+            return false;
+        if (ml > 16u * 1024 * 1024)
+            return false;
+        meta.resize(ml);
+        if (ml && !readAll(fd, &meta[0], ml))
+            return false;
+        if (!readAll(fd, (char *)&bl, 4))
+            return false;
+        if (bl > 256u * 1024 * 1024)
+            return false;
+        body.resize(bl);
+        if (bl && !readAll(fd, &body[0], bl))
+            return false;
         return true;
     }
-}
+    } // namespace rpcwire
 
 // ---------------- node-side unix-socket server ----------------
 inline std::atomic<bool> gRpcUnixRunning{ false };

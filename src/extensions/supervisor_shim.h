@@ -1,9 +1,8 @@
 #pragma once
 
 // Supervisor shim: a tiny subreaper parent that keeps a stable PID across fork-rollback promotes
-// (the promoted child reparents to it, not init). By default it also forks the RPC proxy as a sibling
-// that survives promotes + restarts it on death. Linux-only; opt out QUBIC_NO_SUPERVISOR=1 (no shim)
-// or --rpc-inprocess (shim, but RPC served in-process).
+// (the promoted child reparents to it, not init). Forks the RPC proxy as a sibling
+// that survives promotes + restarts it on death. Linux-only; opt out QUBIC_NO_SUPERVISOR=1 (no shim).
 
 #ifdef __linux__
 
@@ -58,42 +57,28 @@ static bool shimHasNodeChild(pid_t sidecar)
 // Returns ONLY in the node child. The supervisor parent loops here and _exit()s when the node drains.
 static inline void runUnderSupervisor(int argc, const char** argv)
 {
-    // No shim -> no sidecar process; tell main() to serve RPC in-process (dev / screen).
-    if (getenv("QUBIC_NO_SUPERVISOR")) { setenv("QUBIC_RPC_INPROCESS", "1", 1); return; }
+    // No shim -> no sidecar, no RPC at all (dev / screen). Node runs bare.
+    if (getenv("QUBIC_NO_SUPERVISOR")) return;
 
-    bool wantSidecar = true;   // sidecar is the default; --rpc-inprocess opts back to in-process drogon
     for (int i = 1; i < argc; i++)
     {
-        if (std::string(argv[i]) == "--rpc-inprocess") wantSidecar = false;
-        else if (std::string(argv[i]) == "--http-port" && i + 1 < argc)
+        if (std::string(argv[i]) == "--http-port" && i + 1 < argc)
         {
             std::strncpy(gSidecarPort, argv[i + 1], sizeof(gSidecarPort) - 1);
             gSidecarPort[sizeof(gSidecarPort) - 1] = 0;
         }
     }
-#ifdef NO_RPC
-    wantSidecar = false;
-#endif
-    // Every path that does not fork a sidecar must hand RPC back to the in-process server.
-    if (!wantSidecar) setenv("QUBIC_RPC_INPROCESS", "1", 1);
 
-    if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0)   // can't subreap: run the node inline
-    {
-        setenv("QUBIC_RPC_INPROCESS", "1", 1);
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0)   // can't subreap: run node inline
         return;
-    }
 
-    pid_t sidecar = wantSidecar ? shimForkSidecar() : -1;
+    pid_t sidecar = shimForkSidecar();
 
     pid_t node = fork();
-    if (node < 0)                                         // fork failed: run the node inline
-    {
-        setenv("QUBIC_RPC_INPROCESS", "1", 1);
-        return;
-    }
-    if (node == 0) return;                                // CHILD: become the node
+    if (node < 0) return;                                  // fork failed: run node inline
+    if (node == 0) return;                                 // CHILD: become the node
 
-    // SUPERVISOR (stable PID). Reap everything (PID-1 duty under docker) + forward stop signals.
+    // SUPERVISOR (stable PID). Reap everything + forward stop signals.
     signal(SIGTERM, shimForwardSignal);
     signal(SIGINT, shimForwardSignal);
 
@@ -106,19 +91,18 @@ static inline void runUnderSupervisor(int argc, const char** argv)
         if (dead < 0)
         {
             if (errno == EINTR) continue;
-            break;                                        // ECHILD: nothing left
+            break;                                         // ECHILD: nothing left
         }
-        if (wantSidecar && dead == sidecar)
+        if (sidecar > 0 && dead == sidecar)
         {
-            sidecar = shimForkSidecar();                  // RPC must not stay down: restart it
+            sidecar = shimForkSidecar();                   // RPC must not stay down: restart it
             continue;
         }
-        // a node-lineage generation ended; a promoted successor (if any) has reparented to us.
         lastSt = st;
         if (WIFSIGNALED(st)) sawSignal = true;
-        if (!shimHasNodeChild(sidecar)) break;            // node lineage drained -> shim exits
+        if (!shimHasNodeChild(sidecar)) break;             // node lineage drained -> shim exits
     }
-    if (wantSidecar && sidecar > 0) kill(sidecar, SIGTERM);
+    if (sidecar > 0) kill(sidecar, SIGTERM);
     _exit(sawSignal ? 1 : (WIFEXITED(lastSt) ? WEXITSTATUS(lastSt) : 1));
 }
 

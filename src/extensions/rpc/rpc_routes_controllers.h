@@ -384,15 +384,13 @@ RPC_ROUTE("GET", "/v1/latest-stats")
     data["currentTick"] = system.tick;
     data["ticksInCurrentEpoch"] = system.tick - system.initialTick;
     unsigned int emptyTicks = 0;
+    for (unsigned int tick = system.initialTick; tick < system.tick; tick++)
     {
+        PinScope _pinScope;
         TickStorage::tickData.acquireLock();
-       for (unsigned int tick = system.initialTick; tick < system.tick; tick++)
-       {
-           TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
-           if (!tickData)
-               emptyTicks++;
-       }
+        const bool empty = (TickStorage::tickData.getByTickIfNotEmpty(tick) == nullptr);
         TickStorage::tickData.releaseLock();
+        if (empty) emptyTicks++;
     }
     data["emptyTicksInCurrentEpoch"] = emptyTicks;
     data["epochTickQuality"] = system.tick - system.initialTick == 0 ? 0 : std::roundf((float)(system.tick - system.initialTick - emptyTicks) / (float)(system.tick - system.initialTick) * 100000.0f) / 100000.0f;

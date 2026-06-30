@@ -18,7 +18,7 @@ namespace QV2 = RpcQueryV2;
 static constexpr int QV2_BAD = 3;   // RpcQueryV2::StatusCode::BadRequest
 static constexpr int QV2_NF  = 5;   // RpcQueryV2::StatusCode::NotFound
 
-// TickNumberVerifier middleware, inlined. Returns false + fills errOut on failure.
+// Tick number bounds check; returns false + fills errOut on failure.
 static bool rpcTickNumberVerify(const RpcReq& req, RpcResp& errOut)
 {
     Json::Value result;
@@ -205,6 +205,7 @@ RPC_ROUTE("POST", "/query/v1/getTransactionByHash")
     const unsigned int scanHi = hasTickHint ? scanLo : system.tick;
     for (unsigned int tick = scanLo; tick <= scanHi && !found; tick++)
     {
+        PinScope _pinScope;
         TickStorage::tickData.acquireLock();
         TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
         if (tickData)
@@ -285,6 +286,7 @@ RPC_ROUTE("POST", "/query/v1/getTransactionsForIdentity")
         std::vector<std::vector<unsigned char>> matchedBufs;
         for (unsigned int tick = system.initialTick; tick <= system.tick; tick++)
         {
+            PinScope _pinScope;
             TickData localTickData;
             TickStorage::tickData.acquireLock();
             TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
@@ -352,19 +354,19 @@ RPC_ROUTE("POST", "/query/v1/getTransactionsForIdentity")
                         {
                             if (range.isMember("lt"))
                             {
-                                if (!(stoull(tx[key].asString()) < stoull(range["lt"].asString()))) { match = false; break; }
+                                if (!(std::stoull(tx[key].asString()) < std::stoull(range["lt"].asString()))) { match = false; break; }
                             }
                             if (range.isMember("gt"))
                             {
-                                if (!(stoull(tx[key].asString()) > stoull(range["gt"].asString()))) { match = false; break; }
+                                if (!(std::stoull(tx[key].asString()) > std::stoull(range["gt"].asString()))) { match = false; break; }
                             }
                             if (range.isMember("lte"))
                             {
-                                if (!(stoull(tx[key].asString()) <= stoull(range["lte"].asString()))) { match = false; break; }
+                                if (!(std::stoull(tx[key].asString()) <= std::stoull(range["lte"].asString()))) { match = false; break; }
                             }
                             if (range.isMember("gte"))
                             {
-                                if (!(stoull(tx[key].asString()) >= stoull(range["gte"].asString()))) { match = false; break; }
+                                if (!(std::stoull(tx[key].asString()) >= std::stoull(range["gte"].asString()))) { match = false; break; }
                             }
                         }
                     }
@@ -431,7 +433,7 @@ RPC_ROUTE("POST", "/query/v1/getTransfersForIdentity")
     std::string direction = (*json).get("direction", "both").asString();
     const bool wantIn  = (direction == "in"  || direction == "both");
     const bool wantOut = (direction == "out" || direction == "both");
-    const unsigned int limit = (*json).get("limit", 50).asUInt();
+    const unsigned int limit = std::min((*json).get("limit", 50).asUInt(), 1000u);
 
     Json::Value transactions(Json::arrayValue);
     struct Hit { std::vector<unsigned char> buf; const char* dir; };
@@ -440,6 +442,7 @@ RPC_ROUTE("POST", "/query/v1/getTransfersForIdentity")
 
     for (unsigned int tick = system.tick; tick + 1 > system.initialTick && hits.size() < limit; tick--)
     {
+        PinScope _pinScope;
         TickData localTickData;
         TickStorage::tickData.acquireLock();
         TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
@@ -531,6 +534,7 @@ RPC_ROUTE("POST", "/query/v1/getContractCalls")
 
     for (unsigned int tick = toTick; tick + 1 > fromTick; tick--)
     {
+        PinScope _pinScope;
         TickData localTickData;
         TickStorage::tickData.acquireLock();
         TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
@@ -963,6 +967,7 @@ RPC_ROUTE("POST", "/query/v1/getEventLogs")
         bool stopAll = false;
         for (unsigned long long lid = logIdLo; lid <= logIdHi && !stopAll; lid++)
         {
+            PinScope _pinScope;
             qLogger::BlobInfo bi = qLogger::logBuf.getBlobInfo(lid);
             if (bi.startIndex < 0 || bi.length <= 0) continue;
             unsigned long long entryLen = (unsigned long long)bi.length;
