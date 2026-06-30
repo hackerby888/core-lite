@@ -9581,43 +9581,47 @@ void processArgs(int argc, const char* argv[]) {
     cxxopts::Options options("Qubic Core Lite", "The lite version of Qubic Core that can run directly on the OS without a UEFI environment.");
     options.allow_unrecognised_options();
     options.add_options()
+        // ── production ──
         ("p,peers", "Public peers", cxxopts::value<std::string>())
         ("m,mode", "Core mode", cxxopts::value<std::string>())
         ("g,testnet-gbt", "Enable testnet go behind trick in aux node", cxxopts::value<bool>())
         ("r,rebuild-tx-hashmap", "Enable rebuild tx hashmap when start from snapshot", cxxopts::value<bool>())
         ("d,ticking-delay", "Delay ticking process by milliseconds", cxxopts::value<int>())
-        ("sm, node-mode", "Set start mode to Main&aux,....", cxxopts::value<int>())
+        ("sm,node-mode", "Set start mode (1=MAIN, 2=AUX, 3=MAIN&AUX)", cxxopts::value<int>())
         ("seeds", "Set seeds (IDs) to run on this node (only apply for main node)", cxxopts::value<std::string>())
-        ("rp, reader-passcode", "Passcode to access log reader", cxxopts::value<std::string>())
-        ("hp, http-passcode", "Passcode to access http server", cxxopts::value<std::string>())
-        ("o, operator", "Operator id", cxxopts::value<std::string>())
-        ("op, operator-seed", "Lite node seed", cxxopts::value<std::string>())
-		("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
-        ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
-        ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the fork rollback path", cxxopts::value<bool>())
-        ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
-        ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
-        ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
-        ("swap-dirty-track", "Auto-track dirty SwapVM cache pages via mprotect+SIGSEGV (Linux only): skip the writeback (and compression) for pages never modified since load. Trades a small mprotect/fault cost for less disk I/O. Off by default.")
-        ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
-        ("rollback-mode", "DEPRECATED: AUX wrong-solution tick rollback is always fork-on-BSP child-promote now; accepted but ignored", cxxopts::value<std::string>()->default_value("fork"))
-        ("verify-fork-rollback", "TEST: assert the fork re-run reproduces the quorum digest", cxxopts::value<bool>())
-        ("fork-force-fork", "TEST: fork every tick (exercise the MATCH path on clean ticks)", cxxopts::value<bool>())
-        ("fork-force-match", "TEST: force the fork verdict to take the match branch (commit + kill child)", cxxopts::value<bool>())
-        ("fork-force-mismatch", "TEST: force the fork verdict to take the mismatch branch (promote child + parent _exit)", cxxopts::value<bool>())
+        ("rp,reader-passcode", "Passcode to access log reader", cxxopts::value<std::string>())
+        ("hp,http-passcode", "Passcode to access http server", cxxopts::value<std::string>())
+        ("o,operator", "Operator id", cxxopts::value<std::string>())
+        ("op,operator-seed", "Lite node seed", cxxopts::value<std::string>())
+        ("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
+        ("fv,force-verify-solutions", "Force strict solution verification on every tick", cxxopts::value<bool>())
+        ("http-port", "HTTP/RPC server port", cxxopts::value<int>()->default_value("41841"))
+        ("static-peers", "Run in static peer mode: no peer churn, no new incoming connections")
+        ("swap-compression", "Compress SwapVM disk pages with blosc2 (Linux only)")
+        ("swap-dirty-track", "Track dirty SwapVM pages via mprotect+SIGSEGV (Linux only)")
+        ("auto-flush-stuck-seconds", "Seconds stuck on same tick before auto-rewipe tickData and re-fetch from peers (0=off)", cxxopts::value<int>()->default_value("0"))
+        ("rollback-mode", "DEPRECATED: accepted but ignored", cxxopts::value<std::string>()->default_value("fork"))
+        ("max-inbound-per-ip", "Max inbound connections per IP (0=unlimited)", cxxopts::value<int>()->default_value("0"))
+        ("max-inbound", "Max inbound connection slots (0=none, -1=all)", cxxopts::value<int>()->default_value("-1"))
+        ("no-k12-state-cache", "Disable K12 state-digest incremental cache (Linux)")
+        ("k12-state-cache-verify", "Verify K12 state-digest cache against one-shot (soak/CI)")
+
+        // ── debug / test ──
+        ("fbis,force-broadcast-invalid-solution", "TEST: broadcast random-nonce solution tx each tick to exercise fork rollback", cxxopts::value<bool>())
+        ("fbis-count", "TEST: number of solution txs per tick with --fbis", cxxopts::value<int>()->default_value("1"))
+        ("fbis-same", "TEST: inject all --fbis solutions from one computor", cxxopts::value<bool>())
+        ("test-solution-threshold", "TEST: override runtime solution threshold (0=injected validate)", cxxopts::value<int>()->default_value("-1"))
+        ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
+        ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
+        ("fork-force-match", "TEST: force verdict to match branch", cxxopts::value<bool>())
+        ("fork-force-mismatch", "TEST: force verdict to mismatch branch (promote child)", cxxopts::value<bool>())
         ("fork-bench", "TEST: print per-fork timing + RSS", cxxopts::value<bool>())
-        ("no-fork-census", "Disable the fork-eligibility lock census (default on; gate enforcement only)", cxxopts::value<bool>())
-        ("fork-force-rollback-every", "TEST: force a fork + single-tick rollback (to tick-1) every N ticks (0=off)", cxxopts::value<unsigned int>()->default_value("0"))
-        ("fbis-count", "TEST: number of solution txs to inject per tick (with --fbis)", cxxopts::value<int>()->default_value("1"))
-        ("fbis-same", "TEST: inject all --fbis solutions from one computor (drains it -> out-of-qus)", cxxopts::value<bool>())
-        ("test-solution-threshold", "TEST: override the runtime solution threshold for the current epoch (0 = injected solutions validate)", cxxopts::value<int>()->default_value("-1"))
-        ("rpc-proxy", "INTERNAL: run as the RPC sidecar (drogon HTTP -> node unix-socket forwarder)", cxxopts::value<bool>())
-        ("rpc-listen", "RPC sidecar HTTP listen port", cxxopts::value<int>()->default_value("41850"))
-        ("rpc-node", "RPC sidecar: node http port used as the unix-socket key", cxxopts::value<int>()->default_value("41841"))
-        ("max-inbound-per-ip", "Max inbound connection slots from a single IP (0 = unlimited, default). Stops one peer flooding many slots.", cxxopts::value<int>()->default_value("0"))
-        ("no-k12-state-cache", "Disable the incremental smart-contract state digest cache (Linux). Default on: only changed 8KB chunks are re-hashed via mprotect+SIGSEGV dirty tracking. Pass to fall back to full one-shot K12 every tick.")
-        ("k12-state-cache-verify", "Self-check the K12 state-digest cache: each digest also runs the one-shot and stalls loudly on any mismatch. For soak/CI; small per-tick cost. Off by default.")
-        ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"));
+        ("fork-force-rollback-every", "TEST: force fork + rollback every N ticks (0=off)", cxxopts::value<unsigned int>()->default_value("0"))
+
+        // ── internal ──
+        ("rpc-proxy", "INTERNAL: run as the RPC sidecar", cxxopts::value<bool>())
+        ("rpc-listen", "INTERNAL: sidecar HTTP listen port", cxxopts::value<int>()->default_value("41850"))
+        ("rpc-node", "INTERNAL: sidecar node port for unix-socket key", cxxopts::value<int>()->default_value("41841"));
     auto result = options.parse(argc, argv);
 
     auto unmatched = result.unmatched();
@@ -9670,10 +9674,7 @@ void processArgs(int argc, const char* argv[]) {
         gForkBench = true;
         logColorToScreen("INFO", "TEST: per-fork timing + RSS benchmark enabled");
     }
-    if (result.count("no-fork-census")) {
-        gForkCensus = false;
-        logColorToScreen("INFO", "fork-eligibility census DISABLED (--no-fork-census)");
-    }
+
     if (result.count("fork-force-rollback-every")) {
         gForkForceRollbackEvery = result["fork-force-rollback-every"].as<unsigned int>();
         if (gForkForceRollbackEvery)
