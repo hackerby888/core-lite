@@ -8652,48 +8652,68 @@ static void spawnAPs()
 static void tickForkChildPromote(unsigned int strictUntilTick)
 {
     tickForkLog("CHILD: promote begin (rebuild net + APs, replay window strict)");
+
+    // ── Stage 1: fork protocol atomics ──
     tickFork::gIsForkChild = true;
     tickFork::gForkRequest = false;
     tickFork::gChildPid = -2;
     gForkQuiesceRequest = false;
-    close(tickFork::gPipe[0]); tickFork::gPipe[0] = -1;
-    gShadow.reinitForChildPromote();   // inherited mtx may be held by a non-surviving thread
-    gShadow.purgeOrphans();   // drop the parent's optimistic shadow; real page files are pristine
-    ts.resetSwapPinsForChildPromote();   // drop swapVM pins leaked by non-surviving parent threads (else cache slots stay pinned -> fatal)
-    forkCensusResetForChildPromote();   // drop dead parent threads' census slots (else gCount grows per promote -> gOverflow -> forks disabled)
-    gReRunStrict = true;                          // re-run strict from the checkpoint tick ...
-    gReRunStrictUntilTick = strictUntilTick;      // ... through the mismatch tick (the window), then optimistic
-    Overload::resetForChildPromote();  // drop inherited per-peer TCP state, keep the listen socket
-    // Per-socket send/recv workers lazy-spawn on the first Transmit/Receive after reconnect (no eager respawn).
-    // Drop inherited connection state so the main loop reconnects fresh. reset() (not a full zero)
-    // preserves the per-peer heap buffers + EFI tokens that are allocated ONCE at startup
-    // (dataToTransmit/receiveBuffer/transmitData FragmentBuffer/tokens) and valid here via COW.
+    tickFork::setWinState(tickFork::WindowState::Idle);
+    close(tickFork::gPipe[0]);
+    tickFork::gPipe[0] = -1;
+
+    // ── Stage 2: disk shadow + swap pin recovery ──
+    // Inherited structures may be mid-operation in a non-surviving parent thread.
+    gShadow.reinitForChildPromote();
+    gShadow.purgeOrphans();
+    ts.resetSwapPinsForChildPromote();
+    forkCensusResetForChildPromote();
+
+    // ── Stage 3: strict-replay window ──
+    gReRunStrict = true;
+    gReRunStrictUntilTick = strictUntilTick;
+
+    // ── Stage 4: networking — drop parent connection state, keep COW-shared buffers ──
+    Overload::resetForChildPromote();
     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
     {
         peers[i].reset();
-        // Status 0 == EFI_SUCCESS would make peerConnectionNewlyEstablished treat a half-armed Accept
-        // (NewChildHandle still NULL) as completed -> OpenProtocol(NULL)/DestroyChild(NULL) crash.
+        // Status 0 would make peerConnectionNewlyEstablished treat a half-armed Accept as completed.
         peers[i].connectAcceptToken.CompletionToken.Status = -1;
         peers[i].receiveToken.CompletionToken.Status = -1;
         peers[i].transmitToken.CompletionToken.Status = -1;
-        peers[i].receiveData.FragmentTable[0].FragmentBuffer = peers[i].receiveBuffer;  // fresh receive cursor
+        peers[i].receiveData.FragmentTable[0].FragmentBuffer = peers[i].receiveBuffer;
     }
-    if (gAsyncFileIO) gAsyncFileIO->reinitForChildPromote();   // clean queues; reuse inherited struct (no leak)
+    if (gAsyncFileIO)
+    {
+        gAsyncFileIO->reinitForChildPromote();
+    }
+
+    // ── Stage 5: compute threads ──
     spawnAPs();
-    if (numberOfProcessors < 3)   // spawnAPs could not bring up the worker threads -> unrunnable child
+    if (numberOfProcessors < 3)
     {
         tickForkLog("spawnAPs failed: too few processors -> fatal child exit (supervisor restart)");
         _exit(71);
     }
+
+    // ── Stage 6: RPC rebind ──
 #if defined(__linux__) && !defined(NO_RPC)
-    new (&gRpcDispatchLock) SmartSharedMutex("gRpcDispatchLock");   // inherited locked across fork; reset (like networkingLock)
-    if (gRpcUnixListenFd >= 0) { close(gRpcUnixListenFd); gRpcUnixListenFd = -1; }  // close inherited listener (else +1 fd/promote)
-    gRpcUnixRunning = false;                       // inherited unix-server thread is gone; re-bind the socket
+    new (&gRpcDispatchLock) SmartSharedMutex("gRpcDispatchLock");
+    if (gRpcUnixListenFd >= 0)
+    {
+        close(gRpcUnixListenFd);
+        gRpcUnixListenFd = -1;
+    }
+    gRpcUnixRunning = false;
     rpcUnixStart(rpcUnixPath(httpPort));
 #endif
-    if (gForkBench) { fprintf(stderr, "[FORK-BENCH] child promoted rss=%ldMB\n", tickForkRssKb() / 1024); fflush(stderr); }
+    if (gForkBench)
+    {
+        fprintf(stderr, "[FORK-BENCH] child promoted rss=%ldMB\n", tickForkRssKb() / 1024);
+        fflush(stderr);
+    }
     tickForkLog("CHILD: promote done, now the live node");
-    // Inherited socket fds are abandoned here (a small fd leak on the rare promotion).
 }
 
 // Called from the BSP main-loop top (no networkingLock held) when a fork is requested.
@@ -8734,8 +8754,9 @@ static void bspForkPoint()
             fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n",
                     off ? off : "?", (unsigned)system.tick);
             fflush(stderr);
-            tickFork::gChildPid = -1;       // route establishCheckpoint to its existing strict fallback
+            tickFork::gChildPid = -1;
             tickFork::gForkRequest = false;
+            tickFork::setWinState(tickFork::WindowState::Idle);
             return;
         }
     }
@@ -8774,8 +8795,12 @@ static void bspForkPoint()
         tickForkLog("fork() failed -> parent strict fallback (no checkpoint)");
         ForkStats::onForkSkipped(ForkStats::FORK_FAIL, (unsigned)system.tick, "");
     }
-    tickFork::gChildPid = pid;   // >=0 on success, -1 on failure
+    tickFork::gChildPid = pid;
     tickFork::gForkRequest = false;
+    if (pid < 0)
+    {
+        tickFork::setWinState(tickFork::WindowState::Idle);
+    }
 }
 #endif // __linux__
 

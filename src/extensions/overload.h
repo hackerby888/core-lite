@@ -383,10 +383,15 @@ struct Overload {
     {
         const unsigned long long listenKey = (unsigned long long)peerTcp4Protocol;
         std::shared_ptr<TcpData> listenData;
-        if (auto it = tcpDataMap.find(listenKey); it != tcpDataMap.end()) listenData = it->second;
+        if (auto it = tcpDataMap.find(listenKey); it != tcpDataMap.end())
+            listenData = it->second;
 
-        for (auto& kv : tcpDataMap) if (kv.first != listenKey && kv.second && kv.second->socket != INVALID_SOCKET) closesocket(kv.second->socket);
-        for (auto& kv : incomingSocketMap) if (kv.second != INVALID_SOCKET) closesocket(kv.second);
+        for (auto &kv : tcpDataMap)
+            if (kv.first != listenKey && kv.second && kv.second->socket != INVALID_SOCKET)
+                closesocket(kv.second->socket);
+        for (auto &kv : incomingSocketMap)
+            if (kv.second != INVALID_SOCKET)
+                closesocket(kv.second);
         tcpDataMap.clear();
         incomingSocketMap.clear();
         eventDataMap.clear();
@@ -394,7 +399,8 @@ struct Overload {
         isSendThreadSetupMap.clear();
         // The kept listen socket's inherited per-socket worker refs are stale (threads gone); null
         // them so the next op lazy-spawns fresh workers.
-        if (listenData) {
+        if (listenData)
+        {
             listenData->sendIo.reset();
             listenData->recvIo.reset();
             tcpDataMap.emplace(listenKey, listenData);

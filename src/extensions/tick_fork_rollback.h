@@ -54,6 +54,18 @@ namespace tickFork
     inline int gPipe[2] = { -1, -1 };                // verdict channel: parent writes [1], child reads [0]
     inline std::atomic<bool> gIsForkChild{ false };  // set in the promoted child
 
+    enum class WindowState { Idle, Checkpointing, Live, Retiring };
+    inline std::atomic<int> gWinState{ (int)WindowState::Idle };
+
+    inline WindowState winState()
+    {
+        return (WindowState)gWinState.load(std::memory_order_acquire);
+    }
+    inline void setWinState(WindowState s)
+    {
+        gWinState.store((int)s, std::memory_order_release);
+    }
+
     // Only ticks carrying a mining-solution tx can mismatch quorum.
     inline bool tickHasSolution(unsigned int tick)
     {
@@ -105,19 +117,63 @@ namespace tickFork
         gForkQuiesceRequest = false;
     }
 
+    enum class QuiesceMode { Shared, Exclusive, TryExclusive };
+
+    inline bool quiesceWriters(QuiesceMode mode, int timeoutMs)
+    {
+        bool ok = parkRequestProcessors(timeoutMs);
+        switch (mode)
+        {
+        case QuiesceMode::Shared:
+            break;
+        case QuiesceMode::Exclusive:
+#if !defined(NO_RPC)
+            gRpcDispatchLock.lock();
+#endif
+            ok &= ts.drainSwapIoForFork(timeoutMs);
+            break;
+        case QuiesceMode::TryExclusive:
+#if !defined(NO_RPC)
+            gRpcDispatchLock.try_lock();
+#endif
+            ok &= ts.drainSwapIoForFork(timeoutMs);
+            break;
+        }
+        return ok;
+    }
+
+    inline void releaseQuiesce(QuiesceMode mode)
+    {
+        switch (mode)
+        {
+        case QuiesceMode::Shared:
+            break;
+        case QuiesceMode::Exclusive:
+#if !defined(NO_RPC)
+            gRpcDispatchLock.unlock();
+#endif
+            break;
+        case QuiesceMode::TryExclusive:
+            break;
+        }
+        unparkRequestProcessors();
+    }
+
     // Establish a fresh checkpoint at system.tick: park request procs, pipe, arm shadow, ask BSP to fork.
     inline void establishCheckpoint()
     {
         if (gForkBench) { gForkWindowStartNs = tickForkNowNs(); gForkRssBeforeKb = tickForkRssKb(); }
         tickForkLog("checkpoint -> request BSP fork");
+        setWinState(WindowState::Checkpointing);
         ForkStats::onForkRequested();
-        // Bounded: a wedged request processor must not hang the fork. On timeout, score this tick strict.
-        if (!parkRequestProcessors(gForkQuiesceTimeoutMs))
+        if (!quiesceWriters(QuiesceMode::Shared, gForkQuiesceTimeoutMs))
         {
-            unparkRequestProcessors();
-            gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
+            releaseQuiesce(QuiesceMode::Shared);
+            gReRunStrict = true;
+            gReRunStrictUntilTick = (unsigned)system.tick;
             ForkStats::onForkSkipped(ForkStats::PARK_TIMEOUT, (unsigned)system.tick, "");
             tickForkLog("park barrier timeout -> scoring this tick strict (no fork)");
+            setWinState(WindowState::Idle);
             return;
         }
 
@@ -125,10 +181,11 @@ namespace tickFork
         // from quorum: no child is needed and the no-fork verdict won't stall.
         if (pipe(gPipe) != 0)
         {
-            gForkQuiesceRequest = false;
+            releaseQuiesce(QuiesceMode::Shared);
             gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
             ForkStats::onForkSkipped(ForkStats::PIPE_FAIL, (unsigned)system.tick, "");
             tickForkLog("pipe() failed -> scoring this tick strict (no fork)");
+            setWinState(WindowState::Idle);
             return;
         }
         // O_CLOEXEC: a fork+exec helper (crash-reporter curl, sidecar) must not inherit the verdict pipe and
@@ -156,16 +213,18 @@ namespace tickFork
         {
             gShadow.discard();
             close(gPipe[0]); close(gPipe[1]); gPipe[0] = gPipe[1] = -1;
-            gForkQuiesceRequest = false;
+            releaseQuiesce(QuiesceMode::Shared);
             gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
             tickForkLog("fork() failed -> scoring this tick strict (no fork)");
+            setWinState(WindowState::Idle);
             return;
         }
-        close(gPipe[0]);                            // parent keeps the write end across the window
-        gForkQuiesceRequest = false;                // release request processors
+        close(gPipe[0]);
+        releaseQuiesce(QuiesceMode::Shared);
         gCheckpointTick = (unsigned)system.tick;
         ForkStats::onForkOk();
         tickForkLog("parent: checkpoint forked, optimistic processTick ahead");
+        setWinState(WindowState::Live);
     }
 
     // Close out a window that completed with no mismatch (we are still alive): commit its diverted
@@ -173,83 +232,89 @@ namespace tickFork
     inline void retireCheckpoint()
     {
         tickForkLog("window complete -> commit shadow + reap checkpoint");
-        // commit() renames /s/<page> -> real and MUST run with the swap writers stopped: a writeback racing
-        // the rename strands an orphan/torn /s page + a stale real file (wrong serve / boot exit(1) on the
-        // next USE_SWAP reload). Quiesce both writer sets as the fork does (park request procs +
-        // gRpcDispatchLock + drain). If they won't quiesce, do NOT rename under a live writer -> exit so the
-        // pristine checkpoint child promotes + re-derives this (already quorum-matched) window.
-        bool quiesced = parkRequestProcessors(gForkQuiesceTimeoutMs);
-#if !defined(NO_RPC)
-        gRpcDispatchLock.lock();
-#endif
-        quiesced &= ts.drainSwapIoForFork(gForkQuiesceTimeoutMs);
-        if (!quiesced)
+        setWinState(WindowState::Retiring);
+        if (!quiesceWriters(QuiesceMode::Exclusive, gForkQuiesceTimeoutMs))
         {
             tickForkLog("FATAL: swap writers did not quiesce before commit -> exit, checkpoint child takes over");
             _exit(70);
         }
         gShadow.commit();
-#if !defined(NO_RPC)
-        gRpcDispatchLock.unlock();
-#endif
-        unparkRequestProcessors();
+        releaseQuiesce(QuiesceMode::Exclusive);
         kill(gChildPid.load(), SIGKILL);
         int st; waitpid(gChildPid.load(), &st, 0);
         close(gPipe[1]); gPipe[1] = -1;
         gChildPid = -2;
+        setWinState(WindowState::Idle);
     }
 
     // tickProcessor, before processTick(system.tick). Maintains the checkpoint window.
     inline void maybeForkBeforeTick(unsigned long long processorNumber)
     {
         (void)processorNumber;
-        if (gReRunStrict) return;                   // replaying the window strict: never fork
-        if (forceVerifySolutions) return;           // -fv = strict-all mode: no trick/rollback/fork
+        if (gReRunStrict) return;
+        if (forceVerifySolutions) return;
+
         if (isMainMode())
         {
-            // AUX->MAIN with a live checkpoint: verdict() is MAIN-gated and never retires the window, so it
-            // would leak the child (COW RSS -> OOM/SIGTERM) and leave the shadow armed forever (every MAIN
-            // write diverts to /s, real frozen). Commit the optimistic state we already advanced + reap.
-            if (gChildPid >= 0) retireCheckpoint();
+            if (winState() == WindowState::Live)
+            {
+                retireCheckpoint();
+            }
             return;
         }
 
-        // Last tick of the epoch: verdict() is skipped here (same gate as main's reprocess path) and the
-        // next tick runs beginEpoch. Never let a window span the boundary — retire any live checkpoint
-        // and don't open one. An unresolved checkpoint would carry into the new epoch, forcing a promoted
-        // child to replay strict across beginEpoch (which blocks on the operator clean-memory flag).
         if (isLastTickInEpoch())
         {
-            if (gChildPid >= 0) retireCheckpoint();
+            if (winState() == WindowState::Live)
+            {
+                retireCheckpoint();
+            }
             return;
         }
 
-        // Test: force a single-tick fork + rollback every N ticks. Retire any live window first so the
-        // forced mismatch (in verdict) rewinds exactly this tick, back to the tick-1 state.
         if (gForkForceRollbackEvery && (unsigned)system.tick % gForkForceRollbackEvery == 0)
         {
-            if (gChildPid >= 0) retireCheckpoint();
+            if (winState() == WindowState::Live)
+            {
+                retireCheckpoint();
+            }
             establishCheckpoint();
             return;
         }
 
-        // Cheap common path: a live checkpoint still covers this tick -> reuse it, no fork.
-        if (gChildPid >= 0 && (unsigned)system.tick - gCheckpointTick < gForkWindowK) return;
+        switch (winState())
+        {
+        case WindowState::Idle:
+            if (!gForkForceFork && !tickHasSolution(system.tick))
+            {
+                return;
+            }
+            establishCheckpoint();
+            break;
 
-        // Window aged out with no mismatch (still alive) -> commit it and drop the child.
-        if (gChildPid >= 0) retireCheckpoint();
+        case WindowState::Live:
+            if ((unsigned)system.tick - gCheckpointTick < gForkWindowK)
+            {
+                return;
+            }
+            retireCheckpoint();
+            if (gForkForceFork || tickHasSolution(system.tick))
+            {
+                establishCheckpoint();
+            }
+            break;
 
-        // Only solution ticks can diverge from quorum, so only they need a checkpoint.
-        if (!gForkForceFork && !tickHasSolution(system.tick)) return;
-
-        establishCheckpoint();
+        case WindowState::Checkpointing:
+        case WindowState::Retiring:
+            break;
+        }
     }
 
     // At the quorum compare. Returns true if the checkpoint window handled this tick.
     inline bool verdict(bool mismatch, const m256i& quorumSpectrumDigest, unsigned long long processorNumber)
     {
         (void)quorumSpectrumDigest; (void)processorNumber;
-        if (gChildPid < 0) return false;            // no checkpoint (non-solution tick, or mid-replay)
+        if (winState() != WindowState::Live) return false;
 
         if (gForkForceMatch) mismatch = false;      // test: exercise the keep-checkpoint path
         if (gForkForceMismatch) mismatch = true;    // test: force rewind (parent _exit + child replays)
@@ -284,14 +349,9 @@ namespace tickFork
         // Mismatch: rewind to the checkpoint and replay [gCheckpointTick, system.tick] strict (target
         // sent to the child); discard the window's diverts so the child reads pristine pages.
         tickForkLog("verdict MISMATCH: rewind to checkpoint + parent _exit");
-        // Stop swap writers before discard()+_exit (mirror retireCheckpoint): an unparked eviction could
-        // else land an optimistic page on a REAL file shared with the child and tear it on _exit. try_lock
-        // the RPC set + short park: never block the mandatory rollback exit on a wedged handler.
-        parkRequestProcessors(gForkQuiesceTimeoutMs);
-#if !defined(NO_RPC)
-        gRpcDispatchLock.try_lock();
-#endif
-        ts.drainSwapIoForFork(gForkQuiesceTimeoutMs);
+        // Stop swap writers before discard()+_exit: an unparked eviction could land an optimistic
+        // page on a REAL file shared with the child and tear it on _exit.
+        quiesceWriters(QuiesceMode::TryExclusive, gForkQuiesceTimeoutMs);
         gShadow.discard();
         unsigned int target = (unsigned)system.tick;
         const char tag = 'P';
