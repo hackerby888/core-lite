@@ -9324,8 +9324,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 
                     logToConsole(L"Saving node state...");
 #ifdef __linux__
-                    // should retire/kill the child and commit pages before saving snapshot
-                    if (tickFork::gChildPid.load() >= 0) tickFork::retireCheckpoint();
+                    if (tickFork::winState() == tickFork::WindowState::Live) tickFork::retireCheckpoint();
 #endif
                     saveAllNodeStates();
 #ifdef ENABLE_PROFILING

@@ -231,18 +231,29 @@ namespace tickFork
     // disk writes into the real files and reap the checkpoint child.
     inline void retireCheckpoint()
     {
+        if (winState() != WindowState::Live)
+        {
+            return;
+        }
         tickForkLog("window complete -> commit shadow + reap checkpoint");
         setWinState(WindowState::Retiring);
         if (!quiesceWriters(QuiesceMode::Exclusive, gForkQuiesceTimeoutMs))
         {
-            tickForkLog("FATAL: swap writers did not quiesce before commit -> exit, checkpoint child takes over");
+            // Tell the child to promote — its state is at the checkpoint, it replays the window strict.
+            char tag = 'P';
+            unsigned int target = (unsigned)system.tick;
+            write(gPipe[1], &tag, 1);
+            write(gPipe[1], &target, sizeof(target));
+            tickForkLog("FATAL: swap writers did not quiesce before commit -> child promoted");
             _exit(70);
         }
         gShadow.commit();
         releaseQuiesce(QuiesceMode::Exclusive);
-        kill(gChildPid.load(), SIGKILL);
-        int st; waitpid(gChildPid.load(), &st, 0);
-        close(gPipe[1]); gPipe[1] = -1;
+        pid_t child = gChildPid.load();
+        kill(child, SIGKILL);
+        waitpid(child, nullptr, 0);
+        close(gPipe[1]);
+        gPipe[1] = -1;
         gChildPid = -2;
         setWinState(WindowState::Idle);
     }
