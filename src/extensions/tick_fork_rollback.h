@@ -285,11 +285,10 @@ namespace tickFork
 
         if (gForkForceRollbackEvery && (unsigned)system.tick % gForkForceRollbackEvery == 0)
         {
-            if (winState() == WindowState::Live)
+            if (winState() != WindowState::Live)
             {
-                retireCheckpoint();
+                establishCheckpoint();
             }
-            establishCheckpoint();
             return;
         }
 
