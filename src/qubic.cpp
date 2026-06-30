@@ -272,6 +272,8 @@ static PendingTxsPool pendingTxsPool;
 #include "optimizations/opt_eager_tx_fetch.h"
 #include "extensions/fast_tx_window.h"
 #include "extensions/tx_slot_index.h"
+#include "extensions/tick_bench.h"
+#include "extensions/tx_stats.h"
 
 static m256i uniqueNextTickTransactionDigests[NUMBER_OF_COMPUTORS];
 static m256i uniqueCurrentSpectrumDigests[NUMBER_OF_COMPUTORS];
