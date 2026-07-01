@@ -250,7 +250,8 @@ TEST(ForkRollbackDirtyTrack, OverflowGuardCapsPoolCount)
         SwapDirtyTrack::registerPool(&poolBases[i], stride, N, (volatile unsigned char*)dirty[i].data());
         EXPECT_LE(SwapDirtyTrack::gPoolCount.load(), MAXP);   // guard holds at every step
     }
-    for (int i = 0; i < over; i++) SwapDirtyTrack::unregisterPool(&poolBases[i]);
+    for (int i = 0; i < over; i++)
+        SwapDirtyTrack::unregisterPool(&poolBases[i]);
 
     gSwapDirtyTrackEnabled = false;
     free(buf);
@@ -276,10 +277,12 @@ TEST(ForkCensus, SelfExcludedOtherCounted)
     std::thread t([&] {
         forkCensusEnter("otherThreadLock");
         held.store(true, std::memory_order_release);
-        while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+        while (!release.load(std::memory_order_acquire))
+            std::this_thread::yield();
         forkCensusLeave();
     });
-    while (!held.load(std::memory_order_acquire)) std::this_thread::yield();
+    while (!held.load(std::memory_order_acquire))
+        std::this_thread::yield();
 
     EXPECT_GE(forkCensusSumExcept(), 1);                 // the other thread's held lock is visible
     const char* off = forkCensusOffender();
@@ -305,9 +308,11 @@ TEST(ForkCensus, SmartMutexCounted)
         std::thread t([&] {
             std::lock_guard<SmartMutex> g(sm);
             held.store(true, std::memory_order_release);
-            while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+            while (!release.load(std::memory_order_acquire))
+            std::this_thread::yield();
         });
-        while (!held.load(std::memory_order_acquire)) std::this_thread::yield();
+        while (!held.load(std::memory_order_acquire))
+        std::this_thread::yield();
         EXPECT_GE(forkCensusSumExcept(), 1);
         release.store(true, std::memory_order_release);
         t.join();
@@ -319,9 +324,11 @@ TEST(ForkCensus, SmartMutexCounted)
         std::thread t([&] {
             std::shared_lock<SmartSharedMutex> g(ss);
             held.store(true, std::memory_order_release);
-            while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+            while (!release.load(std::memory_order_acquire))
+            std::this_thread::yield();
         });
-        while (!held.load(std::memory_order_acquire)) std::this_thread::yield();
+        while (!held.load(std::memory_order_acquire))
+        std::this_thread::yield();
         EXPECT_GE(forkCensusSumExcept(), 1);
         release.store(true, std::memory_order_release);
         t.join();
@@ -356,7 +363,11 @@ TEST(ForkStatsTest, CountersAndDurableLog)
     // durable log holds every skipped tick (3 lines), with tick + reason
     std::string all = ForkStats::readLogAll();
     int lines = 0;
-    for (char c : all) if (c == '\n') lines++;
+    for (char c : all)
+    {
+        if (c == '\n')
+            lines++;
+    }
     EXPECT_EQ(lines, 3);
     EXPECT_NE(all.find("tick=1001"), std::string::npos);
     EXPECT_NE(all.find("tick=1002"), std::string::npos);

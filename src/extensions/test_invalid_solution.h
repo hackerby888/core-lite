@@ -48,10 +48,9 @@ inline void broadcastTransfer(unsigned int sourceComputorIdx,
     enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
 }
 
-// Broadcast one mining-solution tx with a random nonce from computor `computorIdx`. The nonce won't
-// score, so it is "invalid" at the normal threshold and "valid" if the threshold is forced to 0
-// (--test-solution-threshold 0). Many of these from the SAME computor drain its balance, so later
-// ones fail the security-deposit payment (the out-of-qus case).
+// Broadcast a mining-solution tx with a random nonce from computor `computorIdx`. The nonce
+// won't score ("invalid") unless --test-solution-threshold 0; many from same computor drain
+// its balance → later ones fail the security-deposit payment.
 inline void broadcastSolution(unsigned int computorIdx, const m256i& currentMiningSeed, unsigned int txTick)
 {
     struct
@@ -94,7 +93,8 @@ inline void broadcastSolution(unsigned int computorIdx, const m256i& currentMini
 inline bool broadcastN(const m256i& currentMiningSeed, unsigned int txTick, unsigned int count, bool sameComputor)
 {
     if (computorSeedsCount == 0) return false;
-    m256i rnd; rnd.setRandomValue();
+    m256i rnd;
+    rnd.setRandomValue();
     const unsigned int base = (unsigned int)(rnd.m256i_u64[0] % computorSeedsCount);
     for (unsigned int k = 0; k < count; k++)
     {

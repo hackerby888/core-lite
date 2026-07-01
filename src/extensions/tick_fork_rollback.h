@@ -1,8 +1,7 @@
 #pragma once
 
-// Fork-on-BSP child-promote tick rollback (AUX wrong-solution path); disk side in disk_shadow.h.
-// The fork is on the BSP so the child keeps the networking/dispatch thread; it re-spawns the AP
-// loops on promote. Linux-only (fork/pipe/_exit); #else gives inert stubs for the shared TU.
+// Tick fork-rollback (AUX wrong-solution path): fork on BSP, child keeps networking thread,
+// re-spawns AP loops on promote. Linux-only (fork/pipe/_exit); #else inert stubs.
 
 #ifdef __linux__
 
@@ -33,11 +32,15 @@ static inline long long tickForkNowMs() { return tickForkNowNs() / 1'000'000LL; 
 static inline long tickForkRssKb()
 {
     FILE* f = fopen("/proc/self/status", "r");
-    if (!f) return -1;
+    if (!f)
+        return -1;
     char line[256];
     long kb = -1;
     while (fgets(line, sizeof(line), f))
-        if (sscanf(line, "VmRSS: %ld kB", &kb) == 1) break;
+    {
+        if (sscanf(line, "VmRSS: %ld kB", &kb) == 1)
+            break;
+    }
     fclose(f);
     return kb;
 }
@@ -72,16 +75,20 @@ namespace tickFork
         TickData td;
         ts.tickData.acquireLock();
         const TickData* src = ts.tickData.getByTickIfNotEmpty(tick);
-        if (src) copyMem(&td, src, sizeof(TickData));
+        if (src)
+            copyMem(&td, src, sizeof(TickData));
         ts.tickData.releaseLock();
-        if (!src) return false;
+        if (!src)
+            return false;
 
         auto offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
         for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
         {
-            if (isZero(td.transactionDigests[i]) || !offsets[i]) continue;
+            if (isZero(td.transactionDigests[i]) || !offsets[i])
+                continue;
             Transaction* t = ts.tickTransactions(offsets[i]);
-            if (!t->checkValidity()) continue;
+            if (!t->checkValidity())
+                continue;
             if (MiningSolutionTransaction::isSolutionTransaction(t))
                 return true;
         }
@@ -96,9 +103,8 @@ namespace tickFork
     // snapshot / shadow commit. Shared by establish/retire/verdict + bspForkPoint.
     inline constexpr int gForkQuiesceTimeoutMs = 5'000;
 
-    // Park the request processors at their liteForkRequestPark point (the swap-writer quiesce shared by the
-    // fork snapshot and the shadow commit). Returns false if a processor fails to park before the deadline.
-    // Leaves gForkQuiesceRequest set on success; the caller releases via unparkRequestProcessors().
+    // Park request processors for a consistent fork snapshot / shadow commit.
+    // Returns false on timeout; caller releases via unparkRequestProcessors().
     inline bool parkRequestProcessors(int timeoutMs)
     {
         gForkParked.store(0, std::memory_order_release);
@@ -107,7 +113,8 @@ namespace tickFork
         long long deadline = tickForkNowMs() + timeoutMs;
         while (gForkParked.load(std::memory_order_acquire) < nRequestProcessorIDs)
         {
-            if (tickForkNowMs() > deadline) return false;
+            if (tickForkNowMs() > deadline)
+                return false;
             std::this_thread::yield();
         }
         return true;
@@ -162,7 +169,11 @@ namespace tickFork
     // Establish a fresh checkpoint at system.tick: park request procs, pipe, arm shadow, ask BSP to fork.
     inline void establishCheckpoint()
     {
-        if (gForkBench) { gForkWindowStartNs = tickForkNowNs(); gForkRssBeforeKb = tickForkRssKb(); }
+        if (gForkBench)
+        {
+            gForkWindowStartNs = tickForkNowNs();
+            gForkRssBeforeKb = tickForkRssKb();
+        }
         tickForkLog("checkpoint -> request BSP fork");
         setWinState(WindowState::Checkpointing);
         ForkStats::onForkRequested();
@@ -182,22 +193,21 @@ namespace tickFork
         if (pipe(gPipe) != 0)
         {
             releaseQuiesce(QuiesceMode::Shared);
-            gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
+            gReRunStrict = true;
+            gReRunStrictUntilTick = (unsigned)system.tick;
             ForkStats::onForkSkipped(ForkStats::PIPE_FAIL, (unsigned)system.tick, "");
             tickForkLog("pipe() failed -> scoring this tick strict (no fork)");
             setWinState(WindowState::Idle);
             return;
         }
-        // O_CLOEXEC: a fork+exec helper (crash-reporter curl, sidecar) must not inherit the verdict pipe and
-        // hold its write end open, or a live checkpoint child would never see EOF on a parent crash.
+        // O_CLOEXEC: a fork+exec helper must not hold the write end open — child needs EOF on parent crash.
         fcntl(gPipe[0], F_SETFD, fcntl(gPipe[0], F_GETFD) | FD_CLOEXEC);
         fcntl(gPipe[1], F_SETFD, fcntl(gPipe[1], F_GETFD) | FD_CLOEXEC);
         gShadow.arm();                              // parent disk writes -> shadow for the whole window
         gChildPid = -2;
         gForkRequest = true;                        // BSP forks at its loop-top
-        // The BSP handoff is synchronous and fast; only a wedged/dead main loop stalls here. Reclaiming
-        // on timeout would race a late fork into a rogue promoted child, so treat a true stall as fatal
-        // and let the supervisor restart the node from its snapshot.
+        // BSP handoff is synchronous; a stall means the main loop is dead and timed-out reclaim
+        // races a late fork into a rogue promoted child → fatal exit for supervisor restart.
         long long forkDeadlineMs = tickForkNowMs() + 30'000;
         while (gChildPid == -2)
         {
@@ -212,9 +222,12 @@ namespace tickFork
         if (gChildPid < 0)                          // fork failed
         {
             gShadow.discard();
-            close(gPipe[0]); close(gPipe[1]); gPipe[0] = gPipe[1] = -1;
+            close(gPipe[0]);
+            close(gPipe[1]);
+            gPipe[0] = gPipe[1] = -1;
             releaseQuiesce(QuiesceMode::Shared);
-            gReRunStrict = true; gReRunStrictUntilTick = (unsigned)system.tick;
+            gReRunStrict = true;
+            gReRunStrictUntilTick = (unsigned)system.tick;
             tickForkLog("fork() failed -> scoring this tick strict (no fork)");
             setWinState(WindowState::Idle);
             return;
@@ -262,8 +275,10 @@ namespace tickFork
     inline void maybeForkBeforeTick(unsigned long long processorNumber)
     {
         (void)processorNumber;
-        if (gReRunStrict) return;
-        if (forceVerifySolutions) return;
+        if (gReRunStrict)
+            return;
+        if (forceVerifySolutions)
+            return;
 
         if (isMainMode())
         {
@@ -323,13 +338,19 @@ namespace tickFork
     // At the quorum compare. Returns true if the checkpoint window handled this tick.
     inline bool verdict(bool mismatch, const m256i& quorumSpectrumDigest, unsigned long long processorNumber)
     {
-        (void)quorumSpectrumDigest; (void)processorNumber;
-        if (winState() != WindowState::Live) return false;
+        (void)quorumSpectrumDigest;
+        (void)processorNumber;
+        if (winState() != WindowState::Live)
+            return false;
 
-        if (gForkForceMatch) mismatch = false;      // test: exercise the keep-checkpoint path
-        if (gForkForceMismatch) mismatch = true;    // test: force rewind (parent _exit + child replays)
-        if (gForkForceRollbackEvery && (unsigned)system.tick % gForkForceRollbackEvery == 0) mismatch = true;  // test: periodic forced rollback
-        if (gShadowPoisoned.load(std::memory_order_acquire)) mismatch = true;  // shadow I/O failed -> replay strict from pristine
+        if (gForkForceMatch)
+            mismatch = false;      // test: exercise the keep-checkpoint path
+        if (gForkForceMismatch)
+            mismatch = true;       // test: force rewind (parent _exit + child replays)
+        if (gForkForceRollbackEvery && (unsigned)system.tick % gForkForceRollbackEvery == 0)
+            mismatch = true;       // test: periodic forced rollback
+        if (gShadowPoisoned.load(std::memory_order_acquire))
+            mismatch = true;       // shadow I/O failed -> replay strict from pristine
 
         if (gForkBench)
         {
@@ -365,8 +386,10 @@ namespace tickFork
         gShadow.discard();
         unsigned int target = (unsigned)system.tick;
         const char tag = 'P';
-        ssize_t w = write(gPipe[1], &tag, 1); (void)w;
-        w = write(gPipe[1], &target, sizeof(target)); (void)w;
+        ssize_t w = write(gPipe[1], &tag, 1);
+        (void)w;
+        w = write(gPipe[1], &target, sizeof(target));
+        (void)w;
         _exit(0);
     }
 }
@@ -379,7 +402,13 @@ namespace tickFork
     inline std::atomic<bool> gIsForkChild{ false };
     inline std::atomic<bool> gForkRequest{ false };
     inline void maybeForkBeforeTick(unsigned long long) {}
-    inline bool verdict(bool, const m256i&, unsigned long long) { return false; }
+    inline bool verdict(bool mismatch, const m256i& quorumSpectrumDigest, unsigned long long processorNumber)
+    {
+        (void)mismatch;
+        (void)quorumSpectrumDigest;
+        (void)processorNumber;
+        return false;
+    }
 }
 
 #endif // __linux__

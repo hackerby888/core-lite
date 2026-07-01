@@ -1,8 +1,7 @@
 #pragma once
 
-// Observability for the fork-rollback's degrade-to-strict ("unforkable") ticks: in-mem counters for a
-// cheap summary (GET /v1/fork-stats) + a durable on-disk log of every such tick (GET
-// /v1/unforkable-ticks) so the COMPLETE set is kept, not a ring. RAM bounded (counters only).
+// Fork-rollback degrade-to-strict observability: in-mem counters (GET /v1/fork-stats) +
+// durable on-disk log of every unforkable tick (GET /v1/unforkable-ticks). RAM bounded.
 
 #include <atomic>
 #include <cstdint>

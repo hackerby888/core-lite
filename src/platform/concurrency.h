@@ -30,11 +30,9 @@ static long _InterlockedCompareExchange(volatile long *target, long exchange, lo
 #endif
 
 // ---- Fork-eligibility census (tick fork-rollback) ------------------------------------------------
-// Counts node locks each thread holds (via ACQUIRE/RELEASE/TRY_ACQUIRE + SmartMutex in fork_census.h).
-// bspForkPoint verifies nobody but itself holds one before fork() (else it skips the fork and runs the
-// tick strict, no crash) -> the child never inherits a held lock. Global slots, not thread_local
-// pointers, so a short-lived thread can't dangle the gate read. ACQUIRE_WITHOUT_DEBUG_LOGGING skips only
-// the busy-wait logger, not the census, so debugLogLock/mLock are counted too (balanced by RELEASE).
+// Counts node locks held per thread via ACQUIRE/RELEASE/TRY_ACQUIRE + SmartMutex. bspForkPoint
+// verifies no other thread holds a lock before fork() (else skips fork → strict); child never
+// inherits a held lock. Global slots so short-lived threads don't dangle the gate read.
 inline thread_local int tlLockSlot = -1;   // this thread's census slot; -1 until first acquire
 
 namespace ForkCensus
@@ -59,7 +57,8 @@ namespace ForkCensus
     {
         ~Unreg()
         {
-            if (tlLockSlot < 0) return;
+            if (tlLockSlot < 0)
+                return;
             gSlots[tlLockSlot].depth.store(0, std::memory_order_relaxed);
             gSlots[tlLockSlot].what.store(nullptr, std::memory_order_relaxed);
             gSlots[tlLockSlot].live.store(0, std::memory_order_release);   // free for reuse
@@ -95,7 +94,11 @@ namespace ForkCensus
             }
             int e = 0;
             if (gSlots[i].live.compare_exchange_strong(e, 1, std::memory_order_acq_rel))
-            { tlLockSlot = i; (void)&tlUnreg; return; }
+            {
+                tlLockSlot = i;
+                (void)&tlUnreg;
+                return;
+            }
             // a reuse-scan claimed our fresh index in the tiny window above; retry
         }
     }
@@ -103,36 +106,47 @@ namespace ForkCensus
     inline void enter(const char* what)
     {
         if (tlLockSlot < 0) claimSlot();
-        if (tlLockSlot < 0) return;   // registry full (>MAX_THREADS live): best-effort, this thread uncounted
+        if (tlLockSlot < 0)
+            return;   // registry full (>MAX_THREADS live): best-effort, this thread uncounted
         gSlots[tlLockSlot].what.store(what, std::memory_order_relaxed);
         gSlots[tlLockSlot].depth.fetch_add(1, std::memory_order_relaxed);
     }
     inline void leave()
     {
-        if (tlLockSlot >= 0) gSlots[tlLockSlot].depth.fetch_sub(1, std::memory_order_relaxed);
+        if (tlLockSlot >= 0)
+            gSlots[tlLockSlot].depth.fetch_sub(1, std::memory_order_relaxed);
     }
 
     // Held depth across all slots but the caller's own (excludes the BSP's deliberate fork-time holds).
     inline int sumExceptSelf()
     {
-        if (gOverflow.load(std::memory_order_acquire)) return MAX_THREADS;   // unreliable -> force the gate to skip the fork
+        if (gOverflow.load(std::memory_order_acquire))
+            return MAX_THREADS;   // unreliable -> force the gate to skip the fork
         int self = tlLockSlot;
         int n = gCount.load(std::memory_order_acquire);
-        if (n > MAX_THREADS) n = MAX_THREADS;
+        if (n > MAX_THREADS)
+            n = MAX_THREADS;
         int s = 0;
         for (int i = 0; i < n; i++)
-            if (i != self) s += gSlots[i].depth.load(std::memory_order_relaxed);
+        {
+            if (i != self)
+                s += gSlots[i].depth.load(std::memory_order_relaxed);
+        }
         return s < 0 ? 0 : s;
     }
     inline const char* offenderName()
     {
-        if (gOverflow.load(std::memory_order_acquire)) return "fork-census-slot-overflow";
+        if (gOverflow.load(std::memory_order_acquire))
+            return "fork-census-slot-overflow";
         int self = tlLockSlot;
         int n = gCount.load(std::memory_order_acquire);
-        if (n > MAX_THREADS) n = MAX_THREADS;
+        if (n > MAX_THREADS)
+            n = MAX_THREADS;
         for (int i = 0; i < n; i++)
+        {
             if (i != self && gSlots[i].depth.load(std::memory_order_relaxed) > 0)
                 return gSlots[i].what.load(std::memory_order_relaxed);
+        }
         return nullptr;
     }
 

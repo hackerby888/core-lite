@@ -1,10 +1,8 @@
 #pragma once
 
-// Auto dirty-page tracking for SwapVirtualMemory cache pools (Linux). A freshly loaded slot is armed
-// read-only; the first write faults and is caught by the SIGSEGV fast path here (marks the slot dirty,
-// restores write access), so eviction can skip the writeback for slots never modified since load.
-// SwapVM arms its own slots; this header holds the global pieces the handler needs: toggle, registry,
-// fast path. Gated by gSwapDirtyTrackEnabled.
+// Auto dirty-page tracking for SwapVM cache pools (Linux). Freshly-loaded slot is armed read-only;
+// first write faults → SIGSEGV fast path marks dirty + restores write → eviction skips clean slots.
+// SwapVM arms its own slots; this header holds the handler-global pieces. Gated by gSwapDirtyTrackEnabled.
 
 #if defined(__linux__)
 
@@ -32,10 +30,8 @@ namespace SwapDirtyTrack
     inline std::atomic<int> gPoolCount{0};
     inline unsigned char* gDeadBase = nullptr;   // unregistered slots point basePtr here -> *basePtr reads NULL -> fault path skips them
 
-    // Registered per SwapVM at init, dropped at destruction. Keyed by &currentPage so the entry follows
-    // the pool's realloc on epoch reset (and reads NULL, skipped, mid-realloc). basePtr is published
-    // last so the fault path never sees a live entry with stale fields. register/unregister are
-    // single-threaded relative to the (synchronous, per-thread) SIGSEGV fault path.
+    // Keyed by &currentPage so entries follow pool realloc on epoch reset — reads NULL mid-realloc.
+    // basePtr published last so the fault path never sees a live entry with stale fields.
     inline void registerPool(unsigned char** basePtr, unsigned long long slotStride, int numSlots, volatile unsigned char* dirty)
     {
         const int n = gPoolCount.load(std::memory_order_acquire);
@@ -71,11 +67,13 @@ namespace SwapDirtyTrack
     {
         const int n = gPoolCount.load(std::memory_order_acquire);
         for (int i = 0; i < n; i++)
+        {
             if (gPools[i].basePtr == basePtr)
             {
                 gPools[i].basePtr = &gDeadBase;
                 return;
             }
+        }
     }
 
     // SIGSEGV fast path (called from signalHandler). If addr is in a registered pool, mark the slot

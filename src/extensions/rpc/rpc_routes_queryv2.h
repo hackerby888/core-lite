@@ -354,19 +354,35 @@ RPC_ROUTE("POST", "/query/v1/getTransactionsForIdentity")
                         {
                             if (range.isMember("lt"))
                             {
-                                if (!(std::stoull(tx[key].asString()) < std::stoull(range["lt"].asString()))) { match = false; break; }
+                                if (!(std::stoull(tx[key].asString()) < std::stoull(range["lt"].asString())))
+                                {
+                                    match = false;
+                                    break;
+                                }
                             }
                             if (range.isMember("gt"))
                             {
-                                if (!(std::stoull(tx[key].asString()) > std::stoull(range["gt"].asString()))) { match = false; break; }
+                                if (!(std::stoull(tx[key].asString()) > std::stoull(range["gt"].asString())))
+                                {
+                                    match = false;
+                                    break;
+                                }
                             }
                             if (range.isMember("lte"))
                             {
-                                if (!(std::stoull(tx[key].asString()) <= std::stoull(range["lte"].asString()))) { match = false; break; }
+                                if (!(std::stoull(tx[key].asString()) <= std::stoull(range["lte"].asString())))
+                                {
+                                    match = false;
+                                    break;
+                                }
                             }
                             if (range.isMember("gte"))
                             {
-                                if (!(std::stoull(tx[key].asString()) >= std::stoull(range["gte"].asString()))) { match = false; break; }
+                                if (!(std::stoull(tx[key].asString()) >= std::stoull(range["gte"].asString())))
+                                {
+                                    match = false;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -867,7 +883,11 @@ RPC_ROUTE("POST", "/query/v1/getEventLogs")
                 if (f < mn) mn = f;
                 if (l > mx) mx = l;
             }
-            if (any) { lo = mn; hi = mx; }
+            if (any)
+            {
+                lo = mn;
+                hi = mx;
+            }
             return any;
         };
 

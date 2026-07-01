@@ -724,7 +724,11 @@ static void getUniverseDigest(m256i& digest)
     unsigned int digestIndex;
     for (digestIndex = 0; digestIndex < ASSETS_CAPACITY; digestIndex++)
     {
-        if ((digestIndex & 63) == 0 && assetChangeFlags[digestIndex >> 6] == 0) { digestIndex += 63; continue; }
+        if ((digestIndex & 63) == 0 && assetChangeFlags[digestIndex >> 6] == 0)
+        {
+            digestIndex += 63;
+            continue;
+        }
         if (assetChangeFlags[digestIndex >> 6] & (1ULL << (digestIndex & 63)))
         {
             KangarooTwelve(&assets[digestIndex], sizeof(AssetRecord), &assetDigests[digestIndex], 32);
@@ -737,7 +741,11 @@ static void getUniverseDigest(m256i& digest)
     {
         for (unsigned int i = 0; i < numberOfLeafs; i += 2)
         {
-            if ((i & 63) == 0 && assetChangeFlags[i >> 6] == 0) { i += 62; continue; } // skip 32 clean pairs
+            if ((i & 63) == 0 && assetChangeFlags[i >> 6] == 0)
+            {
+                i += 62;   // skip 32 clean pairs
+                continue;
+            }
             if (assetChangeFlags[i >> 6] & (3ULL << (i & 63)))
             {
                 KangarooTwelve64To32(&assetDigests[previousLevelBeginning + i], &assetDigests[writeBase + (i >> 1)]);

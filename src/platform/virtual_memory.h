@@ -1518,20 +1518,14 @@ public:
     unsigned long long getDirtyEvicts() const { return dirtyEvicts; }
     static constexpr unsigned long long getNumCachePage() { return numCachePage; }
 
-    // Promoted fork child: pinCount[] reflects pins held by parent threads that did NOT survive the
-    // fork (only the calling thread did) -> those slots would stay pinned forever -> eviction starves
-    // -> the "all cache pages pinned" fatal. Clear the stale pin accounting WITHOUT evicting cached
-    // pages (the strict re-run needs them). The child is single-threaded here, so force-clear the
-    // (possibly inherited-locked) memLock rather than ACQUIRE it. Caller must releaseThreadPins()
-    // afterwards to drop the surviving thread's now-stale arena entries.
+    // Fork child: dead parent threads' pins would starve eviction forever. Single-threaded here:
+    // force-clear memLock (inherited-locked), reset all pinCounts, mark stale LOADING slots invalid.
     void resetPinsForChildPromote()
     {
         memLock = 0;
         memReaders = 0;   // dead parent threads' shared (reader) holds would starve writers in the child
         for (int i = 0; i <= numCachePage; i++) pinCount[i] = 0;   // volatile -> element-wise, not setMem
-        // A slot caught mid unlocked miss-IO at fork has no surviving thread to finish it: free the
-        // reserved slot + clear the in-flight arrays (mirrors reset()/loadVMState) so the child cannot
-        // inherit an orphan LOADING slot (dedup-wait hang / next reset-drain exit / capacity leak).
+        // Orphan LOADING slot at fork → dedup-wait hang / reset-drain exit / capacity leak.
         for (int i = 0; i <= numCachePage; i++)
             if (cachePageId[i] == LOADING_PAGE_ID) cachePageId[i] = INVALID_PAGE_ID;
         setMem(loadingTarget, sizeof(loadingTarget), 0xff);   // INVALID_PAGE_ID
