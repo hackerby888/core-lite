@@ -530,7 +530,7 @@ static inline bool isMainMode()
 static bool isLastTickInEpoch();
 // These headers reference logToConsole/isMainMode (above), so include them after.
 #include "extensions/supervisor_shim.h"
-#include "extensions/fork_stats.h"          // unforkable-tick counters + durable log (used by tick_fork_rollback + bspForkPoint)
+#include "extensions/fork_stats.h"          // unforkable-tick counters + durable log
 #include "extensions/tick_fork_rollback.h"
 #include "extensions/rpc/rpc_routes.h"
 #include "extensions/missing_tx_debug.h"
@@ -8720,24 +8720,21 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
 // Called from the BSP main-loop top (no networkingLock held) when a fork is requested.
 static void bspForkPoint()
 {
-    // Hold networkingLock across the fork so the child snapshots a consistent map state (no thread
-    // mid map-mutation). The per-socket workers are cv-blocked when idle (no busy-spin), so they
-    // don't starve the fork; they vanish in the child and lazy-respawn on reconnect.
+    // Hold networkingLock across fork so child snapshots a consistent map; per-socket workers
+    // are cv-blocked when idle, vanish in child, lazy-respawn on reconnect.
     tickForkLog("BSP fork: taking locks");
     long long q0 = gForkBench ? tickForkNowNs() : 0;
     Overload::networkingLock.lock();
 #if !defined(NO_RPC)
     gRpcDispatchLock.lock();   // drain in-flight RPC dispatches so no handler holds a node lock at fork
 #endif
-    Overload::eventMapLock.lock();   // eventDataMap is guarded only by this; hold it so the child snapshots a consistent map (a non-surviving AP worker mid CloseEvent would otherwise leave it torn + locked)
-    // Wait out unlocked swap miss-IO (reset()/snapshot drain it; fork() is a third teardown boundary
-    // that didn't) so the child can't inherit an orphan LOADING cache slot. resetPinsForChildPromote backstops a straggler.
+    Overload::eventMapLock.lock();   // eventDataMap: hold so child snapshots consistent map (AP worker mid-CloseEvent would leave it torn+locked)
+    // Drain in-flight swap IO so child doesn't inherit an orphan LOADING cache slot.
     if (!ts.drainSwapIoForFork(tickFork::gForkQuiesceTimeoutMs)) tickForkLog("warn: swap in-flight IO drain timed out before fork");
     if (gForkBench) gForkQuiesceNs = tickForkNowNs() - q0;
 
-    // Fork-eligibility gate (no lock list): if any thread but this BSP still holds a node lock (spin via
-    // the census, mutex via SmartMutex), the child would inherit it locked -> skip the fork and run this
-    // tick strict instead (degrade, never crash). Bounded wait first for a handler about to release.
+    // Fork-eligibility gate: if another thread holds a lock, child inherits it deadlocked.
+    // Skip fork → strict (degrade, never crash). Brief grace for a handler about to release.
     if (gForkCensus)
     {
         long long censusDeadlineMs = tickForkNowMs() + 50;   // 50ms grace for a transient holder
@@ -8768,24 +8765,24 @@ static void bspForkPoint()
     if (gForkBench && pid != 0) gForkSyscallNs = tickForkNowNs() - f0;
     if (pid == 0)
     {
-        // CHILD BSP: pristine donor. Block until the parent's verdict, then become the node.
+        // CHILD BSP: block until parent's verdict, then become the node.
         close(tickFork::gPipe[1]);
         char tag = 0;
         unsigned int target = 0;
         ssize_t n = read(tickFork::gPipe[0], &tag, 1);   // 'P' = promote; 0/EOF = parent crash -> promote
         if (n == 1 && tag == 'P')
         {
-            // The promote frame carries the last tick to replay strict (the mismatch tick).
+            // The promote frame carries the mismatch tick to replay strict.
             if (read(tickFork::gPipe[0], &target, sizeof(target)) != (ssize_t)sizeof(target)) target = 0;
         }
-        // Crash/short-read: no target -> replay the full window strict to cover any mismatch position.
+        // Crash/short-read → no target; replay full window strict to cover any mismatch.
         if (target == 0) target = (unsigned)system.tick + tickFork::gForkWindowK;
         tickForkChildPromote(target);
         return;
     }
 
     tickForkLog("BSP fork: fork() returned to parent");
-    // PARENT BSP: release the lock; the child carries the frozen snapshot.
+    // PARENT BSP: release locks; child carries frozen snapshot.
     Overload::networkingLock.unlock();
 #if !defined(NO_RPC)
     gRpcDispatchLock.unlock();
