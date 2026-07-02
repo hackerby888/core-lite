@@ -1273,6 +1273,9 @@ TEST(ContractPulse_Public, BuyRandomTicketsDeterministicWithFixedDigest)
 	etalonTick.prevSpectrumDigest = digest;
 
 	PULSE::AllocateRandomTickets_locals::RandomData randomData{};
+	// m256i has user-provided ctors, so {} does not zero the struct's padding; the contract hashes a
+	// zero-padded copy (zeroed locals), so the reference bytes must be zero-padded too.
+	setMem(&randomData, sizeof(randomData), 0);
 	randomData.prevSpectrumDigest = digest;
 	randomData.allocateInput.player = user;
 	randomData.allocateInput.count = 1;
