@@ -198,7 +198,15 @@ typedef void (*LiteWasmUserFn)(const QPI::QpiContextFunctionCall&, void*, void*,
 // member lacking a default ctor (e.g. QSWAP's uint128 accFeePerLPX64) would fail to compile. A char buffer has
 // static zero-init storage and runs no constructor; g_wasmState is a reference view over it, so &g_wasmState and
 // sizeof(g_wasmState) (= sizeof StateData) are unchanged for the state_addr/state_size exports below.
+#ifdef QINIT_CORPUS_RUNNER
+// Corpus-runner build: the contract under test executes in engine-deployed instances (thost bq_invoke /
+// bq_query), never through this module's own dispatch, so the resident state region is dead weight here.
+// Keep it one page instead of sizeof(StateData) — a full-size buffer (hundreds of MB for QTRY/QEARN) would
+// push the runner's data end past the shared-memory bases where those deployed instances live.
+alignas(65536) static unsigned char g_wasmStateBuf[65536];
+#else
 alignas(65536) static unsigned char g_wasmStateBuf[sizeof(CONTRACT_STATE_TYPE::StateData)];   // resident state (= contractStates[idx])
+#endif
 static CONTRACT_STATE_TYPE::StateData& g_wasmState = *reinterpret_cast<CONTRACT_STATE_TYPE::StateData*>(g_wasmStateBuf);
 alignas(65536) static unsigned char     g_wasmCtxBuf[256];   // QpiContext scalar header; host populates per call
 #ifndef LITE_WASM_ARENA_SZ
