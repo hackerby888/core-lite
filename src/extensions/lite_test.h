@@ -140,6 +140,23 @@ inline void failAt(const char* file, int line, const char* what) {
 
 } // namespace litetest
 
+// Googletest-compatible test environment surface (GGWP and other corpora use ::testing::Environment
+// + AddGlobalTestEnvironment to run setup before the first test). Native gtest is unavailable in
+// wasm mode; this minimal stand-in registers environments at static-init time and calls SetUp
+// immediately (the wasm runner's entry has already run global constructors).
+namespace testing {
+class Environment {
+public:
+    virtual ~Environment() {}
+    virtual void SetUp() {}
+    virtual void TearDown() {}
+};
+static inline Environment* AddGlobalTestEnvironment(Environment* e) {
+    e->SetUp();
+    return e;
+}
+} // namespace testing
+
 // ---- googletest-compatible macros ----
 #define TEST(suite, name)                                                                       \
     static void litetest_body_##suite##_##name();                                               \
