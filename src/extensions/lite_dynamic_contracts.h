@@ -7,6 +7,7 @@
 #ifdef LITE_DYNAMIC_CONTRACTS
 
 #include "extensions/lite_dyn_abi.h" // shared ABI structs (LiteHostServices vtable etc)
+#include "extensions/lite_oracle_bridge.h" // host impl of the wasm oracle imports (query/subscribe/getQuery/getReply)
 
 #ifdef _MSC_VER
 // The Windows SDK's specstrings.h (pulled in by <windows.h> via overload.h) defines a function-like
@@ -118,6 +119,10 @@ static LiteHostServices g_liteHostServices = {
     .initMiningSeed = +[](const void* c, const void* s) -> void { ((QPI::QpiContextFunctionCall*)c)->initMiningSeed(*(const m256i*)s); },
     .getOracleQueryStatus = +[](const void* c, long long q) -> unsigned char { return ((QPI::QpiContextFunctionCall*)c)->getOracleQueryStatus(q); },
     .unsubscribeOracle = +[](const void* c, int s) -> unsigned char { return (unsigned char)((QPI::QpiContextProcedureCall*)c)->unsubscribeOracle(s); },
+    .queryOracle = &liteWasmQueryOracle,
+    .subscribeOracle = &liteWasmSubscribeOracle,
+    .getOracleQuery = &liteWasmGetOracleQuery,
+    .getOracleReply = &liteWasmGetOracleReply,
     .distributeDividends = +[](const void* c, long long a) -> unsigned char { return (unsigned char)((QPI::QpiContextProcedureCall*)c)->distributeDividends(a); },
     // liteCallFunction: run the callee's DEPLOYED function (table dispatch) under a nested context.
     .liteCallFunction = +[](const void* cc, unsigned int idx, unsigned short it, const void* in, unsigned int, void* out, unsigned int) -> int {

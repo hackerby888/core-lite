@@ -99,6 +99,10 @@ struct LiteHostServices {
     void           (*initMiningSeed)(const void* ctx, const void* miningSeed32);
     unsigned char  (*getOracleQueryStatus)(const void* ctx, long long queryId);
     unsigned char  (*unsubscribeOracle)(const void* ctx, int oracleSubscriptionId);
+    long long      (*queryOracle)(const void* ctx, unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int notificationProcId, unsigned int timeoutMillisec, long long fee);
+    int            (*subscribeOracle)(const void* ctx, unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int notificationProcId, unsigned int periodMillisec, unsigned int notifyPrev, long long fee);
+    unsigned int   (*getOracleQuery)(const void* ctx, long long queryId, void* out, unsigned int size);
+    unsigned int   (*getOracleReply)(const void* ctx, long long queryId, void* out, unsigned int size);
     unsigned char  (*distributeDividends)(const void* ctx, long long amountPerShare);
     // inter-contract calls (late-bound): run the callee's DEPLOYED code via the host dispatch tables.
     // returns 0 (NoCallError) on success, else an InterContractCallError code.

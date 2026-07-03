@@ -499,6 +499,19 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
             contractUserProcedureInputSizes[idx][it]  = (uint16_t)ei->inSize;
             contractUserProcedureOutputSizes[idx][it] = (uint16_t)ei->outSize;
             contractUserProcedureLocalsSizes[idx][it] = 0;
+
+            // Async oracle replies are delivered by full synthetic procId (CONTRACT_INDEX<<22 | __LINE__) through
+            // userProcedureRegistry (qubic.cpp), where native contracts register via
+            // REGISTER_USER_PROCEDURE_NOTIFICATION. Wasm procs otherwise live only in contractUserProcedures[][],
+            // so a wasm contract's notification procedure would be unreachable. Register every wasm procedure here
+            // (procedure = the same dispatch closure): notification procs become reachable; non-notification procs
+            // are harmless extras (never queried by the oracle). `it` is the low-16 of the procId (== __LINE__ for
+            // notification procs) and is unique per contract, so the reconstructed id is unique. idx == the arm
+            // slot == the contract's baked CONTRACT_INDEX, so the id matches what QUERY_ORACLE computed.
+            if (userProcedureRegistry) {
+                const unsigned int fullProcId = (idx << 22) | it;
+                userProcedureRegistry->add(fullProcId, { (USER_PROCEDURE)code, idx, 0u, (uint16_t)ei->inSize, (uint16_t)ei->outSize });
+            }
         }
     }
 

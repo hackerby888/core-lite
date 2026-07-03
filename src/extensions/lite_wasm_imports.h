@@ -131,6 +131,10 @@ static void     w_computeMiningFunction(wasm_exec_env_t e, uint32_t s, uint32_t 
 static void     w_initMiningSeed(wasm_exec_env_t e, uint32_t s) { LWC; g_liteHostServices.initMiningSeed(cc->ctx, A2N(s)); }
 static uint32_t w_getOracleQueryStatus(wasm_exec_env_t e, int64_t q) { LWC; return g_liteHostServices.getOracleQueryStatus(cc->ctx, q); }
 static uint32_t w_unsubscribeOracle(wasm_exec_env_t e, int32_t sub) { LWC; return g_liteHostServices.unsubscribeOracle(cc->ctx, sub); }
+static int64_t  w_queryOracle(wasm_exec_env_t e, uint32_t iface, uint32_t q, uint32_t qs, uint32_t proc, uint32_t timeout, int64_t fee) { LWC; LWTRACE("queryOracle", "iface=" + std::to_string(iface)); return g_liteHostServices.queryOracle(cc->ctx, iface, A2N(q), qs, proc, timeout, fee); }
+static int32_t  w_subscribeOracle(wasm_exec_env_t e, uint32_t iface, uint32_t q, uint32_t qs, uint32_t proc, uint32_t period, uint32_t notifyPrev, int64_t fee) { LWC; LWTRACE("subscribeOracle", "iface=" + std::to_string(iface)); return g_liteHostServices.subscribeOracle(cc->ctx, iface, A2N(q), qs, proc, period, notifyPrev, fee); }
+static uint32_t w_getOracleQuery(wasm_exec_env_t e, int64_t id, uint32_t out, uint32_t size) { LWC; return g_liteHostServices.getOracleQuery(cc->ctx, id, A2N(out), size); }
+static uint32_t w_getOracleReply(wasm_exec_env_t e, int64_t id, uint32_t out, uint32_t size) { LWC; return g_liteHostServices.getOracleReply(cc->ctx, id, A2N(out), size); }
 static uint32_t w_distributeDividends(wasm_exec_env_t e, int64_t a) { LWC; LWTRACE("distributeDividends", std::to_string(a)); return g_liteHostServices.distributeDividends(cc->ctx, a); }
 static int32_t  w_liteCallFunction(wasm_exec_env_t e, uint32_t idx, uint32_t it, uint32_t in, uint32_t inSize, uint32_t out, uint32_t outSize) { LWC; LWTRACE("callFunction", "-> " + std::to_string(idx) + "/" + std::to_string(it)); return g_liteHostServices.liteCallFunction(cc->ctx, idx, (unsigned short)it, A2N(in), inSize, A2N(out), outSize); }
 static int32_t  w_liteInvokeProcedure(wasm_exec_env_t e, uint32_t idx, uint32_t it, uint32_t in, uint32_t inSize, uint32_t out, uint32_t outSize, int64_t reward) { LWC; LWTRACE("invokeProcedure", "-> " + std::to_string(idx) + "/" + std::to_string(it) + " reward " + std::to_string(reward)); return g_liteHostServices.liteInvokeProcedure(cc->ctx, idx, (unsigned short)it, A2N(in), inSize, A2N(out), outSize, reward); }
@@ -198,6 +202,10 @@ static int32_t  w_liteSetShareholderVotes(wasm_exec_env_t e, uint32_t idx, uint3
     HQ("initMiningSeed",                      initMiningSeed,      w_initMiningSeed,             "(i)")      \
     HQ("getOracleQueryStatus",                getOracleQueryStatus, w_getOracleQueryStatus,      "(I)i")     \
     HQ("unsubscribeOracle",                   unsubscribeOracle,   w_unsubscribeOracle,          "(i)i")     \
+    HQ("queryOracle",                         queryOracle,         w_queryOracle,                "(iiiiiI)I") \
+    HQ("subscribeOracle",                     subscribeOracle,     w_subscribeOracle,            "(iiiiiiI)i") \
+    HQ("getOracleQuery",                      getOracleQuery,      w_getOracleQuery,             "(Iii)i")   \
+    HQ("getOracleReply",                      getOracleReply,      w_getOracleReply,             "(Iii)i")   \
     HQ("distributeDividends",                 distributeDividends, w_distributeDividends,        "(I)i")     \
     HQ("liteCallFunction",                    liteCallFunction,    w_liteCallFunction,           "(iiiiii)i")  \
     HQ("liteInvokeProcedure",                 liteInvokeProcedure, w_liteInvokeProcedure,        "(iiiiiiI)i") \

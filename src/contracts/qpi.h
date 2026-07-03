@@ -2542,6 +2542,10 @@ namespace QPI
 		// Returns the id of the user/contract who has triggered this contract; returns NULL_ID if there has been no user/contract
 		id invocator() const { return _invocator; }
 
+		// Wasm host-bridge only (extensions/lite_oracle_bridge.h): the running contract's index, so the host can
+		// drive oracleEngine on the contract's behalf. Read-only; the index is otherwise protected.
+		unsigned int __qpiCurrentContractIndex() const { return _currentContractIndex; }
+
 		// Returns the ID of the entity who has made this IPO bid or NULL_ID if the ipoContractIndex or ipoBidIndex are invalid.
 		inline id ipoBidId(
 			uint32 ipoContractIndex,
