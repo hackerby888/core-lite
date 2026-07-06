@@ -8717,6 +8717,46 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     tickForkLog("CHILD: promote done, now the live node");
 }
 
+struct ForkSnapshotLocks
+{
+    bool armed = false;
+
+    void lock()
+    {
+        Overload::networkingLock.lock();
+#if !defined(NO_RPC)
+        gRpcDispatchLock.lock();   // drain in-flight RPC dispatches so no handler holds a node lock at fork
+#endif
+        Overload::eventMapLock.lock();
+        armed = true;
+    }
+
+    void unlock()
+    {
+        if (!armed)
+        {
+            return;
+        }
+        Overload::networkingLock.unlock();
+#if !defined(NO_RPC)
+        gRpcDispatchLock.unlock();
+#endif
+        Overload::eventMapLock.unlock();
+        armed = false;
+    }
+
+    // Child reinitializes these inherited locks during promote; do not unlock them there.
+    void abandonInChild()
+    {
+        armed = false;
+    }
+
+    ~ForkSnapshotLocks()
+    {
+        unlock();
+    }
+};
+
 // Called from the BSP main-loop top (no networkingLock held) when a fork is requested.
 static void bspForkPoint()
 {
@@ -8724,11 +8764,8 @@ static void bspForkPoint()
     // are cv-blocked when idle, vanish in child, lazy-respawn on reconnect.
     tickForkLog("BSP fork: taking locks");
     long long q0 = gForkBench ? tickForkNowNs() : 0;
-    Overload::networkingLock.lock();
-#if !defined(NO_RPC)
-    gRpcDispatchLock.lock();   // drain in-flight RPC dispatches so no handler holds a node lock at fork
-#endif
-    Overload::eventMapLock.lock();   // eventDataMap: hold so child snapshots consistent map (AP worker mid-CloseEvent would leave it torn+locked)
+    ForkSnapshotLocks forkLocks;
+    forkLocks.lock();   // eventDataMap is covered so child snapshots a consistent map.
     // Drain in-flight swap IO so child doesn't inherit an orphan LOADING cache slot.
     if (!ts.drainSwapIoForFork(tickFork::gForkQuiesceTimeoutMs)) tickForkLog("warn: swap in-flight IO drain timed out before fork");
     if (gForkBench) gForkQuiesceNs = tickForkNowNs() - q0;
@@ -8743,11 +8780,7 @@ static void bspForkPoint()
         if (forkCensusSumExcept() != 0)
         {
             const char* off = forkCensusOffender();
-            Overload::networkingLock.unlock();
-#if !defined(NO_RPC)
-            gRpcDispatchLock.unlock();
-#endif
-            Overload::eventMapLock.unlock();
+            forkLocks.unlock();
             ForkStats::onForkSkipped(ForkStats::CENSUS, (unsigned)system.tick, off ? off : "?");
             fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n",
                     off ? off : "?", (unsigned)system.tick);
@@ -8766,6 +8799,7 @@ static void bspForkPoint()
     if (pid == 0)
     {
         // CHILD BSP: block until parent's verdict, then become the node.
+        forkLocks.abandonInChild();
         close(tickFork::gPipe[1]);
         char tag = 0;
         unsigned int target = 0;
@@ -8783,11 +8817,7 @@ static void bspForkPoint()
 
     tickForkLog("BSP fork: fork() returned to parent");
     // PARENT BSP: release locks; child carries frozen snapshot.
-    Overload::networkingLock.unlock();
-#if !defined(NO_RPC)
-    gRpcDispatchLock.unlock();
-#endif
-    Overload::eventMapLock.unlock();   // child reinits it (placement-new) in resetForChildPromote
+    forkLocks.unlock();
     if (pid < 0)
     {
         tickForkLog("fork() failed -> parent strict fallback (no checkpoint)");

@@ -1,39 +1,28 @@
 #pragma once
 
-// Fork-rollback disk shadow: parent VM writes divert to /s/ (child reads pristine);
-// commit on match, discard on mismatch. Flags + VM hooks are cross-platform; fork
-// machinery is Linux-only (std deps pull <process.h> on MSVC → gated).
+// Fork rollback disk shadow: parent VM writes divert to /s/ so the child can
+// read pristine files; commit on match, discard on mismatch.
 
-#include <atomic>   // the fork-rollback flags below are CLI-settable on every platform
+#include <atomic>
 
-// Armed on the parent for the duration of one fork window.
 inline volatile bool gForkWindowActive = false;
-// Drives isRevalidation strict scoring during the child re-run (not forceVerifySolutions).
 inline std::atomic<bool> gReRunStrict{ false };
-// Checkpoint-and-replay: the promoted child re-runs strict through this tick (the window's last
-// processed tick at mismatch), then resumes optimistic. 0 = single-tick strict (legacy/fork-fail).
 inline std::atomic<unsigned int> gReRunStrictUntilTick{ 0 };
-// Set when a shadow dir/commit disk op fails; verdict then forces a strict child replay from the
-// pristine real files (the optimistic on-disk state can no longer be trusted). Cleared at arm().
+// Disk shadow failures poison the optimistic state; verdict then forces strict child replay.
 inline std::atomic<bool> gShadowPoisoned{ false };
-// Test: assert the fork re-run reproduces the quorum digest.
 inline volatile bool gVerifyForkRollback = false;
 
-// Test hooks (fork mode): force a fork every tick (exercise the MATCH path on clean ticks),
-// force the verdict to take the match branch, and print per-fork timing + RSS.
 inline volatile bool gForkForceFork = false;
 inline volatile bool gForkForceMatch = false;
 inline volatile bool gForkForceMismatch = false;
 inline volatile bool gForkBench = false;
-// Force a single-tick fork + rollback-replay every N ticks (0 = off).
 inline unsigned int gForkForceRollbackEvery = 0;
 
-// Request-processor quiesce for a consistent fork snapshot.
 inline std::atomic<bool> gForkQuiesceRequest{ false };
 inline std::atomic<int> gForkParked{ 0 };
 inline std::atomic<unsigned> gForkParkGen{ 0 };   // bumped per fork window; see liteForkRequestPark
 
-#ifdef __linux__   // fork-based disk rollback: Linux-only (fork/COW); these std deps pull <process.h> on MSVC
+#ifdef __linux__
 
 #include <map>
 #include <set>
@@ -48,13 +37,11 @@ inline std::atomic<unsigned> gForkParkGen{ 0 };   // bumped per fork window; see
 #include <cstdlib>
 #include <unistd.h>
 
-// Called by request processors at loop top; parks while a fork window is set up.
 static inline void liteForkRequestPark()
 {
     if (!gForkQuiesceRequest.load(std::memory_order_acquire))
         return;
-    // Count once per fork window (generation): a straggler from a prior window can't double-count or
-    // underflow the barrier, and there is no decrement-on-release to race the next window's reset.
+    // Count once per fork window; there is no decrement-on-release to race the next reset.
     static thread_local unsigned myGen = (unsigned)-1;
     unsigned g = gForkParkGen.load(std::memory_order_acquire);
     if (myGen != g) { myGen = g; gForkParked.fetch_add(1, std::memory_order_acq_rel); }
@@ -68,7 +55,7 @@ class DiskShadow
     std::map<std::string, std::vector<CHAR16>> shadowDir;     // real dir (utf8) -> shadow dir buffer
     std::set<std::pair<std::string, std::string>> written;   // (real dir utf8, page name utf8)
 
-    // 2-byte safe length; volatile defeats clang rewriting the scan into libc wcslen.
+    // 2-byte safe length; keep clang from rewriting this into libc wcslen.
     static size_t len16(const CHAR16* s)
     {
         const volatile CHAR16* p = s;
@@ -78,7 +65,6 @@ class DiskShadow
         return n;
     }
 
-    // mtx held; cached "<realDir>/s" CHAR16 buffer, created on first use.
     CHAR16* ensure(const std::string& realUtf8, const CHAR16* realDir)
     {
         auto it = shadowDir.find(realUtf8);
@@ -112,9 +98,7 @@ public:
     void arm()
     {
         std::lock_guard<std::mutex> g(mtx);
-        // Purge any orphan /s/ pages left on disk by a prior window (failed commit-rename / crash /
-        // commit race) so this window starts from a clean divert dir. Clear shadowDir too so ensure()
-        // recreates the dirs fresh on the next writeDir.
+        // Start each fork window from a clean shadow dir.
         for (const auto& kv : shadowDir)
         {
             std::error_code ec;
@@ -127,12 +111,11 @@ public:
         gForkWindowActive = true;
     }
 
-    // Write choke-point: record the page and redirect to the shadow dir.
     CHAR16* writeDir(CHAR16* realDir, const CHAR16* pageName)
     {
         if (!active.load(std::memory_order_acquire)) return realDir;
         std::lock_guard<std::mutex> g(mtx);
-        if (!active.load(std::memory_order_acquire)) return realDir;   // re-check under mtx: commit()/discard() may have closed the window in the check->lock gap
+        if (!active.load(std::memory_order_acquire)) return realDir;
         std::string realUtf8 = wchar_to_string(realDir);
         CHAR16* sd = ensure(realUtf8, realDir);
         std::string pageUtf8 = wchar_to_string(pageName);
@@ -145,25 +128,21 @@ public:
         return sd;
     }
 
-    // Read choke-point: serve from the shadow dir if the page was diverted, else real.
     CHAR16* readDir(CHAR16* realDir, const CHAR16* pageName)
     {
         if (!active.load(std::memory_order_acquire)) return realDir;
         std::lock_guard<std::mutex> g(mtx);
-        if (!active.load(std::memory_order_acquire)) return realDir;   // re-check under mtx (see writeDir)
+        if (!active.load(std::memory_order_acquire)) return realDir;
         std::string realUtf8 = wchar_to_string(realDir);
         auto it = shadowDir.find(realUtf8);
         if (it == shadowDir.end()) return realDir;
-        // Divert to /s/ ONLY if this window actually wrote the page (the `written` set) — not merely
-        // because a /s/ file exists on disk, which could be a stale orphan from a prior window.
+        // Only this window's writes may read from /s/; stale orphan files must be ignored.
         if (!written.count({ realUtf8, wchar_to_string(pageName) })) return realDir;
         if (getFileSize((CHAR16*)pageName, it->second.data()) < 0) return realDir;
         return it->second.data();
     }
 
-    // Match: rename diverted /s/ pages into real dirs. A failed rename loses the only copy
-    // of an evicted page → silent corruption. Bounded retry; _exit(1) on failure so the
-    // supervisor restarts from the last good snapshot.
+    // On commit, failed rename can lose the only copy of an evicted page; exit for restart.
     void commit()
     {
         std::lock_guard<std::mutex> g(mtx);
@@ -192,13 +171,12 @@ public:
             {
                 fprintf(stderr, "[SHADOW] FATAL: commit could not persist %s (disk failure) -> exit for restart from snapshot\n", to.c_str());
                 fflush(stderr);
-                _exit(1);   // not exit(): skip atexit/global dtors that would deadlock under the held mtx + gRpcDispatchLock
+                _exit(1);   // skip atexit/global dtors under held locks
             }
         }
         clearWindow();
     }
 
-    // Quorum mismatch: drop diverted pages; real files were never touched.
     void discard()
     {
         std::lock_guard<std::mutex> g(mtx);
@@ -215,14 +193,12 @@ public:
         clearWindow();
     }
 
-    // Promoted fork child: the inherited mtx may be held by a thread that did not survive the fork.
-    // Reinit it (mirrors Overload::resetForChildPromote) so the following purgeOrphans cannot deadlock.
+    // Promoted child inherits mutex state from threads that did not survive fork().
     void reinitForChildPromote()
     {
         new (&mtx) std::mutex();
     }
 
-    // Defensive cleanup of leftover shadow subdirs (e.g. after a parent crash).
     void purgeOrphans()
     {
         std::lock_guard<std::mutex> g(mtx);
@@ -243,7 +219,6 @@ public:
 
 inline DiskShadow gShadow;
 
-// Hooks called from the VM disk choke-points in virtual_memory.h.
 static inline CHAR16* liteShadowWriteDir(CHAR16* pageDir, const CHAR16* pageName)
 {
     return gShadow.writeDir(pageDir, pageName);
@@ -253,7 +228,7 @@ static inline CHAR16* liteShadowReadDir(CHAR16* pageDir, const CHAR16* pageName)
     return gShadow.readDir(pageDir, pageName);
 }
 
-#else  // !__linux__ : no fork rollback; the VM hooks pass through and the request park is a no-op.
+#else
 
 static inline void liteForkRequestPark() {}
 static inline CHAR16* liteShadowWriteDir(CHAR16* pageDir, const CHAR16* pageName)

@@ -620,7 +620,10 @@ struct Overload {
             eventData.event = *Event;
             eventData.context = NotifyContext;
             eventData.notifyFunction = NotifyFunction;
-            { std::lock_guard<SmartMutex> lk(eventMapLock); eventDataMap[(unsigned long long) * Event] = eventData; }
+            {
+                std::lock_guard<SmartMutex> lk(eventMapLock);
+                eventDataMap[(unsigned long long) * Event] = eventData;
+            }
             return EFI_SUCCESS;
         }
 
@@ -632,7 +635,10 @@ struct Overload {
             eventData.event = *Event;
             eventData.context = NotifyContext;
             eventData.notifyFunction = NotifyFunction;
-            { std::lock_guard<SmartMutex> lk(eventMapLock); eventDataMap[(unsigned long long) * Event] = eventData; }
+            {
+                std::lock_guard<SmartMutex> lk(eventMapLock);
+                eventDataMap[(unsigned long long)*Event] = eventData;
+            }
             return EFI_SUCCESS;
         }
 
