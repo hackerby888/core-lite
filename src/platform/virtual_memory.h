@@ -669,7 +669,7 @@ public:
         CHAR16 pageName[64];
         generatePageName(pageName, pageId);
         acquireMemLock();
-        bool success = (asyncRemoveFile(pageName, pageDir)) == 0;
+        bool success = (asyncRemoveFile(pageName, liteShadowRemoveDir(pageDir, pageName))) == 0;
         RELEASE(memLock);
         return success;
     }
@@ -1100,7 +1100,8 @@ private:
                     break;
 
                 // Loud exact cause (missing vs size-mismatch + full path) so a torn/missing .pg is hand-recoverable.
-                long long onDiskSize = getFileSize((CHAR16*)pageName, (CHAR16*)pageDir);
+                CHAR16* diagnosticDir = liteShadowReadDir(pageDir, pageName);
+                long long onDiskSize = getFileSize((CHAR16*)pageName, diagnosticDir);
                 bool compOn = false;
 #ifdef __linux__
                 compOn = gSwapCompressionEnabled;
@@ -1108,7 +1109,7 @@ private:
                 setText(message, L"swapVM load FAILED page ");
                 appendNumber(message, pageId, true);
                 appendText(message, L" | file ");
-                appendText(message, pageDir);
+                appendText(message, diagnosticDir);
                 appendText(message, L"/");
                 appendText(message, (CHAR16*)pageName);
                 appendText(message, L" | wantPageBytes ");

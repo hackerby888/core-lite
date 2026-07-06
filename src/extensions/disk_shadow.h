@@ -41,19 +41,44 @@ static inline void liteForkRequestPark()
 {
     if (!gForkQuiesceRequest.load(std::memory_order_acquire))
         return;
+
     // Count once per fork window; there is no decrement-on-release to race the next reset.
-    static thread_local unsigned myGen = (unsigned)-1;
-    unsigned g = gForkParkGen.load(std::memory_order_acquire);
-    if (myGen != g) { myGen = g; gForkParked.fetch_add(1, std::memory_order_acq_rel); }
+    static thread_local unsigned localParkGeneration = (unsigned)-1;
+    const unsigned requestedParkGeneration = gForkParkGen.load(std::memory_order_acquire);
+    if (localParkGeneration != requestedParkGeneration)
+    {
+        localParkGeneration = requestedParkGeneration;
+        gForkParked.fetch_add(1, std::memory_order_acq_rel);
+    }
+
     while (gForkQuiesceRequest.load(std::memory_order_acquire))
         std::this_thread::yield();
 }
 
 class DiskShadow
 {
-    std::mutex mtx;   // SMARTMUTEX-EXEMPT: shadow-dir lock, owner-reinit in reinitForChildPromote; provably not held across fork()
-    std::map<std::string, std::vector<CHAR16>> shadowDir;     // real dir (utf8) -> shadow dir buffer
-    std::set<std::pair<std::string, std::string>> written;   // (real dir utf8, page name utf8)
+    struct PageKey
+    {
+        std::string realDirPath;
+        std::string pageFileName;
+
+        bool operator<(const PageKey& other) const
+        {
+            if (realDirPath != other.realDirPath)
+                return realDirPath < other.realDirPath;
+            return pageFileName < other.pageFileName;
+        }
+    };
+
+    using ShadowDirBuffer = std::vector<CHAR16>;
+
+    static constexpr int ioMaxAttempts = 5;
+    static constexpr unsigned int ioInitialDelayMs = 100;
+
+    std::mutex shadowMutex;   // SMARTMUTEX-EXEMPT: shadow-dir lock, owner-reinit in reinitForChildPromote; provably not held across fork()
+    std::map<std::string, ShadowDirBuffer> shadowDirByRealDirPath;
+    std::set<PageKey> writtenPages;
+    std::set<PageKey> removedPages;
 
     // 2-byte safe length; keep clang from rewriting this into libc wcslen.
     static size_t len16(const CHAR16* s)
@@ -65,23 +90,120 @@ class DiskShadow
         return n;
     }
 
-    CHAR16* ensure(const std::string& realUtf8, const CHAR16* realDir)
+    static std::string realPagePath(const PageKey& page)
     {
-        auto it = shadowDir.find(realUtf8);
-        if (it == shadowDir.end())
+        return page.realDirPath + "/" + page.pageFileName;
+    }
+
+    static std::string shadowPagePath(const PageKey& page)
+    {
+        return page.realDirPath + "/s/" + page.pageFileName;
+    }
+
+    static void sleepBeforeRetry(unsigned int& delayMs)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        delayMs *= 2;
+    }
+
+    static void exitAfterPersistFailure(const std::string& realPath)
+    {
+        fprintf(stderr, "[SHADOW] FATAL: commit could not persist %s (disk failure) -> exit for restart from snapshot\n",
+                realPath.c_str());
+        fflush(stderr);
+        _exit(1);   // skip atexit/global dtors under held locks
+    }
+
+    static void exitAfterDeleteFailure(const std::string& realPath)
+    {
+        fprintf(stderr, "[SHADOW] FATAL: commit could not delete %s -> exit for restart from snapshot\n",
+                realPath.c_str());
+        fflush(stderr);
+        _exit(1);   // skip atexit/global dtors under held locks
+    }
+
+    static void renameShadowPageToReal(const PageKey& page)
+    {
+        const std::string shadowPath = shadowPagePath(page);
+        const std::string realPath = realPagePath(page);
+        unsigned int delayMs = ioInitialDelayMs;
+
+        for (int attempt = 1; attempt <= ioMaxAttempts; attempt++)
         {
-            size_t n = len16(realDir);
-            std::vector<CHAR16> buf(n + 3);
-            for (size_t i = 0; i < n; i++) buf[i] = realDir[i];
-            buf[n] = (CHAR16)'/'; buf[n + 1] = (CHAR16)'s'; buf[n + 2] = 0;
-            if (!createDir(buf.data()))
+            std::error_code ec;
+            std::filesystem::rename(shadowPath, realPath, ec);
+            if (!ec)
+                return;
+
+            fprintf(stderr, "[SHADOW] commit rename failed (attempt %d/%d) %s -> %s: %s\n",
+                    attempt, ioMaxAttempts, shadowPath.c_str(), realPath.c_str(), ec.message().c_str());
+            fflush(stderr);
+
+            if (attempt < ioMaxAttempts)
+                sleepBeforeRetry(delayMs);
+        }
+
+        exitAfterPersistFailure(realPath);
+    }
+
+    static void removeRealPage(const PageKey& page)
+    {
+        const std::string realPath = realPagePath(page);
+        unsigned int delayMs = ioInitialDelayMs;
+
+        for (int attempt = 1; attempt <= ioMaxAttempts; attempt++)
+        {
+            std::error_code ec;
+            std::filesystem::remove(realPath, ec);
+            if (!ec)
+                return;
+
+            fprintf(stderr, "[SHADOW] commit delete failed (attempt %d/%d) %s: %s\n",
+                    attempt, ioMaxAttempts, realPath.c_str(), ec.message().c_str());
+            fflush(stderr);
+
+            if (attempt < ioMaxAttempts)
+            {
+                sleepBeforeRetry(delayMs);
+                continue;
+            }
+
+            exitAfterDeleteFailure(realPath);
+        }
+    }
+
+    static void removeShadowPageBestEffort(const PageKey& page)
+    {
+        std::error_code ec;
+        std::filesystem::remove(shadowPagePath(page), ec);
+    }
+
+    CHAR16* ensureShadowDir(const std::string& realDirPath, const CHAR16* realDir)
+    {
+        auto it = shadowDirByRealDirPath.find(realDirPath);
+        if (it == shadowDirByRealDirPath.end())
+        {
+            const size_t realDirLength = len16(realDir);
+            ShadowDirBuffer shadowDirBuffer(realDirLength + 3);
+
+            for (size_t i = 0; i < realDirLength; i++)
+                shadowDirBuffer[i] = realDir[i];
+
+            shadowDirBuffer[realDirLength] = (CHAR16)'/';
+            shadowDirBuffer[realDirLength + 1] = (CHAR16)'s';
+            shadowDirBuffer[realDirLength + 2] = 0;
+
+            if (!createDir(shadowDirBuffer.data()))
             {
                 gShadowPoisoned.store(true, std::memory_order_release);
-                fprintf(stderr, "[SHADOW] createDir failed for %s/s -> poison (force strict replay)\n", realUtf8.c_str());
+                fprintf(stderr, "[SHADOW] createDir failed for %s/s -> poison (force strict replay)\n",
+                        realDirPath.c_str());
                 fflush(stderr);
             }
-            it = shadowDir.emplace(realUtf8, std::move(buf)).first;
+
+            it = shadowDirByRealDirPath.emplace(realDirPath, std::move(shadowDirBuffer)).first;
         }
+
         return it->second.data();
     }
 
@@ -89,7 +211,8 @@ class DiskShadow
     {
         gForkWindowActive = false;
         active.store(false, std::memory_order_release);
-        written.clear();
+        writtenPages.clear();
+        removedPages.clear();
     }
 
 public:
@@ -97,122 +220,176 @@ public:
 
     void arm()
     {
-        std::lock_guard<std::mutex> g(mtx);
+        std::lock_guard<std::mutex> guard(shadowMutex);
         // Start each fork window from a clean shadow dir.
-        for (const auto& kv : shadowDir)
+        for (const auto& entry : shadowDirByRealDirPath)
         {
             std::error_code ec;
-            std::filesystem::remove_all(kv.first + "/s", ec);
+            std::filesystem::remove_all(entry.first + "/s", ec);
         }
-        shadowDir.clear();
-        written.clear();
+
+        shadowDirByRealDirPath.clear();
+        writtenPages.clear();
+        removedPages.clear();
         gShadowPoisoned.store(false, std::memory_order_release);
         active.store(true, std::memory_order_release);
         gForkWindowActive = true;
     }
 
-    CHAR16* writeDir(CHAR16* realDir, const CHAR16* pageName)
+    CHAR16* dirForWrite(CHAR16* realDir, const CHAR16* pageName)
     {
-        if (!active.load(std::memory_order_acquire)) return realDir;
-        std::lock_guard<std::mutex> g(mtx);
-        if (!active.load(std::memory_order_acquire)) return realDir;
-        std::string realUtf8 = wchar_to_string(realDir);
-        CHAR16* sd = ensure(realUtf8, realDir);
-        std::string pageUtf8 = wchar_to_string(pageName);
+        if (!active.load(std::memory_order_acquire))
+            return realDir;
+
+        std::lock_guard<std::mutex> guard(shadowMutex);
+        if (!active.load(std::memory_order_acquire))
+            return realDir;
+
+        const std::string realDirPath = wchar_to_string(realDir);
+        const std::string pageFileName = wchar_to_string(pageName);
+        const PageKey page{ realDirPath, pageFileName };
+        CHAR16* shadowDirForPage = ensureShadowDir(realDirPath, realDir);
+
+        removedPages.erase(page);
+        writtenPages.insert(page);
+
         if (gForkBench)
         {
-            fprintf(stderr, "[SHADOW] divert %s/%s\n", realUtf8.c_str(), pageUtf8.c_str());
+            fprintf(stderr, "[SHADOW] divert %s/%s\n", realDirPath.c_str(), pageFileName.c_str());
             fflush(stderr);
         }
-        written.insert({ std::move(realUtf8), std::move(pageUtf8) });
-        return sd;
+
+        return shadowDirForPage;
     }
 
-    CHAR16* readDir(CHAR16* realDir, const CHAR16* pageName)
+    CHAR16* dirForRemove(CHAR16* realDir, const CHAR16* pageName)
     {
-        if (!active.load(std::memory_order_acquire)) return realDir;
-        std::lock_guard<std::mutex> g(mtx);
-        if (!active.load(std::memory_order_acquire)) return realDir;
-        std::string realUtf8 = wchar_to_string(realDir);
-        auto it = shadowDir.find(realUtf8);
-        if (it == shadowDir.end()) return realDir;
+        if (!active.load(std::memory_order_acquire))
+            return realDir;
+
+        std::lock_guard<std::mutex> guard(shadowMutex);
+        if (!active.load(std::memory_order_acquire))
+            return realDir;
+
+        const std::string realDirPath = wchar_to_string(realDir);
+        const std::string pageFileName = wchar_to_string(pageName);
+        const PageKey page{ realDirPath, pageFileName };
+        CHAR16* shadowDirForPage = ensureShadowDir(realDirPath, realDir);
+
+        writtenPages.erase(page);
+        removedPages.insert(page);
+
+        if (gForkBench)
+        {
+            fprintf(stderr, "[SHADOW] tombstone %s/%s\n", realDirPath.c_str(), pageFileName.c_str());
+            fflush(stderr);
+        }
+
+        return shadowDirForPage;
+    }
+
+    CHAR16* dirForRead(CHAR16* realDir, const CHAR16* pageName)
+    {
+        if (!active.load(std::memory_order_acquire))
+            return realDir;
+
+        std::lock_guard<std::mutex> guard(shadowMutex);
+        if (!active.load(std::memory_order_acquire))
+            return realDir;
+
+        const std::string realDirPath = wchar_to_string(realDir);
+        const std::string pageFileName = wchar_to_string(pageName);
+        const PageKey page{ realDirPath, pageFileName };
+
+        if (removedPages.count(page))
+            return ensureShadowDir(realDirPath, realDir);
+
+        auto it = shadowDirByRealDirPath.find(realDirPath);
+        if (it == shadowDirByRealDirPath.end())
+            return realDir;
+
         // Only this window's writes may read from /s/; stale orphan files must be ignored.
-        if (!written.count({ realUtf8, wchar_to_string(pageName) })) return realDir;
-        if (getFileSize((CHAR16*)pageName, it->second.data()) < 0) return realDir;
+        if (!writtenPages.count(page))
+            return realDir;
+
+        if (getFileSize((CHAR16*)pageName, it->second.data()) < 0)
+            return realDir;
+
         return it->second.data();
     }
 
     // On commit, failed rename can lose the only copy of an evicted page; exit for restart.
     void commit()
     {
-        std::lock_guard<std::mutex> g(mtx);
-        if (gForkBench && !written.empty())
+        std::lock_guard<std::mutex> guard(shadowMutex);
+
+        if (gForkBench && !writtenPages.empty())
         {
-            fprintf(stderr, "[SHADOW] commit %zu diverted page(s) -> real\n", written.size());
+            fprintf(stderr, "[SHADOW] commit %zu diverted page(s) -> real\n", writtenPages.size());
             fflush(stderr);
         }
-        for (const auto& [real, name] : written)
+
+        for (const PageKey& page : writtenPages)
+            renameShadowPageToReal(page);
+
+        if (gForkBench && !removedPages.empty())
         {
-            const std::string from = real + "/s/" + name;
-            const std::string to = real + "/" + name;
-            unsigned int delayMs = 100;   // mirrors SWAPVM_IO_INITIAL_DELAY_MS
-            bool ok = false;
-            for (int attempt = 0; attempt < 5; attempt++)   // mirrors SWAPVM_IO_MAX_ATTEMPTS
-            {
-                std::error_code ec;
-                std::filesystem::rename(from, to, ec);
-                if (!ec) { ok = true; break; }
-                fprintf(stderr, "[SHADOW] commit rename failed (attempt %d/5) %s -> %s: %s\n",
-                        attempt + 1, from.c_str(), to.c_str(), ec.message().c_str());
-                fflush(stderr);
-                if (attempt + 1 < 5) { std::this_thread::sleep_for(std::chrono::milliseconds(delayMs)); delayMs *= 2; }
-            }
-            if (!ok)
-            {
-                fprintf(stderr, "[SHADOW] FATAL: commit could not persist %s (disk failure) -> exit for restart from snapshot\n", to.c_str());
-                fflush(stderr);
-                _exit(1);   // skip atexit/global dtors under held locks
-            }
+            fprintf(stderr, "[SHADOW] commit %zu tombstone(s) -> real\n", removedPages.size());
+            fflush(stderr);
         }
+
+        for (const PageKey& page : removedPages)
+        {
+            removeRealPage(page);
+            removeShadowPageBestEffort(page);
+        }
+
         clearWindow();
     }
 
     void discard()
     {
-        std::lock_guard<std::mutex> g(mtx);
-        if (gForkBench && !written.empty())
+        std::lock_guard<std::mutex> guard(shadowMutex);
+
+        if (gForkBench && !writtenPages.empty())
         {
-            fprintf(stderr, "[SHADOW] discard %zu diverted page(s)\n", written.size());
+            fprintf(stderr, "[SHADOW] discard %zu diverted page(s)\n", writtenPages.size());
             fflush(stderr);
         }
-        for (const auto& [real, name] : written)
-        {
-            std::error_code ec;
-            std::filesystem::remove(real + "/s/" + name, ec);
-        }
+
+        for (const PageKey& page : writtenPages)
+            removeShadowPageBestEffort(page);
+
+        for (const PageKey& page : removedPages)
+            removeShadowPageBestEffort(page);
+
         clearWindow();
     }
 
     // Promoted child inherits mutex state from threads that did not survive fork().
     void reinitForChildPromote()
     {
-        new (&mtx) std::mutex();
+        new (&shadowMutex) std::mutex();
     }
 
     void purgeOrphans()
     {
-        std::lock_guard<std::mutex> g(mtx);
-        if (gForkBench && !written.empty())
+        std::lock_guard<std::mutex> guard(shadowMutex);
+
+        if (gForkBench && !writtenPages.empty())
         {
-            fprintf(stderr, "[SHADOW] child purgeOrphans: drop %zu diverted page(s); real pristine\n", written.size());
+            fprintf(stderr, "[SHADOW] child purgeOrphans: drop %zu diverted page(s); real pristine\n", writtenPages.size());
             fflush(stderr);
         }
-        for (const auto& kv : shadowDir)
+
+        for (const auto& entry : shadowDirByRealDirPath)
         {
             std::error_code ec;
-            std::filesystem::remove_all(kv.first + "/s", ec);
+            std::filesystem::remove_all(entry.first + "/s", ec);
         }
-        written.clear();
+
+        writtenPages.clear();
+        removedPages.clear();
         active.store(false, std::memory_order_release);
     }
 };
@@ -221,11 +398,15 @@ inline DiskShadow gShadow;
 
 static inline CHAR16* liteShadowWriteDir(CHAR16* pageDir, const CHAR16* pageName)
 {
-    return gShadow.writeDir(pageDir, pageName);
+    return gShadow.dirForWrite(pageDir, pageName);
 }
 static inline CHAR16* liteShadowReadDir(CHAR16* pageDir, const CHAR16* pageName)
 {
-    return gShadow.readDir(pageDir, pageName);
+    return gShadow.dirForRead(pageDir, pageName);
+}
+static inline CHAR16* liteShadowRemoveDir(CHAR16* pageDir, const CHAR16* pageName)
+{
+    return gShadow.dirForRemove(pageDir, pageName);
 }
 
 #else
@@ -237,6 +418,11 @@ static inline CHAR16* liteShadowWriteDir(CHAR16* pageDir, const CHAR16* pageName
     return pageDir;
 }
 static inline CHAR16* liteShadowReadDir(CHAR16* pageDir, const CHAR16* pageName)
+{
+    (void)pageName;
+    return pageDir;
+}
+static inline CHAR16* liteShadowRemoveDir(CHAR16* pageDir, const CHAR16* pageName)
 {
     (void)pageName;
     return pageDir;
