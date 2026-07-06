@@ -27,6 +27,36 @@ struct RpcReq
     std::string method, path, query, body;
     std::map<std::string, std::string> params;   // captured :path params
 
+    static int hexValue(char c)
+    {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    }
+
+    static std::string decodeQueryComponent(const std::string& s)
+    {
+        std::string out;
+        out.reserve(s.size());
+        for (size_t i = 0; i < s.size(); i++)
+        {
+            if (s[i] == '%' && i + 2 < s.size())
+            {
+                int hi = hexValue(s[i + 1]);
+                int lo = hexValue(s[i + 2]);
+                if (hi >= 0 && lo >= 0)
+                {
+                    out.push_back((char)((hi << 4) | lo));
+                    i += 2;
+                    continue;
+                }
+            }
+            out.push_back(s[i] == '+' ? ' ' : s[i]);
+        }
+        return out;
+    }
+
     // Mirrors drogon's req->getParameter(): path param first, then query string.
     std::string getParameter(const std::string& key) const
     {
@@ -38,7 +68,8 @@ struct RpcReq
             size_t amp = query.find('&', pos);
             std::string kv = query.substr(pos, amp == std::string::npos ? std::string::npos : amp - pos);
             size_t eq = kv.find('=');
-            if (eq != std::string::npos && kv.substr(0, eq) == key) return kv.substr(eq + 1);
+            if (eq != std::string::npos && decodeQueryComponent(kv.substr(0, eq)) == key)
+                return decodeQueryComponent(kv.substr(eq + 1));
             if (amp == std::string::npos) break;
             pos = amp + 1;
         }

@@ -28,6 +28,9 @@ static void shimForwardSignal(int sig)
 // Re-exec self as the stateless RPC proxy (a sibling of the node).
 static pid_t shimForkSidecar()
 {
+#ifdef NO_RPC
+    return -1;
+#else
     pid_t p = fork();
     if (p != 0) return p;                 // shim: child pid (or -1)
     char self[512];
@@ -37,6 +40,7 @@ static pid_t shimForkSidecar()
     execl(self, "qubic-rpc-sidecar", "--rpc-proxy",
           "--rpc-listen", gSidecarPort, "--rpc-node", gSidecarPort, (char*)nullptr);
     _exit(127);                           // execl failed
+#endif
 }
 
 // True while any child other than the sidecar exists (i.e. the node lineage is still alive).
