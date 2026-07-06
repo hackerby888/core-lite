@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y \
     libfmt-dev \
     liblzo2-dev \
     liblz4-dev \
+    libc-ares-dev \
     git \
     && rm -rf /var/lib/apt/lists/*
 

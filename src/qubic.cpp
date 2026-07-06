@@ -9978,7 +9978,10 @@ void watchAndCheckin()
                         isFetched = true;
                         if (result == drogon::ReqResult::Ok)
                         {
-                           isSuccess = true;
+                            // print the json response for debugging
+                            auto body = resp->body();
+                            printf("Check-in response: %.*s\n", (int)body.size(), body.data());
+                            isSuccess = true;
                         }
                         else
                         {
