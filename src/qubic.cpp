@@ -10018,6 +10018,11 @@ void watchAndCheckin()
 }
 #endif
 
+static bool argEquals(const char* arg, const char* expected)
+{
+    return arg && std::string(arg) == expected;
+}
+
 #ifdef __linux__
 void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
     // Component B fast path: a write to an armed read-only SwapVM cache page faults here. Mark the
@@ -10080,34 +10085,71 @@ void setupSignalHandlers() {
 }
 #endif
 
+#if defined(__linux__) && !defined(NO_RPC)
+static bool hasArg(int argc, const char* argv[], const char* name)
+{
+    for (int i = 1; i < argc; i++)
+        if (argEquals(argv[i], name))
+            return true;
+    return false;
+}
+
+static int intArgOrDefault(int argc, const char* argv[], const char* name, int defaultValue)
+{
+    for (int i = 1; i + 1 < argc; i++)
+        if (argEquals(argv[i], name))
+            return atoi(argv[i + 1]);
+    return defaultValue;
+}
+
+static bool runRpcProxyIfRequested(int argc, const char* argv[], int& exitCode)
+{
+    if (!hasArg(argc, argv, "--rpc-proxy"))
+        return false;
+
+    const int listenPort = intArgOrDefault(argc, argv, "--rpc-listen", 41850);
+    const int nodePort = intArgOrDefault(argc, argv, "--rpc-node", 41841);
+    exitCode = rpcProxyMain(listenPort, rpcUnixPath(nodePort));
+    return true;
+}
+
+static void startRpcServices()
+{
+    rpcUnixStart(rpcUnixPath(httpPort));
+    watchAndCheckin();
+}
+#endif
+
+#ifdef __linux__
+static void prepareLinuxRuntime(int argc, const char* argv[])
+{
+    runUnderSupervisor(argc, argv);
+    setupSignalHandlers();
+}
+#endif
+
+static void processStartupArgs(int argc, const char* argv[])
+{
+    logColorToScreen("INFO", "================== Qubic Core Lite ==================");
+    processArgs(argc, argv);
+    logColorToScreen("INFO", "================== ~~~~~~~~~~~~~~~ ==================\n");
+}
+
 int main(int argc, const char* argv[]) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
 #if defined(__linux__) && !defined(NO_RPC)
-    // RPC sidecar mode: a stateless drogon forwarder -> node unix socket.
-    for (int i = 1; i < argc; i++)
-        if (std::string(argv[i]) == "--rpc-proxy")
-        {
-            int listenPort = 41850, nodePort = 41841;
-            for (int j = 1; j + 1 < argc; j++)
-            {
-                if (std::string(argv[j]) == "--rpc-listen") listenPort = atoi(argv[j + 1]);
-                if (std::string(argv[j]) == "--rpc-node")   nodePort  = atoi(argv[j + 1]);
-            }
-            return rpcProxyMain(listenPort, rpcUnixPath(nodePort));
-        }
+    int rpcProxyExitCode = 0;
+    if (runRpcProxyIfRequested(argc, argv, rpcProxyExitCode))
+        return rpcProxyExitCode;
 #endif
 #ifdef __linux__
-    runUnderSupervisor(argc, argv);   // forks the node (+ RPC sidecar by default); returns here only as the node
-    setupSignalHandlers();
+    prepareLinuxRuntime(argc, argv);
 #endif
-    logColorToScreen("INFO", "================== Qubic Core Lite ==================");
-	processArgs(argc, argv);
-    logColorToScreen("INFO", "================== ~~~~~~~~~~~~~~~ ==================\n");
+    processStartupArgs(argc, argv);
 
     Overload::initializeUefi();
 #if defined(__linux__) && !defined(NO_RPC)
-    rpcUnixStart(rpcUnixPath(httpPort));
-    watchAndCheckin();
+    startRpcServices();
 #endif
     auto status = (int)efi_main(ih, st);
     std::raise(SIGTERM);
