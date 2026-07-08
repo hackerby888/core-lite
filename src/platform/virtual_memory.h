@@ -390,7 +390,7 @@ public:
                 {
                     return false;
                 }
-                setMem(pageDir, sizeof(pageDir), 0);
+                setMem(pageDir, 32, 0);
                 unsigned long long tmp = prefixName;
                 copyMem(pageDir, &tmp, 8);
                 tmp = pageDirectory;
@@ -495,7 +495,8 @@ public:
 #if !defined(NDEBUG)
                     addDebugMessage(L"Invalid cache page index, return zeroes array");
 #endif
-                    setMem(dst, numItems * sizeof(T), 0);
+                    // zero only remaining span; dst already advanced
+                    setMem(dst, (p_end - bs) * sizeof(T), 0);
                     RELEASE(memLock);
                     return 0;
                 }
@@ -517,7 +518,8 @@ public:
 #if !defined(NDEBUG)
                 addDebugMessage(L"Invalid cache page index, return zeroes array");
 #endif
-                setMem(dst, numItems * sizeof(T), 0);
+                // zero only remaining span; dst already advanced
+                setMem(dst, (p_end - bs) * sizeof(T), 0);
                 RELEASE(memLock);
                 return 0;
             }
