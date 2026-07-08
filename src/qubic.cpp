@@ -8660,6 +8660,10 @@ static void spawnAPs()
 }
 
 #ifdef __linux__
+#if !defined(NO_RPC)
+void watchAndCheckin();
+#endif
+
 // Promoted fork child: drop the donor role, rebuild the AP workers, re-run the tick strict.
 static void tickForkChildPromote(unsigned int strictUntilTick)
 {
@@ -8719,6 +8723,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     }
     gRpcUnixRunning = false;
     rpcUnixStart(rpcUnixPath(httpPort));
+    watchAndCheckin();
 #endif
     if (gForkBench)
     {
