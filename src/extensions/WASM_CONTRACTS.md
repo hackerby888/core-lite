@@ -695,39 +695,17 @@ libc++ bits under `#ifndef LITEDYN_CONTRACT_TU` (incremental whack-a-mole, sever
 node headers enter the TU). Recommend keeping the sysroot until (a) is worth doing; the sysroot ships with the
 wasi-sdk clang anyway, so the cost is bundle size, not a missing tool.
 
-## 18. Testing contracts in the engine (wasm gtest)
+## 18. Testing contracts
 
-A contract author writes C++ tests in the googletest style and runs them **in the engine** (qinit in Bun, the
-IDE in the browser) — no native toolchain, no cmake, no node deploy. The test + the contract compile into **one
-wasm module** (the same wasi-sdk clang path as a normal contract build), and the engine drives it.
+The only authoritative C++ test source format is the native core harness in `test/contract_testing.h`:
+`ContractTesting`-derived fixtures with normal GoogleTest `TEST` / `EXPECT_*` / `ASSERT_*` macros. Contract
+tests intended for review or node acceptance must build and pass through that native harness.
 
-`extensions/lite_test.h` (compiled in under `-DLITE_TEST_BUILD`) provides:
-- the macro surface — `TEST(Suite, Name)`, `EXPECT_EQ/NE/LT/LE/GT/GE`, `EXPECT_TRUE/FALSE`, `ASSERT_*`. It is a
-  self-contained reimplementation (no googletest, no STL exceptions/RTTI — the contract wasm builds
-  `-fno-rtti -fno-exceptions`), so the *same* `.cpp` is portable to native googletest for mainnet review later
-  (an `#ifdef LITE_TEST_NATIVE` adapter maps the same API onto `test/contract_testing.h`).
-- a `ContractTest` harness (construct one per `TEST`, like core's `ContractTestingX x;`): `reset()`,
-  `invoke<Out>(it, in, amount, origin)`, `call<Out>(it, in)`, `state<StateData>()`, `fund/balance/idFromSeed/advanceTick`.
-- runner exports `test_count` / `test_name` / `run_test` the engine enumerates and calls.
+Qinit can execute the same source against a virtual node. Its Wasm runner substitutes a private implementation
+of the `ContractTesting` API and a private test registry at build time; those portability headers are owned by
+Qinit and are not part of the contract or node ABI. Test source must not include a second lite-only harness.
 
-**Wasm ABI — module `"thost"` (test-host).** The engine binds these beside `lhost`; pointers are i32 linear-mem
-offsets, amounts i64. The contract's own `qpi.*` calls still go through `lhost`; only the test scaffolding uses `thost`:
-
-| import | meaning |
-| --- | --- |
-| `t_reset()` | fresh isolated ledger + zero state + INITIALIZE (the fixture ctor) |
-| `t_invoke(it, in, inLen, amount, origin32, out, outCap) -> outLen` | run a user procedure (real tx path: energy, POST_INCOMING_TRANSFER) |
-| `t_query(it, in, inLen, out, outCap) -> outLen` | call a user function (read-only) |
-| `t_fund(id32, amount)` / `t_balance(id32) -> i64` | seed / read a spectrum balance |
-| `t_derive(seed, seedLen, out32)` | FourQ public key from a seed string |
-| `t_tick(n)` | advance n ticks |
-| `t_report(name, nameLen, passed, msg, msgLen)` | one result per test |
-
-**Isolation.** Each run executes on a dedicated, throwaway Virtual Node (empty spectrum + universe, no other
-contracts) — never the live IDE/CLI session. Per-`TEST` freshness comes from the `ContractTest` constructor, so
-tests are independent and the user's deployed state is never touched.
-
-**Workflow.** `qinit gtest [<test.cpp>]` (scaffolds `tests/<Name>.test.cpp` from the IDL when absent) or the IDE
-"Run gtest" button. The engine side is `@qinit/engine` `runTests(testWasm)`; the scaffolder is `@qinit/build`
-`genGtest(idl)`; the combined module comes from `compileWasmContract({ ..., testSource })`. Dev builds need
-`QINIT_CORE` pointed at a core checkout that carries this `lite_test.h` (it is not in older published snapshots).
+For browser development, Qinit's TypeScript compiler compiles `TEST` bodies and fixture methods through its
+normal C++ frontend, typed IR, and Wasm code generator. A private test-host ABI supplies the virtual-node
+operations. Native clang remains the authoritative backend. In both modes, each `TEST` runs on a fresh isolated
+ledger and contract state.
