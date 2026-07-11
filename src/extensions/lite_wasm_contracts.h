@@ -14,6 +14,7 @@
 #include <string>
 #include <chrono>
 #include "wasm_export.h"
+#include "extensions/lite_wasm_arena.h"
 #include "extensions/lite_wasm_imports.h"   // g_liteWasmNatives[] + LiteWasmCallCtx -> g_liteHostServices (+ debug trace)
 
 void logColorToScreen(std::string type, std::string msg);   // defined later in qubic.cpp (same TU)
@@ -50,6 +51,7 @@ struct LiteWasmSlot {
     uint32_t             stateOff = 0, stateSize = 0;
     uint32_t             ioBase = 0;
     uint32_t             ctxOff = 0;       // contract-side QpiContext buffer; host copies the ctx base in per call
+    uint32_t*            arenaTop = nullptr; // optional mutable wasm32 global; reset at each outer dispatch
     uint32_t             entryCount = 0;
     LiteWasmEntryBind    binds[LITE_MAX_USER_ENTRIES] = {};
     ffi_closure*         closures[LITE_MAX_USER_ENTRIES] = {};
@@ -104,6 +106,9 @@ static inline void liteWasmEnsureThreadEnv() {
 // the slot's own env; a NESTED wasm->wasm call (via liteCallFunction) must REUSE the current env and swap its
 // module_inst (Stage-3b: a fresh/foreign env traps "invalid exec env" against WAMR's per-thread TLS env).
 static thread_local wasm_exec_env_t t_liteWasmCurEnv = nullptr;
+// Per-slot depth is distinct from t_liteWasmCurEnv: A -> B is nested on the thread but is an outer call for
+// B's arena, while A -> B -> A must preserve A's live arena frames and restore its bump after the inner A.
+static thread_local uint32_t t_liteWasmSlotDepth[LITE_DYN_SLOT_COUNT] = {};
 
 // ---- liteWasmDispatch helpers (extracted; behavior identical to the previously inlined code) ----
 
@@ -202,6 +207,7 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
         LiteWasmCallCtx cc; cc.ctx = ctx;
         // shift the bump-scratch base past the old blob so an acquireScratch inside __migrate can't clobber it.
         cc.arenaBase = cc.arenaBump = wArena + ((oldSz + 15u) & ~15u); cc.arenaEnd = wArena + LITE_WASM_ARENA_SZ;
+        LiteWasmArenaScope arenaScope(t_liteWasmSlotDepth[local], s.arenaTop, cc.arenaBase);
         wasm_runtime_set_user_data(env, &cc);
         if (ctx && s.ctxOff) copyMem(wasm_runtime_addr_app_to_native(s.inst, s.ctxOff), ctx, sizeof(QPI::QpiContext));
         if (oldSz) copyMem(wasm_runtime_addr_app_to_native(s.inst, wArena), input /*oldState*/, oldSz);
@@ -234,6 +240,7 @@ static void liteWasmDispatch(uint32_t idx, uint16_t it, uint8_t kind, const void
     LiteWasmCallCtx cc;
     cc.ctx = ctx;
     cc.arenaBase = wArena; cc.arenaBump = wArena; cc.arenaEnd = wArena + LITE_WASM_ARENA_SZ;
+    LiteWasmArenaScope arenaScope(t_liteWasmSlotDepth[local], s.arenaTop, wArena);
     wasm_runtime_set_user_data(env, &cc);
 
     // debug trace (off by default; one atomic-bool check): capture input, bind the entry so effectful imports
@@ -346,6 +353,7 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
 {
     if (s.env)  { wasm_runtime_destroy_exec_env(s.env); s.env = nullptr; }
     if (s.inst) { wasm_runtime_deinstantiate(s.inst);   s.inst = nullptr; }
+    s.arenaTop = nullptr;
     if (s.mod)  { wasm_runtime_unload(s.mod);            s.mod = nullptr; }
     for (uint32_t k = 0; k < s.entryCount; k++)        if (s.closures[k])    { ffi_closure_free(s.closures[k]);    s.closures[k] = nullptr; }
     for (uint32_t sp = 0; sp < LITE_SP_COUNT; sp++)    if (s.sysClosures[sp]) { ffi_closure_free(s.sysClosures[sp]); s.sysClosures[sp] = nullptr; }
@@ -393,6 +401,7 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     if (!ms.env) { logToConsole(L"LITEWASM: exec env alloc failed"); return false; }
     wasm_module_inst_t inst = ms.inst;
     wasm_exec_env_t env = ms.env;
+    uint32_t* arenaTop = nullptr;
 
     wasm_function_inst_t f_state_addr = wasm_runtime_lookup_function(inst, "state_addr");
     wasm_function_inst_t f_state_size = wasm_runtime_lookup_function(inst, "state_size");
@@ -409,6 +418,18 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
     s.stateSize = liteWasmCallU32(env, f_state_size);
     s.ioBase = liteWasmCallU32(env, f_io_base);
 
+    // Qinit compiler modules own their temporary-locals bump in this exported global. Cache its WAMR backing
+    // storage so dispatch can reset it without adding an ABI function call. It remains optional for older
+    // contract wasm, but a present export must have the compiler ABI's mutable-i32 shape.
+    { wasm_global_inst_t arenaGlobal = {};
+      if (wasm_runtime_get_export_global_inst(inst, "arena_top", &arenaGlobal)) {
+          if (arenaGlobal.kind != WASM_I32 || !arenaGlobal.is_mutable || !arenaGlobal.global_data) {
+              logToConsole(L"LITEWASM: arena_top must be a mutable i32 global");
+              return false;
+          }
+          arenaTop = static_cast<uint32_t*>(arenaGlobal.global_data);
+      } }
+
     // The contract's io_base region [in|out|locals|arena] must hold the engine's carve (LITE_WASM_IO_TOTAL).
     // io_size is exported so an engine/contract size mismatch fails loudly here, not as silent over-carve.
     // (optional export: pre-io_size contracts skip the check and keep their matching layout.) Checked BEFORE
@@ -420,7 +441,7 @@ static void liteWasmSlotUnload(LiteWasmSlot& s)
       } }
 
     // All validation passed: hand the module set to the slot (ms no longer owns it).
-    s.mod = ms.mod; s.inst = ms.inst; s.env = ms.env; s.dispatchFn = f_dispatch;
+    s.mod = ms.mod; s.inst = ms.inst; s.env = ms.env; s.dispatchFn = f_dispatch; s.arenaTop = arenaTop;
     ms.release();
 
     // Release the slot's reserve (once) and point contractStates[idx] AT the instance's resident state region.

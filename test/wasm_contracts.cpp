@@ -12,6 +12,7 @@
 #include <vector>
 #include "gtest/gtest.h"
 #include "wasm_export.h"
+#include "extensions/lite_wasm_arena.h"
 #include "wasm_contract_fixture.h"
 
 namespace {
@@ -55,6 +56,36 @@ struct WasmFixture {
     void* nat(uint32_t off) { return wasm_runtime_addr_app_to_native(inst, off); }
 };
 } // namespace
+
+TEST(WasmContracts, ArenaTopResetsAndNestedRestores) {
+    uint32_t depth = 0;
+    uint32_t top = 999;
+
+    {
+        LiteWasmArenaScope outer(depth, &top, 100);
+        EXPECT_EQ(depth, 1u);
+        EXPECT_EQ(top, 100u);
+
+        top = 160;
+        {
+            LiteWasmArenaScope nested(depth, &top, 100);
+            EXPECT_EQ(depth, 2u);
+            EXPECT_EQ(top, 160u);
+            top = 224;
+        }
+        EXPECT_EQ(depth, 1u);
+        EXPECT_EQ(top, 160u);
+    }
+    EXPECT_EQ(depth, 0u);
+    EXPECT_EQ(top, 160u);
+
+    // The next independent call discards the previous call's temporary allocations.
+    {
+        LiteWasmArenaScope nextOuter(depth, &top, 100);
+        EXPECT_EQ(top, 100u);
+    }
+    EXPECT_EQ(depth, 0u);
+}
 
 TEST(WasmContracts, RegistrationDispatchAndStateRoundTrip) {
     WasmFixture w;
