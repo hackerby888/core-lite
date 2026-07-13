@@ -10,7 +10,7 @@ ENV SSHD_CONFIG_ADDITIONAL=""
 RUN apt-get update -y \
     && apt install -y sudo \
     && sudo apt upgrade -y \
-    && sudo apt install -y build-essential clang cmake nasm \
+    && sudo apt install -y build-essential clang cmake nasm libc-ares-dev \
     && apt-get install -y iproute2 iputils-ping openssh-server telnet \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \

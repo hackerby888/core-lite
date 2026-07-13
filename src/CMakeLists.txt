@@ -198,11 +198,26 @@ target_link_libraries(Qubic
         m
 )
 
+# qubic-cli: standalone debug tool binary (eg. read-entity, read-score-cache).
+add_executable(qubic-cli cli/main.cpp)
+target_include_directories(qubic-cli PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/lib
+    ${CMAKE_SOURCE_DIR}/lib/platform_common
+    ${CMAKE_SOURCE_DIR}/lib/platform_common/edk2_mdepkg/Include
+)
+target_compile_definitions(qubic-cli PRIVATE NO_UEFI)
+if(IS_CLANG)
+    target_compile_options(qubic-cli PRIVATE -fshort-wchar -w -mavx -mavx2)
+endif()
+target_link_libraries(qubic-cli PRIVATE m)
+
 # Configure linker settings based on compiler
 if(IS_MSVC)
     # MSVC-specific linker settings
     set_target_properties(Qubic PROPERTIES SUFFIX ".efi")
-    
+
 elseif(IS_CLANG)
     # Use default linker settings for Clang
 endif()
