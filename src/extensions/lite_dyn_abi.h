@@ -5,29 +5,31 @@
 // engine (lite_wasm_imports.h) exposes the same surface to the module as "lhost" imports.
 
 #include <cstdint>
+#include "extensions/lite_abi_metadata.h"
 
 // ---------------------------------------------------------------------------
 // Shared ABI — primitives only, no QPI types, so both sides agree byte-for-byte.
 // ---------------------------------------------------------------------------
 
-#define LITE_DYN_ABI_VERSION 1u
+// Named contract/host exchange records. These declarations are the canonical binary layout consumed by
+// the node adapter, the contract-side iterator, and generated SDK metadata.
+struct LiteAssetEntry {
+    unsigned char owner[32];
+    unsigned char possessor[32];
+    long long shares;
+    unsigned short ownershipManagingContract;
+    unsigned short possessionManagingContract;
+    unsigned char padding[4];
+};
+#define LITE_ASSET_ENTRY_CAPACITY 1024u
 
 // System-procedure slots — MUST match SystemProcedureID order in contract_def.h.
+#define LITE_SYS_PROC_ENUM(symbol, id, method, emptyMember) LITE_SP_##symbol = id,
 enum LiteSysProcId : uint32_t {
-    LITE_SP_INITIALIZE = 0,
-    LITE_SP_BEGIN_EPOCH,
-    LITE_SP_END_EPOCH,
-    LITE_SP_BEGIN_TICK,
-    LITE_SP_END_TICK,
-    LITE_SP_PRE_RELEASE_SHARES,
-    LITE_SP_PRE_ACQUIRE_SHARES,
-    LITE_SP_POST_RELEASE_SHARES,
-    LITE_SP_POST_ACQUIRE_SHARES,
-    LITE_SP_POST_INCOMING_TRANSFER,
-    LITE_SP_SET_SHAREHOLDER_PROPOSAL,
-    LITE_SP_SET_SHAREHOLDER_VOTES,
+    LITE_SYSTEM_PROCEDURE_ROWS(LITE_SYS_PROC_ENUM)
     LITE_SP_COUNT,
 };
+#undef LITE_SYS_PROC_ENUM
 
 enum LiteEntryKind : uint8_t { LITE_KIND_FUNCTION = 0, LITE_KIND_PROCEDURE = 1 };
 
@@ -83,9 +85,7 @@ struct LiteHostServices {
     long long      (*issueAsset)(const void* ctx, unsigned long long name, const void* issuer32, signed char decimals, long long shares, unsigned long long unit);
     long long      (*numberOfShares)(const void* ctx, const void* asset, const void* ownSel, const void* posSel);
     long long      (*numberOfPossessedShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, unsigned short ownMgmt, unsigned short posMgmt);
-    // Enumerate matching asset records for the contract-side AssetOwnership/PossessionIterator (kind 0 = ownership,
-    // 1 = possession). Writes 80-byte records (owner[32], possessor[32], sint64 shares, uint16 ownMgmt, uint16
-    // posMgmt, pad[4]) to outBuf, returns the count (capped at maxEntries).
+    // Enumerate matching LiteAssetEntry records for the contract-side AssetOwnership/PossessionIterator.
     unsigned int   (*assetEnumerate)(const void* ctx, unsigned int kind, const void* issuance, const void* ownSel, const void* posSel, void* outBuf, unsigned int maxEntries);
     long long      (*transferShareOwnershipAndPossession)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, const void* newOwner32);
     long long      (*acquireShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned short srcOwnMgmt, unsigned short srcPosMgmt, long long offeredFee);

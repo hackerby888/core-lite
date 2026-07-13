@@ -229,10 +229,13 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
     wasm_exec_env_t env = wasm_runtime_create_exec_env(inst, 256 * 1024);
     ASSERT_NE(env, nullptr);
 
-    auto call = [&](const char* fn, uint32_t* a, uint32_t n) -> uint32_t {
+    bool trapped = false;
+    auto call = [&](const char* fn, uint32_t* a, uint32_t n, bool expectSuccess = true) -> uint32_t {
         wasm_function_inst_t f = wasm_runtime_lookup_function(inst, fn);
         EXPECT_NE(f, nullptr) << fn;
-        EXPECT_TRUE(wasm_runtime_call_wasm(env, f, n, a)) << fn << ": " << wasm_runtime_get_exception(inst);
+        const bool ok = f && wasm_runtime_call_wasm(env, f, n, a);
+        if (expectSuccess) EXPECT_TRUE(ok) << fn << ": " << wasm_runtime_get_exception(inst);
+        trapped = !ok;
         return a[0];
     };
 
@@ -245,6 +248,22 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
     const uint32_t IN = io, OUT = io + 64, LOCALS = io + 128;
     enum { KIND_PROCEDURE = 1, KIND_SYSPROC = 2, SP_INITIALIZE = 0 };
 
+    // Resolve the selected procedure's exact output size from the module registration table. The parity
+    // driver compares every operation result, so this cannot be a fixture-specific hardcoded width.
+    struct EntryInfo { uint32_t inputType, kind, inSize, outSize; };
+    uint32_t outputSize = 0;
+    a[0] = 0;
+    const uint32_t entryCount = call("reg_count", a, 0);
+    for (uint32_t i = 0; i < entryCount; ++i) {
+        a[0] = i; a[1] = io;
+        call("reg_info", a, 2);
+        const EntryInfo* entry = (const EntryInfo*)wasm_runtime_addr_app_to_native(inst, io);
+        if (entry && entry->kind == KIND_PROCEDURE && entry->inputType == 1) {
+            outputSize = entry->outSize;
+            break;
+        }
+    }
+
     a[0] = KIND_SYSPROC; a[1] = SP_INITIALIZE; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
     call("dispatch", a, 5);
 
@@ -254,6 +273,7 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
         // Recompute the native IN pointer each op: a contract's scratch allocation can grow linear memory.
         std::string s(script);
         size_t p = 0;
+        uint32_t operationIndex = 0;
         while (p < s.size()) {
             size_t semi = s.find(';', p);
             std::string tok = s.substr(p, semi == std::string::npos ? std::string::npos : semi - p);
@@ -269,7 +289,20 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
                 if (hi >= 0 && lo >= 0) inN[i / 2] = (unsigned char)((hi << 4) | lo);
             }
             a[0] = KIND_PROCEDURE; a[1] = (uint32_t)it; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
-            call("dispatch", a, 5);
+            call("dispatch", a, 5, false);
+            if (trapped) {
+                printf("CROSSHOST_OP=%u:trap\n", operationIndex++);
+                break;
+            }
+            const unsigned char* outN = (const unsigned char*)wasm_runtime_addr_app_to_native(inst, OUT);
+            std::string outHex;
+            outHex.reserve(outputSize * 2);
+            char byteHex[3];
+            for (uint32_t i = 0; i < outputSize; ++i) {
+                sprintf(byteHex, "%02x", outN[i]);
+                outHex += byteHex;
+            }
+            printf("CROSSHOST_OP=%u:ok:%s\n", operationIndex++, outHex.c_str());
         }
     } else {
         for (int i = 0; i < ops; i++) {

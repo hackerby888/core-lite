@@ -55,6 +55,7 @@ LH_IMPORT(isAssetIssued)  unsigned int lh_isAssetIssued(const void* issuer32, un
 LH_IMPORT(issueAsset)     long long lh_issueAsset(unsigned long long name, const void* issuer32, unsigned int decimals, long long shares, unsigned long long unit);
 LH_IMPORT(numberOfShares) long long lh_numberOfShares(const void* asset, const void* ownSel, const void* posSel);
 LH_IMPORT(numberOfPossessedShares) long long lh_numberOfPossessedShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, unsigned int om, unsigned int pm);
+LH_IMPORT(assetEnumerate) unsigned int lh_assetEnumerate(unsigned int kind, const void* issuance, const void* ownership, const void* possession, void* out, unsigned int capacity);
 LH_IMPORT(transferShareOwnershipAndPossession) long long lh_transferShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, const void* newOwner32);
 LH_IMPORT(acquireShares) long long lh_acquireShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned int srcOwnMgmt, unsigned int srcPosMgmt, long long offeredFee);
 LH_IMPORT(releaseShares) long long lh_releaseShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned int dstOwnMgmt, unsigned int dstPosMgmt, long long offeredFee);
@@ -247,18 +248,9 @@ void reg_info(unsigned int i, LiteWasmTuInfo* out) {
 LH_EXPORT(reg_sysproc_mask)
 unsigned int reg_sysproc_mask() {
     unsigned int m = 0;
-    if (!CONTRACT_STATE_TYPE::__initializeEmpty)            m |= (1u << 0);
-    if (!CONTRACT_STATE_TYPE::__beginEpochEmpty)            m |= (1u << 1);
-    if (!CONTRACT_STATE_TYPE::__endEpochEmpty)              m |= (1u << 2);
-    if (!CONTRACT_STATE_TYPE::__beginTickEmpty)             m |= (1u << 3);
-    if (!CONTRACT_STATE_TYPE::__endTickEmpty)               m |= (1u << 4);
-    if (!CONTRACT_STATE_TYPE::__preReleaseSharesEmpty)      m |= (1u << 5);
-    if (!CONTRACT_STATE_TYPE::__preAcquireSharesEmpty)      m |= (1u << 6);
-    if (!CONTRACT_STATE_TYPE::__postReleaseSharesEmpty)     m |= (1u << 7);
-    if (!CONTRACT_STATE_TYPE::__postAcquireSharesEmpty)     m |= (1u << 8);
-    if (!CONTRACT_STATE_TYPE::__postIncomingTransferEmpty)  m |= (1u << 9);
-    if (!CONTRACT_STATE_TYPE::__setShareholderProposalEmpty)m |= (1u << 10);
-    if (!CONTRACT_STATE_TYPE::__setShareholderVotesEmpty)   m |= (1u << 11);
+#define LITE_SYS_PROC_MASK(symbol, id, method, emptyMember) if (!CONTRACT_STATE_TYPE::emptyMember) m |= (1u << id);
+    LITE_SYSTEM_PROCEDURE_ROWS(LITE_SYS_PROC_MASK)
+#undef LITE_SYS_PROC_MASK
     return m;
 }
 LH_EXPORT(sysproc_locals_size)

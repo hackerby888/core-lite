@@ -15,6 +15,7 @@
 #include <type_traits>
 #include <array>
 #include "wasm_export.h"
+#include "extensions/lite_abi_metadata.h"
 #include "extensions/lite_wasm_debug.h"   // trace ring + liteWasmTraceHostCall (debug toggle, off by default)
 
 // Per-call binding, set by liteWasmDispatch (step 3) before entering the contract: the QpiContext the QPI
@@ -150,74 +151,12 @@ static int32_t  w_liteSetShareholderVotes(wasm_exec_env_t e, uint32_t idx, uint3
 //   HQ/HI  = hand-written (bespoke body), sig still derived from the member  -> w_*
 // The 4th column is the previously hand-typed WAMR sig: each row static_asserts the DERIVED sig reproduces it.
 // ---------------------------------------------------------------------------
-#define LHOST_TABLE(GQ, GI, HQ, HI) \
-    GI("beginFn",                             beginFn,                              "(i)")       \
-    GI("endFn",                               endFn,                                "(i)")       \
-    GI("markDirty",                           markDirty,                            "(i)")       \
-    GI("pauseLog",                            pauseLog,                             "()")        \
-    GI("resumeLog",                           resumeLog,                            "()")        \
-    HI("acquireScratch",                      acquireScratch, w_acquireScratch,     "(Ii)i")     \
-    HI("releaseScratch",                      releaseScratch, w_releaseScratch,     "(i)")       \
-    HI("logBytes",                            logBytes,       w_logBytes,           "(iiii)")    \
-    GI("k12",                                 k12,                                  "(iii)")     \
-    HQ("transfer",                            transfer,       w_transfer,           "(iI)I")     \
-    HQ("transferTyped",                       transferTyped,  w_transferTyped,      "(iIi)I")    \
-    HQ("abort",                               abort,          w_abort,              "(i)")       \
-    HQ("burn",                                burn,           w_burn,               "(Ii)I")     \
-    GQ("epoch",                               epoch,                                "()i")       \
-    GQ("tick",                                tick,                                 "()i")       \
-    GQ("numberOfTickTransactions",            numberOfTickTransactions,             "()i")       \
-    GQ("getEntity",                           getEntity,                            "(ii)i")     \
-    GQ("queryFeeReserve",                     queryFeeReserve,                      "(i)I")      \
-    GQ("nextId",                              nextId,                               "(ii)")      \
-    GQ("prevId",                              prevId,                               "(ii)")      \
-    GQ("isContractId",                        isContractId,                         "(i)i")      \
-    GQ("arbitrator",                          arbitrator,                           "(i)")       \
-    GQ("computor",                            computor,                             "(ii)")      \
-    GQ("day",                                 day,                                  "()i")       \
-    GQ("year",                                year,                                 "()i")       \
-    GQ("hour",                                hour,                                 "()i")       \
-    GQ("minute",                              minute,                               "()i")       \
-    GQ("month",                               month,                                "()i")       \
-    GQ("second",                              second,                               "()i")       \
-    GQ("millisecond",                         millisecond,                          "()i")       \
-    GQ("now",                                 now,                                  "(i)")       \
-    GQ("prevSpectrumDigest",                  prevSpectrumDigest,                   "(i)")       \
-    GQ("prevUniverseDigest",                  prevUniverseDigest,                   "(i)")       \
-    GQ("prevComputerDigest",                  prevComputerDigest,                   "(i)")       \
-    GQ("isAssetIssued",                       isAssetIssued,                        "(iI)i")     \
-    HQ("issueAsset",                          issueAsset,     w_issueAsset,         "(IiiII)I")  \
-    GQ("numberOfShares",                      numberOfShares,                       "(iii)I")    \
-    GQ("numberOfPossessedShares",             numberOfPossessedShares,              "(Iiiiii)I") \
-    HQ("assetEnumerate",                      assetEnumerate,      w_assetEnumerate,             "(iiiiii)i") \
-    HQ("transferShareOwnershipAndPossession", transferShareOwnershipAndPossession, w_transferShares, "(IiiiIi)I") \
-    HQ("acquireShares",                       acquireShares,       w_acquireShares,              "(IiiiIiiI)I") \
-    HQ("releaseShares",                       releaseShares,       w_releaseShares,              "(IiiiIiiI)I") \
-    HQ("dayOfWeek",                           dayOfWeek,           w_dayOfWeek,                  "(iii)i")   \
-    HQ("signatureValidity",                   signatureValidity,   w_signatureValidity,          "(iii)i")   \
-    HQ("bidInIPO",                            bidInIPO,            w_bidInIPO,                   "(iIi)I")   \
-    HQ("ipoBidId",                            ipoBidId,            w_ipoBidId,                   "(iii)")    \
-    HQ("ipoBidPrice",                         ipoBidPrice,         w_ipoBidPrice,                "(ii)I")    \
-    HQ("computeMiningFunction",               computeMiningFunction, w_computeMiningFunction,    "(iiii)")   \
-    HQ("initMiningSeed",                      initMiningSeed,      w_initMiningSeed,             "(i)")      \
-    HQ("getOracleQueryStatus",                getOracleQueryStatus, w_getOracleQueryStatus,      "(I)i")     \
-    HQ("unsubscribeOracle",                   unsubscribeOracle,   w_unsubscribeOracle,          "(i)i")     \
-    HQ("queryOracle",                         queryOracle,         w_queryOracle,                "(iiiiiI)I") \
-    HQ("subscribeOracle",                     subscribeOracle,     w_subscribeOracle,            "(iiiiiiI)i") \
-    HQ("getOracleQuery",                      getOracleQuery,      w_getOracleQuery,             "(Iii)i")   \
-    HQ("getOracleReply",                      getOracleReply,      w_getOracleReply,             "(Iii)i")   \
-    HQ("distributeDividends",                 distributeDividends, w_distributeDividends,        "(I)i")     \
-    HQ("liteCallFunction",                    liteCallFunction,    w_liteCallFunction,           "(iiiiii)i")  \
-    HQ("liteInvokeProcedure",                 liteInvokeProcedure, w_liteInvokeProcedure,        "(iiiiiiI)i") \
-    HQ("liteSetShareholderProposal",          setShareholderProposal, w_liteSetShareholderProposal, "(iiI)i") \
-    HQ("liteSetShareholderVotes",             setShareholderVotes,    w_liteSetShareholderVotes,    "(iiiI)i")
-
-// pass 1 — prove the derived sig reproduces every previously hand-typed string (transition safety net).
+// ABI rows live in lite_abi_metadata.h and are consumed by both WAMR and SDK generators.
 #define LHOST_AS_GQ(nm, m, lit)     static_assert(liteCstrEq(LiteQpiImport<&LiteHostServices::m>::sig.data(),   lit), "wasm sig drift: " nm);
 #define LHOST_AS_GI(nm, m, lit)     static_assert(liteCstrEq(LiteInfraImport<&LiteHostServices::m>::sig.data(), lit), "wasm sig drift: " nm);
 #define LHOST_AS_HQ(nm, m, wfn, lit) static_assert(liteCstrEq(LiteQpiImport<&LiteHostServices::m>::sig.data(),   lit), "wasm sig drift: " nm);
 #define LHOST_AS_HI(nm, m, wfn, lit) static_assert(liteCstrEq(LiteInfraImport<&LiteHostServices::m>::sig.data(), lit), "wasm sig drift: " nm);
-LHOST_TABLE(LHOST_AS_GQ, LHOST_AS_GI, LHOST_AS_HQ, LHOST_AS_HI)
+LITE_LHOST_ABI_ROWS(LHOST_AS_GQ, LHOST_AS_GI, LHOST_AS_HQ, LHOST_AS_HI)
 
 // pass 2 — the NativeSymbol table. Generated rows use the templated wrapper; hand rows use w_*; sig is DERIVED
 // for every row (single source). Pointers cross as i32 offsets (converted in-fn), so the sig never names "*".
@@ -226,7 +165,7 @@ LHOST_TABLE(LHOST_AS_GQ, LHOST_AS_GI, LHOST_AS_HQ, LHOST_AS_HI)
 #define LHOST_ROW_HQ(nm, m, wfn, lit) { nm, (void*)wfn,                                          LiteQpiImport<&LiteHostServices::m>::sig.data(),   NULL },
 #define LHOST_ROW_HI(nm, m, wfn, lit) { nm, (void*)wfn,                                          LiteInfraImport<&LiteHostServices::m>::sig.data(), NULL },
 static NativeSymbol g_liteWasmNatives[] = {
-    LHOST_TABLE(LHOST_ROW_GQ, LHOST_ROW_GI, LHOST_ROW_HQ, LHOST_ROW_HI)
+    LITE_LHOST_ABI_ROWS(LHOST_ROW_GQ, LHOST_ROW_GI, LHOST_ROW_HQ, LHOST_ROW_HI)
 };
 static const uint32_t g_liteWasmNativesCount = (uint32_t)(sizeof(g_liteWasmNatives) / sizeof(g_liteWasmNatives[0]));
 

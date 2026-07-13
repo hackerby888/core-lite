@@ -79,11 +79,9 @@ static LiteHostServices g_liteHostServices = {
     .issueAsset = +[](const void* c, unsigned long long n, const void* i, signed char d, long long s, unsigned long long u) -> long long { return ((QPI::QpiContextProcedureCall*)c)->issueAsset(n, *(const QPI::id*)i, d, s, u); },
     .numberOfShares = +[](const void* c, const void* a, const void* o, const void* p) -> long long { return ((QPI::QpiContextFunctionCall*)c)->numberOfShares(*(const QPI::Asset*)a, *(const QPI::AssetOwnershipSelect*)o, *(const QPI::AssetPossessionSelect*)p); },
     .numberOfPossessedShares = +[](const void* c, unsigned long long n, const void* i, const void* o, const void* p, unsigned short om, unsigned short pm) -> long long { return ((QPI::QpiContextFunctionCall*)c)->numberOfPossessedShares(n, *(const m256i*)i, *(const m256i*)o, *(const m256i*)p, om, pm); },
-    // Walk the node's AssetOwnership/PossessionIterator over the universe; write each matching record (80 bytes,
-    // matching the wasm shim's __qinitAssetEntry) into outBuf. The cursor/index members are host-side here.
+    // Walk the node's AssetOwnership/PossessionIterator and write canonical LiteAssetEntry records.
     .assetEnumerate = +[](const void* c, unsigned int kind, const void* iss, const void* own, const void* pos, void* outBuf, unsigned int maxN) -> unsigned int {
-        struct Entry { unsigned char owner[32]; unsigned char possessor[32]; long long shares; unsigned short ownMgmt; unsigned short posMgmt; unsigned char pad[4]; };
-        Entry* out = (Entry*)outBuf;
+        LiteAssetEntry* out = (LiteAssetEntry*)outBuf;
         unsigned int n = 0;
         if (kind == 1)
         {
@@ -92,7 +90,9 @@ static LiteHostServices g_liteHostServices = {
             {
                 QPI::id ow = it.owner(), pp = it.possessor();
                 copyMem(out[n].owner, &ow, 32); copyMem(out[n].possessor, &pp, 32);
-                out[n].shares = it.numberOfPossessedShares(); out[n].ownMgmt = it.ownershipManagingContract(); out[n].posMgmt = 0;
+                out[n].shares = it.numberOfPossessedShares();
+                out[n].ownershipManagingContract = it.ownershipManagingContract();
+                out[n].possessionManagingContract = 0;
             }
         }
         else
@@ -102,7 +102,9 @@ static LiteHostServices g_liteHostServices = {
             {
                 QPI::id ow = it.owner();
                 copyMem(out[n].owner, &ow, 32); copyMem(out[n].possessor, &ow, 32);
-                out[n].shares = it.numberOfOwnedShares(); out[n].ownMgmt = it.ownershipManagingContract(); out[n].posMgmt = 0;
+                out[n].shares = it.numberOfOwnedShares();
+                out[n].ownershipManagingContract = it.ownershipManagingContract();
+                out[n].possessionManagingContract = 0;
             }
         }
         return n;
