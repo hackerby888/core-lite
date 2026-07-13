@@ -116,4 +116,6 @@ ENV QUBIC_LOG_FORMAT="json"
 # orphans — that produced zombie curl processes. Remove the duplication.
 
 # PID 1: Python orchestrator
-ENTRYPOINT ["python", "-m", "app"]
+COPY docker/orchestrator/entrypoint.sh /opt/orchestrator/entrypoint.sh
+RUN chmod +x /opt/orchestrator/entrypoint.sh
+ENTRYPOINT ["/opt/orchestrator/entrypoint.sh"]
