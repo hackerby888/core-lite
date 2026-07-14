@@ -4,6 +4,14 @@
 // registration expands these rows directly and SDK generators parse the same rows.
 #define LITE_DYN_ABI_VERSION 1u
 
+// GQ/GI = generated
+//   Q = ctx-bound QPI backend
+//   I = ctx-less infrastructure
+//
+// HQ/HI = hand-written wrapper
+//   Q = ctx-bound QPI backend
+//   I = ctx-less infrastructure
+
 #define LITE_SYSTEM_PROCEDURE_ROWS(X) \
     X(INITIALIZE,               0, initialize,               __initializeEmpty) \
     X(BEGIN_EPOCH,              1, beginEpoch,               __beginEpochEmpty) \
