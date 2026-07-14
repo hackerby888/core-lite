@@ -1,10 +1,6 @@
 #pragma once
 
-// Contract-side helpers required before a dynamic contract header is parsed.
-//
-// This file is part of the core-lite Wasm target ABI. Build tools set
-// LITE_WASM_TU_BUILD and include it directly instead of carrying private copies
-// of QPI helpers, locals behavior, or asset-iterator layouts.
+// Contract-side QPI helpers required before a deployed contract header is parsed.
 #ifdef LITE_WASM_TU_BUILD
 
 #include "platform/memory.h"
@@ -46,136 +42,153 @@ void copyFromBuffer(ContractState<T1, I>&, const T2&) = delete;
 
 // Saturating arithmetic
 
-inline static sint64 smul(sint64 a, sint64 b)
+inline static sint64 smul(sint64 left, sint64 right)
 {
-    __int128 r = (__int128)a * (__int128)b;
-    if (r < (__int128)(-9223372036854775807LL - 1))
+    __int128 result = (__int128)left * (__int128)right;
+    if (result < (__int128)(-9223372036854775807LL - 1))
     {
         return -9223372036854775807LL - 1;
     }
-    if (r > (__int128)9223372036854775807LL)
+
+    if (result > (__int128)9223372036854775807LL)
     {
         return 9223372036854775807LL;
     }
-    return (sint64)r;
+
+    return (sint64)result;
 }
 
-inline static uint64 smul(uint64 a, uint64 b)
+inline static uint64 smul(uint64 left, uint64 right)
 {
-    unsigned __int128 r = (unsigned __int128)a * (unsigned __int128)b;
-    if (r > (unsigned __int128)18446744073709551615ULL)
+    unsigned __int128 result = (unsigned __int128)left * (unsigned __int128)right;
+    if (result > (unsigned __int128)18446744073709551615ULL)
     {
         return 18446744073709551615ULL;
     }
-    return (uint64)r;
+
+    return (uint64)result;
 }
 
-inline static sint32 smul(sint32 a, sint32 b)
+inline static sint32 smul(sint32 left, sint32 right)
 {
-    sint64 r = (sint64)a * (sint64)b;
-    if (r < -2147483647LL - 1)
+    sint64 result = (sint64)left * (sint64)right;
+    if (result < -2147483647LL - 1)
     {
         return -2147483647 - 1;
     }
-    if (r > 2147483647LL)
+
+    if (result > 2147483647LL)
     {
         return 2147483647;
     }
-    return (sint32)r;
+
+    return (sint32)result;
 }
 
-inline static uint32 smul(uint32 a, uint32 b)
+inline static uint32 smul(uint32 left, uint32 right)
 {
-    uint64 r = (uint64)a * (uint64)b;
-    if (r > 4294967295ULL)
+    uint64 result = (uint64)left * (uint64)right;
+    if (result > 4294967295ULL)
     {
         return 4294967295u;
     }
-    return (uint32)r;
+
+    return (uint32)result;
 }
 
-inline static sint64 sadd(sint64 a, sint64 b)
+inline static sint64 sadd(sint64 left, sint64 right)
 {
-    sint64 sum = (sint64)((uint64)a + (uint64)b);
-    if (a < 0 && b < 0 && sum > 0)
+    sint64 sum = (sint64)((uint64)left + (uint64)right);
+    if (left < 0 && right < 0 && sum > 0)
     {
         return -9223372036854775807LL - 1;
     }
-    if (a > 0 && b > 0 && sum < 0)
+
+    if (left > 0 && right > 0 && sum < 0)
     {
         return 9223372036854775807LL;
     }
+
     return sum;
 }
 
-inline static uint64 sadd(uint64 a, uint64 b)
+inline static uint64 sadd(uint64 left, uint64 right)
 {
-    if (18446744073709551615ULL - a < b)
+    if (18446744073709551615ULL - left < right)
     {
         return 18446744073709551615ULL;
     }
-    return a + b;
+
+    return left + right;
 }
 
-inline static sint32 sadd(sint32 a, sint32 b)
+inline static sint32 sadd(sint32 left, sint32 right)
 {
-    sint64 sum = (sint64)a + (sint64)b;
+    sint64 sum = (sint64)left + (sint64)right;
     if (sum < -2147483647LL - 1)
     {
         return -2147483647 - 1;
     }
+
     if (sum > 2147483647LL)
     {
         return 2147483647;
     }
+
     return (sint32)sum;
 }
 
-inline static uint32 sadd(uint32 a, uint32 b)
+inline static uint32 sadd(uint32 left, uint32 right)
 {
-    uint64 sum = (uint64)a + (uint64)b;
+    uint64 sum = (uint64)left + (uint64)right;
     if (sum > 4294967295ULL)
     {
         return 4294967295u;
     }
+
     return (uint32)sum;
 }
 
 // Array predicates
 
 template <typename T, uint64 L>
-bool isArraySorted(const Array<T, L>& array, uint64 beginIdx, uint64 endIdx)
+bool isArraySorted(const Array<T, L>& array, uint64 beginIndex, uint64 endIndex)
 {
-    if (endIdx > L || beginIdx > endIdx)
+    if (endIndex > L || beginIndex > endIndex)
     {
         return false;
     }
 
-    for (uint64 i = beginIdx + 1; i < endIdx; ++i)
+    for (uint64 index = beginIndex + 1; index < endIndex; ++index)
     {
-        if (array.get(i - 1) > array.get(i))
+        if (array.get(index - 1) > array.get(index))
         {
             return false;
         }
     }
+
     return true;
 }
 
 template <typename T, uint64 L>
-bool isArraySortedWithoutDuplicates(const Array<T, L>& array, uint64 beginIdx, uint64 endIdx)
+bool isArraySortedWithoutDuplicates(
+    const Array<T, L>& array,
+    uint64 beginIndex,
+    uint64 endIndex)
 {
-    if (endIdx > L || beginIdx > endIdx)
+    if (endIndex > L || beginIndex > endIndex)
     {
         return false;
     }
 
-    for (uint64 i = beginIdx + 1; i < endIdx; ++i)
+    for (uint64 index = beginIndex + 1; index < endIndex; ++index)
     {
-        if (array.get(i - 1) >= array.get(i))
+        if (array.get(index - 1) >= array.get(index))
         {
             return false;
         }
     }
+
     return true;
 }
 
@@ -196,14 +209,15 @@ unsigned int g_liteWasmLocalsDepth = 0;
 
 void* QPI::QpiContextFunctionCall::__qpiAllocLocals(unsigned int sizeOfLocals) const
 {
-    const unsigned long off = g_liteWasmLocalsTop;
+    const unsigned long offset = g_liteWasmLocalsTop;
     if (g_liteWasmLocalsDepth < LITE_WASM_LOCALS_DEPTH)
     {
-        g_liteWasmLocalsMarks[g_liteWasmLocalsDepth++] = off;
+        g_liteWasmLocalsMarks[g_liteWasmLocalsDepth++] = offset;
     }
-    g_liteWasmLocalsTop = (off + sizeOfLocals + 7) & ~7ul;
-    __builtin_memset(&g_liteWasmLocals[off], 0, sizeOfLocals);
-    return (void*)&g_liteWasmLocals[off];
+
+    g_liteWasmLocalsTop = (offset + sizeOfLocals + 7) & ~7ul;
+    __builtin_memset(&g_liteWasmLocals[offset], 0, sizeOfLocals);
+    return (void*)&g_liteWasmLocals[offset];
 }
 
 void QPI::QpiContextFunctionCall::__qpiFreeLocals() const
@@ -223,8 +237,13 @@ static_assert(offsetof(LiteAssetEntry, shares) == 64, "LiteAssetEntry shares off
 static_assert(offsetof(LiteAssetEntry, ownershipManagingContract) == 72, "LiteAssetEntry ownership-management offset");
 static_assert(offsetof(LiteAssetEntry, possessionManagingContract) == 74, "LiteAssetEntry possession-management offset");
 __attribute__((import_module("lhost"), import_name("assetEnumerate")))
-extern "C" unsigned int lh_assetEnumerate(unsigned int kind, const void* issuance, const void* ownership,
-                                          const void* possession, void* out, unsigned int capacity);
+extern "C" unsigned int lh_assetEnumerate(
+    unsigned int kind,
+    const void* issuance,
+    const void* ownership,
+    const void* possession,
+    void* output,
+    unsigned int capacity);
 
 namespace
 {
@@ -270,9 +289,10 @@ QPI::uint64 QPI::AssetOwnershipIterator::assetName() const
 
 QPI::id QPI::AssetOwnershipIterator::owner() const
 {
-    QPI::id r;
-    copyMem(&r, g_liteAssetEntries[_ownershipIdx].owner, 32);
-    return r;
+    QPI::id ownerId;
+
+    copyMem(&ownerId, g_liteAssetEntries[_ownershipIdx].owner, 32);
+    return ownerId;
 }
 
 QPI::sint64 QPI::AssetOwnershipIterator::numberOfOwnedShares() const
@@ -316,9 +336,10 @@ bool QPI::AssetPossessionIterator::next()
 
 QPI::id QPI::AssetPossessionIterator::possessor() const
 {
-    QPI::id r;
-    copyMem(&r, g_liteAssetEntries[_ownershipIdx].possessor, 32);
-    return r;
+    QPI::id possessorId;
+
+    copyMem(&possessorId, g_liteAssetEntries[_ownershipIdx].possessor, 32);
+    return possessorId;
 }
 
 QPI::sint64 QPI::AssetPossessionIterator::numberOfPossessedShares() const

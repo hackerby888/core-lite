@@ -200,18 +200,12 @@ if(TESTNET_LITE_RAM)
     target_compile_definitions(Qubic PRIVATE TESTNET_LITE_RAM)
 endif()
 
-if(LITE_DYNAMIC_CONTRACTS)
-    target_compile_definitions(Qubic PRIVATE LITE_DYNAMIC_CONTRACTS)
-endif()
+# Wasm smart contracts embed WAMR and libffi. The root CMakeLists enforces the testnet-lite-RAM prerequisites.
+if(LITE_WASM_SC)
+    target_compile_definitions(Qubic PRIVATE LITE_WASM_SC)
+    enable_language(C)
 
-# WASM-executed contracts (testnet, experimental). Embeds WAMR (interp) + libffi for the dispatch closures.
-# Default OFF -> the whole block is skipped and the native build is byte-identical. See extensions/WASM_CONTRACTS.md.
-if(LITE_WASM_CONTRACTS)
-    target_compile_definitions(Qubic PRIVATE LITE_WASM_CONTRACTS)
-    enable_language(C)   # WAMR runtime is C; the node project is C++/ASM only
-
-    # --- WAMR static runtime (fast-interp; AOT added later). WAMR_ROOT_DIR is set by the root CMakeLists
-    # (FetchContent, SHA-pinned). ---
+    # WAMR_ROOT_DIR is fetched and SHA-pinned by the root CMakeLists.
     if(APPLE)
         set(WAMR_BUILD_PLATFORM "darwin")
     elseif(WIN32)
@@ -225,23 +219,16 @@ if(LITE_WASM_CONTRACTS)
         set(WAMR_BUILD_TARGET "X86_64")
     endif()
     set(WAMR_BUILD_INTERP 1)
-    # Dev: classic interp + call-stack capture -> source-mapped trap backtraces. Slower; prod keeps fast interp.
-    option(LITE_WASM_TRAP_BACKTRACE "WAMR classic interp + call-stack capture for source-mapped trap backtraces (dev)" OFF)
-    if(LITE_WASM_TRAP_BACKTRACE)
-        # Classic interp keeps trap offsets as original-wasm bytes; DUMP_CALL_STACK makes WAMR print the
-        # backtrace (#NN: 0xOFF - name) to stdout on trap -> node.log -> qinit maps it to source (DWARF sidecar).
-        set(WAMR_BUILD_FAST_INTERP 0)
-        set(WAMR_BUILD_DUMP_CALL_STACK 1)
-    else()
-        set(WAMR_BUILD_FAST_INTERP 1)
-    endif()
+    set(WAMR_BUILD_FAST_INTERP 0)
+    set(WAMR_BUILD_DUMP_CALL_STACK 1)
     set(WAMR_BUILD_AOT 0)
     set(WAMR_BUILD_JIT 0)
-    set(WAMR_BUILD_LIBC_BUILTIN 0)   # contracts use our host imports, not libc
+    set(WAMR_BUILD_LIBC_BUILTIN 0)
     set(WAMR_BUILD_LIBC_WASI 0)
     set(WAMR_BUILD_MULTI_MODULE 0)
-    set(WAMR_BUILD_REF_TYPES 1)      # real contracts use call_indirect/funcref (lite_wasm_tu.h fn-ptr dispatch)
-    set(WAMR_DISABLE_HW_BOUND_CHECK 1) # SW bounds checks -> no per-thread SIGSEGV handler (we run wasm on the node's tick/RPC threads)
+    set(WAMR_BUILD_REF_TYPES 1)
+    # Use software bounds checks because Wasm runs on existing node threads.
+    set(WAMR_DISABLE_HW_BOUND_CHECK 1)
     include(${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
     add_library(vmlib STATIC ${WAMR_RUNTIME_LIB_SOURCE})
     if(WIN32)
@@ -256,7 +243,7 @@ if(LITE_WASM_CONTRACTS)
     endif()
     target_include_directories(Qubic PRIVATE ${WAMR_ROOT_DIR}/core/iwasm/include)
 
-    # --- libffi (host-side node dep; prefer the static archive for distribution) ---
+    # Prefer the static libffi archive for distribution.
     find_library(FFI_LIB_STATIC libffi.a)
     find_library(FFI_LIB_SHARED ffi)
     if(FFI_LIB_STATIC)
@@ -266,12 +253,12 @@ if(LITE_WASM_CONTRACTS)
     endif()
     find_path(FFI_INCLUDE_DIR ffi.h PATH_SUFFIXES x86_64-linux-gnu aarch64-linux-gnu)
     if(NOT FFI_LIB OR NOT FFI_INCLUDE_DIR)
-        message(FATAL_ERROR "LITE_WASM_CONTRACTS: libffi not found (install libffi-dev / libffi)")
+        message(FATAL_ERROR "LITE_WASM_SC: libffi not found (install libffi-dev / libffi)")
     endif()
     target_include_directories(Qubic PRIVATE ${FFI_INCLUDE_DIR})
 
-    target_link_libraries(Qubic vmlib ${FFI_LIB})   # plain form to match the other Qubic link calls
-    message(STATUS "LITE_WASM_CONTRACTS: WAMR(${WAMR_BUILD_PLATFORM}/${WAMR_BUILD_TARGET}) + libffi(${FFI_LIB})")
+    target_link_libraries(Qubic vmlib ${FFI_LIB})
+    message(STATUS "LITE_WASM_SC: WAMR(${WAMR_BUILD_PLATFORM}/${WAMR_BUILD_TARGET}) + libffi(${FFI_LIB})")
 endif()
 
 if(ADDON_TX_STATUS_REQUEST)
@@ -364,4 +351,3 @@ if(IS_MSVC)
 elseif(IS_CLANG)
     # Use default linker settings for Clang
 endif()
-

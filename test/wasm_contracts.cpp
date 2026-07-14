@@ -2,8 +2,8 @@
 // fixture contract.wasm (engine ABI: state_addr/state_size/io_base/reg_count/reg_info/dispatch) in WAMR and
 // checks registration + dispatch (function + procedure) + state round-trip. This is the contract<->runtime
 // contract that both the node engine (lite_wasm_contracts.h) and the contract binding (lite_wasm_tu.h) rely on.
-// Built only with -DLITE_WASM_CONTRACTS (the test CMake adds WAMR/vmlib + this source then).
-#ifdef LITE_WASM_CONTRACTS
+// Built only with -DLITE_WASM_SC (the test CMake adds WAMR/vmlib + this source then).
+#ifdef LITE_WASM_SC
 
 #include <cstring>
 #include <cstdint>
@@ -327,16 +327,11 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
     wasm_runtime_destroy();
 }
 
-#ifdef LITE_WASM_TRAP_BACKTRACE
 #include "wasm_trap_fixture.h"
 #include <unistd.h>
 #include <cstdio>
 #include <string>
-// Classic interp + DUMP_CALL_STACK: on a contract trap WAMR auto-prints a backtrace ("#NN: 0xOFF - name")
-// whose offsets are original-wasm bytes -> source file:line via the DWARF sidecar (qinit side). The node
-// can't capture it structurally (copy_callstack carries no offset + the frames unwind before we regain
-// control), so it flows stdout -> node.log -> qinit. This locks that the auto-dump fires with a byte offset
-// under the dev build. Only runs with -DLITE_WASM_TRAP_BACKTRACE=ON (fast-interp offsets are unmappable).
+// Classic interpretation preserves original Wasm offsets for Qinit's DWARF source mapping.
 TEST(WasmContracts, TrapAutoDumpHasMappableOffset) {
     static char heap[8 * 1024 * 1024];
     RuntimeInitArgs ia; memset(&ia, 0, sizeof ia);
@@ -379,6 +374,4 @@ TEST(WasmContracts, TrapAutoDumpHasMappableOffset) {
     wasm_runtime_unload(mod);
     wasm_runtime_destroy();
 }
-#endif // LITE_WASM_TRAP_BACKTRACE
-
-#endif // LITE_WASM_CONTRACTS
+#endif // LITE_WASM_SC

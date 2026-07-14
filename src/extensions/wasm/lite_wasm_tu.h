@@ -1,21 +1,33 @@
 #pragma once
-// Contract-side wasm binding (compiled INTO contract.wasm by qinit's wasi-sdk clang, NOT into the node).
-// The contract's qpi.X() calls resolve to wasm
-// IMPORTS from module "lhost" (matching lite_wasm_imports.h on the node); the contract's entry points become
-// wasm EXPORTS (dispatch / reg_count / reg_info / state_addr / state_size / io_base). Pointers cross as i32
-// linear-mem offsets; the import DROPS the QpiContext (host binds it out-of-band). See WASM_CONTRACTS.md §13.11.
+// Contract-side binding compiled into contract.wasm by Qinit.
+// Host imports omit QpiContext because the node binds it to the active call.
 #ifdef LITE_WASM_TU_BUILD
 
 #define LH_IMPORT(name) __attribute__((import_module("lhost"), import_name(#name)))
 #define LH_EXPORT(name) __attribute__((export_name(#name)))
 
-// ---- core mem ops (the contract's qpi.h collections need them; no libc in the freestanding wasm) ----
-void setMem(void* buffer, unsigned long long size, unsigned char value) { __builtin_memset(buffer, value, size); }
-void copyMem(void* destination, const void* source, unsigned long long length) { __builtin_memcpy(destination, source, length); }
-bool allocatePool(unsigned long long size, void** buffer) { *buffer = __builtin_malloc(size); return *buffer != nullptr; }
-void freePool(void* buffer) { __builtin_free(buffer); }
+void setMem(void* buffer, unsigned long long size, unsigned char value)
+{
+    __builtin_memset(buffer, value, size);
+}
 
-// ---- host imports (module "lhost"); ctx is host-bound so NOT passed; pointers are i32 offsets ----
+void copyMem(void* destination, const void* source, unsigned long long length)
+{
+    __builtin_memcpy(destination, source, length);
+}
+
+bool allocatePool(unsigned long long size, void** buffer)
+{
+    *buffer = __builtin_malloc(size);
+    return *buffer != nullptr;
+}
+
+void freePool(void* buffer)
+{
+    __builtin_free(buffer);
+}
+
+// These signatures are the contract side of the stable "lhost" ABI.
 extern "C" {
 LH_IMPORT(beginFn)        void  lh_beginFn(unsigned int id);
 LH_IMPORT(endFn)          void  lh_endFn(unsigned int id);
@@ -79,270 +91,1077 @@ LH_IMPORT(liteSetShareholderProposal) unsigned int lh_liteSetShareholderProposal
 LH_IMPORT(liteSetShareholderVotes) unsigned int lh_liteSetShareholderVotes(unsigned int calleeIdx, const void* voteData, unsigned int voteSize, long long invocationReward);
 } // extern "C"
 
-// inter-contract helpers (called by the redefined CALL_OTHER_CONTRACT_* macros from contract code).
-int liteCallFunction(const void*, unsigned int calleeIdx, unsigned short inputType,
-                     const void* in, unsigned int inSize, void* out, unsigned int outSize) {
-    return lh_liteCallFunction(calleeIdx, inputType, in, inSize, out, outSize);
-}
-int liteInvokeProcedure(const void*, unsigned int calleeIdx, unsigned short inputType,
-                        const void* in, unsigned int inSize, void* out, unsigned int outSize, long long reward) {
-    return lh_liteInvokeProcedure(calleeIdx, inputType, in, inSize, out, outSize, reward);
+int liteCallFunction(
+    const void*,
+    unsigned int calleeIndex,
+    unsigned short inputType,
+    const void* input,
+    unsigned int inputSize,
+    void* output,
+    unsigned int outputSize)
+{
+    return lh_liteCallFunction(
+        calleeIndex,
+        inputType,
+        input,
+        inputSize,
+        output,
+        outputSize);
 }
 
-// ---- static QPI hooks (declared static in pre_qpi_def.h) ----
-static void __markContractStateDirty(unsigned int ci) { lh_markDirty(ci); }
-static void __beginFunctionOrProcedure(const unsigned int id) { lh_beginFn(id); }
-static void __endFunctionOrProcedure(const unsigned int id) { lh_endFn(id); }
-static void __pauseLogMessage() { lh_pauseLog(); }
-static void __resumeLogMessage() { lh_resumeLog(); }
-static void* __acquireScratchpad(unsigned long long size, bool initZero) { return lh_acquireScratch(size, initZero ? 1u : 0u); }
-static void __releaseScratchpad(void* ptr) { lh_releaseScratch(ptr); }
-template <typename T> static void __logContractDebugMessage(unsigned int ci, T& m)   { lh_logBytes(ci, 7, &m, (unsigned int)__builtin_offsetof(T, _terminator)); }
-template <typename T> static void __logContractErrorMessage(unsigned int ci, T& m)   { lh_logBytes(ci, 4, &m, (unsigned int)__builtin_offsetof(T, _terminator)); }
-template <typename T> static void __logContractInfoMessage(unsigned int ci, T& m)    { lh_logBytes(ci, 6, &m, (unsigned int)__builtin_offsetof(T, _terminator)); }
-template <typename T> static void __logContractWarningMessage(unsigned int ci, T& m) { lh_logBytes(ci, 5, &m, (unsigned int)__builtin_offsetof(T, _terminator)); }
+int liteInvokeProcedure(
+    const void*,
+    unsigned int calleeIndex,
+    unsigned short inputType,
+    const void* input,
+    unsigned int inputSize,
+    void* output,
+    unsigned int outputSize,
+    long long invocationReward)
+{
+    return lh_liteInvokeProcedure(
+        calleeIndex,
+        inputType,
+        input,
+        inputSize,
+        output,
+        outputSize,
+        invocationReward);
+}
 
-// ---- QpiContext method forwarders (mirror lite_dyn_abi.h, but call imports; ctx dropped) ----
+static void __markContractStateDirty(unsigned int contractIndex)
+{
+    lh_markDirty(contractIndex);
+}
+
+static void __beginFunctionOrProcedure(const unsigned int id)
+{
+    lh_beginFn(id);
+}
+
+static void __endFunctionOrProcedure(const unsigned int id)
+{
+    lh_endFn(id);
+}
+
+static void __pauseLogMessage()
+{
+    lh_pauseLog();
+}
+
+static void __resumeLogMessage()
+{
+    lh_resumeLog();
+}
+
+static void* __acquireScratchpad(unsigned long long size, bool initializeToZero)
+{
+    return lh_acquireScratch(size, initializeToZero ? 1u : 0u);
+}
+
+static void __releaseScratchpad(void* pointer)
+{
+    lh_releaseScratch(pointer);
+}
+
 template <typename T>
-QPI::id QPI::QpiContextFunctionCall::K12(const T& data) const { QPI::id out; lh_k12(&data, sizeof(T), &out); return out; }
+static void __logContractDebugMessage(unsigned int contractIndex, T& message)
+{
+    lh_logBytes(
+        contractIndex,
+        7,
+        &message,
+        (unsigned int)__builtin_offsetof(T, _terminator));
+}
 
-long long QPI::QpiContextProcedureCall::transfer(const m256i& d, long long a) const { return lh_transfer(&d, a); }
-long long QPI::QpiContextProcedureCall::__transfer(const m256i& d, long long a, unsigned char t) const { return lh_transferTyped(&d, a, t); }
-void QPI::QpiContextFunctionCall::__qpiAbort(unsigned int e) const { lh_abort(e); }
-long long QPI::QpiContextProcedureCall::burn(long long a, unsigned int idx) const { return lh_burn(a, idx); }
-unsigned short QPI::QpiContextFunctionCall::epoch() const { return (unsigned short)lh_epoch(); }
-unsigned int QPI::QpiContextFunctionCall::tick() const { return lh_tick(); }
-int QPI::QpiContextFunctionCall::numberOfTickTransactions() const { return lh_numberOfTickTransactions(); }
-QPI::bit QPI::QpiContextFunctionCall::getEntity(const m256i& id, QPI::Entity& e) const { return (QPI::bit)lh_getEntity(&id, &e); }
-long long QPI::QpiContextFunctionCall::queryFeeReserve(unsigned int ci) const { return lh_queryFeeReserve(ci); }
-m256i QPI::QpiContextFunctionCall::nextId(const m256i& c) const { m256i r; lh_nextId(&c, &r); return r; }
-m256i QPI::QpiContextFunctionCall::prevId(const m256i& c) const { m256i r; lh_prevId(&c, &r); return r; }
-QPI::bit QPI::QpiContextFunctionCall::isContractId(const QPI::id& id) const { return (QPI::bit)lh_isContractId(&id); }
-QPI::id QPI::QpiContextFunctionCall::arbitrator() const { m256i r; lh_arbitrator(&r); return r; }
-QPI::id QPI::QpiContextFunctionCall::computor(unsigned short i) const { m256i r; lh_computor(i, &r); return r; }
-unsigned char QPI::QpiContextFunctionCall::day() const { return (unsigned char)lh_day(); }
-unsigned char QPI::QpiContextFunctionCall::year() const { return (unsigned char)lh_year(); }
-unsigned char QPI::QpiContextFunctionCall::hour() const { return (unsigned char)lh_hour(); }
-unsigned char QPI::QpiContextFunctionCall::minute() const { return (unsigned char)lh_minute(); }
-unsigned char QPI::QpiContextFunctionCall::month() const { return (unsigned char)lh_month(); }
-unsigned char QPI::QpiContextFunctionCall::second() const { return (unsigned char)lh_second(); }
-unsigned short QPI::QpiContextFunctionCall::millisecond() const { return (unsigned short)lh_millisecond(); }
-QPI::DateAndTime QPI::QpiContextFunctionCall::now() const { QPI::DateAndTime d; lh_now(&d); return d; }
-m256i QPI::QpiContextFunctionCall::getPrevSpectrumDigest() const { m256i r; lh_prevSpectrumDigest(&r); return r; }
-m256i QPI::QpiContextFunctionCall::getPrevUniverseDigest() const { m256i r; lh_prevUniverseDigest(&r); return r; }
-m256i QPI::QpiContextFunctionCall::getPrevComputerDigest() const { m256i r; lh_prevComputerDigest(&r); return r; }
-bool QPI::QpiContextFunctionCall::isAssetIssued(const m256i& iss, unsigned long long n) const { return lh_isAssetIssued(&iss, n); }
-long long QPI::QpiContextProcedureCall::issueAsset(unsigned long long n, const QPI::id& iss, signed char dec, long long sh, unsigned long long u) const { return lh_issueAsset(n, &iss, (unsigned int)(unsigned char)dec, sh, u); }
-long long QPI::QpiContextFunctionCall::numberOfShares(const QPI::Asset& a, const QPI::AssetOwnershipSelect& o, const QPI::AssetPossessionSelect& p) const { return lh_numberOfShares(&a, &o, &p); }
-long long QPI::QpiContextFunctionCall::numberOfPossessedShares(unsigned long long n, const m256i& iss, const m256i& ow, const m256i& po, unsigned short om, unsigned short pm) const { return lh_numberOfPossessedShares(n, &iss, &ow, &po, om, pm); }
-long long QPI::QpiContextProcedureCall::transferShareOwnershipAndPossession(unsigned long long n, const m256i& iss, const m256i& ow, const m256i& po, long long sh, const m256i& no) const { return lh_transferShares(n, &iss, &ow, &po, sh, &no); }
-long long QPI::QpiContextProcedureCall::acquireShares(const QPI::Asset& asset, const m256i& ow, const m256i& po, long long sh, unsigned short so, unsigned short sp, long long fee) const { return lh_acquireShares(asset.assetName, &asset.issuer, &ow, &po, sh, so, sp, fee); }
-long long QPI::QpiContextProcedureCall::releaseShares(const QPI::Asset& asset, const m256i& ow, const m256i& po, long long sh, unsigned short dno, unsigned short dp, long long fee) const { return lh_releaseShares(asset.assetName, &asset.issuer, &ow, &po, sh, dno, dp, fee); }
-unsigned char QPI::QpiContextFunctionCall::dayOfWeek(unsigned char year, unsigned char month, unsigned char day) const { return (unsigned char)lh_dayOfWeek(year, month, day); }
-QPI::bit QPI::QpiContextFunctionCall::signatureValidity(const m256i& entity, const m256i& digest, const QPI::Array<QPI::sint8, 64>& signature) const { return lh_signatureValidity(&entity, &digest, &signature) != 0; }
-long long QPI::QpiContextProcedureCall::bidInIPO(unsigned int ipoContractIndex, long long price, unsigned int quantity) const { return lh_bidInIPO(ipoContractIndex, price, quantity); }
-m256i QPI::QpiContextFunctionCall::ipoBidId(unsigned int ipoContractIndex, unsigned int ipoBidIndex) const { m256i r; lh_ipoBidId(ipoContractIndex, ipoBidIndex, &r); return r; }
-long long QPI::QpiContextFunctionCall::ipoBidPrice(unsigned int ipoContractIndex, unsigned int ipoBidIndex) const { return lh_ipoBidPrice(ipoContractIndex, ipoBidIndex); }
-m256i QPI::QpiContextFunctionCall::computeMiningFunction(const m256i miningSeed, const m256i publicKey, const m256i nonce) const { m256i r; lh_computeMiningFunction(&miningSeed, &publicKey, &nonce, &r); return r; }
-void QPI::QpiContextFunctionCall::initMiningSeed(const m256i miningSeed) const { lh_initMiningSeed(&miningSeed); }
-unsigned char QPI::QpiContextFunctionCall::getOracleQueryStatus(long long queryId) const { return (unsigned char)lh_getOracleQueryStatus(queryId); }
-bool QPI::QpiContextProcedureCall::unsubscribeOracle(int oracleSubscriptionId) const { return lh_unsubscribeOracle(oracleSubscriptionId) != 0; }
-template <typename OracleInterface, typename ContractStateType, typename LocalsType>
-QPI::sint64 QPI::QpiContextProcedureCall::__qpiQueryOracle(const typename OracleInterface::OracleQuery& query, void (*)(const QPI::QpiContextProcedureCall&, ContractStateType&, QPI::OracleNotificationInput<OracleInterface>&, QPI::NoData&, LocalsType&), unsigned int notificationProcId, unsigned int timeoutMillisec) const { return lh_queryOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), notificationProcId, timeoutMillisec, OracleInterface::getQueryFee(query)); }
-template <typename OracleInterface, typename ContractStateType, typename LocalsType>
-QPI::sint32 QPI::QpiContextProcedureCall::__qpiSubscribeOracle(const typename OracleInterface::OracleQuery& query, void (*)(const QPI::QpiContextProcedureCall&, ContractStateType&, QPI::OracleNotificationInput<OracleInterface>&, QPI::NoData&, LocalsType&), unsigned int notificationProcId, unsigned int notificationPeriodInMilliseconds, bool notifyWithPreviousReply) const { return lh_subscribeOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), notificationProcId, notificationPeriodInMilliseconds, notifyWithPreviousReply ? 1u : 0u, OracleInterface::getSubscriptionFee(query, notificationPeriodInMilliseconds)); }
-template <typename OracleInterface>
-bool QPI::QpiContextFunctionCall::getOracleQuery(QPI::sint64 queryId, typename OracleInterface::OracleQuery& query) const { return lh_getOracleQuery(queryId, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery)) != 0; }
-template <typename OracleInterface>
-bool QPI::QpiContextFunctionCall::getOracleReply(QPI::sint64 queryId, typename OracleInterface::OracleReply& reply) const { return lh_getOracleReply(queryId, &reply, (unsigned int)sizeof(typename OracleInterface::OracleReply)) != 0; }
-bool QPI::QpiContextProcedureCall::distributeDividends(long long a) const { return lh_distributeDividends(a); }
-QPI::uint16 QPI::QpiContextProcedureCall::setShareholderProposal(QPI::uint16 idx, const QPI::Array<QPI::uint8, 1024>& proposalDataBuffer, QPI::sint64 reward) const { return (QPI::uint16)lh_liteSetShareholderProposal(idx, &proposalDataBuffer, reward); }
-bool QPI::QpiContextProcedureCall::setShareholderVotes(QPI::uint16 idx, const QPI::ProposalMultiVoteDataV1& voteData, QPI::sint64 reward) const { return lh_liteSetShareholderVotes(idx, &voteData, sizeof(voteData), reward) != 0; }
+template <typename T>
+static void __logContractErrorMessage(unsigned int contractIndex, T& message)
+{
+    lh_logBytes(
+        contractIndex,
+        4,
+        &message,
+        (unsigned int)__builtin_offsetof(T, _terminator));
+}
 
-// ---- registration capture (the contract's __registerUserFunctionsAndProcedures fills this) ----
+template <typename T>
+static void __logContractInfoMessage(unsigned int contractIndex, T& message)
+{
+    lh_logBytes(
+        contractIndex,
+        6,
+        &message,
+        (unsigned int)__builtin_offsetof(T, _terminator));
+}
+
+template <typename T>
+static void __logContractWarningMessage(unsigned int contractIndex, T& message)
+{
+    lh_logBytes(
+        contractIndex,
+        5,
+        &message,
+        (unsigned int)__builtin_offsetof(T, _terminator));
+}
+
+// ---- QpiContext method forwarders (stable host ABI) ----
+template <typename T>
+QPI::id QPI::QpiContextFunctionCall::K12(const T& data) const
+{
+    QPI::id digest;
+
+    lh_k12(&data, sizeof(T), &digest);
+    return digest;
+}
+
+long long QPI::QpiContextProcedureCall::transfer(
+    const m256i& destination,
+    long long amount) const
+{
+    return lh_transfer(&destination, amount);
+}
+
+long long QPI::QpiContextProcedureCall::__transfer(
+    const m256i& destination,
+    long long amount,
+    unsigned char transferType) const
+{
+    return lh_transferTyped(&destination, amount, transferType);
+}
+
+void QPI::QpiContextFunctionCall::__qpiAbort(unsigned int errorCode) const
+{
+    lh_abort(errorCode);
+}
+
+long long QPI::QpiContextProcedureCall::burn(
+    long long amount,
+    unsigned int contractIndex) const
+{
+    return lh_burn(amount, contractIndex);
+}
+
+unsigned short QPI::QpiContextFunctionCall::epoch() const
+{
+    return (unsigned short)lh_epoch();
+}
+
+unsigned int QPI::QpiContextFunctionCall::tick() const
+{
+    return lh_tick();
+}
+
+int QPI::QpiContextFunctionCall::numberOfTickTransactions() const
+{
+    return lh_numberOfTickTransactions();
+}
+
+QPI::bit QPI::QpiContextFunctionCall::getEntity(
+    const m256i& id,
+    QPI::Entity& entity) const
+{
+    return (QPI::bit)lh_getEntity(&id, &entity);
+}
+
+long long QPI::QpiContextFunctionCall::queryFeeReserve(
+    unsigned int contractIndex) const
+{
+    return lh_queryFeeReserve(contractIndex);
+}
+
+m256i QPI::QpiContextFunctionCall::nextId(const m256i& current) const
+{
+    m256i next;
+
+    lh_nextId(&current, &next);
+    return next;
+}
+
+m256i QPI::QpiContextFunctionCall::prevId(const m256i& current) const
+{
+    m256i previous;
+
+    lh_prevId(&current, &previous);
+    return previous;
+}
+
+QPI::bit QPI::QpiContextFunctionCall::isContractId(const QPI::id& id) const
+{
+    return (QPI::bit)lh_isContractId(&id);
+}
+
+QPI::id QPI::QpiContextFunctionCall::arbitrator() const
+{
+    m256i id;
+
+    lh_arbitrator(&id);
+    return id;
+}
+
+QPI::id QPI::QpiContextFunctionCall::computor(unsigned short index) const
+{
+    m256i id;
+
+    lh_computor(index, &id);
+    return id;
+}
+
+unsigned char QPI::QpiContextFunctionCall::day() const
+{
+    return (unsigned char)lh_day();
+}
+
+unsigned char QPI::QpiContextFunctionCall::year() const
+{
+    return (unsigned char)lh_year();
+}
+
+unsigned char QPI::QpiContextFunctionCall::hour() const
+{
+    return (unsigned char)lh_hour();
+}
+
+unsigned char QPI::QpiContextFunctionCall::minute() const
+{
+    return (unsigned char)lh_minute();
+}
+
+unsigned char QPI::QpiContextFunctionCall::month() const
+{
+    return (unsigned char)lh_month();
+}
+
+unsigned char QPI::QpiContextFunctionCall::second() const
+{
+    return (unsigned char)lh_second();
+}
+
+unsigned short QPI::QpiContextFunctionCall::millisecond() const
+{
+    return (unsigned short)lh_millisecond();
+}
+
+QPI::DateAndTime QPI::QpiContextFunctionCall::now() const
+{
+    QPI::DateAndTime dateAndTime;
+
+    lh_now(&dateAndTime);
+    return dateAndTime;
+}
+
+m256i QPI::QpiContextFunctionCall::getPrevSpectrumDigest() const
+{
+    m256i digest;
+
+    lh_prevSpectrumDigest(&digest);
+    return digest;
+}
+
+m256i QPI::QpiContextFunctionCall::getPrevUniverseDigest() const
+{
+    m256i digest;
+
+    lh_prevUniverseDigest(&digest);
+    return digest;
+}
+
+m256i QPI::QpiContextFunctionCall::getPrevComputerDigest() const
+{
+    m256i digest;
+
+    lh_prevComputerDigest(&digest);
+    return digest;
+}
+
+bool QPI::QpiContextFunctionCall::isAssetIssued(
+    const m256i& issuer,
+    unsigned long long assetName) const
+{
+    return lh_isAssetIssued(&issuer, assetName);
+}
+
+long long QPI::QpiContextProcedureCall::issueAsset(
+    unsigned long long assetName,
+    const QPI::id& issuer,
+    signed char decimals,
+    long long numberOfShares,
+    unsigned long long unitOfMeasurement) const
+{
+    return lh_issueAsset(
+        assetName,
+        &issuer,
+        (unsigned int)(unsigned char)decimals,
+        numberOfShares,
+        unitOfMeasurement);
+}
+
+long long QPI::QpiContextFunctionCall::numberOfShares(
+    const QPI::Asset& asset,
+    const QPI::AssetOwnershipSelect& ownership,
+    const QPI::AssetPossessionSelect& possession) const
+{
+    return lh_numberOfShares(&asset, &ownership, &possession);
+}
+
+long long QPI::QpiContextFunctionCall::numberOfPossessedShares(
+    unsigned long long assetName,
+    const m256i& issuer,
+    const m256i& owner,
+    const m256i& possessor,
+    unsigned short ownershipManagingContractIndex,
+    unsigned short possessionManagingContractIndex) const
+{
+    return lh_numberOfPossessedShares(
+        assetName,
+        &issuer,
+        &owner,
+        &possessor,
+        ownershipManagingContractIndex,
+        possessionManagingContractIndex);
+}
+
+long long QPI::QpiContextProcedureCall::transferShareOwnershipAndPossession(
+    unsigned long long assetName,
+    const m256i& issuer,
+    const m256i& owner,
+    const m256i& possessor,
+    long long numberOfShares,
+    const m256i& newOwnerAndPossessor) const
+{
+    return lh_transferShares(
+        assetName,
+        &issuer,
+        &owner,
+        &possessor,
+        numberOfShares,
+        &newOwnerAndPossessor);
+}
+
+long long QPI::QpiContextProcedureCall::acquireShares(
+    const QPI::Asset& asset,
+    const m256i& owner,
+    const m256i& possessor,
+    long long numberOfShares,
+    unsigned short sourceOwnershipManagingContractIndex,
+    unsigned short sourcePossessionManagingContractIndex,
+    long long offeredFee) const
+{
+    return lh_acquireShares(
+        asset.assetName,
+        &asset.issuer,
+        &owner,
+        &possessor,
+        numberOfShares,
+        sourceOwnershipManagingContractIndex,
+        sourcePossessionManagingContractIndex,
+        offeredFee);
+}
+
+long long QPI::QpiContextProcedureCall::releaseShares(
+    const QPI::Asset& asset,
+    const m256i& owner,
+    const m256i& possessor,
+    long long numberOfShares,
+    unsigned short destinationOwnershipManagingContractIndex,
+    unsigned short destinationPossessionManagingContractIndex,
+    long long offeredFee) const
+{
+    return lh_releaseShares(
+        asset.assetName,
+        &asset.issuer,
+        &owner,
+        &possessor,
+        numberOfShares,
+        destinationOwnershipManagingContractIndex,
+        destinationPossessionManagingContractIndex,
+        offeredFee);
+}
+
+unsigned char QPI::QpiContextFunctionCall::dayOfWeek(
+    unsigned char year,
+    unsigned char month,
+    unsigned char day) const
+{
+    return (unsigned char)lh_dayOfWeek(year, month, day);
+}
+
+QPI::bit QPI::QpiContextFunctionCall::signatureValidity(
+    const m256i& entity,
+    const m256i& digest,
+    const QPI::Array<QPI::sint8, 64>& signature) const
+{
+    return lh_signatureValidity(&entity, &digest, &signature) != 0;
+}
+
+long long QPI::QpiContextProcedureCall::bidInIPO(
+    unsigned int ipoContractIndex,
+    long long price,
+    unsigned int quantity) const
+{
+    return lh_bidInIPO(ipoContractIndex, price, quantity);
+}
+
+m256i QPI::QpiContextFunctionCall::ipoBidId(
+    unsigned int ipoContractIndex,
+    unsigned int ipoBidIndex) const
+{
+    m256i id;
+
+    lh_ipoBidId(ipoContractIndex, ipoBidIndex, &id);
+    return id;
+}
+
+long long QPI::QpiContextFunctionCall::ipoBidPrice(
+    unsigned int ipoContractIndex,
+    unsigned int ipoBidIndex) const
+{
+    return lh_ipoBidPrice(ipoContractIndex, ipoBidIndex);
+}
+
+m256i QPI::QpiContextFunctionCall::computeMiningFunction(
+    const m256i miningSeed,
+    const m256i publicKey,
+    const m256i nonce) const
+{
+    m256i result;
+
+    lh_computeMiningFunction(&miningSeed, &publicKey, &nonce, &result);
+    return result;
+}
+
+void QPI::QpiContextFunctionCall::initMiningSeed(const m256i miningSeed) const
+{
+    lh_initMiningSeed(&miningSeed);
+}
+
+unsigned char QPI::QpiContextFunctionCall::getOracleQueryStatus(
+    long long queryId) const
+{
+    return (unsigned char)lh_getOracleQueryStatus(queryId);
+}
+
+bool QPI::QpiContextProcedureCall::unsubscribeOracle(
+    int oracleSubscriptionId) const
+{
+    return lh_unsubscribeOracle(oracleSubscriptionId) != 0;
+}
+
+template <typename OracleInterface, typename ContractStateType, typename LocalsType>
+QPI::sint64 QPI::QpiContextProcedureCall::__qpiQueryOracle(
+    const typename OracleInterface::OracleQuery& query,
+    void (*)(
+        const QPI::QpiContextProcedureCall&,
+        ContractStateType&,
+        QPI::OracleNotificationInput<OracleInterface>&,
+        QPI::NoData&,
+        LocalsType&),
+    unsigned int notificationProcedureId,
+    unsigned int timeoutMilliseconds) const
+{
+    return lh_queryOracle(
+        OracleInterface::oracleInterfaceIndex,
+        &query,
+        (unsigned int)sizeof(typename OracleInterface::OracleQuery),
+        notificationProcedureId,
+        timeoutMilliseconds,
+        OracleInterface::getQueryFee(query));
+}
+
+template <typename OracleInterface, typename ContractStateType, typename LocalsType>
+QPI::sint32 QPI::QpiContextProcedureCall::__qpiSubscribeOracle(
+    const typename OracleInterface::OracleQuery& query,
+    void (*)(
+        const QPI::QpiContextProcedureCall&,
+        ContractStateType&,
+        QPI::OracleNotificationInput<OracleInterface>&,
+        QPI::NoData&,
+        LocalsType&),
+    unsigned int notificationProcedureId,
+    unsigned int notificationPeriodInMilliseconds,
+    bool notifyWithPreviousReply) const
+{
+    return lh_subscribeOracle(
+        OracleInterface::oracleInterfaceIndex,
+        &query,
+        (unsigned int)sizeof(typename OracleInterface::OracleQuery),
+        notificationProcedureId,
+        notificationPeriodInMilliseconds,
+        notifyWithPreviousReply ? 1u : 0u,
+        OracleInterface::getSubscriptionFee(
+            query,
+            notificationPeriodInMilliseconds));
+}
+
+template <typename OracleInterface>
+bool QPI::QpiContextFunctionCall::getOracleQuery(
+    QPI::sint64 queryId,
+    typename OracleInterface::OracleQuery& query) const
+{
+    return lh_getOracleQuery(
+        queryId,
+        &query,
+        (unsigned int)sizeof(typename OracleInterface::OracleQuery)) != 0;
+}
+
+template <typename OracleInterface>
+bool QPI::QpiContextFunctionCall::getOracleReply(
+    QPI::sint64 queryId,
+    typename OracleInterface::OracleReply& reply) const
+{
+    return lh_getOracleReply(
+        queryId,
+        &reply,
+        (unsigned int)sizeof(typename OracleInterface::OracleReply)) != 0;
+}
+
+bool QPI::QpiContextProcedureCall::distributeDividends(
+    long long amountPerShare) const
+{
+    return lh_distributeDividends(amountPerShare);
+}
+
+QPI::uint16 QPI::QpiContextProcedureCall::setShareholderProposal(
+    QPI::uint16 contractIndex,
+    const QPI::Array<QPI::uint8, 1024>& proposalDataBuffer,
+    QPI::sint64 invocationReward) const
+{
+    return (QPI::uint16)lh_liteSetShareholderProposal(
+        contractIndex,
+        &proposalDataBuffer,
+        invocationReward);
+}
+
+bool QPI::QpiContextProcedureCall::setShareholderVotes(
+    QPI::uint16 contractIndex,
+    const QPI::ProposalMultiVoteDataV1& voteData,
+    QPI::sint64 invocationReward) const
+{
+    return lh_liteSetShareholderVotes(
+        contractIndex,
+        &voteData,
+        sizeof(voteData),
+        invocationReward) != 0;
+}
+
+// ---- registration capture (read by reg_info) ----
 #ifndef LITE_MAX_USER_ENTRIES
 #define LITE_MAX_USER_ENTRIES 1024
 #endif
-struct LiteWasmTuEntry { unsigned short it; unsigned char kind; unsigned short inSize, outSize; unsigned int localsSize; void* fn; };
+struct LiteWasmTuEntry
+{
+    unsigned short inputType;
+    LiteWasmDispatchKind kind;
+    unsigned short inputSize;
+    unsigned short outputSize;
+    unsigned int localsSize;
+    void* function;
+};
 static LiteWasmTuEntry g_wasmTuEntries[LITE_MAX_USER_ENTRIES];
-static unsigned int    g_wasmTuEntryCount = 0;
+static unsigned int g_wasmTuEntryCount = 0;
 
 QPI::QpiContextForInit::QpiContextForInit(unsigned int contractIndex)
-    : QpiContext(contractIndex, QPI::NULL_ID, QPI::NULL_ID, 0, 0) {}
-void QPI::QpiContextForInit::__registerUserFunction(USER_FUNCTION fn, unsigned short it,
-        unsigned short inSize, unsigned short outSize, unsigned int localsSize) const {
-    if (g_wasmTuEntryCount >= LITE_MAX_USER_ENTRIES) return;
-    g_wasmTuEntries[g_wasmTuEntryCount++] = { it, 0 /*FUNCTION*/, inSize, outSize, localsSize, (void*)fn };
-}
-void QPI::QpiContextForInit::__registerUserProcedure(USER_PROCEDURE fn, unsigned short it,
-        unsigned short inSize, unsigned short outSize, unsigned int localsSize) const {
-    if (g_wasmTuEntryCount >= LITE_MAX_USER_ENTRIES) return;
-    g_wasmTuEntries[g_wasmTuEntryCount++] = { it, 1 /*PROCEDURE*/, inSize, outSize, localsSize, (void*)fn };
-}
-// Notification procedures (oracle reply callbacks) are dispatched by their synthetic procedureId; the lite
-// dispatch matches on the low 16 bits, so store that as the entry's inputType (qpi.h REGISTER_USER_PROCEDURE_NOTIFICATION).
-void QPI::QpiContextForInit::__registerUserProcedureNotification(USER_PROCEDURE fn, unsigned int procedureId,
-        unsigned short inSize, unsigned short outSize, unsigned int localsSize) const {
-    if (g_wasmTuEntryCount >= LITE_MAX_USER_ENTRIES) return;
-    g_wasmTuEntries[g_wasmTuEntryCount++] = { (unsigned short)procedureId, 1 /*PROCEDURE*/, inSize, outSize, localsSize, (void*)fn };
+    : QpiContext(contractIndex, QPI::NULL_ID, QPI::NULL_ID, 0, 0)
+{
 }
 
-// ---- exported entry points the node calls (compiled when the contract type is defined) ----
+void QPI::QpiContextForInit::__registerUserFunction(
+    USER_FUNCTION function,
+    unsigned short inputType,
+    unsigned short inputSize,
+    unsigned short outputSize,
+    unsigned int localsSize) const
+{
+    if (g_wasmTuEntryCount >= LITE_MAX_USER_ENTRIES)
+    {
+        return;
+    }
+
+    g_wasmTuEntries[g_wasmTuEntryCount++] = {
+        inputType,
+        LiteWasmDispatchKind::UserFunction,
+        inputSize,
+        outputSize,
+        localsSize,
+        (void*)function,
+    };
+}
+
+void QPI::QpiContextForInit::__registerUserProcedure(
+    USER_PROCEDURE procedure,
+    unsigned short inputType,
+    unsigned short inputSize,
+    unsigned short outputSize,
+    unsigned int localsSize) const
+{
+    if (g_wasmTuEntryCount >= LITE_MAX_USER_ENTRIES)
+    {
+        return;
+    }
+
+    g_wasmTuEntries[g_wasmTuEntryCount++] = {
+        inputType,
+        LiteWasmDispatchKind::UserProcedure,
+        inputSize,
+        outputSize,
+        localsSize,
+        (void*)procedure,
+    };
+}
+
+// Oracle notification dispatch uses the low 16 bits of its synthetic procedure ID.
+void QPI::QpiContextForInit::__registerUserProcedureNotification(
+    USER_PROCEDURE procedure,
+    unsigned int procedureId,
+    unsigned short inputSize,
+    unsigned short outputSize,
+    unsigned int localsSize) const
+{
+    if (g_wasmTuEntryCount >= LITE_MAX_USER_ENTRIES)
+    {
+        return;
+    }
+
+    g_wasmTuEntries[g_wasmTuEntryCount++] = {
+        (unsigned short)procedureId,
+        LiteWasmDispatchKind::UserProcedure,
+        inputSize,
+        outputSize,
+        localsSize,
+        (void*)procedure,
+    };
+}
+
+// The node calls these exports when the contract type is available.
 #ifdef CONTRACT_STATE_TYPE
-typedef void (*LiteWasmUserFn)(const QPI::QpiContextFunctionCall&, void*, void*, void*, void*);
+typedef void (*LiteWasmUserFunction)(
+    const QPI::QpiContextFunctionCall&,
+    void*,
+    void*,
+    void*,
+    void*);
+typedef void (*LiteWasmUserProcedure)(
+    const QPI::QpiContextProcedureCall&,
+    void*,
+    void*,
+    void*,
+    void*);
+typedef void (*LiteWasmSystemProcedure)(
+    const QPI::QpiContextProcedureCall&,
+    void*,
+    void*,
+    void*,
+    void*);
+typedef void (*LiteWasmMigrateProcedure)(
+    const QPI::QpiContextFunctionCall&,
+    void*,
+    void*,
+    void*);
 
-// 64K-page-aligned so each region sits on its own page(s): the debugger mprotect's the state region RO for
-// dirty-page diffing, so it must NOT share a page with ctx/io (64K covers any runtime page size incl. arm).
-// Raw zero-init bytes, NOT a typed `static StateData` object: the node holds contract state as zero-initialized
-// raw memory (contractStates[] = memset 0) and the host copies state into this region before every call, so
-// default-constructing here is both pointless (immediately overwritten) and fragile — a StateData with any
-// member lacking a default ctor (e.g. QSWAP's uint128 accFeePerLPX64) would fail to compile. A char buffer has
-// static zero-init storage and runs no constructor; g_wasmState is a reference view over it, so &g_wasmState and
-// sizeof(g_wasmState) (= sizeof StateData) are unchanged for the state_addr/state_size exports below.
+// Alignment keeps debug page protection for state separate from context and IO.
+// Raw storage avoids running constructors that native contract state never runs.
 #ifdef QINIT_CORPUS_RUNNER
-// Corpus-runner build: the contract under test executes in engine-deployed instances (thost bq_invoke /
-// bq_query), never through this module's own dispatch, so the resident state region is dead weight here.
-// Keep it one page instead of sizeof(StateData) — a full-size buffer (hundreds of MB for QTRY/QEARN) would
-// push the runner's data end past the shared-memory bases where those deployed instances live.
+// Corpus runs use engine-deployed state, so the local region only reserves one page.
 alignas(65536) static unsigned char g_wasmStateBuf[65536];
 #else
-alignas(65536) static unsigned char g_wasmStateBuf[sizeof(CONTRACT_STATE_TYPE::StateData)];   // resident state (= contractStates[idx])
+alignas(65536) static unsigned char g_wasmStateBuf[
+    sizeof(CONTRACT_STATE_TYPE::StateData)];
 #endif
-static CONTRACT_STATE_TYPE::StateData& g_wasmState = *reinterpret_cast<CONTRACT_STATE_TYPE::StateData*>(g_wasmStateBuf);
-alignas(65536) static unsigned char     g_wasmCtxBuf[256];   // QpiContext scalar header; host populates per call
+static CONTRACT_STATE_TYPE::StateData& g_wasmState =
+    *reinterpret_cast<CONTRACT_STATE_TYPE::StateData*>(g_wasmStateBuf);
+alignas(65536) static unsigned char g_wasmCtxBuf[256];
 #ifndef LITE_WASM_ARENA_SZ
 #define LITE_WASM_ARENA_SZ (1024 * 1024 * 1024)
 #endif
-alignas(65536) static unsigned char     g_wasmIo[(64 * 1024) + (64 * 1024) + (32 * 1024) + LITE_WASM_ARENA_SZ];   // [in 64K|out 64K|locals 32K|arena]; MUST match LITE_WASM_*_SZ in lite_wasm_contracts.h
+// Layout is input, output, locals, then scratch arena; it must match the node carve.
+alignas(65536) static unsigned char g_wasmIo[
+    (64 * 1024) + (64 * 1024) + (32 * 1024) + LITE_WASM_ARENA_SZ];
 
 static bool g_wasmRegistered = false;
-static void liteWasmTuEnsureRegistered() {
-    if (g_wasmRegistered) return;
+static void liteWasmTuEnsureRegistered()
+{
+    if (g_wasmRegistered)
+    {
+        return;
+    }
+
     g_wasmRegistered = true;
     QPI::QpiContextForInit qpi(CONTRACT_INDEX);
+
     CONTRACT_STATE_TYPE::__registerUserFunctionsAndProcedures(qpi);
 }
 
-extern "C" {
-LH_EXPORT(state_addr) unsigned int state_addr() { return (unsigned int)(unsigned long)&g_wasmState; }
-LH_EXPORT(state_size) unsigned int state_size() { return (unsigned int)sizeof(g_wasmState); }
-LH_EXPORT(io_base)    unsigned int io_base()    { return (unsigned int)(unsigned long)&g_wasmIo[0]; }
-LH_EXPORT(io_size)    unsigned int io_size()    { return (unsigned int)sizeof(g_wasmIo); } // engine asserts its carve fits
-LH_EXPORT(ctx_addr)   unsigned int ctx_addr()   { return (unsigned int)(unsigned long)&g_wasmCtxBuf[0]; }
-
-LH_EXPORT(reg_count)  unsigned int reg_count()  { liteWasmTuEnsureRegistered(); return g_wasmTuEntryCount; }
-
-struct LiteWasmTuInfo { unsigned int inputType, kind, inSize, outSize; };
-LH_EXPORT(reg_info)
-void reg_info(unsigned int i, LiteWasmTuInfo* out) {
-    liteWasmTuEnsureRegistered();
-    if (i >= g_wasmTuEntryCount) { setMem(out, sizeof(*out), 0); return; }
-    const LiteWasmTuEntry& e = g_wasmTuEntries[i];
-    out->inputType = e.it; out->kind = e.kind; out->inSize = e.inSize; out->outSize = e.outSize;
+extern "C"
+{
+LH_EXPORT(state_addr)
+unsigned int state_addr()
+{
+    return (unsigned int)(unsigned long)&g_wasmState;
 }
 
-// System procedures. Bit i (= LITE_SP_* id) set if the contract defines it. Order matches lite_dyn_abi.h:
-// 0 INITIALIZE, 1 BEGIN_EPOCH, 2 END_EPOCH, 3 BEGIN_TICK, 4 END_TICK, 5 PRE_RELEASE_SHARES,
-// 6 PRE_ACQUIRE_SHARES, 7 POST_RELEASE_SHARES, 8 POST_ACQUIRE_SHARES, 9 POST_INCOMING_TRANSFER,
-// 10 SET_SHAREHOLDER_PROPOSAL, 11 SET_SHAREHOLDER_VOTES.
+LH_EXPORT(state_size)
+unsigned int state_size()
+{
+    return (unsigned int)sizeof(g_wasmState);
+}
+
+LH_EXPORT(io_base)
+unsigned int io_base()
+{
+    return (unsigned int)(unsigned long)&g_wasmIo[0];
+}
+
+LH_EXPORT(io_size)
+unsigned int io_size()
+{
+    return (unsigned int)sizeof(g_wasmIo);
+}
+
+LH_EXPORT(ctx_addr)
+unsigned int ctx_addr()
+{
+    return (unsigned int)(unsigned long)&g_wasmCtxBuf[0];
+}
+
+LH_EXPORT(reg_count)
+unsigned int reg_count()
+{
+    liteWasmTuEnsureRegistered();
+    return g_wasmTuEntryCount;
+}
+
+struct LiteWasmTuInfo
+{
+    unsigned int inputType;
+    unsigned int kind;
+    unsigned int inputSize;
+    unsigned int outputSize;
+};
+
+LH_EXPORT(reg_info)
+void reg_info(unsigned int entryIndex, LiteWasmTuInfo* output)
+{
+    liteWasmTuEnsureRegistered();
+    if (entryIndex >= g_wasmTuEntryCount)
+    {
+        setMem(output, sizeof(*output), 0);
+        return;
+    }
+
+    const LiteWasmTuEntry& entry = g_wasmTuEntries[entryIndex];
+
+    output->inputType = entry.inputType;
+    output->kind = (unsigned int)entry.kind;
+    output->inputSize = entry.inputSize;
+    output->outputSize = entry.outputSize;
+}
+
+// System procedure bits use the IDs declared in lite_dyn_abi.h.
 LH_EXPORT(reg_sysproc_mask)
-unsigned int reg_sysproc_mask() {
-    unsigned int m = 0;
-#define LITE_SYS_PROC_MASK(symbol, id, method, emptyMember) if (!CONTRACT_STATE_TYPE::emptyMember) m |= (1u << id);
+unsigned int reg_sysproc_mask()
+{
+    unsigned int mask = 0;
+#define LITE_SYS_PROC_MASK(symbol, id, method, emptyMember) \
+    if (!CONTRACT_STATE_TYPE::emptyMember)                 \
+    {                                                      \
+        mask |= (1u << id);                                \
+    }
     LITE_SYSTEM_PROCEDURE_ROWS(LITE_SYS_PROC_MASK)
 #undef LITE_SYS_PROC_MASK
-    return m;
+    return mask;
 }
+
 LH_EXPORT(sysproc_locals_size)
-unsigned int sysproc_locals_size(unsigned int sp) {
-    switch (sp) {
-        case 0:  return (unsigned int)CONTRACT_STATE_TYPE::__initializeLocalsSize;
-        case 1:  return (unsigned int)CONTRACT_STATE_TYPE::__beginEpochLocalsSize;
-        case 2:  return (unsigned int)CONTRACT_STATE_TYPE::__endEpochLocalsSize;
-        case 3:  return (unsigned int)CONTRACT_STATE_TYPE::__beginTickLocalsSize;
-        case 4:  return (unsigned int)CONTRACT_STATE_TYPE::__endTickLocalsSize;
-        case 5:  return (unsigned int)CONTRACT_STATE_TYPE::__preReleaseSharesLocalsSize;
-        case 6:  return (unsigned int)CONTRACT_STATE_TYPE::__preAcquireSharesLocalsSize;
-        case 7:  return (unsigned int)CONTRACT_STATE_TYPE::__postReleaseSharesLocalsSize;
-        case 8:  return (unsigned int)CONTRACT_STATE_TYPE::__postAcquireSharesLocalsSize;
-        case 9:  return (unsigned int)CONTRACT_STATE_TYPE::__postIncomingTransferLocalsSize;
-        case 10: return (unsigned int)CONTRACT_STATE_TYPE::__setShareholderProposalLocalsSize;
-        case 11: return (unsigned int)CONTRACT_STATE_TYPE::__setShareholderVotesLocalsSize;
+unsigned int sysproc_locals_size(unsigned int systemProcedure)
+{
+    switch (systemProcedure)
+    {
+        case 0:
+            return (unsigned int)CONTRACT_STATE_TYPE::__initializeLocalsSize;
+        case 1:
+            return (unsigned int)CONTRACT_STATE_TYPE::__beginEpochLocalsSize;
+        case 2:
+            return (unsigned int)CONTRACT_STATE_TYPE::__endEpochLocalsSize;
+        case 3:
+            return (unsigned int)CONTRACT_STATE_TYPE::__beginTickLocalsSize;
+        case 4:
+            return (unsigned int)CONTRACT_STATE_TYPE::__endTickLocalsSize;
+        case 5:
+            return (unsigned int)CONTRACT_STATE_TYPE::__preReleaseSharesLocalsSize;
+        case 6:
+            return (unsigned int)CONTRACT_STATE_TYPE::__preAcquireSharesLocalsSize;
+        case 7:
+            return (unsigned int)CONTRACT_STATE_TYPE::__postReleaseSharesLocalsSize;
+        case 8:
+            return (unsigned int)CONTRACT_STATE_TYPE::__postAcquireSharesLocalsSize;
+        case 9:
+            return (unsigned int)CONTRACT_STATE_TYPE::__postIncomingTransferLocalsSize;
+        case 10:
+            return (unsigned int)CONTRACT_STATE_TYPE::__setShareholderProposalLocalsSize;
+        case 11:
+            return (unsigned int)CONTRACT_STATE_TYPE::__setShareholderVotesLocalsSize;
     }
+
     return 0;
 }
-// QPI-defined input/output sizes for the share-management sysprocs (lifecycle ones = NoData).
+
 LH_EXPORT(sysproc_in_size)
-unsigned int sysproc_in_size(unsigned int sp) {
-    switch (sp) {
-        case 5: case 6: return (unsigned int)sizeof(QPI::PreManagementRightsTransfer_input);
-        case 7: case 8: return (unsigned int)sizeof(QPI::PostManagementRightsTransfer_input);
-        case 9:  return (unsigned int)sizeof(QPI::PostIncomingTransfer_input);
-        case 10: return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_PROPOSAL_input);
-        case 11: return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_VOTES_input);
+unsigned int sysproc_in_size(unsigned int systemProcedure)
+{
+    switch (systemProcedure)
+    {
+        case 5:
+        case 6:
+            return (unsigned int)sizeof(QPI::PreManagementRightsTransfer_input);
+        case 7:
+        case 8:
+            return (unsigned int)sizeof(QPI::PostManagementRightsTransfer_input);
+        case 9:
+            return (unsigned int)sizeof(QPI::PostIncomingTransfer_input);
+        case 10:
+            return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_PROPOSAL_input);
+        case 11:
+            return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_VOTES_input);
     }
+
     return 0;
 }
+
 LH_EXPORT(sysproc_out_size)
-unsigned int sysproc_out_size(unsigned int sp) {
-    switch (sp) {
-        case 5: case 6: return (unsigned int)sizeof(QPI::PreManagementRightsTransfer_output);
-        case 10: return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_PROPOSAL_output);
-        case 11: return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_VOTES_output);
+unsigned int sysproc_out_size(unsigned int systemProcedure)
+{
+    switch (systemProcedure)
+    {
+        case 5:
+        case 6:
+            return (unsigned int)sizeof(QPI::PreManagementRightsTransfer_output);
+        case 10:
+            return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_PROPOSAL_output);
+        case 11:
+            return (unsigned int)sizeof(QPI::SET_SHAREHOLDER_VOTES_output);
     }
-    return 0;   // POST_* outputs are NoData
+
+    return 0;
 }
 
-// Migration metadata: has_migrate() = 1 if the contract defines MIGRATE(); the sizes drive the host's
-// old-state copy + locals. Absent on contracts built before migration support (the host guard-reads them).
-LH_EXPORT(has_migrate)            unsigned int has_migrate()            { return CONTRACT_STATE_TYPE::__migrateEmpty ? 0u : 1u; }
-LH_EXPORT(migrate_old_state_size) unsigned int migrate_old_state_size() { return (unsigned int)CONTRACT_STATE_TYPE::__migrateOldStateSize; }
-LH_EXPORT(migrate_locals_size)    unsigned int migrate_locals_size()    { return (unsigned int)CONTRACT_STATE_TYPE::__migrateLocalsSize; }
+LH_EXPORT(has_migrate)
+unsigned int has_migrate()
+{
+    return CONTRACT_STATE_TYPE::__migrateEmpty ? 0u : 1u;
+}
 
-// kind/it select the entry; in/out/locals are linear-mem offsets (== ptrs in wasm32). The host has already
-// copied state -> g_wasmState and the input bytes -> inOff, and populated the ctx header at ctx_addr.
+LH_EXPORT(migrate_old_state_size)
+unsigned int migrate_old_state_size()
+{
+    return (unsigned int)CONTRACT_STATE_TYPE::__migrateOldStateSize;
+}
+
+LH_EXPORT(migrate_locals_size)
+unsigned int migrate_locals_size()
+{
+    return (unsigned int)CONTRACT_STATE_TYPE::__migrateLocalsSize;
+}
+} // extern "C"
+
+static const LiteWasmTuEntry* liteWasmFindUserEntry(
+    unsigned int inputType,
+    LiteWasmDispatchKind kind)
+{
+    for (unsigned int entryIndex = 0; entryIndex < g_wasmTuEntryCount; entryIndex++)
+    {
+        const LiteWasmTuEntry& entry = g_wasmTuEntries[entryIndex];
+        if (entry.inputType == (unsigned short)inputType && entry.kind == kind)
+        {
+            return &entry;
+        }
+    }
+
+    return nullptr;
+}
+
+static void liteWasmCallSystemProcedure(
+    LiteWasmSystemProcedure procedure,
+    void* input,
+    void* output,
+    void* locals)
+{
+    auto& context = *reinterpret_cast<QPI::QpiContextProcedureCall*>(&g_wasmCtxBuf[0]);
+    procedure(context, &g_wasmState, input, output, locals);
+}
+
+static void liteWasmDispatchSystemProcedure(
+    unsigned int systemProcedureId,
+    void* input,
+    void* output,
+    void* locals)
+{
+    switch (systemProcedureId)
+    {
+        case LITE_SP_INITIALIZE:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__initialize,
+                input,
+                output,
+                locals);
+            break;
+        case LITE_SP_BEGIN_EPOCH:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__beginEpoch,
+                input,
+                output,
+                locals);
+            break;
+        case LITE_SP_END_EPOCH:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__endEpoch,
+                input,
+                output,
+                locals);
+            break;
+        case LITE_SP_BEGIN_TICK:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__beginTick,
+                input,
+                output,
+                locals);
+            break;
+        case LITE_SP_END_TICK:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__endTick,
+                input,
+                output,
+                locals);
+            break;
+        case LITE_SP_PRE_RELEASE_SHARES:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__preReleaseShares,
+                input,
+                output,
+                locals);
+            break;
+        case LITE_SP_PRE_ACQUIRE_SHARES:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__preAcquireShares,
+                input,
+                output,
+                locals);
+            break;
+        case LITE_SP_POST_RELEASE_SHARES:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__postReleaseShares,
+                input,
+                output,
+                locals);
+            break;
+        case LITE_SP_POST_ACQUIRE_SHARES:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__postAcquireShares,
+                input,
+                output,
+                locals);
+            break;
+        case LITE_SP_POST_INCOMING_TRANSFER:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__postIncomingTransfer,
+                input,
+                output,
+                locals);
+            break;
+        case LITE_SP_SET_SHAREHOLDER_PROPOSAL:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__setShareholderProposal,
+                input,
+                output,
+                locals);
+            break;
+        case LITE_SP_SET_SHAREHOLDER_VOTES:
+            liteWasmCallSystemProcedure(
+                (LiteWasmSystemProcedure)(void*)CONTRACT_STATE_TYPE::__setShareholderVotes,
+                input,
+                output,
+                locals);
+            break;
+        default:
+            break;
+    }
+}
+
+static void liteWasmDispatchMigration(void* oldState, void* locals)
+{
+    auto& context = *reinterpret_cast<QPI::QpiContextFunctionCall*>(&g_wasmCtxBuf[0]);
+    auto migrate = (LiteWasmMigrateProcedure)(void*)CONTRACT_STATE_TYPE::__migrate;
+
+    migrate(context, &g_wasmState, oldState, locals);
+}
+
+static void liteWasmDispatchUserFunction(
+    unsigned int inputType,
+    void* input,
+    void* output,
+    void* locals)
+{
+    const LiteWasmTuEntry* entry =
+        liteWasmFindUserEntry(inputType, LiteWasmDispatchKind::UserFunction);
+    if (!entry)
+    {
+        return;
+    }
+
+    auto& context = *reinterpret_cast<QPI::QpiContextFunctionCall*>(&g_wasmCtxBuf[0]);
+    auto function = (LiteWasmUserFunction)entry->function;
+
+    function(context, &g_wasmState, input, output, locals);
+}
+
+static void liteWasmDispatchUserProcedure(
+    unsigned int inputType,
+    void* input,
+    void* output,
+    void* locals)
+{
+    const LiteWasmTuEntry* entry =
+        liteWasmFindUserEntry(inputType, LiteWasmDispatchKind::UserProcedure);
+    if (!entry)
+    {
+        return;
+    }
+
+    auto& context = *reinterpret_cast<QPI::QpiContextProcedureCall*>(&g_wasmCtxBuf[0]);
+    auto procedure = (LiteWasmUserProcedure)entry->function;
+
+    procedure(context, &g_wasmState, input, output, locals);
+}
+
+extern "C"
+{
 LH_EXPORT(dispatch)
-void dispatch(unsigned int kind, unsigned int it, unsigned int inOff, unsigned int outOff, unsigned int localsOff) {
+void dispatch(
+    unsigned int kindValue,
+    unsigned int inputType,
+    unsigned int inputOffset,
+    unsigned int outputOffset,
+    unsigned int localsOffset)
+{
     liteWasmTuEnsureRegistered();
-    void* in = (void*)(unsigned long)inOff; void* out = (void*)(unsigned long)outOff; void* lo = (void*)(unsigned long)localsOff;
-    if (kind == 2) {   // system procedure; it = LITE_SP_* id (lifecycle set)
-        // the generated __initialize/etc have typed signatures (ContractState&, varying arity); cast through
-        // void* to the uniform SYSTEM_PROCEDURE shape + call with 5 args, exactly as lite_dyn_abi.h's table does.
-        typedef void (*LiteWasmSysProc)(const QPI::QpiContextProcedureCall&, void*, void*, void*, void*);
-        auto& pctx = *reinterpret_cast<QPI::QpiContextProcedureCall*>(&g_wasmCtxBuf[0]);
-        #define LITE_WASM_SP_CALL(fn) ((LiteWasmSysProc)(void*)CONTRACT_STATE_TYPE::fn)(pctx, &g_wasmState, in, out, lo)
-        switch (it) {
-            case 0:  LITE_WASM_SP_CALL(__initialize);             break;
-            case 1:  LITE_WASM_SP_CALL(__beginEpoch);             break;
-            case 2:  LITE_WASM_SP_CALL(__endEpoch);               break;
-            case 3:  LITE_WASM_SP_CALL(__beginTick);              break;
-            case 4:  LITE_WASM_SP_CALL(__endTick);                break;
-            case 5:  LITE_WASM_SP_CALL(__preReleaseShares);       break;
-            case 6:  LITE_WASM_SP_CALL(__preAcquireShares);       break;
-            case 7:  LITE_WASM_SP_CALL(__postReleaseShares);      break;
-            case 8:  LITE_WASM_SP_CALL(__postAcquireShares);      break;
-            case 9:  LITE_WASM_SP_CALL(__postIncomingTransfer);   break;
-            case 10: LITE_WASM_SP_CALL(__setShareholderProposal); break;
-            case 11: LITE_WASM_SP_CALL(__setShareholderVotes);    break;
-        }
-        #undef LITE_WASM_SP_CALL
-        return;
-    }
-    if (kind == 3) {   // MIGRATE: in = old-state offset, lo = locals; out unused. The host copied the old
-        // state bytes to inOff and zeroed g_wasmState; run the new module's __migrate(newState, oldState, locals).
-        typedef void (*LiteWasmMigrate)(const QPI::QpiContextFunctionCall&, void*, void*, void*);
-        auto& mctx = *reinterpret_cast<QPI::QpiContextFunctionCall*>(&g_wasmCtxBuf[0]);
-        ((LiteWasmMigrate)(void*)CONTRACT_STATE_TYPE::__migrate)(mctx, &g_wasmState, in, lo);
-        return;
-    }
-    auto& ctx = *reinterpret_cast<QPI::QpiContextFunctionCall*>(&g_wasmCtxBuf[0]);
-    for (unsigned int i = 0; i < g_wasmTuEntryCount; i++) {
-        const LiteWasmTuEntry& e = g_wasmTuEntries[i];
-        if (e.it == (unsigned short)it && e.kind == (unsigned char)kind) {
-            ((LiteWasmUserFn)e.fn)(ctx, &g_wasmState, (void*)(unsigned long)inOff,
-                                   (void*)(unsigned long)outOff, (void*)(unsigned long)localsOff);
-            return;
-        }
+
+    const LiteWasmDispatchKind kind = (LiteWasmDispatchKind)kindValue;
+    void* input = (void*)(unsigned long)inputOffset;
+    void* output = (void*)(unsigned long)outputOffset;
+    void* locals = (void*)(unsigned long)localsOffset;
+
+    switch (kind)
+    {
+        case LiteWasmDispatchKind::UserFunction:
+            liteWasmDispatchUserFunction(inputType, input, output, locals);
+            break;
+        case LiteWasmDispatchKind::UserProcedure:
+            liteWasmDispatchUserProcedure(inputType, input, output, locals);
+            break;
+        case LiteWasmDispatchKind::SystemProcedure:
+            liteWasmDispatchSystemProcedure(inputType, input, output, locals);
+            break;
+        case LiteWasmDispatchKind::Migration:
+            liteWasmDispatchMigration(input, locals);
+            break;
     }
 }
 } // extern "C"

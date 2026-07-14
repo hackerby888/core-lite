@@ -1,16 +1,9 @@
 #pragma once
 
-// Canonical metadata for the dynamic-contract Wasm ABI. Keep this file declarative: core's WAMR
-// registration expands these rows directly and SDK generators parse the same rows.
+// Canonical rows shared by WAMR registration and SDK metadata generation.
 #define LITE_DYN_ABI_VERSION 1u
 
-// GQ/GI = generated
-//   Q = ctx-bound QPI backend
-//   I = ctx-less infrastructure
-//
-// HQ/HI = hand-written wrapper
-//   Q = ctx-bound QPI backend
-//   I = ctx-less infrastructure
+// G/H selects generated or handwritten adapters; Q/I selects QPI-bound or infrastructure calls.
 
 #define LITE_SYSTEM_PROCEDURE_ROWS(X) \
     X(INITIALIZE,               0, initialize,               __initializeEmpty) \

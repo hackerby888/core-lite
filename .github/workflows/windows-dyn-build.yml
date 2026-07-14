@@ -1,5 +1,5 @@
-# Phase 1 of the Windows dynamic-contract port: does the TESTNET + LITE_DYNAMIC_CONTRACTS + LITE_WASM_CONTRACTS
-# node BUILD under MSVC? Uses cmake + the Visual Studio generator so it reuses the dynamic/WAMR/libffi wiring
+# Windows build coverage for TESTNET + TESTNET_LITE_RAM + LITE_WASM_SC.
+# Uses CMake so it reuses the Wasm and libffi wiring
 # the mainnet Qubic.sln lacks (k12_engine is Linux-only -> Windows falls to the demand-zero VirtualAlloc path).
 # This is a porting probe — expect iteration: read the MSVC errors, fix, repeat. Gates nothing yet.
 # Run on the fork (hackerby888/core-lite), NEVER qubic upstream.
@@ -66,7 +66,7 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-rel `
             -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF `
             -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON `
-            -DLITE_DYNAMIC_CONTRACTS=ON -DLITE_WASM_CONTRACTS=ON -DCMAKE_NO_USE_SWAP=ON `
+            -DLITE_WASM_SC=ON -DCMAKE_NO_USE_SWAP=ON `
             -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF `
             -DFFI_LIB_SHARED="$inst/lib/ffi.lib" -DFFI_INCLUDE_DIR="$inst/include"
 

@@ -1,155 +1,159 @@
 #pragma once
-// Adapter over the contract-state RAM engine (k12_engine.h). Routes contract-state
-// alloc/digest/evict through the engine when active, else the plain committed-pool path.
-// Engine is Linux-only today (userfaultfd); cross-platform backends land later. Included from
-// qubic.cpp after contract_exec.h + overload.h (+ k12_engine.h on Linux), before lite_wasm_contracts.h.
+// Routes state allocation, digesting, and eviction through the active backend.
+// The userfaultfd engine is Linux-only.
 
-// The contract-state engine is testnet dynamic-contract only (Linux). Mainnet and normal testnet keep
-// the plain committed-pool path (original behavior) — engine off, no memfd/uffd, no trims.
-// (-DLITE_SC_NO_ENGINE forces the non-uffd contract-level path on Linux, for testing the mac/win path.)
-#if defined(__linux__) && defined(LITE_DYNAMIC_CONTRACTS) && !defined(LITE_SC_NO_ENGINE)
+// LITE_SC_NO_ENGINE selects the demand-zero fallback on Linux for testing.
+#if defined(__linux__) && defined(LITE_WASM_SC) && !defined(LITE_SC_NO_ENGINE)
 #define LITE_SC_ENGINE 1
 #endif
 
-// Non-Linux testnet dynamic-contract node (native macOS/Windows dev): no userfaultfd. Use demand-zero
-// contract-state buffers so unused contracts (empty dyn slots, idle system contracts) cost ~0 RSS.
-// (The score/commonBuffers/processor trims already apply here — they gate on TESTNET && LITE_DYNAMIC_CONTRACTS.)
-#if !defined(LITE_SC_ENGINE) && defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
+// Non-engine builds reserve demand-zero state so unused contracts consume little RSS.
+#if !defined(LITE_SC_ENGINE) && defined(TESTNET) && defined(LITE_WASM_SC)
 #define LITE_SC_CONTRACT_LEVEL 1
 #endif
 
-// Slot taken over by a wasm contract: its state lives in WAMR linear memory, engine abandoned for it.
 inline bool g_wasmOwnedSlot[contractCount] = {};
 
-// True when the engine owns contract idx's state (Linux, not wasm-owned). False -> plain path.
-inline bool liteSCEngineActive(unsigned int idx)
+inline bool liteSCEngineActive(unsigned int contractIndex)
 {
 #ifdef LITE_SC_ENGINE
-    return ContractStateEngine::getEngine(idx) != nullptr && !g_wasmOwnedSlot[idx];
+    return ContractStateEngine::getEngine(contractIndex) != nullptr
+        && !g_wasmOwnedSlot[contractIndex];
 #else
-    (void)idx;
+    (void)contractIndex;
     return false;
 #endif
 }
 
-// Allocate contract idx's state. Engine-backed on Linux; plain committed pool otherwise.
-inline bool liteSCAlloc(unsigned int idx, unsigned long long size)
+inline bool liteSCAlloc(unsigned int contractIndex, unsigned long long size)
 {
 #if defined(LITE_SC_ENGINE)
-    return ContractStateEngine::create(&contractStates[idx], size, idx);
+    return ContractStateEngine::create(
+        &contractStates[contractIndex],
+        size,
+        contractIndex);
 #elif defined(LITE_SC_CONTRACT_LEVEL)
-    // demand-zero: COMMIT charge (not just RSS) must track actual use, else the sum of all slot reserves
-    // (~10 GB) sits on the commit limit and a 16 GB CI VM tips over when a deploy arms a WAMR contract.
+    // Demand-zero reservation keeps commit charge proportional to written state.
 #ifdef _MSC_VER
-    // Windows: MEM_COMMIT charges the whole reserve up front -> reserve only, commit-on-write via the VEH in
-    // overload.h. The per-tick digest reads are routed through KangarooTwelvePaged (see liteSCDigest) so they
-    // don't fault untouched pages back into commit. (macOS/Linux mmap overcommit is already lazy on commit.)
-    contractStates[idx] = (unsigned char*)qVirtualAllocLazy(size);
+    contractStates[contractIndex] = (unsigned char*)qVirtualAllocLazy(size);
 #else
-    contractStates[idx] = (unsigned char*)qVirtualAlloc(size, /*commitMem=*/true);
+    contractStates[contractIndex] = (unsigned char*)qVirtualAlloc(
+        size,
+        /*commitMem=*/true);
 #endif
-    return contractStates[idx] != nullptr;
+    return contractStates[contractIndex] != nullptr;
 #else
-    return allocPoolWithErrorLog(L"contractStates", size, (void**)&contractStates[idx], __LINE__);
+    return allocPoolWithErrorLog(
+        L"contractStates",
+        size,
+        (void**)&contractStates[contractIndex],
+        __LINE__);
 #endif
 }
 
-// Digest of contract idx's state into out (32 bytes). effectiveSize = bytes to hash (wasm hashes a prefix).
-inline void liteSCDigest(unsigned int idx, unsigned char* out, unsigned long long effectiveSize)
+inline void liteSCDigest(
+    unsigned int contractIndex,
+    unsigned char* output,
+    unsigned long long effectiveSize)
 {
-    if (liteSCEngineActive(idx))
+    if (liteSCEngineActive(contractIndex))
     {
 #ifdef LITE_SC_ENGINE
-        ContractStateEngine::getEngine(idx)->getHashAndReprotect(out, 32);
+        ContractStateEngine::getEngine(contractIndex)->getHashAndReprotect(
+            output,
+            32);
 #endif
     }
     else
     {
 #ifdef _MSC_VER
-        // Windows: the contract-state reserve is lazily committed (commit-on-write, overload.h). A plain
-        // KangarooTwelve over the whole effective span would fault every untouched page, the VEH would commit
-        // it, and the commit charge would balloon back to the full ~10 GB of reserves on the boot sweep
-        // (change flags start 0xFF -> every contract digested once). KangarooTwelvePaged hashes committed
-        // (written) pages as-is and reserved (never-written, therefore all-zero) pages as synthesized zeros
-        // WITHOUT touching them -> bit-identical to KangarooTwelve (proven: tools/k12paged_test.cpp), so the
-        // cross-platform contract-state digest is unchanged while the commit charge stays at the written
-        // footprint (~2 GB, Linux parity). Replaces the earlier VirtualUnlock RSS-trim, now unnecessary:
-        // the digest no longer faults untouched pages in, so there is nothing to unlock.
-        KangarooTwelvePaged(contractStates[idx], (unsigned int)effectiveSize, out, 32);
+        // Hash reserved Windows pages as zero without committing them.
+        KangarooTwelvePaged(
+            contractStates[contractIndex],
+            (unsigned int)effectiveSize,
+            output,
+            32);
 #else
-        KangarooTwelve(contractStates[idx], (unsigned int)effectiveSize, out, 32);
+        KangarooTwelve(
+            contractStates[contractIndex],
+            (unsigned int)effectiveSize,
+            output,
+            32);
 #endif
     }
 }
 
-// Per-tick: LRU-evict cold chunks down to the RAM cap. No-op when the engine is off.
 inline void liteSCEvictTick()
 {
 #ifdef LITE_SC_ENGINE
-    ContractStateEngine::tryEvictChunks();              // LRU evict of faulted chunks
-    ContractStateEngine::tryEvictResidentBatch(50000);  // ~400 MB/tick of boot-resident chunks down to cap
+    ContractStateEngine::tryEvictChunks();
+    ContractStateEngine::tryEvictResidentBatch(50000);
 #endif
 }
 
-// Flush contract idx's resident chunks (before save / on wasm takeover). No-op when off.
-inline void liteSCFlush(unsigned int idx)
+inline void liteSCFlush(unsigned int contractIndex)
 {
 #ifdef LITE_SC_ENGINE
-    if (auto* e = ContractStateEngine::getEngine(idx)) e->flushAllChunksToDisk();
+    if (auto* engine = ContractStateEngine::getEngine(contractIndex))
+    {
+        engine->flushAllChunksToDisk();
+    }
 #else
-    (void)idx;
+    (void)contractIndex;
 #endif
 }
 
-// Make idx's whole state resident + uncompressed (before save / digest fallback needs the bytes).
-inline void liteSCTouchAll(unsigned int idx)
+inline void liteSCTouchAll(unsigned int contractIndex)
 {
 #ifdef LITE_SC_ENGINE
-    if (auto* e = ContractStateEngine::getEngine(idx)) e->touchAllPages();
+    if (auto* engine = ContractStateEngine::getEngine(contractIndex))
+    {
+        engine->touchAllPages();
+    }
 #else
-    (void)idx;
+    (void)contractIndex;
 #endif
 }
 
-// Re-arm read/write protection for idx after a bulk operation (digest/setup).
-inline void liteSCReprotect(unsigned int idx)
+inline void liteSCReprotect(unsigned int contractIndex)
 {
 #ifdef LITE_SC_ENGINE
-    if (auto* e = ContractStateEngine::getEngine(idx)) { e->reprotectWriteRegion(); e->reprotectReadRegion(); }
+    if (auto* engine = ContractStateEngine::getEngine(contractIndex))
+    {
+        engine->reprotectWriteRegion();
+        engine->reprotectReadRegion();
+    }
 #else
-    (void)idx;
+    (void)contractIndex;
 #endif
 }
 
-// A wasm contract is taking over the slot. Engine path: flush + abandon the region (engine owns the
-// memfd, never free it), mark wasm-owned. Plain path: free the committed pool buffer as before.
-inline void liteSCOnWasmTakeover(unsigned int idx)
+inline void liteSCOnWasmTakeover(unsigned int contractIndex)
 {
 #if defined(LITE_SC_ENGINE)
-    liteSCFlush(idx);
-    g_wasmOwnedSlot[idx] = true;
+    // The engine retains ownership of its memfd after Wasm takes over the slot.
+    liteSCFlush(contractIndex);
+    g_wasmOwnedSlot[contractIndex] = true;
 #elif defined(LITE_SC_CONTRACT_LEVEL)
-    // abandon the demand-zero stub (reserved address space, ~0 RSS); wasm linear memory takes over the slot
-    g_wasmOwnedSlot[idx] = true;
+    g_wasmOwnedSlot[contractIndex] = true;
 #else
-    freePool(contractStates[idx]);
+    freePool(contractStates[contractIndex]);
 #endif
 }
 
-// Free contract idx's state at shutdown, matching how liteSCAlloc allocated it. On engine/contract-level
-// builds every slot is a memfd/mmap (or WAMR linear mem for wasm-owned slots) the OS reclaims at process
-// exit — never freePool those (free() on a non-malloc pointer aborts on macOS). Only the plain committed
-// pool is malloc'd, so only it is freePool'd. The alloc strategy is build-wide, so the macro gate suffices.
-inline void liteSCFree(unsigned int idx)
+// Only the plain pool backend returns state through freePool.
+inline void liteSCFree(unsigned int contractIndex)
 {
 #if defined(LITE_SC_ENGINE) || defined(LITE_SC_CONTRACT_LEVEL)
-    (void)idx;
+    (void)contractIndex;
 #else
-    if (contractStates[idx]) freePool(contractStates[idx]);
+    if (contractStates[contractIndex])
+    {
+        freePool(contractStates[contractIndex]);
+    }
 #endif
 }
 
-// Resident contract-state RAM across all engines (for logging / cap checks).
 inline unsigned long long liteSCRamUsage()
 {
 #ifdef LITE_SC_ENGINE
