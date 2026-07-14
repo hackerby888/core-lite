@@ -6,8 +6,8 @@
 // the uploaded module to the wasm engine, then constructs the deployable slot.
 #ifdef LITE_DYNAMIC_CONTRACTS
 
-#include "extensions/lite_dyn_abi.h" // shared ABI structs (LiteHostServices vtable etc)
-#include "extensions/lite_oracle_bridge.h" // host impl of the wasm oracle imports (query/subscribe/getQuery/getReply)
+#include "extensions/wasm/lite_dyn_abi.h" // shared ABI structs (LiteHostServices vtable etc)
+#include "extensions/wasm/lite_oracle_bridge.h" // host impl of the wasm oracle imports (query/subscribe/getQuery/getReply)
 
 #ifdef _MSC_VER
 // The Windows SDK's specstrings.h (pulled in by <windows.h> via overload.h) defines a function-like
@@ -239,7 +239,7 @@ static bool liteDynUploadComplete() {
 }
 
 #ifdef LITE_WASM_CONTRACTS
-// Defined later in the same TU (extensions/lite_wasm_contracts.h, included after this header in qubic.cpp).
+// Defined later in the same TU (extensions/wasm/lite_wasm_contracts.h, included after this header in qubic.cpp).
 static bool liteWasmLoadFromBytes(unsigned int idx, const unsigned char* bytes, unsigned int len);
 static bool liteWasmIsWasm(unsigned int idx);
 static bool liteWasmHasPendingMigrate(unsigned int idx);

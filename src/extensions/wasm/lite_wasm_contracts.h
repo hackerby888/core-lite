@@ -14,8 +14,8 @@
 #include <string>
 #include <chrono>
 #include "wasm_export.h"
-#include "extensions/lite_wasm_arena.h"
-#include "extensions/lite_wasm_imports.h"   // g_liteWasmNatives[] + LiteWasmCallCtx -> g_liteHostServices (+ debug trace)
+#include "extensions/wasm/lite_wasm_arena.h"
+#include "extensions/wasm/lite_wasm_imports.h"   // g_liteWasmNatives[] + LiteWasmCallCtx -> g_liteHostServices (+ debug trace)
 
 void logColorToScreen(std::string type, std::string msg);   // defined later in qubic.cpp (same TU)
 

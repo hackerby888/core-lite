@@ -12,7 +12,7 @@
 #include <vector>
 #include "gtest/gtest.h"
 #include "wasm_export.h"
-#include "extensions/lite_wasm_arena.h"
+#include "extensions/wasm/lite_wasm_arena.h"
 #include "wasm_contract_fixture.h"
 
 namespace {

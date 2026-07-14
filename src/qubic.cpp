@@ -189,9 +189,9 @@ static volatile bool isReprocessingSolutions = false;
 #if defined(__linux__) && defined(LITE_DYNAMIC_CONTRACTS)
 #include "extensions/k12_engine.h"
 #endif
-#include "extensions/lite_sc_engine_adapter.h"
-#include "extensions/lite_dynamic_contracts.h"
-#include "extensions/lite_wasm_contracts.h"
+#include "extensions/wasm/lite_sc_engine_adapter.h"
+#include "extensions/wasm/lite_dynamic_contracts.h"
+#include "extensions/wasm/lite_wasm_contracts.h"
 #include "extensions/test_invalid_solution.h"
 #include "extensions/k12_state_digest_cache.h"
 

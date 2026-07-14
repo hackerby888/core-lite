@@ -15,8 +15,8 @@
 #include <type_traits>
 #include <array>
 #include "wasm_export.h"
-#include "extensions/lite_abi_metadata.h"
-#include "extensions/lite_wasm_debug.h"   // trace ring + liteWasmTraceHostCall (debug toggle, off by default)
+#include "extensions/wasm/lite_abi_metadata.h"
+#include "extensions/wasm/lite_wasm_debug.h"   // trace ring + liteWasmTraceHostCall (debug toggle, off by default)
 
 // Per-call binding, set by liteWasmDispatch (step 3) before entering the contract: the QpiContext the QPI
 // backends need, the contract's scratch arena (acquireScratch bump-allocates offsets within it), and the

@@ -8,7 +8,7 @@
 #ifdef LITE_WASM_TU_BUILD
 
 #include "platform/memory.h"
-#include "extensions/lite_dyn_abi.h"
+#include "extensions/wasm/lite_dyn_abi.h"
 
 // QPI memory helpers
 

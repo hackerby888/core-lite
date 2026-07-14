@@ -361,7 +361,7 @@ constexpr unsigned short LITEDYN0_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #define CONTRACT_INDEX LITEDYN0_CONTRACT_INDEX
 #define CONTRACT_STATE_TYPE LITEDYN0
 #define CONTRACT_STATE2_TYPE LITEDYN0_2
-#include "extensions/lite_dyn_stub_contract.h"
+#include "extensions/wasm/lite_dyn_stub_contract.h"
 
 constexpr unsigned short LITEDYN1_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #undef CONTRACT_INDEX
@@ -370,7 +370,7 @@ constexpr unsigned short LITEDYN1_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #define CONTRACT_INDEX LITEDYN1_CONTRACT_INDEX
 #define CONTRACT_STATE_TYPE LITEDYN1
 #define CONTRACT_STATE2_TYPE LITEDYN1_2
-#include "extensions/lite_dyn_stub_contract.h"
+#include "extensions/wasm/lite_dyn_stub_contract.h"
 
 constexpr unsigned short LITEDYN2_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #undef CONTRACT_INDEX
@@ -379,7 +379,7 @@ constexpr unsigned short LITEDYN2_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #define CONTRACT_INDEX LITEDYN2_CONTRACT_INDEX
 #define CONTRACT_STATE_TYPE LITEDYN2
 #define CONTRACT_STATE2_TYPE LITEDYN2_2
-#include "extensions/lite_dyn_stub_contract.h"
+#include "extensions/wasm/lite_dyn_stub_contract.h"
 
 constexpr unsigned short LITEDYN3_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #undef CONTRACT_INDEX
@@ -388,7 +388,7 @@ constexpr unsigned short LITEDYN3_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #define CONTRACT_INDEX LITEDYN3_CONTRACT_INDEX
 #define CONTRACT_STATE_TYPE LITEDYN3
 #define CONTRACT_STATE2_TYPE LITEDYN3_2
-#include "extensions/lite_dyn_stub_contract.h"
+#include "extensions/wasm/lite_dyn_stub_contract.h"
 #endif
 
 #define MAX_CONTRACT_ITERATION_DURATION 0 // In milliseconds, must be above 0; for now set to 0 to disable timeout, because a rollback mechanism needs to be implemented to properly handle timeout

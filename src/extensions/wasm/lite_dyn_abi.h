@@ -5,7 +5,7 @@
 // engine (lite_wasm_imports.h) exposes the same surface to the module as "lhost" imports.
 
 #include <cstdint>
-#include "extensions/lite_abi_metadata.h"
+#include "extensions/wasm/lite_abi_metadata.h"
 
 // ---------------------------------------------------------------------------
 // Shared ABI — primitives only, no QPI types, so both sides agree byte-for-byte.
