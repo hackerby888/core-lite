@@ -36,15 +36,28 @@ else()
     message(WARNING "You are not using Clang. This project is optimized for Clang 18+.")
 endif()
 
-# Include the centralized compiler detection module
+# Load project CMake modules.
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerSetup)
+include(HomebrewDependencies)
+
+# Make keg-only dependencies visible to ordinary find_package calls.
+qubic_add_homebrew_prefixes(
+    zlib
+    openssl@3
+    libffi
+)
 
 # Build options
 option(BUILD_TESTS "Build the test suite" OFF)
 option(BUILD_BENCHMARK "Build the EFI benchmark application" OFF)
 option(BUILD_BINARY "Build the EFI application" ON)
 option(USE_SANITIZER "Build test with sanitizer support (clang only)" ON)
+option(LITE_WASM_SC "Enable testnet-lite-RAM Wasm smart contracts" OFF)
+
+if(LITE_WASM_SC AND (NOT TESTNET OR NOT TESTNET_LITE_RAM))
+    message(FATAL_ERROR "LITE_WASM_SC requires TESTNET=ON and TESTNET_LITE_RAM=ON")
+endif()
 
 if(IS_WINDOWS)
     message(WARNING "Building on Windows using Visual Studio and CMake has undergone limited testing and is not officially supported at this time.")
@@ -79,7 +92,7 @@ endif()
 # WAMR runtime for wasm contracts, fetched + SHA-pinned (= tag WAMR-2.4.3) so src/ and test/ build vmlib from
 # the same source. Consensus-critical: bump the SHA deliberately. SOURCE_SUBDIR -> a nonexistent dir makes
 # MakeAvailable download-only; vmlib is built via build-scripts/runtime_lib.cmake in src/ and test/.
-if(LITE_WASM_CONTRACTS)
+if(LITE_WASM_SC)
     FetchContent_Declare(
             wamr
             GIT_REPOSITORY https://github.com/bytecodealliance/wasm-micro-runtime.git

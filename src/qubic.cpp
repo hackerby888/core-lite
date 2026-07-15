@@ -51,7 +51,7 @@
 // #define TESTNET
 // #define TESTNET_PREFILL_QUS
 // #define TESTNET_LITE_RAM
-// #define LITE_DYNAMIC_CONTRACTS   // testnet-only (contract_def.h); node build enables via -DLITE_DYNAMIC_CONTRACTS
+// #define LITE_WASM_SC   // testnet-only (contract_def.h); node build enables via -DLITE_WASM_SC
 #define USE_SWAP
 
 // ============================================================================
@@ -186,12 +186,12 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
-#if defined(__linux__) && defined(LITE_DYNAMIC_CONTRACTS)
+#if defined(__linux__) && defined(LITE_WASM_SC)
 #include "extensions/k12_engine.h"
 #endif
-#include "extensions/lite_sc_engine_adapter.h"
-#include "extensions/lite_dynamic_contracts.h"
-#include "extensions/lite_wasm_contracts.h"
+#include "extensions/wasm/lite_sc_engine_adapter.h"
+#include "extensions/wasm/lite_dynamic_contracts.h"
+#include "extensions/wasm/lite_wasm_contracts.h"
 #include "extensions/test_invalid_solution.h"
 #include "extensions/k12_state_digest_cache.h"
 
@@ -585,7 +585,7 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
     {
         if (contractStateChangeFlags[digestIndex >> 6] & (1ULL << (digestIndex & 63)))
         {
-#ifdef LITE_WASM_CONTRACTS
+#ifdef LITE_WASM_SC
             // wasm slots hash only the contract's real state (not the 1GB slot reserve); no-op for others.
             const unsigned long long size = digestIndex < contractCount ? liteWasmEffectiveStateSize(digestIndex, contractDescriptions[digestIndex].stateSize) : 0;
 #else
@@ -606,7 +606,7 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
 
                 // wasm slots: contractStates[idx] aliases the resident state, hashed at `size` (its real span).
                 const unsigned long long startTime = __rdtsc();
-#if defined(LITE_DYNAMIC_CONTRACTS)
+#if defined(LITE_WASM_SC)
                 liteSCDigest(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
 #else
                 if (!bypassCache && K12StateDigestCache::gK12StateDigestCacheEnabled && K12StateDigestCache::isCached(digestIndex))
@@ -3044,7 +3044,7 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                 moneyFlew = true;
             }
 
-#ifdef LITE_DYNAMIC_CONTRACTS
+#ifdef LITE_WASM_SC
             if (transaction->destinationPublicKey == m256i(99999ULL, 0, 0, 0))
             {
                 // Lite dynamic-contract deploy txs use a dedicated address (NOT the core zero address).
@@ -3452,7 +3452,7 @@ static void processTick(unsigned long long processorNumber)
         PROFILE_SCOPE_END();
     }
 
-#ifdef LITE_DYNAMIC_CONTRACTS
+#ifdef LITE_WASM_SC
     // Construct armed dynamic-contract slots under SC_INITIALIZE_TX framing (design B').
     if (liteDynPendingForTick(system.tick))
     {
@@ -4559,13 +4559,13 @@ static void endEpoch()
             oracleEngine.getRevenuePoints(oracleRevPoints);
             copyMemory(gEpochRevenueData.oracleScore, oracleRevPoints.computorRevPoints);
         }
-        // The 8-computor SC-dev committee (TESTNET + LITE_DYNAMIC_CONTRACTS) serves qinit/contract devs, for
+        // The 8-computor SC-dev committee (TESTNET + LITE_WASM_SC) serves qinit/contract devs, for
         // whom consensus economics are irrelevant. The V2 / multi-dimension formulas assume a full-size
         // committee and a full-length epoch: their sliding window divides by totalTicks (= system.tick -
         // system.initialTick), which a forced or immediate dev epoch advance makes 0 -> divide-by-zero crash.
         // Skip the formulas in that mode (revenue is split evenly below); standard testnet + mainnet are
         // unaffected (the formulas still run and pay out as before).
-#if !(defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS))
+#if !(defined(TESTNET) && defined(LITE_WASM_SC))
         computeRevenueV2(gEpochRevenueData);
 
         // Multi-dimension revenue: computed for offline comparison; paid to computors
@@ -4586,7 +4586,7 @@ static void endEpoch()
         for (unsigned int computorIndex = 0; computorIndex < NUMBER_OF_COMPUTORS; computorIndex++)
         {
             // Compute initial computor revenue, reducing arbitrator revenue
-#if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
+#if defined(TESTNET) && defined(LITE_WASM_SC)
             // SC-dev committee: revenue formulas skipped above; split issuance evenly so the epoch transition
             // still pays computors + balances the arbitrator without exercising the windowed math.
             long long revenue = issuancePerComputor;
@@ -7342,7 +7342,7 @@ static bool saveContractStateFiles(CHAR16* directory)
         CONTRACT_FILE_NAME[sizeof(CONTRACT_FILE_NAME) / sizeof(CONTRACT_FILE_NAME[0]) - 7] = (contractIndex % 100) / 10 + L'0';
         CONTRACT_FILE_NAME[sizeof(CONTRACT_FILE_NAME) / sizeof(CONTRACT_FILE_NAME[0]) - 6] = contractIndex % 10 + L'0';
         contractStateLock[contractIndex].acquireRead();
-#ifdef LITE_WASM_CONTRACTS
+#ifdef LITE_WASM_SC
         // wasm slots alias a resident state smaller than the 1GB reserve; save its real span (avoid OOB read).
         const unsigned long long saveSize = liteWasmEffectiveStateSize(contractIndex, contractDescriptions[contractIndex].stateSize);
 #else
@@ -7480,7 +7480,7 @@ static bool initialize()
         for (unsigned int contractIndex = 0; contractIndex < contractCount; contractIndex++)
         {
             unsigned long long size = contractDescriptions[contractIndex].stateSize;
-#if defined(LITE_DYNAMIC_CONTRACTS)
+#if defined(LITE_WASM_SC)
             const bool contractStateAllocOk = liteSCAlloc(contractIndex, size);
 #else
             // cached contracts need page-aligned state for per-chunk mprotect; off-path keeps the plain alloc
@@ -7504,7 +7504,7 @@ static bool initialize()
         {
             return false;
         }
-#if !(defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS))
+#if !(defined(TESTNET) && defined(LITE_WASM_SC))
         // eager-zero on mainnet/normal testnet (full mining); only the testnet dynamic-contract node
         // skips it and lets the mmap zero-fill lazily (no 2GB commit).
         setMem(score, sizeof(*score), 0);
@@ -7763,10 +7763,8 @@ static bool initialize()
 
     // universe needs to be initialized before initializing contract errors
     initializeContractErrors();
-#ifdef LITE_DYNAMIC_CONTRACTS
+#ifdef LITE_WASM_SC
     liteDynBootDeploy();
-#endif
-#ifdef LITE_WASM_CONTRACTS
     liteWasmRuntimeInit();
 #endif
 
@@ -7903,7 +7901,7 @@ static bool initialize()
     emptyTickResolver.lastTryClock = 0;
 
     // contract states are now allocated, loaded and constructed; arm the per-chunk K12 digest cache
-#if defined(LITE_DYNAMIC_CONTRACTS)
+#if defined(LITE_WASM_SC)
     // the userfaultfd contract-state engine (and the demand-zero contract-level path) own these buffers and
     // already do incremental per-chunk digest caching; arming the mprotect cache on the same evictable, often
     // non-page-aligned regions would fight fault delivery and re-hash evicted-to-zero chunks.
@@ -8949,7 +8947,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             {
                 // testnet dynamic-contract: demand-zero the per-processor network buffer (low local traffic
                 // never fills 32MB); mainnet/normal keep eager commit. Capacity unchanged either way.
-#if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
+#if defined(TESTNET) && defined(LITE_WASM_SC)
                 if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__, true, true, /*lazyCommit=*/true))
 #else
                 if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))

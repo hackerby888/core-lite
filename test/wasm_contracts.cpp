@@ -2,8 +2,8 @@
 // fixture contract.wasm (engine ABI: state_addr/state_size/io_base/reg_count/reg_info/dispatch) in WAMR and
 // checks registration + dispatch (function + procedure) + state round-trip. This is the contract<->runtime
 // contract that both the node engine (lite_wasm_contracts.h) and the contract binding (lite_wasm_tu.h) rely on.
-// Built only with -DLITE_WASM_CONTRACTS (the test CMake adds WAMR/vmlib + this source then).
-#ifdef LITE_WASM_CONTRACTS
+// Built only with -DLITE_WASM_SC (the test CMake adds WAMR/vmlib + this source then).
+#ifdef LITE_WASM_SC
 
 #include <cstring>
 #include <cstdint>
@@ -12,6 +12,7 @@
 #include <vector>
 #include "gtest/gtest.h"
 #include "wasm_export.h"
+#include "extensions/wasm/lite_wasm_arena.h"
 #include "wasm_contract_fixture.h"
 
 namespace {
@@ -55,6 +56,36 @@ struct WasmFixture {
     void* nat(uint32_t off) { return wasm_runtime_addr_app_to_native(inst, off); }
 };
 } // namespace
+
+TEST(WasmContracts, ArenaTopResetsAndNestedRestores) {
+    uint32_t depth = 0;
+    uint32_t top = 999;
+
+    {
+        LiteWasmArenaScope outer(depth, &top, 100);
+        EXPECT_EQ(depth, 1u);
+        EXPECT_EQ(top, 100u);
+
+        top = 160;
+        {
+            LiteWasmArenaScope nested(depth, &top, 100);
+            EXPECT_EQ(depth, 2u);
+            EXPECT_EQ(top, 160u);
+            top = 224;
+        }
+        EXPECT_EQ(depth, 1u);
+        EXPECT_EQ(top, 160u);
+    }
+    EXPECT_EQ(depth, 0u);
+    EXPECT_EQ(top, 160u);
+
+    // The next independent call discards the previous call's temporary allocations.
+    {
+        LiteWasmArenaScope nextOuter(depth, &top, 100);
+        EXPECT_EQ(top, 100u);
+    }
+    EXPECT_EQ(depth, 0u);
+}
 
 TEST(WasmContracts, RegistrationDispatchAndStateRoundTrip) {
     WasmFixture w;
@@ -198,10 +229,13 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
     wasm_exec_env_t env = wasm_runtime_create_exec_env(inst, 256 * 1024);
     ASSERT_NE(env, nullptr);
 
-    auto call = [&](const char* fn, uint32_t* a, uint32_t n) -> uint32_t {
+    bool trapped = false;
+    auto call = [&](const char* fn, uint32_t* a, uint32_t n, bool expectSuccess = true) -> uint32_t {
         wasm_function_inst_t f = wasm_runtime_lookup_function(inst, fn);
         EXPECT_NE(f, nullptr) << fn;
-        EXPECT_TRUE(wasm_runtime_call_wasm(env, f, n, a)) << fn << ": " << wasm_runtime_get_exception(inst);
+        const bool ok = f && wasm_runtime_call_wasm(env, f, n, a);
+        if (expectSuccess) EXPECT_TRUE(ok) << fn << ": " << wasm_runtime_get_exception(inst);
+        trapped = !ok;
         return a[0];
     };
 
@@ -214,6 +248,22 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
     const uint32_t IN = io, OUT = io + 64, LOCALS = io + 128;
     enum { KIND_PROCEDURE = 1, KIND_SYSPROC = 2, SP_INITIALIZE = 0 };
 
+    // Resolve the selected procedure's exact output size from the module registration table. The parity
+    // driver compares every operation result, so this cannot be a fixture-specific hardcoded width.
+    struct EntryInfo { uint32_t inputType, kind, inSize, outSize; };
+    uint32_t outputSize = 0;
+    a[0] = 0;
+    const uint32_t entryCount = call("reg_count", a, 0);
+    for (uint32_t i = 0; i < entryCount; ++i) {
+        a[0] = i; a[1] = io;
+        call("reg_info", a, 2);
+        const EntryInfo* entry = (const EntryInfo*)wasm_runtime_addr_app_to_native(inst, io);
+        if (entry && entry->kind == KIND_PROCEDURE && entry->inputType == 1) {
+            outputSize = entry->outSize;
+            break;
+        }
+    }
+
     a[0] = KIND_SYSPROC; a[1] = SP_INITIALIZE; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
     call("dispatch", a, 5);
 
@@ -223,6 +273,7 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
         // Recompute the native IN pointer each op: a contract's scratch allocation can grow linear memory.
         std::string s(script);
         size_t p = 0;
+        uint32_t operationIndex = 0;
         while (p < s.size()) {
             size_t semi = s.find(';', p);
             std::string tok = s.substr(p, semi == std::string::npos ? std::string::npos : semi - p);
@@ -238,7 +289,20 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
                 if (hi >= 0 && lo >= 0) inN[i / 2] = (unsigned char)((hi << 4) | lo);
             }
             a[0] = KIND_PROCEDURE; a[1] = (uint32_t)it; a[2] = IN; a[3] = OUT; a[4] = LOCALS;
-            call("dispatch", a, 5);
+            call("dispatch", a, 5, false);
+            if (trapped) {
+                printf("CROSSHOST_OP=%u:trap\n", operationIndex++);
+                break;
+            }
+            const unsigned char* outN = (const unsigned char*)wasm_runtime_addr_app_to_native(inst, OUT);
+            std::string outHex;
+            outHex.reserve(outputSize * 2);
+            char byteHex[3];
+            for (uint32_t i = 0; i < outputSize; ++i) {
+                sprintf(byteHex, "%02x", outN[i]);
+                outHex += byteHex;
+            }
+            printf("CROSSHOST_OP=%u:ok:%s\n", operationIndex++, outHex.c_str());
         }
     } else {
         for (int i = 0; i < ops; i++) {
@@ -263,16 +327,11 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
     wasm_runtime_destroy();
 }
 
-#ifdef LITE_WASM_TRAP_BACKTRACE
 #include "wasm_trap_fixture.h"
 #include <unistd.h>
 #include <cstdio>
 #include <string>
-// Classic interp + DUMP_CALL_STACK: on a contract trap WAMR auto-prints a backtrace ("#NN: 0xOFF - name")
-// whose offsets are original-wasm bytes -> source file:line via the DWARF sidecar (qinit side). The node
-// can't capture it structurally (copy_callstack carries no offset + the frames unwind before we regain
-// control), so it flows stdout -> node.log -> qinit. This locks that the auto-dump fires with a byte offset
-// under the dev build. Only runs with -DLITE_WASM_TRAP_BACKTRACE=ON (fast-interp offsets are unmappable).
+// Classic interpretation preserves original Wasm offsets for Qinit's DWARF source mapping.
 TEST(WasmContracts, TrapAutoDumpHasMappableOffset) {
     static char heap[8 * 1024 * 1024];
     RuntimeInitArgs ia; memset(&ia, 0, sizeof ia);
@@ -315,6 +374,4 @@ TEST(WasmContracts, TrapAutoDumpHasMappableOffset) {
     wasm_runtime_unload(mod);
     wasm_runtime_destroy();
 }
-#endif // LITE_WASM_TRAP_BACKTRACE
-
-#endif // LITE_WASM_CONTRACTS
+#endif // LITE_WASM_SC

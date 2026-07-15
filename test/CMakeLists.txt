@@ -126,15 +126,15 @@ if(NOT WIN32 AND NOT APPLE AND NOT IS_ARM)
     target_link_libraries(qubic_core_tests PRIVATE zstd)
 endif()
 
-# WASM-executed contracts: build the dispatch/reg/state ABI regression test against the WAMR runtime.
-# Reuses the Qubic target's vmlib if present (BUILD_BINARY), else builds its own. See extensions/WASM_CONTRACTS.md.
-if(LITE_WASM_CONTRACTS)
-    target_compile_definitions(qubic_core_tests PRIVATE LITE_WASM_CONTRACTS)
-    if(LITE_WASM_TRAP_BACKTRACE)
-        target_compile_definitions(qubic_core_tests PRIVATE LITE_WASM_TRAP_BACKTRACE)
-    endif()
+# Build the Wasm ABI regression tests against the node's WAMR configuration.
+if(LITE_WASM_SC)
+    target_compile_definitions(qubic_core_tests PRIVATE
+        LITE_WASM_SC
+        TESTNET
+        TESTNET_LITE_RAM
+    )
     target_sources(qubic_core_tests PRIVATE wasm_contracts.cpp)
-    # WAMR_ROOT_DIR is set by the root CMakeLists (FetchContent, SHA-pinned).
+
     if(NOT TARGET vmlib)
         if(APPLE)
             set(WAMR_BUILD_PLATFORM "darwin")
@@ -147,12 +147,8 @@ if(LITE_WASM_CONTRACTS)
             set(WAMR_BUILD_TARGET "X86_64")
         endif()
         set(WAMR_BUILD_INTERP 1)
-        if(LITE_WASM_TRAP_BACKTRACE)   # classic interp + auto-dump (the trap-backtrace mechanism under test)
-            set(WAMR_BUILD_FAST_INTERP 0)
-            set(WAMR_BUILD_DUMP_CALL_STACK 1)
-        else()
-            set(WAMR_BUILD_FAST_INTERP 1)
-        endif()
+        set(WAMR_BUILD_FAST_INTERP 0)
+        set(WAMR_BUILD_DUMP_CALL_STACK 1)
         set(WAMR_BUILD_AOT 0)
         set(WAMR_BUILD_JIT 0)
         set(WAMR_BUILD_LIBC_BUILTIN 0)

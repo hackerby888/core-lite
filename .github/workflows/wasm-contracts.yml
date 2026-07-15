@@ -34,14 +34,16 @@ jobs:
           sudo apt install -y libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev liblz4-dev
 
       # Standalone WAMR test build (no node binary, no real seeds): BUILD_BINARY=OFF + ONLY_LOGGING=ON.
-      - name: Configure (LITE_WASM_CONTRACTS + tests)
+      - name: Configure (LITE_WASM_SC + tests)
         run: |
           cmake -S . -B build-wasm-ci \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
             -DBUILD_TESTS:BOOL=ON \
             -DBUILD_BINARY:BOOL=OFF \
-            -DLITE_WASM_CONTRACTS:BOOL=ON \
+            -DTESTNET:BOOL=ON \
+            -DTESTNET_LITE_RAM:BOOL=ON \
+            -DLITE_WASM_SC:BOOL=ON \
             -DENABLE_AVX512=OFF \
             -DUSE_SANITIZER=OFF \
             -DONLY_LOGGING=ON

@@ -27,17 +27,15 @@ class RpcLiveController : public HttpController<RpcLiveController>
     ADD_METHOD_TO(RpcLiveController::broadcastTransaction, "/live/v1/broadcast-transaction", Post);
     ADD_METHOD_TO(RpcLiveController::iposActive, "/live/v1/ipos/active", Get);
     ADD_METHOD_TO(RpcLiveController::querySmartContract, "/live/v1/querySmartContract", Post);
-#ifdef LITE_DYNAMIC_CONTRACTS
+#ifdef LITE_WASM_SC
     ADD_METHOD_TO(RpcLiveController::dynRegistry, "/live/v1/dyn-registry", Get);
     ADD_METHOD_TO(RpcLiveController::dynUpload, "/live/v1/dyn-upload", Get);
     ADD_METHOD_TO(RpcLiveController::logStats, "/live/v1/log-stats", Get);
-#ifdef LITE_WASM_CONTRACTS
     ADD_METHOD_TO(RpcLiveController::debugTrace, "/live/v1/debug-trace", Get);
     ADD_METHOD_TO(RpcLiveController::devDebug, "/live/v1/dev/debug", Get);
     ADD_METHOD_TO(RpcLiveController::devDebugClear, "/live/v1/dev/debug-clear", Get);
     ADD_METHOD_TO(RpcLiveController::devStateRead, "/live/v1/dev/state-read", Get);
     ADD_METHOD_TO(RpcLiveController::devContractDigest, "/live/v1/dev/contract-digest", Get);
-#endif
 #if ADDON_TX_STATUS_REQUEST
     ADD_METHOD_TO(RpcLiveController::txStatus, "/live/v1/tx-status/{tick}/{tx}", Get);
 #endif
@@ -523,7 +521,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
         cb(HttpResponse::newHttpJsonResponse(result));
     }
 
-#ifdef LITE_DYNAMIC_CONTRACTS
+#ifdef LITE_WASM_SC
     // Dynamic-contract registry: deployed slots + their function/procedure inputTypes (tooling autocomplete).
     inline void dynRegistry(const HttpRequestPtr &req,
                             std::function<void(const HttpResponsePtr &)> &&cb)
@@ -566,9 +564,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
             c["functions"] = fns;
             c["procedures"] = procs;
             c["source"] = s.sourceH;   // contract .h source (if submitted via /dev/contract-source) for callee resolution
-#ifdef LITE_WASM_CONTRACTS
             c["lastError"] = liteWasmLastTrap(idx);   // most recent dispatch trap reason (empty if last call ok) — for tooling
-#endif
             arr.append(c);
         }
         json["slotBase"] = (unsigned int)LITEDYN0_CONTRACT_INDEX;
@@ -660,7 +656,6 @@ class RpcLiveController : public HttpController<RpcLiveController>
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
-#ifdef LITE_WASM_CONTRACTS
     // GET /live/v1/debug-trace?since=<seq>&limit=<n> — recent wasm contract-call traces (debug toggle).
     inline void debugTrace(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
     {
@@ -673,18 +668,18 @@ class RpcLiveController : public HttpController<RpcLiveController>
         for (const auto &t : liteWasmTraceSnapshot(since, limit))
         {
             Json::Value e;
-            e["seq"] = (Json::UInt64)t.seq; e["tick"] = t.tick; e["index"] = t.idx;
-            e["entry"] = (unsigned int)t.it; e["kind"] = (unsigned int)t.kind; e["ok"] = t.ok;
-            e["execNs"] = (Json::UInt64)t.execNs;
-            e["inSize"] = t.inSize; e["outSize"] = t.outSize; e["stateSize"] = t.stateSize; e["stateTruncated"] = t.stateTruncated;
+            e["seq"] = (Json::UInt64)t.sequence; e["tick"] = t.tick; e["index"] = t.contractIndex;
+            e["entry"] = (unsigned int)t.inputType; e["kind"] = (unsigned int)t.kind; e["ok"] = t.ok;
+            e["execNs"] = (Json::UInt64)t.executionNanoseconds;
+            e["inSize"] = t.inputSize; e["outSize"] = t.outputSize; e["stateSize"] = t.stateSize; e["stateTruncated"] = t.stateTruncated;
             e["invocator"] = liteWasmHex(&t.invocator, 32);
             e["invocationReward"] = (Json::Int64)t.invocationReward;
-            unsigned int ih = t.inSize  < LITE_WASM_TRACE_HEAD ? t.inSize  : LITE_WASM_TRACE_HEAD;
-            unsigned int oh = t.outSize < LITE_WASM_TRACE_HEAD ? t.outSize : LITE_WASM_TRACE_HEAD;
-            e["inHex"] = liteWasmHex(t.inHead, ih);
-            e["outHex"] = liteWasmHex(t.outHead, oh);
+            unsigned int ih = t.inputSize  < LITE_WASM_TRACE_HEAD ? t.inputSize  : LITE_WASM_TRACE_HEAD;
+            unsigned int oh = t.outputSize < LITE_WASM_TRACE_HEAD ? t.outputSize : LITE_WASM_TRACE_HEAD;
+            e["inHex"] = liteWasmHex(t.inputHead, ih);
+            e["outHex"] = liteWasmHex(t.outputHead, oh);
             Json::Value sd(Json::arrayValue);   // full-state diff: changed byte runs (offset within StateData)
-            for (const auto &r : t.stateDiff) { Json::Value x; x["off"] = r.off; x["before"] = r.before; x["after"] = r.after; sd.append(x); }
+            for (const auto &r : t.stateDiff) { Json::Value x; x["off"] = r.offset; x["before"] = r.before; x["after"] = r.after; sd.append(x); }
             e["stateDiff"] = sd;
             if (!t.trap.empty()) e["trap"] = t.trap;
             Json::Value hc(Json::arrayValue);
@@ -767,7 +762,6 @@ class RpcLiveController : public HttpController<RpcLiveController>
         json["slot"] = idx; json["stateSize"] = (Json::UInt64)ss; json["digest"] = hex;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
-#endif
 
 #if ADDON_TX_STATUS_REQUEST
     // Exact tx confirmation: is transaction <tx> (60-char id) included+processed in tick <tick>?

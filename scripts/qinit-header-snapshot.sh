@@ -49,7 +49,7 @@ cat > "$TMP/Stub.wrapper.cpp" <<EOF
 #include "contract_core/qpi_hash_map_impl.h"
 #undef __acquireScratchpad
 #undef __releaseScratchpad
-#include "extensions/lite_dyn_abi.h"
+#include "extensions/wasm/lite_dyn_abi.h"
 EOF
 
 SNAP="$TMP/core-headers"
@@ -64,9 +64,9 @@ for f in $DEPS; do copy "$f"; done
 # references — lite_wasm_tu.h (swapped in for lite_dyn_abi.h), the force -include'd lite_wasm_intrinsics.h, and
 # the simde/x86 m256i headers the wasm path takes (native uses real SSE). Compute that closure with the real
 # wasm target+sysroot and add it, or the cached snapshot fails: 'lite_wasm_intrinsics.h file not found'.
-SHIM="$CORE/src/extensions/lite_wasm_intrinsics.h"
+SHIM="$CORE/src/extensions/wasm/lite_wasm_intrinsics.h"
 sed -e 's|#define LITE_DYN_SO_BUILD|#define LITE_WASM_TU_BUILD|' \
-    -e 's|#include "extensions/lite_dyn_abi.h"|#include "extensions/lite_wasm_tu.h"|' \
+    -e 's|#include "extensions/wasm/lite_dyn_abi.h"|#include "extensions/wasm/lite_wasm_tu.h"|' \
     "$TMP/Stub.wrapper.cpp" > "$TMP/Stub.wasm.wrapper.cpp"
 if [ -n "${WASM_CLANG:-}" ]; then
   WDEPS="$("$WASM_CLANG" --target=wasm32-wasi -std=c++20 -fno-exceptions -fno-rtti \
@@ -77,12 +77,12 @@ else
   echo "WARN: WASM_CLANG unset — wasm header closure (simde / lite_wasm_*) NOT captured; snapshot incomplete for wasm" >&2
 fi
 copy "$SHIM"                                       # -include'd by the wasm compile
-copy "$CORE/src/extensions/lite_wasm_tu.h"         # wasm TU binding (swapped in)
+copy "$CORE/src/extensions/wasm/lite_wasm_tu.h"         # wasm TU binding (swapped in)
 
 # Inter-contract: every contract header (callee types), the index map, the call-macro header.
 for f in "$CORE"/src/contracts/*.h; do copy "$f"; done
 copy "$CORE/src/contract_core/contract_def.h"
-copy "$CORE/src/extensions/lite_contract_calls.h"
+copy "$CORE/src/extensions/wasm/lite_contract_calls.h"
 
 mkdir -p "$OUT"
 tar czf "$OUT/core-headers.tar.gz" -C "$SNAP" .

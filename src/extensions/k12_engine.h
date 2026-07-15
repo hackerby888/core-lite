@@ -211,7 +211,7 @@ class ContractStateEngine : public K12Engine
 {
 public:
     // Access tracker (LRU eviction)
-#if defined(TESTNET) && defined(LITE_DYNAMIC_CONTRACTS)
+#if defined(TESTNET) && defined(LITE_WASM_SC)
     static inline size_t MAX_RAM_USEAGE = 1ULL * 1024 * 1024 * 1024;  // 1 GB — testnet dynamic-contract SC-dev budget (override: --max-sc-mem)
 #else
     static inline size_t MAX_RAM_USEAGE = 10ULL * 1024 * 1024 * 1024; // 10 GB
