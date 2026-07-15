@@ -1,7 +1,7 @@
 # Publishes qinit turnkey assets (prebuilt node per-platform + header snapshot + sha-pinned manifest).
 # Run on the fork (hackerby888/core-lite), NEVER qubic upstream. Assets use ${{ github.repository }}.
 # ONLY_LOGGING=OFF embeds committed src/private_settings.h — ensure it's a PUBLIC testnet fixture.
-# linux-arm64 builds on a NATIVE arm runner (ubuntu-24.04-arm) — no qemu; also runs the crypto gtests.
+# linux-arm64 builds on a native arm runner (ubuntu-24.04-arm), without qemu.
 name: qinit-release
 
 on:
@@ -82,19 +82,6 @@ jobs:
           shasum -a 256 "Qubic-${{ matrix.key }}" | awk '{print $1}' > "Qubic-${{ matrix.key }}.sha256"
           file "Qubic-${{ matrix.key }}"
 
-      # Native validation (real hardware) — authoritative: a crypto KAT failure FAILS the job,
-      # so a broken-on-platform build never ships. Pure deterministic suites (FourQ/m256/K12).
-      - name: Build + run crypto gtests
-        run: |
-          J=$(getconf _NPROCESSORS_ONLN)
-          cmake -S . -B build-tests \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
-            -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
-            -DLITE_WASM_SC=ON -DTESTNET=ON -DTESTNET_LITE_RAM=ON
-          cmake --build build-tests -- -j"$J" qubic_core_tests
-          ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:TestCoreK12*'
-
       - name: Upload node artifact
         uses: actions/upload-artifact@v7
         with:
@@ -104,9 +91,8 @@ jobs:
             Qubic-${{ matrix.key }}.sha256
           if-no-files-found: error
 
-  # macOS-native (Apple Silicon, Mach-O). Builds the node + runs crypto KATs on real macOS, and its
-  # Qubic-darwin-arm64 is folded into the published manifest below. Non-gating (continue-on-error) so a
-  # macOS runner hiccup never blocks the linux release; publish degrades gracefully if darwin is absent.
+  # macOS-native (Apple Silicon, Mach-O). Its Qubic-darwin-arm64 artifact is folded into the published
+  # manifest below. Non-gating so a macOS runner hiccup never blocks the Linux release.
   node-macos:
     needs: resolve
     runs-on: macos-14
@@ -136,21 +122,7 @@ jobs:
           cp build-node/src/Qubic Qubic-darwin-arm64
           shasum -a 256 Qubic-darwin-arm64 | awk '{print $1}' > Qubic-darwin-arm64.sha256
           file Qubic-darwin-arm64
-      - name: Build + run crypto gtests
-        run: |
-          set -o pipefail
-          J=$(getconf _NPROCESSORS_ONLN)
-          CC=$(xcrun -f clang); CXX=$(xcrun -f clang++)
-          {
-            cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
-              -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
-              -DLITE_WASM_SC=ON -DTESTNET=ON -DTESTNET_LITE_RAM=ON
-            cmake --build build-tests -- -j"$J" qubic_core_tests
-            ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:TestCoreK12*'
-          } 2>&1 | tee -a "$GITHUB_WORKSPACE/macos-build.log"
-      # On failure only, publish the build+test log tail to a public debug release so a macOS
-      # regression is diagnosable without CI-log auth. Dormant while the port stays green.
+      # On failure only, publish the build log tail to a public debug release.
       - name: Publish macOS build log (debug)
         if: failure()
         env:
@@ -237,6 +209,68 @@ jobs:
             Qubic-windows-x64.tar.gz
             Qubic-windows-x64.tar.gz.sha256
           if-no-files-found: error
+
+  # Crypto KATs protect published binaries but are unrelated to the Qinit deploy smoke. Run them
+  # only for releases, in parallel with the node builds, and gate publishing below.
+  release-crypto-kats:
+    name: release crypto KATs (${{ matrix.key }})
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04,     key: linux-x64,    cc: clang-18, cxx: clang++-18, advisory: false }
+          - { runner: ubuntu-24.04-arm, key: linux-arm64,  cc: clang-18, cxx: clang++-18, advisory: false }
+          - { runner: macos-14,         key: darwin-arm64, cc: clang,    cxx: clang++,    advisory: true }
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.advisory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain (Linux x64)
+        if: matrix.key == 'linux-x64'
+        run: |
+          sudo apt update -y
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt install -y clang cmake nasm \
+            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
+            zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev liblz4-dev libssl-dev libffi-dev
+
+      - name: Install toolchain (Linux ARM64)
+        if: matrix.key == 'linux-arm64'
+        run: |
+          sudo apt update -y
+          sudo apt install -y clang-18 cmake nasm \
+            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
+            zlib1g-dev libzstd-dev g++ libfmt-dev liblzo2-dev liblz4-dev libssl-dev libffi-dev
+
+      - name: Install toolchain (macOS)
+        if: matrix.key == 'darwin-arm64'
+        run: brew install cmake nasm jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi || true
+
+      - name: Build and run crypto KATs
+        shell: bash
+        run: |
+          J=$(getconf _NPROCESSORS_ONLN)
+          CC=${{ matrix.cc }}
+          CXX=${{ matrix.cxx }}
+
+          if [ "${{ matrix.key }}" = "darwin-arm64" ]; then
+            CC=$(xcrun -f clang)
+            CXX=$(xcrun -f clang++)
+          fi
+
+          cmake -S . -B build-crypto-kats \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+            -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
+            -DLITE_WASM_SC=ON -DTESTNET=ON -DTESTNET_LITE_RAM=ON
+          cmake --build build-crypto-kats -- -j"$J" qubic_core_tests
+          ./build-crypto-kats/test/qubic_core_tests \
+            --gtest_filter='TestFourQ.*:TestCore256*:TestCoreK12*'
 
   # Per-platform deploy smoke: boot the freshly-built node and run `qinit test` against it — a REAL
   # on-chain deploy + read + write (DigestProbe: Get -> Inc -> Get) through the wasm engine, not a tick-only
@@ -423,7 +457,7 @@ jobs:
     # gate the release on the deploy smoke + cross-platform digest-equivalence: never publish a node that
     # can't deploy/run a contract, or whose exec diverges across platforms. (A macOS infra flake then blocks
     # the release until re-dispatch — acceptable: correctness > convenience for a published node.)
-    needs: [resolve, node, node-macos, node-windows, headers, smoke, digest-check]
+    needs: [resolve, node, node-macos, node-windows, release-crypto-kats, headers, smoke, digest-check]
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ github.token }}
