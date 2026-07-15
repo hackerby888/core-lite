@@ -102,11 +102,11 @@ static_assert(AUTO_FORCE_NEXT_TICK_THRESHOLD* TARGET_TICK_DURATION >= PEER_REFRE
 
 #define VERSION_A 1
 #define VERSION_B 299
-#define VERSION_C 0
+#define VERSION_C 1
 
 // Epoch and initial tick for node startup
 #define EPOCH 222
-#define TICK 66350000
+#define TICK 66360000
 #define TICK_IS_FIRST_TICK_OF_EPOCH 1 // Set to 0 if the network is restarted during the EPOCH with a new initial TICK
 
 #define ARBITRATOR "AFZPUAIYVPNUYGJRQVLUKOPPVLHAZQTGLYAAUUNBXFTVTAMSBKQBLEIEPCVJ"
