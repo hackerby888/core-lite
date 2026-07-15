@@ -243,22 +243,13 @@ if(LITE_WASM_SC)
     endif()
     target_include_directories(Qubic PRIVATE ${WAMR_ROOT_DIR}/core/iwasm/include)
 
-    # Prefer the static libffi archive for distribution.
-    find_library(FFI_LIB_STATIC libffi.a)
-    find_library(FFI_LIB_SHARED ffi)
-    if(FFI_LIB_STATIC)
-        set(FFI_LIB ${FFI_LIB_STATIC})
-    else()
-        set(FFI_LIB ${FFI_LIB_SHARED})
-    endif()
-    find_path(FFI_INCLUDE_DIR ffi.h PATH_SUFFIXES x86_64-linux-gnu aarch64-linux-gnu)
-    if(NOT FFI_LIB OR NOT FFI_INCLUDE_DIR)
-        message(FATAL_ERROR "LITE_WASM_SC: libffi not found (install libffi-dev / libffi)")
-    endif()
-    target_include_directories(Qubic PRIVATE ${FFI_INCLUDE_DIR})
-
-    target_link_libraries(Qubic vmlib ${FFI_LIB})
-    message(STATUS "LITE_WASM_SC: WAMR(${WAMR_BUILD_PLATFORM}/${WAMR_BUILD_TARGET}) + libffi(${FFI_LIB})")
+    find_package(LibFFI REQUIRED)
+    target_link_libraries(
+        Qubic
+        vmlib
+        LibFFI::LibFFI
+    )
+    message(STATUS "LITE_WASM_SC: WAMR(${WAMR_BUILD_PLATFORM}/${WAMR_BUILD_TARGET}) + libffi")
 endif()
 
 if(ADDON_TX_STATUS_REQUEST)

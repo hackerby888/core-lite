@@ -22,7 +22,7 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # NOTE: nasm intentionally NOT installed. With nasm on PATH, CMake routes the MASM-syntax .asm files
       # (EDK2 SetJump/LongJump, WAMR invokeNative_em64) to nasm -fwin32 -> error. Without it, all .asm use
@@ -33,7 +33,7 @@ jobs:
       # so once a (stale) cache existed it was never refreshed -> vcpkg restored 0 packages -> rebuilt every
       # run. (vcpkg's x-gha provider was removed upstream, so this is files+actions/cache, done right.)
       - name: Cache vcpkg binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/AppData/Local/vcpkg/archives
           key: vcpkg-x64-win-rel-${{ github.run_id }}
@@ -56,9 +56,6 @@ jobs:
         shell: pwsh
         run: |
           $vcpkg = "$env:VCPKG_INSTALLATION_ROOT"
-          # manifest mode installs into the build dir, NOT $vcpkg/installed. The paths don't exist
-          # until the configure's vcpkg-install step runs — fine, they're only dereferenced at link.
-          $inst  = "$PWD/build-win/vcpkg_installed/x64-windows-rel"
           # No -G: CMake auto-picks the newest installed VS generator (a pinned major fails when the runner bumps VS).
           cmake -S . -B build-win -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
@@ -67,8 +64,7 @@ jobs:
             -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF `
             -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON `
             -DLITE_WASM_SC=ON -DCMAKE_NO_USE_SWAP=ON `
-            -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF `
-            -DFFI_LIB_SHARED="$inst/lib/ffi.lib" -DFFI_INCLUDE_DIR="$inst/include"
+            -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
 
       - name: Build Qubic
         run: |
@@ -79,7 +75,7 @@ jobs:
 
       - name: Upload binary
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Qubic-windows-x64
           # vcpkg applocal deploys the runtime DLLs (ffi-8, openssl, c-ares, zlib, brotli) next to

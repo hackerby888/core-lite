@@ -46,7 +46,7 @@ jobs:
           - { runner: ubuntu-24.04-arm, key: linux-arm64, cc: clang-18, cxx: clang++-18 }
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install toolchain (x64 — llvm.sh)
         if: matrix.key == 'linux-x64'
@@ -96,7 +96,7 @@ jobs:
           ./build-tests/test/qubic_core_tests --gtest_filter='TestFourQ.*:TestCore256*:TestCoreK12*'
 
       - name: Upload node artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: node-${{ matrix.key }}
           path: |
@@ -114,7 +114,7 @@ jobs:
     # blocks the linux release; publish then degrades gracefully (no darwin in the manifest).
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install toolchain (brew)
         run: brew install cmake nasm jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi || true
       - name: Build node
@@ -125,13 +125,9 @@ jobs:
           # uses a newer exception ABI (ne180100) the system libc++ at link doesn't have. Apple clang
           # supports C++20; SIMDe + -fsigned-char (IS_ARM) handle the SIMD/char-signedness.
           CC=$(xcrun -f clang); CXX=$(xcrun -f clang++)
-          ZR=$(brew --prefix zlib)        # macOS ships libz only as a .tbd stub CMake's FindZLIB misses
-          LF=$(brew --prefix libffi)      # keg-only -> hint the FFI find vars directly
           {
             cmake -S . -B build-node -DCMAKE_BUILD_TYPE=RelWithDebInfo \
               -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
-              -DZLIB_ROOT="$ZR" -DZLIB_LIBRARY="$ZR/lib/libz.dylib" -DZLIB_INCLUDE_DIR="$ZR/include" \
-              -DFFI_LIB_SHARED="$LF/lib/libffi.dylib" -DFFI_INCLUDE_DIR="$LF/include" \
               -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF \
               -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
               -DLITE_WASM_SC=ON -DCMAKE_NO_USE_SWAP=ON -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
@@ -145,11 +141,9 @@ jobs:
           set -o pipefail
           J=$(getconf _NPROCESSORS_ONLN)
           CC=$(xcrun -f clang); CXX=$(xcrun -f clang++)
-          ZR=$(brew --prefix zlib)
           {
             cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
-              -DZLIB_ROOT="$ZR" -DZLIB_LIBRARY="$ZR/lib/libz.dylib" -DZLIB_INCLUDE_DIR="$ZR/include" \
               -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
               -DLITE_WASM_SC=ON -DTESTNET=ON -DTESTNET_LITE_RAM=ON
             cmake --build build-tests -- -j"$J" qubic_core_tests
@@ -166,7 +160,7 @@ jobs:
           tail -c 250000 "$GITHUB_WORKSPACE/macos-build.log" > macos-build.tail.log || true
           gh release create qinit-macos-debug macos-build.tail.log -t "macOS build debug" -n "node-macos build+test log (tail)" \
           || gh release upload qinit-macos-debug macos-build.tail.log --clobber
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: node-darwin-arm64
           path: |
@@ -182,13 +176,13 @@ jobs:
     runs-on: windows-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # vcpkg binary cache (files) persisted via actions/cache, key ROTATED per run so the freshly built
       # archives are always re-saved; restore-keys pulls the latest matching archives and vcpkg reuses the
       # ABIs that still match. The old static hashFiles('vcpkg.json') key was immutable -> never refreshed ->
       # vcpkg restored 0 packages -> rebuilt all deps each run. (x-gha provider was removed upstream.)
       - name: Cache vcpkg binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/AppData/Local/vcpkg/archives
           key: vcpkg-x64-win-rel-${{ github.run_id }}
@@ -207,7 +201,6 @@ jobs:
         shell: pwsh
         run: |
           $vcpkg = "$env:VCPKG_INSTALLATION_ROOT"
-          $inst  = "$PWD/build-win/vcpkg_installed/x64-windows-rel"
           # No -G: CMake auto-picks the newest installed VS generator (a pinned major fails when the runner bumps VS).
           cmake -S . -B build-win -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
@@ -216,12 +209,11 @@ jobs:
             -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF `
             -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON `
             -DLITE_WASM_SC=ON -DCMAKE_NO_USE_SWAP=ON `
-            -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF `
-            -DFFI_LIB_SHARED="$inst/lib/ffi.lib" -DFFI_INCLUDE_DIR="$inst/include"
+            -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
       - name: Build Qubic
         run: cmake --build build-win --config Release --target Qubic --parallel 4
       - name: Upload node artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: node-windows-x64
           # the whole dir: vcpkg applocal puts the runtime DLLs (ffi-8/openssl/...) next to Qubic.exe
@@ -238,7 +230,7 @@ jobs:
           (Get-FileHash -Algorithm SHA256 Qubic-windows-x64.tar.gz).Hash.ToLower() |
             Set-Content -NoNewline -Encoding ascii Qubic-windows-x64.tar.gz.sha256
       - name: Upload windows release bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: node-windows-release
           path: |
@@ -269,10 +261,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout core-lite (--core, wasm contract headers)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with: { path: core }
       - name: Checkout qinit (the test runner)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with: { repository: hackerby888/qinit, ref: main, path: qinit }
       - uses: oven-sh/setup-bun@v2
       - name: Install qinit deps
@@ -300,7 +292,7 @@ jobs:
       - name: Install macOS runtime libs
         if: matrix.key == 'darwin-arm64'
         run: brew install jq jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi || true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact }}
       - name: qinit test (deploy + read + write)
@@ -339,7 +331,7 @@ jobs:
           echo "$D" > "$GITHUB_WORKSPACE/digest-${{ matrix.key }}.txt"
           echo "::notice::${{ matrix.key }} DigestProbe state digest = $D"
       - name: Upload state digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.key }}
           path: digest-${{ matrix.key }}.txt
@@ -368,7 +360,7 @@ jobs:
       # from the now-fixed commit charge — the node boots + ticks but crawls at tens of s/tick on the CI VM).
       - name: Upload full node log (on failure)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nodelog-${{ matrix.key }}
           path: ~/.cache/qinit/run/node.log
@@ -381,7 +373,7 @@ jobs:
     needs: smoke
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: 'digest-*'
           path: digests
@@ -403,7 +395,7 @@ jobs:
     needs: resolve
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install toolchain
         run: |
           sudo apt update -y
@@ -422,7 +414,7 @@ jobs:
             bash scripts/qinit-header-snapshot.sh "$PWD/snapshot-out"
           cp snapshot-out/core-headers.tar.gz ./core-headers.tar.gz
           cp snapshot-out/core-headers.sha256 ./core-headers.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: headers, path: "core-headers.*", if-no-files-found: error }
 
   publish:
@@ -438,9 +430,9 @@ jobs:
       GH_REPO: ${{ github.repository }}   # gh needs this without a checkout
       TAG: ${{ needs.resolve.outputs.tag }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { path: dist, pattern: "node-*", merge-multiple: true }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: headers, path: dist }
       - name: Generate manifest
         working-directory: dist

@@ -36,9 +36,17 @@ else()
     message(WARNING "You are not using Clang. This project is optimized for Clang 18+.")
 endif()
 
-# Include the centralized compiler detection module
+# Load project CMake modules.
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerSetup)
+include(HomebrewDependencies)
+
+# Make keg-only dependencies visible to ordinary find_package calls.
+qubic_add_homebrew_prefixes(
+    zlib
+    openssl@3
+    libffi
+)
 
 # Build options
 option(BUILD_TESTS "Build the test suite" OFF)
