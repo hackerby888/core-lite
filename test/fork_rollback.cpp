@@ -9,6 +9,7 @@
 #include "platform/concurrency.h"    // fork-eligibility census (forkCensusEnter/Leave/SumExcept/Offender)
 #include "extensions/fork_census.h"  // SmartMutex / SmartSharedMutex
 #include "extensions/fork_stats.h"   // ForkStats (unforkable-tick counters + durable log)
+#include "extensions/tick_fork_control.h"
 
 #include <filesystem>
 #include <fstream>
@@ -180,6 +181,52 @@ TEST_F(ForkRollback, PurgeOrphansDropsShadow)
 }
 
 #if defined(__linux__)
+
+TEST(ForkRollbackControl, ExplicitRetireDoesNotPromote)
+{
+    int pipeFds[2];
+    ASSERT_EQ(pipe(pipeFds), 0);
+
+    ASSERT_TRUE(tickForkControl::writeRetireCommand(pipeFds[1]));
+    close(pipeFds[1]);
+
+    const auto command = tickForkControl::readChildCommand(pipeFds[0], 1234);
+    close(pipeFds[0]);
+
+    EXPECT_EQ(command.action, tickForkControl::ChildAction::Retire);
+    EXPECT_EQ(command.targetTick, 0U);
+}
+
+TEST(ForkRollbackControl, ParentCrashEofStillPromotes)
+{
+    int pipeFds[2];
+    ASSERT_EQ(pipe(pipeFds), 0);
+    close(pipeFds[1]);
+
+    const auto command = tickForkControl::readChildCommand(pipeFds[0], 1234);
+    close(pipeFds[0]);
+
+    EXPECT_EQ(command.action, tickForkControl::ChildAction::Promote);
+    EXPECT_EQ(command.targetTick, 1234U);
+}
+
+TEST(ForkRollbackControl, PromoteCommandCarriesTargetTick)
+{
+    int pipeFds[2];
+    ASSERT_EQ(pipe(pipeFds), 0);
+
+    const char tag = tickForkControl::promoteTag;
+    const unsigned int targetTick = 5678;
+    ASSERT_EQ(write(pipeFds[1], &tag, 1), 1);
+    ASSERT_EQ(write(pipeFds[1], &targetTick, sizeof(targetTick)), (ssize_t)sizeof(targetTick));
+    close(pipeFds[1]);
+
+    const auto command = tickForkControl::readChildCommand(pipeFds[0], 1234);
+    close(pipeFds[0]);
+
+    EXPECT_EQ(command.action, tickForkControl::ChildAction::Promote);
+    EXPECT_EQ(command.targetTick, targetTick);
+}
 
 // 8. registerPool + tryMarkDirty: in-range address marks its slot dirty; out-of-range is ignored.
 TEST(ForkRollbackDirtyTrack, MarkDirtyInRange)

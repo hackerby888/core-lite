@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <ctime>
 #include <atomic>
+#include "extensions/tick_fork_control.h"
 
 // Fork-path diagnostics: fprintf/stderr is fork-safe (no log-subsystem locks/buffers).
 static inline void tickForkLog(const char* msg)
@@ -253,7 +254,7 @@ namespace tickFork
         if (!quiesceWriters(QuiesceMode::Exclusive, gForkQuiesceTimeoutMs))
         {
             // Tell the child to promote — its state is at the checkpoint, it replays the window strict.
-            char tag = 'P';
+            char tag = tickForkControl::promoteTag;
             unsigned int target = (unsigned)system.tick;
             write(gPipe[1], &tag, 1);
             write(gPipe[1], &target, sizeof(target));
@@ -269,6 +270,38 @@ namespace tickFork
         gPipe[1] = -1;
         gChildPid = -2;
         setWinState(WindowState::Idle);
+    }
+
+    // A deliberate node shutdown must not look like a parent crash to the checkpoint child.
+    // Keep request processors available to park until the shadow is committed, then explicitly retire
+    // and reap the child. Writers are released only after shutDownNode is set.
+    inline void retireCheckpointForShutdown()
+    {
+        if (winState() != WindowState::Live)
+            return;
+
+        tickForkLog("graceful shutdown -> commit shadow + reap checkpoint");
+        setWinState(WindowState::Retiring);
+        while (!quiesceWriters(QuiesceMode::Exclusive, gForkQuiesceTimeoutMs))
+        {
+            releaseQuiesce(QuiesceMode::Exclusive);
+            tickForkLog("graceful shutdown quiesce timed out -> retrying without promoting child");
+        }
+
+        gShadow.commit();
+
+        const pid_t child = gChildPid.load();
+        if (!tickForkControl::writeRetireCommand(gPipe[1]))
+            kill(child, SIGKILL);
+        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR)
+        {
+        }
+        close(gPipe[1]);
+        gPipe[1] = -1;
+        gChildPid = -2;
+        setWinState(WindowState::Idle);
+        shutDownNode = 1;
+        releaseQuiesce(QuiesceMode::Exclusive);
     }
 
     // tickProcessor, before processTick(system.tick). Maintains the checkpoint window.
@@ -385,7 +418,7 @@ namespace tickFork
         quiesceWriters(QuiesceMode::TryExclusive, gForkQuiesceTimeoutMs);
         gShadow.discard();
         unsigned int target = (unsigned)system.tick;
-        const char tag = 'P';
+        const char tag = tickForkControl::promoteTag;
         ssize_t w = write(gPipe[1], &tag, 1);
         (void)w;
         w = write(gPipe[1], &target, sizeof(target));

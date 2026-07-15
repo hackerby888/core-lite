@@ -3,6 +3,7 @@
 #include <vector>
 #include <thread>
 #include <string>
+#include <atomic>
 #include <lib/platform_efi/uefi_globals.h>
 #ifdef __linux__
 #define BOOST_STACKTRACE_USE_BACKTRACE // Use libbacktrace for filenames/lines
@@ -162,6 +163,11 @@ static bool loadMiningSeedFromFile = false;
 static bool loadAllNodeStateFromFile = false;
 
 static volatile int shutDownNode = 0;
+static std::atomic<bool> gracefulShutdownRequested{ false };
+static void requestGracefulShutdown()
+{
+    gracefulShutdownRequested.store(true, std::memory_order_release);
+}
 static volatile char enableBadBoySpammer = 0;
 static volatile bool spammerWithRpc = false;
 
@@ -1804,7 +1810,7 @@ static void processSpecialCommand(Peer* peer, RequestResponseHeader* header)
             {
             case SPECIAL_COMMAND_SHUT_DOWN:
             {
-                shutDownNode = 1;
+                requestGracefulShutdown();
             }
             break;
 
@@ -4605,7 +4611,7 @@ static void initializeFirstTick()
     int uniqueVoteCount[NUMBER_OF_COMPUTORS];
     int uniqueCount = 0;
     const unsigned int firstTickIndex = ts.tickToIndexCurrentEpoch(system.initialTick);
-    while (!shutDownNode)
+    while (!shutDownNode && !gracefulShutdownRequested.load(std::memory_order_acquire))
     {
         if (broadcastedComputors.computors.epoch == system.epoch)
         {
@@ -6131,6 +6137,14 @@ static void tickProcessor(void*, unsigned long long processorNumber)
     unsigned int latestProcessedTick = 0;
     while (!shutDownNode)
     {
+        if (gracefulShutdownRequested.load(std::memory_order_acquire))
+        {
+#ifdef __linux__
+            tickFork::retireCheckpointForShutdown();
+#endif
+            shutDownNode = 1;
+            break;
+        }
 #ifdef TESTNET
         std::this_thread::sleep_for(std::chrono::microseconds(500));
 #endif
@@ -8545,7 +8559,7 @@ static void processKeyPresses()
         */
         case 0x17:
         {
-            shutDownNode = 1;
+            requestGracefulShutdown();
         }
         break;
 
@@ -8806,17 +8820,15 @@ static void bspForkPoint()
         // CHILD BSP: block until parent's verdict, then become the node.
         forkLocks.abandonInChild();
         close(tickFork::gPipe[1]);
-        char tag = 0;
-        unsigned int target = 0;
-        ssize_t n = read(tickFork::gPipe[0], &tag, 1);   // 'P' = promote; 0/EOF = parent crash -> promote
-        if (n == 1 && tag == 'P')
+        const tickForkControl::ChildCommand command = tickForkControl::readChildCommand(
+            tickFork::gPipe[0], (unsigned)system.tick + tickFork::gForkWindowK);
+        if (command.action == tickForkControl::ChildAction::Retire)
         {
-            // The promote frame carries the mismatch tick to replay strict.
-            if (read(tickFork::gPipe[0], &target, sizeof(target)) != (ssize_t)sizeof(target)) target = 0;
+            close(tickFork::gPipe[0]);
+            tickFork::gPipe[0] = -1;
+            _exit(0);
         }
-        // Crash/short-read → no target; replay full window strict to cover any mismatch.
-        if (target == 0) target = (unsigned)system.tick + tickFork::gForkWindowK;
-        tickForkChildPromote(target);
+        tickForkChildPromote(command.targetTick);
         return;
     }
 

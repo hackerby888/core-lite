@@ -168,7 +168,7 @@ RPC_ROUTE("GET", "/universe")
 RPC_ROUTE("GET", "/shutdown")
 {
     if (!rpcPasscodeOk(req)) return rpcUnauthorized();
-    shutDownNode = 1;
+    requestGracefulShutdown();
     Json::Value json; json["status"] = "ok";
     return jsonResp(json);
 }
