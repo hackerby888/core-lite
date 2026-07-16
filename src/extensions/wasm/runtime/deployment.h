@@ -1,0 +1,305 @@
+#pragma once
+
+// Module upload, deployment, activation scheduling, and boot setup.
+#ifdef LITE_WASM_SC
+
+#include "extensions/wasm/runtime/contract_slots.h"
+#include "extensions/wasm/runtime/deployment_protocol.h"
+#include "extensions/wasm/runtime/engine.h"
+
+namespace Wasm::Runtime
+{
+
+[[maybe_unused]] static void beginModuleUpload(
+    unsigned long long sessionId,
+    unsigned int totalSize,
+    unsigned int chunkCount,
+    const unsigned char* finalHash)
+{
+    if (totalSize > WASM_MAX_MODULE_SIZE)
+    {
+        return;
+    }
+
+    moduleUpload.active = true;
+    moduleUpload.sessionId = sessionId;
+    moduleUpload.totalSize = totalSize;
+    moduleUpload.chunkCount = chunkCount;
+    moduleUpload.receivedCount = 0;
+    copyMem(moduleUpload.finalHash, finalHash, 32);
+    setMem(receivedChunkBits, sizeof(receivedChunkBits), 0);
+    logToConsole(L"LITEDYN: UploadBegin received");
+}
+
+[[maybe_unused]] static void receiveModuleChunk(
+    unsigned long long sessionId,
+    unsigned int sequence,
+    const unsigned char* data,
+    unsigned int dataLength)
+{
+    if (!moduleUpload.active || sessionId != moduleUpload.sessionId)
+    {
+        return;
+    }
+
+    const unsigned long long destinationOffset = (unsigned long long)sequence * 1008ull;
+    if (destinationOffset + dataLength > WASM_MAX_MODULE_SIZE)
+    {
+        return;
+    }
+
+    if (sequence >= moduleUpload.chunkCount)
+    {
+        return;
+    }
+
+    const unsigned int sequenceByte = sequence >> 3;
+    const unsigned int sequenceBit = 1u << (sequence & 7);
+    if (!(receivedChunkBits[sequenceByte] & sequenceBit))
+    {
+        receivedChunkBits[sequenceByte] |= sequenceBit;
+        moduleUpload.receivedCount++;
+    }
+
+    copyMem(moduleUploadBuffer + destinationOffset, data, dataLength);
+}
+
+static bool moduleUploadComplete()
+{
+    if (!moduleUpload.active
+        || moduleUpload.receivedCount != moduleUpload.chunkCount)
+    {
+        return false;
+    }
+
+    unsigned char calculatedHash[32];
+
+    KangarooTwelve(moduleUploadBuffer, moduleUpload.totalSize, calculatedHash, 32);
+    for (int index = 0; index < 32; index++)
+    {
+        if (calculatedHash[index] != moduleUpload.finalHash[index])
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// Defined by runtime/engine.h earlier in the extension translation unit.
+static bool loadFromBytes(
+    unsigned int contractIndex,
+    const unsigned char* bytes,
+    unsigned int length);
+static bool isContractLoaded(unsigned int contractIndex);
+static bool hasPendingMigration(unsigned int contractIndex);
+static void runPendingMigration(unsigned int contractIndex);
+
+[[maybe_unused]] static void deployModule(
+    unsigned long long sessionId,
+    unsigned int targetSlot,
+    const unsigned char* finalHash,
+    unsigned int /*abiVersion*/,
+    unsigned int /*stateLayoutVersion*/,
+    const char* name)
+{
+    const int slotOffset = reservedSlotOffset(targetSlot);
+    if (slotOffset < 0)
+    {
+        return;
+    }
+
+    if (sessionId != moduleUpload.sessionId || !moduleUploadComplete())
+    {
+        return;
+    }
+
+    for (int index = 0; index < 32; index++)
+    {
+        if (finalHash[index] != moduleUpload.finalHash[index])
+        {
+            return;
+        }
+    }
+
+    ContractSlot& slot = contractSlots[slotOffset];
+
+    copyMem(slot.codeHash, finalHash, 32);
+    if (name)
+    {
+        copyMem(slot.name, name, 32);
+        slot.name[31] = 0;
+    }
+
+    slot.armed = true;
+    logToConsole(L"LITEDYN: Deploy accepted, slot armed");
+    slot.constructed = slot.everInitialized;
+    slot.version++;
+
+    bool loadOk = false;
+    const unsigned char* artifact = moduleUploadBuffer;
+    const bool hasWasmMagic = moduleUpload.totalSize >= 4
+        && artifact[0] == 0x00
+        && artifact[1] == 0x61
+        && artifact[2] == 0x73
+        && artifact[3] == 0x6d;
+
+    if (hasWasmMagic)
+    {
+        loadOk = loadFromBytes(targetSlot, moduleUploadBuffer, moduleUpload.totalSize);
+        logToConsole(loadOk ? L"LITEDYN: wasm contract loaded" : L"LITEDYN: ERROR wasm load failed");
+    }
+    else
+    {
+        logToConsole(L"LITEDYN: ERROR upload is not a wasm module ('\\0asm' expected)");
+    }
+
+    if (!loadOk)
+    {
+        logToConsole(L"LITEDYN: ERROR load failed - slot armed but not runnable");
+    }
+
+    if (loadOk && hasPendingMigration(targetSlot))
+    {
+        slot.needsMigrate = true;
+        logToConsole(L"LITEDYN: migrate scheduled for next tick");
+    }
+
+    moduleUpload.active = false;
+}
+
+
+[[maybe_unused]] static void dispatchDeploymentTransaction(
+    unsigned short inputType,
+    const unsigned char* input,
+    unsigned int size)
+{
+    if (inputType == WASM_DEPLOYMENT_UPLOAD_BEGIN_INPUT_TYPE)
+    {
+        if (size < DeploymentProtocol::UploadBeginSize)
+        {
+            return;
+        }
+
+        beginModuleUpload(
+            readU64(input, DeploymentProtocol::SessionIdOffset),
+            readU32(input, DeploymentProtocol::UploadTotalSizeOffset),
+            readU32(input, DeploymentProtocol::UploadChunkCountOffset),
+            input + DeploymentProtocol::UploadHashOffset);
+    }
+    else if (inputType == WASM_DEPLOYMENT_UPLOAD_CHUNK_INPUT_TYPE)
+    {
+        if (size < DeploymentProtocol::ChunkHeaderSize)
+        {
+            return;
+        }
+
+        const unsigned int dataLength = readU16(input, DeploymentProtocol::ChunkLengthOffset);
+        if (DeploymentProtocol::ChunkDataOffset + dataLength > size)
+        {
+            return;
+        }
+
+        receiveModuleChunk(
+            readU64(input, DeploymentProtocol::SessionIdOffset),
+            readU32(input, DeploymentProtocol::ChunkSequenceOffset),
+            input + DeploymentProtocol::ChunkDataOffset,
+            dataLength);
+    }
+    else if (inputType == WASM_DEPLOYMENT_DEPLOY_INPUT_TYPE)
+    {
+        if (size < DeploymentProtocol::DeployBaseSize)
+        {
+            return;
+        }
+
+        const char* name = nullptr;
+        if (size >= DeploymentProtocol::DeployNamedSize)
+        {
+            name = (const char*)(input + DeploymentProtocol::DeployNameOffset);
+        }
+
+        deployModule(
+            readU64(input, DeploymentProtocol::SessionIdOffset),
+            readU32(input, DeploymentProtocol::DeploySlotOffset),
+            input + DeploymentProtocol::DeployHashOffset,
+            readU32(input, DeploymentProtocol::DeployAbiVersionOffset),
+            readU32(input, DeploymentProtocol::DeployStateLayoutVersionOffset),
+            name);
+    }
+}
+
+static bool hasPendingActivation(unsigned int /*tick*/)
+{
+    for (unsigned int slotOffset = 0; slotOffset < WASM_RESERVED_SLOT_COUNT; slotOffset++)
+    {
+        const ContractSlot& slot = contractSlots[slotOffset];
+        if (slot.armed && (!slot.constructed || slot.needsMigrate))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+[[maybe_unused]] static void activatePendingContracts()
+{
+    for (unsigned int slotOffset = 0; slotOffset < WASM_RESERVED_SLOT_COUNT; slotOffset++)
+    {
+        ContractSlot& slot = contractSlots[slotOffset];
+        if (!slot.armed)
+        {
+            continue;
+        }
+
+        const unsigned int contractIndex = LITEDYN0_CONTRACT_INDEX + slotOffset;
+        if (slot.needsMigrate)
+        {
+            runPendingMigration(contractIndex);
+            slot.needsMigrate = false;
+            continue;
+        }
+
+        if (slot.constructed)
+        {
+            continue;
+        }
+
+        if (contractSystemProcedures[contractIndex][INITIALIZE])
+        {
+            QpiContextSystemProcedureCall qpiContext(contractIndex, INITIALIZE);
+
+            qpiContext.call();
+            slot.everInitialized = true;
+            logToConsole(L"LITEDYN: slot constructed (INITIALIZE ran)");
+        }
+        else
+        {
+            logToConsole(L"LITEDYN: ERROR construct skipped - tables unpatched (load failed)");
+        }
+
+        slot.constructed = true;
+    }
+}
+
+[[maybe_unused]] static void initializeDeployment()
+{
+    logToConsole(L"LITEWASM: runtime deployment enabled for testnet lite RAM");
+    logToConsole(L"LITEWASM: deploy address id(99999,0,0,0)");
+
+    for (unsigned int slotOffset = 0; slotOffset < WASM_RESERVED_SLOT_COUNT; slotOffset++)
+    {
+        const unsigned int contractIndex = LITEDYN0_CONTRACT_INDEX + slotOffset;
+
+        contractError[contractIndex] = NoContractError;
+        if (getContractFeeReserve(contractIndex) <= 0)
+        {
+            setContractFeeReserve(contractIndex, 1000000000000ll);
+        }
+    }
+}
+
+} // namespace Wasm::Runtime
+
+#endif // LITE_WASM_SC

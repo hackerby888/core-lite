@@ -53,7 +53,7 @@ cmake --build build-win --config Release --target Qubic
 ## Rules
 - **Guard every Windows change** with `if(WIN32)` / `#ifdef _WIN32` so the Linux + macOS builds are
   byte-identical (verify with `cmake -B <existing linux build dir>` — it must reconfigure unchanged).
-- **`k12_engine.h` is Linux-only** (userfaultfd). On Windows the adapter (`lite_sc_engine_adapter.h`)
+- **`k12_engine.h` is Linux-only** (userfaultfd). On Windows the adapter (`runtime/state_backend.h`)
   uses `LITE_SC_CONTRACT_LEVEL` → demand-zero `qVirtualAlloc` (VirtualAlloc) contract state. The
   free-mismatch fixes (`liteSCOnWasmTakeover`, `liteSCFree`, `freePoolOrVirtual`) already route the
   Windows free path correctly — don't `freePool` a `qVirtualAlloc`/memfd pointer.
@@ -71,14 +71,14 @@ cmake --build build-win --config Release --target Qubic
 | iter | error | fix |
 |---|---|---|
 | 12 | `C2665 appendText` ×1000s — `L"..."` is native `wchar_t*`, `CHAR16` is `unsigned short` | **`/Zc:wchar_t-`** on the Qubic target (= the mainnet .sln setting; wchar_t == unsigned short == CHAR16). Deps unaffected: their APIs are std::string; `<filesystem>` internals are `extern "C"` |
-| 13 | `C2760` syntax error in `lite_dynamic_contracts.h` at `->__transfer(...)` | the Windows SDK `specstrings.h` (via `<windows.h>`) defines a **function-like SAL macro `__transfer(formal)`** → `#undef __transfer` under `_MSC_VER` (no other SAL names collide — grepped) |
+| 13 | `C2760` syntax error in `runtime/qpi_services.h` at `->__transfer(...)` | the Windows SDK `specstrings.h` (via `<windows.h>`) defines a **function-like SAL macro `__transfer(formal)`** → `#undef __transfer` under `_MSC_VER` (no other SAL names collide — grepped) |
 | 14 | `C2589 '(' illegal right of '::'` — `std::min/max` vs windows.h `min`/`max` macros | `/DNOMINMAX` on the Qubic target |
 | 15 | `C1083 explorer_assets.generated.h` missing (regen.sh needs bash) | `regen.cmake` (cmake -P, no bash) + `else()` branch of the explorer custom command. NOTE: emits **byte arrays**, not raw strings — see iter 16 |
 | 16 | `C2026 string too big` — MSVC caps a string literal at ~16K; css/js exceed it | regen.cmake emits `unsigned char[]` byte arrays + `const char* const` aliases (consumers unchanged) |
 | 17 | `LNK2019 __imp_?...@trantor/drogon@` everywhere | vcpkg-manifest drogon's **dynamic** headers shadowed the FetchContent static ones (via FFI_INCLUDE_DIR) → trim `vcpkg.json` (see build notes above) |
 | 18/19 | trantor/drogon `C1083 ares.h / openssl / zlib.h / brotli` after the trim | those C libs ARE consumed from vcpkg → manifest = libffi+openssl+c-ares+zlib+brotli exactly |
 
-Also in this pass (pre-emptive, all `_WIN32`-guarded): `lite_wasm_debug.h` dirty-page tracker ported
+Also in this pass (pre-emptive, all `_WIN32`-guarded): `runtime/state_write_tracker.h` dirty-page tracker ported
 (sigaction/mprotect → `AddVectoredExceptionHandler`/`VirtualProtect`, `__sync_*` → `_InterlockedExchange`);
 `utils.h` `exec()` via `_popen`; `overload.h` `getCheckInData` compiled on Windows (http.h references it);
 `http.h` + the `QubicHttpServer::start`/`watchAndCheckin` gates extended to `_WIN32` (RPC server now runs
@@ -90,7 +90,7 @@ on Windows — Phase 2 needs it); the leftover `SUFFIX ".efi"` removed (OS port 
 | node boots, ticks 2-3×, then stalls at `tx=?` with the vote counter crawling (~25 votes/s; quorum needs 451) | **Windows default timer resolution is ~15.6ms** — every `sleep_for(1ms)` in the request/vote/transmit loops slept 15.6ms → throughput ~15× below Linux | `timeBeginPeriod(1)` in `initializeUefi()` (overload.h, `_MSC_VER`) + winmm |
 | (belt-and-braces, same pass) | Nagle + delayed-ACK on the many small per-vote loopback sends | `TCP_NODELAY` on accepted + outgoing sockets (`_MSC_VER`) |
 | stalls kept recurring ANYWAY — randomly at boot ("warm-up") or mid-run under tx load, request rate back at the ~256/s signature; interactive-console runs eventually recovered, qinit-spawned (detached, stdio→file) nodes never did | **Windows 11 power-throttles timer-resolution requests of "background" processes** (detached/occluded-console), silently ignoring `timeBeginPeriod` — the stall came and went with window state, which is why it looked nondeterministic | `SetProcessInformation(ProcessPowerThrottling, IGNORE_TIMER_RESOLUTION, StateMask=0)` right after `timeBeginPeriod(1)` — the request is then always honored. Node now ticks ~1/s (Linux parity) with no warm-up stall, even spawned by qinit |
-| working set ~11.5 GB (target ~1.9 GB) | Windows has **no shared zero page** for committed private memory: the per-tick digest's READS of never-written state pages each fault in a unique physical zero page — the first full sweep (change flags boot 0xFF) pinned every contract state's whole reserve (wsmap: 4×1GB dyn reserves + QX 593MB + ... ≈ 11 GB, all 100% resident; linux/mac mmap reads hit the shared zero page) | `VirtualUnlock(state, size)` after the K12 in `liteSCDigest` — documented way to drop pages from the working set WITHOUT invalidating them (readers soft-fault back; clean zero pages reclaimed outright; digest unchanged). Working set now **~1.7 GB**, contract regions 0-resident (`tools/wsmap.c` measures per-region residency) |
+| working set ~11.5 GB (target ~1.9 GB) | Windows has **no shared zero page** for committed private memory: the per-tick digest's READS of never-written state pages each fault in a unique physical zero page — the first full sweep (change flags boot 0xFF) pinned every contract state's whole reserve (wsmap: 4×1GB dyn reserves + QX 593MB + ... ≈ 11 GB, all 100% resident; linux/mac mmap reads hit the shared zero page) | `VirtualUnlock(state, size)` after the K12 in `hashContractState` — documented way to drop pages from the working set WITHOUT invalidating them (readers soft-fault back; clean zero pages reclaimed outright; digest unchanged). Working set now **~1.7 GB**, contract regions 0-resident (`tools/wsmap.c` measures per-region residency) |
 
 Boot: `run\..\build-win\src\Release\Qubic.exe --peers 127.0.0.1 --node-mode 3 --ticking-delay 1000`,
 then `GET http://127.0.0.1:41841/live/v1/tick-info` advances (vcpkg applocal copies ffi-8/openssl/...

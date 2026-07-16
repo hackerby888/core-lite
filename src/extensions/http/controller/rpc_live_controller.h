@@ -529,9 +529,9 @@ class RpcLiveController : public HttpController<RpcLiveController>
         Json::Value json;
         Json::Value arr(Json::arrayValue);
         // All reserved slots (armed + free) so tooling can resolve name -> slot and auto-allocate.
-        for (unsigned int i = 0; i < LITE_DYN_SLOT_COUNT; i++)
+        for (unsigned int i = 0; i < WASM_RESERVED_SLOT_COUNT; i++)
         {
-            const LiteDynSlot &s = g_liteDynSlots[i];
+            const Wasm::Runtime::ContractSlot &s = Wasm::Runtime::contractSlots[i];
             unsigned int idx = LITEDYN0_CONTRACT_INDEX + i;
             Json::Value c;
             c["index"] = idx;
@@ -564,11 +564,11 @@ class RpcLiveController : public HttpController<RpcLiveController>
             c["functions"] = fns;
             c["procedures"] = procs;
             c["source"] = s.sourceH;   // contract .h source (if submitted via /dev/contract-source) for callee resolution
-            c["lastError"] = liteWasmLastTrap(idx);   // most recent dispatch trap reason (empty if last call ok) — for tooling
+            c["lastError"] = Wasm::Runtime::lastTrap(idx);   // most recent dispatch trap reason (empty if last call ok) — for tooling
             arr.append(c);
         }
         json["slotBase"] = (unsigned int)LITEDYN0_CONTRACT_INDEX;
-        json["slotCount"] = (unsigned int)LITE_DYN_SLOT_COUNT;
+        json["slotCount"] = (unsigned int)WASM_RESERVED_SLOT_COUNT;
         json["contracts"] = arr;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
@@ -580,14 +580,14 @@ class RpcLiveController : public HttpController<RpcLiveController>
         Json::Value json;
         int idx = std::atoi(req->getParameter("slot").c_str());
         int local = idx - (int)LITEDYN0_CONTRACT_INDEX;
-        if (local < 0 || local >= (int)LITE_DYN_SLOT_COUNT)
+        if (local < 0 || local >= (int)WASM_RESERVED_SLOT_COUNT)
         {
             json["ok"] = false; json["error"] = "bad slot";
             cb(HttpResponse::newHttpJsonResponse(json));
             return;
         }
-        g_liteDynSlots[local].sourceH = std::string(req->getBody());
-        json["ok"] = true; json["slot"] = idx; json["len"] = (Json::UInt)g_liteDynSlots[local].sourceH.size();
+        Wasm::Runtime::contractSlots[local].sourceH = std::string(req->getBody());
+        json["ok"] = true; json["slot"] = idx; json["len"] = (Json::UInt)Wasm::Runtime::contractSlots[local].sourceH.size();
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
@@ -596,19 +596,19 @@ class RpcLiveController : public HttpController<RpcLiveController>
     inline void dynUpload(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
-        const LiteDynUpload &u = g_liteDynUpload;
+        const Wasm::Runtime::ModuleUpload &u = Wasm::Runtime::moduleUpload;
         char sid[32]; snprintf(sid, sizeof(sid), "%llu", (unsigned long long)u.sessionId);
         json["active"] = u.active;
         json["sessionId"] = std::string(sid);     // u64 as string (JSON loses precision past 2^53)
         json["totalSize"] = u.totalSize;
-        json["chunkSize"] = 1008u;                 // mirrors liteDynOnUploadChunk's seq*1008 layout
+        json["chunkSize"] = 1008u;                 // mirrors receiveModuleChunk's seq*1008 layout
         json["chunkCount"] = u.chunkCount;
         json["receivedCount"] = u.receivedCount;
         json["complete"] = (u.active && u.receivedCount == u.chunkCount);
         char hex[65];
         for (int b = 0; b < 32; b++) snprintf(hex + b * 2, 3, "%02x", u.finalHash[b]);
         json["finalHash"] = std::string(hex, 64);
-        // Missing seqs (bit clear in g_liteDynSeqSeen), capped so a large upload can't bloat the response.
+        // Missing seqs (bit clear in receivedChunkBits), capped so a large upload can't bloat the response.
         Json::Value missing(Json::arrayValue);
         unsigned int missingCount = 0;
         const unsigned int CAP = 4096;
@@ -616,7 +616,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
             for (unsigned int seq = 0; seq < u.chunkCount; seq++)
             {
                 const unsigned int byteIdx = seq >> 3, bit = 1u << (seq & 7);
-                if (!(g_liteDynSeqSeen[byteIdx] & bit))
+                if (!(Wasm::Runtime::receivedChunkBits[byteIdx] & bit))
                 {
                     if (missingCount < CAP) missing.append(seq);
                     missingCount++;
@@ -662,22 +662,22 @@ class RpcLiveController : public HttpController<RpcLiveController>
         unsigned long long since = 0; unsigned int limit = 64;
         try { auto s = req->getParameter("since"); if (!s.empty()) since = std::stoull(s); } catch (...) {}
         try { auto s = req->getParameter("limit"); if (!s.empty()) limit = (unsigned int)std::stoul(s); } catch (...) {}
-        if (limit == 0 || limit > LITE_WASM_TRACE_RING) limit = LITE_WASM_TRACE_RING;
-        Json::Value json; json["enabled"] = liteWasmDebugEnabled();
+        if (limit == 0 || limit > WASM_TRACE_RING_CAPACITY) limit = WASM_TRACE_RING_CAPACITY;
+        Json::Value json; json["enabled"] = Wasm::Runtime::traceEnabled();
         Json::Value arr(Json::arrayValue);
-        for (const auto &t : liteWasmTraceSnapshot(since, limit))
+        for (const auto &t : Wasm::Runtime::traceSnapshot(since, limit))
         {
             Json::Value e;
             e["seq"] = (Json::UInt64)t.sequence; e["tick"] = t.tick; e["index"] = t.contractIndex;
             e["entry"] = (unsigned int)t.inputType; e["kind"] = (unsigned int)t.kind; e["ok"] = t.ok;
             e["execNs"] = (Json::UInt64)t.executionNanoseconds;
             e["inSize"] = t.inputSize; e["outSize"] = t.outputSize; e["stateSize"] = t.stateSize; e["stateTruncated"] = t.stateTruncated;
-            e["invocator"] = liteWasmHex(&t.invocator, 32);
+            e["invocator"] = Wasm::Runtime::hex(&t.invocator, 32);
             e["invocationReward"] = (Json::Int64)t.invocationReward;
-            unsigned int ih = t.inputSize  < LITE_WASM_TRACE_HEAD ? t.inputSize  : LITE_WASM_TRACE_HEAD;
-            unsigned int oh = t.outputSize < LITE_WASM_TRACE_HEAD ? t.outputSize : LITE_WASM_TRACE_HEAD;
-            e["inHex"] = liteWasmHex(t.inputHead, ih);
-            e["outHex"] = liteWasmHex(t.outputHead, oh);
+            unsigned int ih = t.inputSize  < WASM_TRACE_CAPTURE_SIZE ? t.inputSize  : WASM_TRACE_CAPTURE_SIZE;
+            unsigned int oh = t.outputSize < WASM_TRACE_CAPTURE_SIZE ? t.outputSize : WASM_TRACE_CAPTURE_SIZE;
+            e["inHex"] = Wasm::Runtime::hex(t.inputHead, ih);
+            e["outHex"] = Wasm::Runtime::hex(t.outputHead, oh);
             Json::Value sd(Json::arrayValue);   // full-state diff: changed byte runs (offset within StateData)
             for (const auto &r : t.stateDiff) { Json::Value x; x["off"] = r.offset; x["before"] = r.before; x["after"] = r.after; sd.append(x); }
             e["stateDiff"] = sd;
@@ -697,14 +697,14 @@ class RpcLiveController : public HttpController<RpcLiveController>
     inline void devDebug(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
     {
         auto on = req->getParameter("on");
-        if (!on.empty()) liteWasmDebugSetEnabled(on == "1" || on == "true");   // installs the SIGSEGV dirty-tracker on first enable
-        Json::Value json; json["enabled"] = liteWasmDebugEnabled();
+        if (!on.empty()) Wasm::Runtime::setTraceEnabled(on == "1" || on == "true");   // installs the SIGSEGV dirty-tracker on first enable
+        Json::Value json; json["enabled"] = Wasm::Runtime::traceEnabled();
         cb(HttpResponse::newHttpJsonResponse(json));
     }
     // GET /live/v1/dev/debug-clear — drop all captured traces.
     inline void devDebugClear(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
     {
-        (void)req; liteWasmTraceClear();
+        (void)req; Wasm::Runtime::clearTrace();
         Json::Value json; json["cleared"] = true;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
@@ -720,8 +720,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
         const int local = idx - (int)LITEDYN0_CONTRACT_INDEX;
         bool ok; unsigned long long ss;
         if (idx >= (int)LITEDYN0_CONTRACT_INDEX) {
-            ok = (local >= 0 && local < (int)LITE_DYN_SLOT_COUNT && liteWasmIsWasm(idx) && contractStates[idx]);
-            ss = ok ? liteWasmEffectiveStateSize(idx, contractDescriptions[idx].stateSize) : 0;
+            ok = (local >= 0 && local < (int)WASM_RESERVED_SLOT_COUNT && Wasm::Runtime::isContractLoaded(idx) && contractStates[idx]);
+            ss = ok ? Wasm::Runtime::effectiveStateSize(idx, contractDescriptions[idx].stateSize) : 0;
         } else {
             ok = (idx >= 1 && idx < (int)contractCount && contractStates[idx]);
             ss = ok ? contractDescriptions[idx].stateSize : 0;
@@ -747,8 +747,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
         const int local = idx - (int)LITEDYN0_CONTRACT_INDEX;
         bool ok; unsigned long long ss;
         if (idx >= (int)LITEDYN0_CONTRACT_INDEX) {
-            ok = (local >= 0 && local < (int)LITE_DYN_SLOT_COUNT && liteWasmIsWasm(idx) && contractStates[idx]);
-            ss = ok ? liteWasmEffectiveStateSize(idx, contractDescriptions[idx].stateSize) : 0;
+            ok = (local >= 0 && local < (int)WASM_RESERVED_SLOT_COUNT && Wasm::Runtime::isContractLoaded(idx) && contractStates[idx]);
+            ss = ok ? Wasm::Runtime::effectiveStateSize(idx, contractDescriptions[idx].stateSize) : 0;
         } else {
             ok = (idx >= 1 && idx < (int)contractCount && contractStates[idx]);
             ss = ok ? contractDescriptions[idx].stateSize : 0;

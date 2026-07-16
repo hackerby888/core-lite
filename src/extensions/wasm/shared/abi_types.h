@@ -2,10 +2,13 @@
 // Shared binary declarations for runtime-deployed Wasm contracts.
 
 #include <cstdint>
-#include "extensions/wasm/lite_abi_metadata.h"
+#include "extensions/wasm/shared/abi_metadata.h"
+
+namespace Wasm
+{
 
 // This exchange layout is consumed by the node, contract iterator, and SDK metadata.
-struct LiteAssetEntry
+struct AssetEntry
 {
     unsigned char owner[32];
     unsigned char possessor[32];
@@ -14,24 +17,24 @@ struct LiteAssetEntry
     unsigned short possessionManagingContract;
     unsigned char padding[4];
 };
-#define LITE_ASSET_ENTRY_CAPACITY 1024u
+#define WASM_ASSET_ENTRY_CAPACITY 1024u
 
 // System-procedure slots must match SystemProcedureID in contract_def.h.
-#define LITE_SYS_PROC_ENUM(symbol, id, method, emptyMember) LITE_SP_##symbol = id,
-enum LiteSysProcId : uint32_t
+#define WASM_SYSTEM_PROCEDURE_ENUM(symbol, id, method, emptyMember) WASM_SYSTEM_PROCEDURE_##symbol = id,
+enum SystemProcedureId : uint32_t
 {
-    LITE_SYSTEM_PROCEDURE_ROWS(LITE_SYS_PROC_ENUM)
-    LITE_SP_COUNT,
+    WASM_SYSTEM_PROCEDURE_ROWS(WASM_SYSTEM_PROCEDURE_ENUM)
+    WASM_SYSTEM_PROCEDURE_COUNT,
 };
-#undef LITE_SYS_PROC_ENUM
+#undef WASM_SYSTEM_PROCEDURE_ENUM
 
-enum LiteEntryKind : uint8_t
+enum EntryKind : uint8_t
 {
-    LITE_KIND_FUNCTION = 0,
-    LITE_KIND_PROCEDURE = 1,
+    WASM_ENTRY_FUNCTION = 0,
+    WASM_ENTRY_PROCEDURE = 1,
 };
 
-enum class LiteWasmDispatchKind : uint8_t
+enum class DispatchKind : uint8_t
 {
     UserFunction = 0,
     UserProcedure = 1,
@@ -40,7 +43,7 @@ enum class LiteWasmDispatchKind : uint8_t
 };
 
 // The host fills this vtable and exposes it through the stable "lhost" import surface.
-struct LiteHostServices
+struct HostServices
 {
     uint32_t abiVersion;
 
@@ -115,9 +118,9 @@ struct LiteHostServices
     unsigned char  (*setShareholderVotes)(const void* callerCtx, unsigned int calleeIdx, const void* voteData, unsigned int voteSize, long long invocationReward);
 };
 
-#define LITE_MAX_USER_ENTRIES 1024
+#define WASM_MAX_USER_ENTRIES 1024
 
-struct LiteContractDescriptor
+struct ContractDescriptor
 {
     uint32_t abiVersion;
     char name[16];
@@ -125,3 +128,5 @@ struct LiteContractDescriptor
     uint32_t stateLayoutVersion;
     uint16_t entryCount;
 };
+
+} // namespace Wasm

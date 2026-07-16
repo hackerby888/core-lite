@@ -1,7 +1,7 @@
 // Regression test for the wasm-contract dispatch/reg/state ABI (WASM_CONTRACTS.md §13). Loads the embedded
 // fixture contract.wasm (engine ABI: state_addr/state_size/io_base/reg_count/reg_info/dispatch) in WAMR and
 // checks registration + dispatch (function + procedure) + state round-trip. This is the contract<->runtime
-// contract that both the node engine (lite_wasm_contracts.h) and the contract binding (lite_wasm_tu.h) rely on.
+// contract that both the node runtime and the contract SDK binding rely on.
 // Built only with -DLITE_WASM_SC (the test CMake adds WAMR/vmlib + this source then).
 #ifdef LITE_WASM_SC
 
@@ -12,7 +12,7 @@
 #include <vector>
 #include "gtest/gtest.h"
 #include "wasm_export.h"
-#include "extensions/wasm/lite_wasm_arena.h"
+#include "extensions/wasm/runtime/arena_scope.h"
 #include "wasm_contract_fixture.h"
 
 namespace {
@@ -62,13 +62,13 @@ TEST(WasmContracts, ArenaTopResetsAndNestedRestores) {
     uint32_t top = 999;
 
     {
-        LiteWasmArenaScope outer(depth, &top, 100);
+        Wasm::Runtime::ArenaScope outer(depth, &top, 100);
         EXPECT_EQ(depth, 1u);
         EXPECT_EQ(top, 100u);
 
         top = 160;
         {
-            LiteWasmArenaScope nested(depth, &top, 100);
+            Wasm::Runtime::ArenaScope nested(depth, &top, 100);
             EXPECT_EQ(depth, 2u);
             EXPECT_EQ(top, 160u);
             top = 224;
@@ -81,7 +81,7 @@ TEST(WasmContracts, ArenaTopResetsAndNestedRestores) {
 
     // The next independent call discards the previous call's temporary allocations.
     {
-        LiteWasmArenaScope nextOuter(depth, &top, 100);
+        Wasm::Runtime::ArenaScope nextOuter(depth, &top, 100);
         EXPECT_EQ(top, 100u);
     }
     EXPECT_EQ(depth, 0u);

@@ -12,9 +12,12 @@
 #define LITE_SC_CONTRACT_LEVEL 1
 #endif
 
+namespace Wasm::Runtime
+{
+
 inline bool g_wasmOwnedSlot[contractCount] = {};
 
-inline bool liteSCEngineActive(unsigned int contractIndex)
+inline bool stateEngineActive(unsigned int contractIndex)
 {
 #ifdef LITE_SC_ENGINE
     return ContractStateEngine::getEngine(contractIndex) != nullptr
@@ -25,7 +28,7 @@ inline bool liteSCEngineActive(unsigned int contractIndex)
 #endif
 }
 
-inline bool liteSCAlloc(unsigned int contractIndex, unsigned long long size)
+inline bool allocateContractState(unsigned int contractIndex, unsigned long long size)
 {
 #if defined(LITE_SC_ENGINE)
     return ContractStateEngine::create(
@@ -51,12 +54,12 @@ inline bool liteSCAlloc(unsigned int contractIndex, unsigned long long size)
 #endif
 }
 
-inline void liteSCDigest(
+inline void hashContractState(
     unsigned int contractIndex,
     unsigned char* output,
     unsigned long long effectiveSize)
 {
-    if (liteSCEngineActive(contractIndex))
+    if (stateEngineActive(contractIndex))
     {
 #ifdef LITE_SC_ENGINE
         ContractStateEngine::getEngine(contractIndex)->getHashAndReprotect(
@@ -83,7 +86,7 @@ inline void liteSCDigest(
     }
 }
 
-inline void liteSCEvictTick()
+inline void evictContractState()
 {
 #ifdef LITE_SC_ENGINE
     ContractStateEngine::tryEvictChunks();
@@ -91,7 +94,7 @@ inline void liteSCEvictTick()
 #endif
 }
 
-inline void liteSCFlush(unsigned int contractIndex)
+inline void flushContractState(unsigned int contractIndex)
 {
 #ifdef LITE_SC_ENGINE
     if (auto* engine = ContractStateEngine::getEngine(contractIndex))
@@ -103,7 +106,7 @@ inline void liteSCFlush(unsigned int contractIndex)
 #endif
 }
 
-inline void liteSCTouchAll(unsigned int contractIndex)
+inline void touchContractState(unsigned int contractIndex)
 {
 #ifdef LITE_SC_ENGINE
     if (auto* engine = ContractStateEngine::getEngine(contractIndex))
@@ -115,7 +118,7 @@ inline void liteSCTouchAll(unsigned int contractIndex)
 #endif
 }
 
-inline void liteSCReprotect(unsigned int contractIndex)
+inline void reprotectContractState(unsigned int contractIndex)
 {
 #ifdef LITE_SC_ENGINE
     if (auto* engine = ContractStateEngine::getEngine(contractIndex))
@@ -128,11 +131,11 @@ inline void liteSCReprotect(unsigned int contractIndex)
 #endif
 }
 
-inline void liteSCOnWasmTakeover(unsigned int contractIndex)
+inline void transferContractStateToWasm(unsigned int contractIndex)
 {
 #if defined(LITE_SC_ENGINE)
     // The engine retains ownership of its memfd after Wasm takes over the slot.
-    liteSCFlush(contractIndex);
+    flushContractState(contractIndex);
     g_wasmOwnedSlot[contractIndex] = true;
 #elif defined(LITE_SC_CONTRACT_LEVEL)
     g_wasmOwnedSlot[contractIndex] = true;
@@ -142,7 +145,7 @@ inline void liteSCOnWasmTakeover(unsigned int contractIndex)
 }
 
 // Only the plain pool backend returns state through freePool.
-inline void liteSCFree(unsigned int contractIndex)
+inline void freeContractState(unsigned int contractIndex)
 {
 #if defined(LITE_SC_ENGINE) || defined(LITE_SC_CONTRACT_LEVEL)
     (void)contractIndex;
@@ -154,7 +157,7 @@ inline void liteSCFree(unsigned int contractIndex)
 #endif
 }
 
-inline unsigned long long liteSCRamUsage()
+inline unsigned long long contractStateRamUsage()
 {
 #ifdef LITE_SC_ENGINE
     return ContractStateEngine::getRamUsageByAllEngines();
@@ -162,3 +165,5 @@ inline unsigned long long liteSCRamUsage()
     return 0;
 #endif
 }
+
+} // namespace Wasm::Runtime

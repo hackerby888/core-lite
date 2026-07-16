@@ -189,9 +189,7 @@ static volatile bool isReprocessingSolutions = false;
 #if defined(__linux__) && defined(LITE_WASM_SC)
 #include "extensions/k12_engine.h"
 #endif
-#include "extensions/wasm/lite_sc_engine_adapter.h"
-#include "extensions/wasm/lite_dynamic_contracts.h"
-#include "extensions/wasm/lite_wasm_contracts.h"
+#include "extensions/wasm/runtime/extension.h"
 #include "extensions/test_invalid_solution.h"
 #include "extensions/k12_state_digest_cache.h"
 
@@ -587,7 +585,7 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
         {
 #ifdef LITE_WASM_SC
             // wasm slots hash only the contract's real state (not the 1GB slot reserve); no-op for others.
-            const unsigned long long size = digestIndex < contractCount ? liteWasmEffectiveStateSize(digestIndex, contractDescriptions[digestIndex].stateSize) : 0;
+            const unsigned long long size = digestIndex < contractCount ? Wasm::Runtime::effectiveStateSize(digestIndex, contractDescriptions[digestIndex].stateSize) : 0;
 #else
             const unsigned long long size = digestIndex < contractCount ? contractDescriptions[digestIndex].stateSize : 0;
 #endif
@@ -607,7 +605,7 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
                 // wasm slots: contractStates[idx] aliases the resident state, hashed at `size` (its real span).
                 const unsigned long long startTime = __rdtsc();
 #if defined(LITE_WASM_SC)
-                liteSCDigest(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
+                Wasm::Runtime::hashContractState(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
 #else
                 if (!bypassCache && K12StateDigestCache::gK12StateDigestCacheEnabled && K12StateDigestCache::isCached(digestIndex))
                     K12StateDigestCache::computeDigest(digestIndex, &contractStateDigests[digestIndex]);
@@ -3047,8 +3045,8 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
 #ifdef LITE_WASM_SC
             if (transaction->destinationPublicKey == m256i(99999ULL, 0, 0, 0))
             {
-                // Lite dynamic-contract deploy txs use a dedicated address (NOT the core zero address).
-                liteDynDispatchTx(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
+                // Wasm deployment transactions use a dedicated address, not the core zero address.
+                Wasm::Runtime::dispatchDeploymentTransaction(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
             }
             else
 #endif
@@ -3454,10 +3452,10 @@ static void processTick(unsigned long long processorNumber)
 
 #ifdef LITE_WASM_SC
     // Construct armed dynamic-contract slots under SC_INITIALIZE_TX framing (design B').
-    if (liteDynPendingForTick(system.tick))
+    if (Wasm::Runtime::hasPendingActivation(system.tick))
     {
         logger.registerNewTx(system.tick, logger.SC_INITIALIZE_TX);
-        liteDynConstructPending();
+        Wasm::Runtime::activatePendingContracts();
     }
 #endif
     PROFILE_NAMED_SCOPE_BEGIN("processTick(): BEGIN_TICK");
@@ -7144,7 +7142,9 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 }
             }
         }
-        liteSCEvictTick(); // LRU-evict cold contract-state chunks down to the RAM cap (no-op under cap / engine off)
+#ifdef LITE_WASM_SC
+        Wasm::Runtime::evictContractState(); // LRU-evict cold contract-state chunks down to the RAM cap (no-op under cap / engine off)
+#endif
         tickerLoopNumerator += __rdtsc() - curTimeTick;
         tickerLoopDenominator++;
     }
@@ -7344,7 +7344,7 @@ static bool saveContractStateFiles(CHAR16* directory)
         contractStateLock[contractIndex].acquireRead();
 #ifdef LITE_WASM_SC
         // wasm slots alias a resident state smaller than the 1GB reserve; save its real span (avoid OOB read).
-        const unsigned long long saveSize = liteWasmEffectiveStateSize(contractIndex, contractDescriptions[contractIndex].stateSize);
+        const unsigned long long saveSize = Wasm::Runtime::effectiveStateSize(contractIndex, contractDescriptions[contractIndex].stateSize);
 #else
         const unsigned long long saveSize = contractDescriptions[contractIndex].stateSize;
 #endif
@@ -7481,7 +7481,7 @@ static bool initialize()
         {
             unsigned long long size = contractDescriptions[contractIndex].stateSize;
 #if defined(LITE_WASM_SC)
-            const bool contractStateAllocOk = liteSCAlloc(contractIndex, size);
+            const bool contractStateAllocOk = Wasm::Runtime::allocateContractState(contractIndex, size);
 #else
             // cached contracts need page-aligned state for per-chunk mprotect; off-path keeps the plain alloc
             const bool contractStateAllocOk = K12StateDigestCache::wantsPageAlignedAlloc(size)
@@ -7764,8 +7764,8 @@ static bool initialize()
     // universe needs to be initialized before initializing contract errors
     initializeContractErrors();
 #ifdef LITE_WASM_SC
-    liteDynBootDeploy();
-    liteWasmRuntimeInit();
+    Wasm::Runtime::initializeDeployment();
+    Wasm::Runtime::initializeEngine();
 #endif
 
     if (loadMiningSeedFromFile)
@@ -7945,7 +7945,11 @@ static void deinitialize()
     {
         if (contractStates[contractIndex])
         {
-            liteSCFree(contractIndex); // engine/demand-zero builds: OS reclaims memfd/mmap at exit (no freePool -> no darwin abort)
+#ifdef LITE_WASM_SC
+            Wasm::Runtime::freeContractState(contractIndex); // engine/demand-zero builds: OS reclaims memfd/mmap at exit (no freePool -> no darwin abort)
+#else
+            freePool(contractStates[contractIndex]);
+#endif
         }
     }
 

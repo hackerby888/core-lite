@@ -2,13 +2,16 @@
 // Host adapters for the Wasm oracle imports.
 // Fees and caller identity are always derived from host-owned state.
 
-static inline unsigned int liteOracleContractIndex(const void* context)
+namespace Wasm::Runtime
+{
+
+static inline unsigned int oracleContractIndex(const void* context)
 {
     return ((const QPI::QpiContextProcedureCall*)context)
         ->__qpiCurrentContractIndex();
 }
 
-static long long liteWasmQueryOracle(
+static long long queryOracle(
     const void* context,
     unsigned int interfaceIndex,
     const void* query,
@@ -32,7 +35,7 @@ static long long liteWasmQueryOracle(
         return -1;
     }
 
-    const unsigned int contractIndex = liteOracleContractIndex(context);
+    const unsigned int contractIndex = oracleContractIndex(context);
     const m256i contractId = m256i(contractIndex, 0, 0, 0);
     const long long fee = OI::getOracleQueryFeeFunc[interfaceIndex](query);
     const int contractSpectrumIndex = ::spectrumIndex(contractId);
@@ -64,7 +67,7 @@ static long long liteWasmQueryOracle(
 }
 
 // Subscription support is unavailable; the import remains stable and fails cleanly.
-static int liteWasmSubscribeOracle(
+static int subscribeOracle(
     const void* /*context*/,
     unsigned int /*interfaceIndex*/,
     const void* /*query*/,
@@ -77,7 +80,7 @@ static int liteWasmSubscribeOracle(
     return -1;
 }
 
-static unsigned int liteWasmGetOracleQuery(
+static unsigned int getOracleQuery(
     const void* /*context*/,
     long long queryId,
     void* output,
@@ -88,7 +91,7 @@ static unsigned int liteWasmGetOracleQuery(
         : 0u;
 }
 
-static unsigned int liteWasmGetOracleReply(
+static unsigned int getOracleReply(
     const void* /*context*/,
     long long queryId,
     void* output,
@@ -98,3 +101,5 @@ static unsigned int liteWasmGetOracleReply(
         ? 1u
         : 0u;
 }
+
+} // namespace Wasm::Runtime

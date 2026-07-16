@@ -1,0 +1,240 @@
+#pragma once
+
+// Per-call trace ring and host-call capture for testnet development.
+#ifdef LITE_WASM_SC
+
+#include <atomic>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <cstring>
+#include <cstdlib>
+#include <cstdint>
+
+#ifndef WASM_TRACE_RING_CAPACITY
+#define WASM_TRACE_RING_CAPACITY 256u
+#endif
+#ifndef WASM_TRACE_CAPTURE_SIZE
+#define WASM_TRACE_CAPTURE_SIZE 256u
+#endif
+#ifndef WASM_MAX_DIRTY_PAGES
+#define WASM_MAX_DIRTY_PAGES 4096u
+#endif
+
+namespace Wasm::Runtime
+{
+
+struct HostCallTrace
+{
+    const char* name;
+    std::string detail;
+};
+
+struct StateRegionTrace
+{
+    unsigned int offset;
+    std::string before;
+    std::string after;
+};
+
+struct LogTrace
+{
+    unsigned char type = 0;
+    unsigned int size = 0;
+    std::string hex;
+};
+
+struct TraceEntry
+{
+    unsigned long long sequence = 0;
+    unsigned int tick = 0;
+    unsigned int contractIndex = 0;
+    unsigned short inputType = 0;
+    unsigned char kind = 0;
+    bool ok = true;
+    bool used = false;
+    m256i invocator = m256i::zero();
+    long long invocationReward = 0;
+    unsigned int inputSize = 0;
+    unsigned int outputSize = 0;
+    unsigned int stateSize = 0;
+    bool stateTruncated = false;
+    unsigned char inputHead[WASM_TRACE_CAPTURE_SIZE] = {};
+    unsigned char outputHead[WASM_TRACE_CAPTURE_SIZE] = {};
+    unsigned long long executionNanoseconds = 0;
+    std::string trap;
+    std::vector<StateRegionTrace> stateDiff;
+    std::vector<HostCallTrace> hostCalls;
+    std::vector<LogTrace> logs;
+};
+
+static std::atomic<bool> traceActive{ false };
+
+static inline bool traceEnabled()
+{
+    return traceActive.load(std::memory_order_relaxed);
+}
+
+static TraceEntry traceRing[WASM_TRACE_RING_CAPACITY];
+static volatile long g_liteWasmTraceLock = 0;
+static unsigned int traceWriteIndex = 0;
+static unsigned long long traceSequence = 0;
+
+#ifdef _MSC_VER
+static inline void acquireTraceLock()
+{
+    while (_InterlockedExchange(&g_liteWasmTraceLock, 1))
+    {
+    }
+}
+
+static inline void releaseTraceLock()
+{
+    _InterlockedExchange(&g_liteWasmTraceLock, 0);
+}
+#else
+static inline void acquireTraceLock()
+{
+    while (__sync_lock_test_and_set(&g_liteWasmTraceLock, 1))
+    {
+    }
+}
+
+static inline void releaseTraceLock()
+{
+    __sync_lock_release(&g_liteWasmTraceLock);
+}
+#endif
+
+struct TraceLockScope
+{
+    TraceLockScope()
+    {
+        acquireTraceLock();
+    }
+
+    ~TraceLockScope()
+    {
+        releaseTraceLock();
+    }
+
+    TraceLockScope(const TraceLockScope&) = delete;
+    TraceLockScope& operator=(const TraceLockScope&) = delete;
+};
+
+static inline void recordHostCall(
+    TraceEntry* entry,
+    const char* name,
+    const std::string& detail)
+{
+    if (entry && entry->hostCalls.size() < 64)
+    {
+        entry->hostCalls.push_back({
+            name,
+            detail,
+        });
+    }
+}
+
+static inline void commitTrace(TraceEntry& entry)
+{
+    TraceLockScope lock;
+
+    entry.sequence = ++traceSequence;
+    entry.used = true;
+    traceRing[traceWriteIndex % WASM_TRACE_RING_CAPACITY] = entry;
+    traceWriteIndex++;
+}
+
+static inline std::vector<TraceEntry> traceSnapshot(
+    unsigned long long since,
+    unsigned int limit)
+{
+    std::vector<TraceEntry> entries;
+
+    {
+        TraceLockScope lock;
+
+        for (unsigned int index = 0; index < WASM_TRACE_RING_CAPACITY; index++)
+        {
+            if (traceRing[index].used
+                && traceRing[index].sequence > since)
+            {
+                entries.push_back(traceRing[index]);
+            }
+        }
+    }
+
+    std::sort(
+        entries.begin(),
+        entries.end(),
+        [](const TraceEntry& left, const TraceEntry& right)
+        {
+            return left.sequence < right.sequence;
+        });
+
+    if (entries.size() > limit)
+    {
+        entries.erase(entries.begin(), entries.end() - limit);
+    }
+
+    return entries;
+}
+
+static inline void clearTrace()
+{
+    TraceLockScope lock;
+
+    for (unsigned int index = 0; index < WASM_TRACE_RING_CAPACITY; index++)
+    {
+        traceRing[index].used = false;
+    }
+
+    traceWriteIndex = 0;
+}
+
+static inline std::string hex(const void* bytes, unsigned int size)
+{
+    if (!bytes)
+    {
+        return "null";
+    }
+
+    static const char* digits = "0123456789abcdef";
+    const unsigned char* input = (const unsigned char*)bytes;
+    std::string result;
+
+    result.reserve(size * 2);
+    for (unsigned int index = 0; index < size; index++)
+    {
+        result += digits[input[index] >> 4];
+        result += digits[input[index] & 15];
+    }
+
+    return result;
+}
+
+static inline void recordLog(
+    TraceEntry* entry,
+    unsigned char type,
+    const void* bytes,
+    unsigned int size)
+{
+    if (!entry)
+    {
+        return;
+    }
+
+    const unsigned int capturedSize = size > WASM_TRACE_CAPTURE_SIZE
+        ? WASM_TRACE_CAPTURE_SIZE
+        : size;
+    entry->logs.push_back(LogTrace{
+        type,
+        size,
+        hex(bytes, capturedSize),
+    });
+}
+
+} // namespace Wasm::Runtime
+
+#endif // LITE_WASM_SC

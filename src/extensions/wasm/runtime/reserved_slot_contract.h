@@ -1,4 +1,4 @@
-// Each reserved slot gets a fixed state stub until a deployed Wasm module takes over.
+// Re-included for each reserved slot, providing a fixed state stub until Wasm deployment.
 
 using namespace QPI;
 
@@ -10,7 +10,7 @@ struct CONTRACT_STATE_TYPE : public ContractBase
 {
     struct StateData
     {
-        Array<uint8, LITE_DYN_SLOT_STATE_SIZE> blob;
+        Array<uint8, WASM_RESERVED_SLOT_STATE_SIZE> blob;
     };
 
     REGISTER_USER_FUNCTIONS_AND_PROCEDURES()

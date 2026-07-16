@@ -26,7 +26,7 @@
 > confirming the page-aware digest / consensus path is correct. Final proof is the `windows-latest` smoke +
 > `digest-check` leg on push.
 >
-> Files: `src/extensions/overload.h`, `src/extensions/k12_paged.h` (new), `src/extensions/wasm/lite_sc_engine_adapter.h`,
+> Files: `src/extensions/overload.h`, `src/extensions/k12_paged.h` (new), `src/extensions/wasm/runtime/state_backend.h`,
 > `src/platform/memory_util.h`, `src/qubic.cpp`, `src/common_buffers.h`; harness `tools/joblaunch.c`,
 > `tools/k12paged_test.cpp`.
 
@@ -127,7 +127,7 @@ register ZERO votes the moment a tick carries transactions?** Framing facts (all
    at their last (reset → 0) value. The DEPLOY tx **arms a WAMR contract**: instantiate + the ~1 GB linear-
    memory arena via the Windows mmap-shim / `VirtualAlloc`. That path is **NOT** Linux-gated (unlike
    `k12_engine.h`) and is the most Windows-divergent code any transaction can reach. **Most likely** — and,
-   importantly, it lives in `src/extensions/wasm/lite_wasm_contracts.h` / the WAMR glue, which **is** editable.
+   importantly, it lives in `src/extensions/wasm/runtime/module_loader.h` / the WAMR glue, which **is** editable.
 2. **Vote broadcast/counting halted** — the node still produces votes but they aren't stored/counted in
    `ts.ticks[]` (loopback self-vote dropped under the deploy burst, or a lock left held). Less likely (the
    `ACQUIRE` locks are `_mm_pause` spins, `concurrency.h:31`), but a thread dump rules it in or out.
@@ -201,8 +201,8 @@ background launch reproduces it and a normal terminal launch does not, the diagn
 2. **Contract vs any-tx split.** Submit a **plain transfer** tx (no contract) and watch the prefix vote
    count. If it **also** freezes at `000:000(000)` → the halt is generic to *any* tx in a tick (look at the
    tx/tickData assembly + vote production, not the wasm engine). If a plain tx sails through and **only the
-   deploy** freezes → it's the **dynamic-contract path** (`src/extensions/wasm/lite_wasm_contracts.h` /
-   `lite_dynamic_contracts.h`, WAMR arm) — hypothesis 1. This one test eliminates half the search space.
+   deploy** freezes → it's the **dynamic-contract path** (`src/extensions/wasm/runtime/module_loader.h` /
+   `runtime/deployment.h`, WAMR arm) — hypothesis 1. This one test eliminates half the search space.
 3. **Watch the vote counters live.** The prefix already prints them (`AAA:BBB(CCC)` = aligned : misaligned
    : future, `qubic.cpp:498-512`). Confirm they sit at **0** (halt) and never climb. If they climb slowly
    toward 451 instead, re-open the timer-throughput theory — but the captured CI log shows a flat 0.
@@ -218,7 +218,7 @@ background launch reproduces it and a normal terminal launch does not, the diagn
 > The thread dump in Diagnostic 1 should pick the fix for you. Most-likely target is the WAMR arm path:
 
 1. **Fix the wedged call the thread dump names.** If it's WAMR instantiate / linear-memory alloc
-   (`src/extensions/wasm/lite_wasm_contracts.h` + the mmap-shim used on Windows): make the arena allocation lazy/
+   (`src/extensions/wasm/runtime/module_loader.h` + the mmap-shim used on Windows): make the arena allocation lazy/
    non-faulting on Windows (`MEM_RESERVE` then commit-on-touch, or a VEH commit handler), or bound/relocate
    whatever blocks. **In-scope (extensions-only).** This is where hypothesis 1 lands.
 2. **If it's the counting/broadcast path (hypothesis 2):** a lock left held or a loopback self-vote dropped
@@ -249,8 +249,8 @@ legs — that's the cross-platform consensus proof Phase 3b is for).
 - `QUORUM = 451`: `src/network_messages/common_def.h:11` (`676*2/3+1`). `TARGET_TICK_DURATION = 1000`:
   `src/public_settings.h:56`.
 - MAIN mode: `--node-mode 3` → `mainAuxStatus=3` → `isMainMode()` (`qubic.cpp:9593`, def `:535`).
-- WAMR contract-exec / arm path (hypothesis 1, NOT Linux-gated): `src/extensions/wasm/lite_wasm_contracts.h`,
-  `lite_dynamic_contracts.h`. Contrast `k12_engine.h` which **is** `#if __linux__` (`qubic.cpp:189`).
+- WAMR contract-exec / arm path (hypothesis 1, NOT Linux-gated): `src/extensions/wasm/runtime/module_loader.h`,
+  `runtime/deployment.h`. Contrast `k12_engine.h` which **is** `#if __linux__` (`qubic.cpp:189`).
 - `winmm` linked: `src/extensions/overload.h:13`. Timer opt-out block: `overload.h:1266-1289`
   (`timeBeginPeriod` `:1271`, `IGNORE_TIMER_RESOLUTION` `:1288`). `preciseSleepMicros()` helper `:52`.
   Pacing sleep (real but not this bug): `src/qubic.cpp:2037`.

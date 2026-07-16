@@ -1,11 +1,11 @@
 #pragma once
 
 // Canonical rows shared by WAMR registration and SDK metadata generation.
-#define LITE_DYN_ABI_VERSION 1u
+#define WASM_ABI_VERSION 1u
 
 // G/H selects generated or handwritten adapters; Q/I selects QPI-bound or infrastructure calls.
 
-#define LITE_SYSTEM_PROCEDURE_ROWS(X) \
+#define WASM_SYSTEM_PROCEDURE_ROWS(X) \
     X(INITIALIZE,               0, initialize,               __initializeEmpty) \
     X(BEGIN_EPOCH,              1, beginEpoch,               __beginEpochEmpty) \
     X(END_EPOCH,                2, endEpoch,                 __endEpochEmpty) \
@@ -19,7 +19,7 @@
     X(SET_SHAREHOLDER_PROPOSAL, 10, setShareholderProposal,  __setShareholderProposalEmpty) \
     X(SET_SHAREHOLDER_VOTES,    11, setShareholderVotes,     __setShareholderVotesEmpty)
 
-#define LITE_LHOST_ABI_ROWS(GQ, GI, HQ, HI) \
+#define WASM_LHOST_ABI_ROWS(GQ, GI, HQ, HI) \
     GI("beginFn",                             beginFn,                              "(i)")       \
     GI("endFn",                               endFn,                                "(i)")       \
     GI("markDirty",                           markDirty,                            "(i)")       \
