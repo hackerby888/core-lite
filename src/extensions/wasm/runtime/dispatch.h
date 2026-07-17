@@ -85,6 +85,75 @@ static void bindEnvironment(
     wasm_runtime_set_user_data(execEnv, &callContext);
 }
 
+struct CallContextScope
+{
+    wasm_exec_env_t execEnv;
+    CallContext*& activeContext;
+    CallContext* savedContext;
+    void* savedUserData;
+
+    CallContextScope(
+        wasm_exec_env_t environment,
+        int slotOffset,
+        CallContext& callContext)
+        : execEnv(environment),
+          activeContext(slotCallContexts[slotOffset]),
+          savedContext(activeContext),
+          savedUserData(wasm_runtime_get_user_data(environment))
+    {
+        activeContext = &callContext;
+        wasm_runtime_set_user_data(execEnv, &callContext);
+    }
+
+    ~CallContextScope()
+    {
+        activeContext = savedContext;
+        wasm_runtime_set_user_data(execEnv, savedUserData);
+    }
+
+    CallContextScope(const CallContextScope&) = delete;
+    CallContextScope& operator=(const CallContextScope&) = delete;
+};
+
+struct GuestContextScope
+{
+    const EngineSlot& slot;
+    bool restore = false;
+    unsigned char savedContext[sizeof(QPI::QpiContext)] = {};
+
+    GuestContextScope(const EngineSlot& engineSlot, bool nested)
+        : slot(engineSlot)
+    {
+        if (!nested || !slot.contextOffset)
+        {
+            return;
+        }
+
+        const void* guestContext = wasm_runtime_addr_app_to_native(
+            slot.instance,
+            slot.contextOffset);
+        if (guestContext)
+        {
+            copyMem(savedContext, guestContext, sizeof(savedContext));
+            restore = true;
+        }
+    }
+
+    ~GuestContextScope()
+    {
+        if (restore)
+        {
+            copyMem(
+                wasm_runtime_addr_app_to_native(slot.instance, slot.contextOffset),
+                savedContext,
+                sizeof(savedContext));
+        }
+    }
+
+    GuestContextScope(const GuestContextScope&) = delete;
+    GuestContextScope& operator=(const GuestContextScope&) = delete;
+};
+
 static void prepareMemory(
     const EngineSlot& slot,
     const MemoryLayout& layout,
@@ -112,6 +181,8 @@ static void prepareMemory(
         wasm_runtime_addr_app_to_native(slot.instance, layout.outputOffset),
         sizes.output ? sizes.output : 1,
         0);
+    zeroEntryLocals(
+        wasm_runtime_addr_app_to_native(slot.instance, layout.localsOffset));
 }
 
 static void finalizeMemory(
@@ -316,16 +387,27 @@ static void dispatchMigration(
     }
 
     const MemoryLayout layout = resolveMemoryLayout(slot);
+    uint32_t arenaEnd = 0;
+    if (!resolveArenaEnd(layout, arenaEnd))
+    {
+        logColorToScreen(
+            "ERROR",
+            "LITEWASM migrate arena exceeds Wasm32 memory idx="
+                + std::to_string(contractIndex));
+        return;
+    }
+
     const uint32_t migrationArenaBase =
         layout.arenaOffset + ((oldStateSize + 15u) & ~15u);
     CallContext callContext = createCallContext(
         context,
         migrationArenaBase,
-        layout.arenaOffset + WASM_ARENA_SIZE);
+        arenaEnd);
     ArenaScope arenaScope(
         slotCallDepth[slotOffset],
         slot.arenaTop,
-        migrationArenaBase);
+        migrationArenaBase,
+        slot.arenaTop ? *slot.arenaTop : migrationArenaBase);
 
     bindEnvironment(environment.execEnv, callContext);
 
@@ -413,17 +495,50 @@ static void dispatchCall(
         return;
     }
 
-    const MemoryLayout layout = resolveMemoryLayout(slot);
+    const MemoryLayout fixedLayout = resolveMemoryLayout(slot);
+    uint32_t arenaEnd = 0;
+    if (!resolveArenaEnd(fixedLayout, arenaEnd))
+    {
+        logColorToScreen(
+            "ERROR",
+            "LITEWASM dispatch arena exceeds Wasm32 memory idx="
+                + std::to_string(contractIndex));
+        return;
+    }
+
+    const bool nested = slotCallDepth[slotOffset] != 0;
+    CallContext* parentContext = slotCallContexts[slotOffset];
+    MemoryLayout layout = fixedLayout;
+    if (nested
+        && !nestedMemoryLayout(
+            fixedLayout,
+            arenaEnd,
+            slot.arenaTop ? *slot.arenaTop : 0,
+            parentContext ? parentContext->arenaBump : 0,
+            layout))
+    {
+        logColorToScreen(
+            "ERROR",
+            "LITEWASM nested dispatch frame exceeds arena idx="
+                + std::to_string(contractIndex));
+        return;
+    }
+
+    GuestContextScope guestContextScope(slot, nested);
     CallContext callContext = createCallContext(
         context,
         layout.arenaOffset,
-        layout.arenaOffset + WASM_ARENA_SIZE);
+        arenaEnd);
     ArenaScope arenaScope(
         slotCallDepth[slotOffset],
         slot.arenaTop,
+        fixedLayout.arenaOffset,
         layout.arenaOffset);
 
-    bindEnvironment(environment.execEnv, callContext);
+    CallContextScope callContextScope(
+        environment.execEnv,
+        slotOffset,
+        callContext);
     DispatchTrace trace;
     beginDispatchTrace(
         slot,

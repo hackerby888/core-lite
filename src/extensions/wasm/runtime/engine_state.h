@@ -24,13 +24,8 @@ void logColorToScreen(std::string type, std::string msg);
 namespace Wasm::Runtime
 {
 
-static constexpr uint32_t WASM_INPUT_CAPACITY = 64u * 1024u;
-static constexpr uint32_t WASM_OUTPUT_CAPACITY = 64u * 1024u;
-static constexpr uint32_t WASM_LOCALS_CAPACITY = 32u * 1024u;
 static constexpr unsigned long long WASM_IO_CAPACITY =
-    (unsigned long long)WASM_INPUT_CAPACITY
-    + WASM_OUTPUT_CAPACITY
-    + WASM_LOCALS_CAPACITY
+    (unsigned long long)WASM_DISPATCH_FRAME_CAPACITY
     + WASM_ARENA_SIZE;
 
 static bool engineReady = false;
@@ -140,6 +135,7 @@ static inline void ensureThreadEnvironment()
 
 static thread_local wasm_exec_env_t currentEnvironment = nullptr;
 static thread_local uint32_t slotCallDepth[WASM_RESERVED_SLOT_COUNT] = {};
+static thread_local CallContext* slotCallContexts[WASM_RESERVED_SLOT_COUNT] = {};
 
 struct IoSizes
 {
@@ -147,23 +143,24 @@ struct IoSizes
     uint16_t output = 0;
 };
 
-struct MemoryLayout
-{
-    uint32_t inputOffset;
-    uint32_t outputOffset;
-    uint32_t localsOffset;
-    uint32_t arenaOffset;
-};
-
 static MemoryLayout resolveMemoryLayout(const EngineSlot& slot)
 {
-    MemoryLayout layout;
+    return fixedMemoryLayout(slot.ioBaseOffset);
+}
 
-    layout.inputOffset = slot.ioBaseOffset;
-    layout.outputOffset = layout.inputOffset + WASM_INPUT_CAPACITY;
-    layout.localsOffset = layout.outputOffset + WASM_OUTPUT_CAPACITY;
-    layout.arenaOffset = layout.localsOffset + WASM_LOCALS_CAPACITY;
-    return layout;
+static bool resolveArenaEnd(
+    const MemoryLayout& fixedLayout,
+    uint32_t& arenaEnd)
+{
+    const unsigned long long end =
+        (unsigned long long)fixedLayout.arenaOffset + WASM_ARENA_SIZE;
+    if (end > 0xffffffffull)
+    {
+        return false;
+    }
+
+    arenaEnd = (uint32_t)end;
+    return true;
 }
 
 static bool resolveIoSizes(

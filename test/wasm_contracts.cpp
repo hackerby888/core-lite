@@ -62,15 +62,15 @@ TEST(WasmContracts, ArenaTopResetsAndNestedRestores) {
     uint32_t top = 999;
 
     {
-        Wasm::Runtime::ArenaScope outer(depth, &top, 100);
+        Wasm::Runtime::ArenaScope outer(depth, &top, 100, 100);
         EXPECT_EQ(depth, 1u);
         EXPECT_EQ(top, 100u);
 
         top = 160;
         {
-            Wasm::Runtime::ArenaScope nested(depth, &top, 100);
+            Wasm::Runtime::ArenaScope nested(depth, &top, 100, 200);
             EXPECT_EQ(depth, 2u);
-            EXPECT_EQ(top, 160u);
+            EXPECT_EQ(top, 200u);
             top = 224;
         }
         EXPECT_EQ(depth, 1u);
@@ -81,10 +81,68 @@ TEST(WasmContracts, ArenaTopResetsAndNestedRestores) {
 
     // The next independent call discards the previous call's temporary allocations.
     {
-        Wasm::Runtime::ArenaScope nextOuter(depth, &top, 100);
+        Wasm::Runtime::ArenaScope nextOuter(depth, &top, 100, 100);
         EXPECT_EQ(top, 100u);
     }
     EXPECT_EQ(depth, 0u);
+}
+
+TEST(WasmContracts, NestedCallUsesIsolatedFrame) {
+    using namespace Wasm::Runtime;
+
+    const MemoryLayout fixed = fixedMemoryLayout(4096);
+    const uint32_t parentArenaTop = fixed.arenaOffset + 3;
+    const uint32_t parentHostBump = fixed.arenaOffset + 21;
+    const uint32_t expectedInput = (parentHostBump + 7u) & ~7u;
+    const uint32_t arenaEnd = expectedInput + WASM_DISPATCH_FRAME_CAPACITY + 64;
+    MemoryLayout nested = {};
+
+    ASSERT_TRUE(nestedMemoryLayout(
+        fixed,
+        arenaEnd,
+        parentArenaTop,
+        parentHostBump,
+        nested));
+    EXPECT_EQ(nested.inputOffset, expectedInput);
+    EXPECT_EQ(nested.outputOffset, expectedInput + WASM_INPUT_CAPACITY);
+    EXPECT_EQ(
+        nested.localsOffset,
+        expectedInput + WASM_INPUT_CAPACITY + WASM_OUTPUT_CAPACITY);
+    EXPECT_EQ(
+        nested.arenaOffset,
+        expectedInput + WASM_DISPATCH_FRAME_CAPACITY);
+    EXPECT_GE(nested.inputOffset, fixed.arenaOffset);
+
+    std::vector<unsigned char> memory(arenaEnd + 1, 0);
+    memset(memory.data() + fixed.inputOffset, 0x11, WASM_INPUT_CAPACITY);
+    memset(memory.data() + fixed.outputOffset, 0x22, WASM_OUTPUT_CAPACITY);
+    memset(memory.data() + fixed.localsOffset, 0x33, WASM_LOCALS_CAPACITY);
+    memset(memory.data() + nested.inputOffset, 0x44, WASM_DISPATCH_FRAME_CAPACITY);
+
+    EXPECT_EQ(memory[fixed.inputOffset], 0x11);
+    EXPECT_EQ(memory[fixed.outputOffset], 0x22);
+    EXPECT_EQ(memory[fixed.localsOffset], 0x33);
+
+    MemoryLayout exhausted = {};
+    EXPECT_FALSE(nestedMemoryLayout(
+        fixed,
+        nested.arenaOffset - 1,
+        parentArenaTop,
+        parentHostBump,
+        exhausted));
+}
+
+TEST(WasmContracts, EntryLocalsAreFullyZeroed) {
+    std::vector<unsigned char> locals(
+        Wasm::Runtime::WASM_LOCALS_CAPACITY,
+        0xa5);
+
+    Wasm::Runtime::zeroEntryLocals(locals.data());
+
+    for (unsigned char byte : locals)
+    {
+        ASSERT_EQ(byte, 0);
+    }
 }
 
 TEST(WasmContracts, RegistrationDispatchAndStateRoundTrip) {
