@@ -20,12 +20,7 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
-#include <functional>
 #include <zstd.h>
-
-#ifdef LITE_ENGINE_DEBUG
-extern std::function<void()> engineCustomeActionCallback;
-#endif
 
 class K12Engine
 {
@@ -720,27 +715,12 @@ public:
                         paddedSize - (chunkIndex * (size_t)K12_chunkSize),
                         (size_t)K12_chunkSize);
 
-#ifdef LITE_ENGINE_DEBUG
-                    if (engineCustomeActionCallback)
-                    {
-                        engineCustomeActionCallback();
-                    }
-#endif
-
                     {
                         // Resume a write after recording the dirty chunk.
                         if (isWriteProtect)
                         {
                             updateAccessTracker(contractIndex, chunkIndex);
                             markChunkChanged(chunkIndex);
-#ifdef LITE_ENGINE_DEBUG
-                            printf(
-                                "Contract %u: page fault at address 0x%llx, chunk %u marked changed\n",
-                                contractIndex,
-                                (unsigned long long)accessAddress,
-                                chunkIndex);
-#endif
-
                             uffdio_writeprotect uwp{};
                             uwp.range.start = startRange;
                             uwp.range.len = lenRange;
@@ -768,13 +748,6 @@ public:
                                     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                                 }
                             } while (!loadOk);
-#ifdef LITE_ENGINE_DEBUG
-                            printf(
-                                "Loaded chunk %u for contract %u from disk\n",
-                                chunkIndex,
-                                contractIndex);
-#endif
-
                             uffdio_copy copyRequest{};
                             copyRequest.src = (uint64_t)loadBuffer;
                             copyRequest.dst = startRange;
@@ -801,13 +774,6 @@ public:
                         if (isMinor)
                         {
                             updateAccessTracker(contractIndex, chunkIndex);
-#ifdef LITE_ENGINE_DEBUG
-                            printf(
-                                "Found minor page fault at contract %llu address 0x%llx, chunk %u\n",
-                                contractIndex,
-                                (unsigned long long)accessAddress,
-                                chunkIndex);
-#endif
                             uffdio_continue continueRequest{};
                             continueRequest.range.start = startRange;
                             continueRequest.range.len = lenRange;

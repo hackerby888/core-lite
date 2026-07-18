@@ -34,7 +34,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstdio>
 #include <memory>
 
 static volatile bool listOfPeersIsStaticLiteNode = false;
@@ -1276,134 +1275,11 @@ struct Overload {
         return EFI_SUCCESS;
     }
 
-    // Aggregate loopback I/O health counters once per second.
-    inline static std::atomic<unsigned long long> npTxReqs{0};
-    inline static std::atomic<unsigned long long> npTxSend{0};
-    inline static std::atomic<unsigned long long> npTxBytes{0};
-    inline static std::atomic<unsigned long long> npTxWblk{0};
-    inline static std::atomic<unsigned long long> npTxTmo{0};
-    inline static std::atomic<unsigned long long> npTxSendNs{0};
-    inline static std::atomic<unsigned long long> npTxSendMaxNs{0};
-    inline static std::atomic<unsigned long long> npRxRecv{0};
-    inline static std::atomic<unsigned long long> npRxOk{0};
-    inline static std::atomic<unsigned long long> npRxBytes{0};
-    inline static std::atomic<unsigned long long> npRxRecvNs{0};
-    inline static std::atomic<unsigned long long> npRxRecvMaxNs{0};
-    inline static unsigned long long npSleepUs = 1000;
-
-    // Return process CPU time in 100 ns units when supported.
-    static unsigned long long npProcessCpu100ns()
-    {
-#ifdef _MSC_VER
-        FILETIME creationTime;
-        FILETIME exitTime;
-        FILETIME kernelTimeParts;
-        FILETIME userTimeParts;
-        if (!GetProcessTimes(
-                GetCurrentProcess(),
-                &creationTime,
-                &exitTime,
-                &kernelTimeParts,
-                &userTimeParts))
-        {
-            return 0;
-        }
-
-        ULARGE_INTEGER kernelTime;
-        kernelTime.LowPart = kernelTimeParts.dwLowDateTime;
-        kernelTime.HighPart = kernelTimeParts.dwHighDateTime;
-        ULARGE_INTEGER userTime;
-        userTime.LowPart = userTimeParts.dwLowDateTime;
-        userTime.HighPart = userTimeParts.dwHighDateTime;
-        return kernelTime.QuadPart + userTime.QuadPart;
-#else
-        return 0;
-#endif
-    }
-
-    // Emit one health sample per second independently of the I/O threads.
-    static void netprobeProcessor()
-    {
-        auto previousTime = std::chrono::steady_clock::now();
-        unsigned long long previousCpuTime = npProcessCpu100ns();
-        while (true)
-        {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            const auto currentTime = std::chrono::steady_clock::now();
-            const unsigned long long wallTimeNs =
-                (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    currentTime - previousTime).count();
-            previousTime = currentTime;
-
-            const unsigned long long currentCpuTime = npProcessCpu100ns();
-            const unsigned long long cpuCoresX100 = wallTimeNs
-                ? ((currentCpuTime - previousCpuTime) * 10000ULL / wallTimeNs)
-                : 0;
-            previousCpuTime = currentCpuTime;
-
-            const unsigned long long txRequests = npTxReqs.exchange(0);
-            const unsigned long long txSends = npTxSend.exchange(0);
-            const unsigned long long txBytes = npTxBytes.exchange(0);
-            const unsigned long long txWouldBlock = npTxWblk.exchange(0);
-            const unsigned long long txTimeouts = npTxTmo.exchange(0);
-            const unsigned long long txSendNs = npTxSendNs.exchange(0);
-            const unsigned long long txSendMaxNs = npTxSendMaxNs.exchange(0);
-            const unsigned long long rxReceives = npRxRecv.exchange(0);
-            const unsigned long long rxSuccesses = npRxOk.exchange(0);
-            const unsigned long long rxBytes = npRxBytes.exchange(0);
-            const unsigned long long rxReceiveNs = npRxRecvNs.exchange(0);
-            const unsigned long long rxReceiveMaxNs = npRxRecvMaxNs.exchange(0);
-
-            CHAR16 message[760];
-            setText(message, L"[NETPROBE] cpu_cores_x100=");
-            appendNumber(message, cpuCoresX100, FALSE);
-            appendText(message, L" sched_gap_ms=");
-            appendNumber(message, wallTimeNs / 1000000, FALSE);
-            appendText(message, L" | tx reqs=");
-            appendNumber(message, txRequests, FALSE);
-            appendText(message, L" send=");
-            appendNumber(message, txSends, FALSE);
-            appendText(message, L" wblk=");
-            appendNumber(message, txWouldBlock, FALSE);
-            appendText(message, L" tmo=");
-            appendNumber(message, txTimeouts, FALSE);
-            appendText(message, L" send_ns_avg=");
-            appendNumber(message, txSends ? txSendNs / txSends : 0, FALSE);
-            appendText(message, L" send_ns_max=");
-            appendNumber(message, txSendMaxNs, FALSE);
-            appendText(message, L" sleep_ms~=");
-            appendNumber(message, (txWouldBlock * npSleepUs) / 1000, FALSE);
-            appendText(message, L" txbytes=");
-            appendNumber(message, txBytes, FALSE);
-            appendText(message, L" || rx recv=");
-            appendNumber(message, rxReceives, FALSE);
-            appendText(message, L" ok=");
-            appendNumber(message, rxSuccesses, FALSE);
-            appendText(message, L" nonok=");
-            appendNumber(
-                message,
-                rxReceives >= rxSuccesses ? rxReceives - rxSuccesses : 0,
-                FALSE);
-            appendText(message, L" recv_ns_avg=");
-            appendNumber(
-                message,
-                rxReceives ? rxReceiveNs / rxReceives : 0,
-                FALSE);
-            appendText(message, L" recv_ns_max=");
-            appendNumber(message, rxReceiveMaxNs, FALSE);
-            appendText(message, L" rxbytes=");
-            appendNumber(message, rxBytes, FALSE);
-            logToConsole(message);
-            fflush(stdout);
-        }
-    }
-
     static void transmitProcessor()
     {
         while (true)
         {
             TransmitRequest request = transmitQueue.pop();
-            npTxReqs.fetch_add(1, std::memory_order_relaxed);
             int totalSentBytes = 0;
             auto& fragment = request.token->Packet.TxData->FragmentTable[0];
             // Timeout only after five seconds without forward progress.
@@ -1418,32 +1294,18 @@ struct Overload {
                 if (stalledTimeNs > NO_PROGRESS_TIMEOUT_NS)
                 {
                     request.token->CompletionToken.Status = EFI_TIMEOUT;
-                    npTxTmo.fetch_add(1, std::memory_order_relaxed);
                     break;
                 }
 
-                const auto sendStart = std::chrono::high_resolution_clock::now();
                 const auto sentBytes = send(
                     request.socket,
                     (const char*)fragment.FragmentBuffer + totalSentBytes,
                     fragment.FragmentLength - totalSentBytes,
                     MSG_DONTWAIT | MSG_NOSIGNAL);
-                const unsigned long long sendDurationNs =
-                    (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::high_resolution_clock::now() - sendStart).count();
-                npTxSend.fetch_add(1, std::memory_order_relaxed);
-                npTxSendNs.fetch_add(sendDurationNs, std::memory_order_relaxed);
-                const unsigned long long previousMaxNs =
-                    npTxSendMaxNs.load(std::memory_order_relaxed);
-                if (sendDurationNs > previousMaxNs)
-                {
-                    npTxSendMaxNs.store(sendDurationNs, std::memory_order_relaxed);
-                }
 
                 if (sentBytes > 0)
                 {
                     totalSentBytes += sentBytes;
-                    npTxBytes.fetch_add((unsigned long long)sentBytes, std::memory_order_relaxed);
                     lastProgress = currentTime;
                 }
                 else if (sentBytes == 0)
@@ -1455,10 +1317,9 @@ struct Overload {
                 else if (sentBytes == SOCKET_ERROR)
                 {
 #ifdef _MSC_VER
-					int err = WSAGetLastError();
+                    int err = WSAGetLastError();
                     if (err == WSAEWOULDBLOCK)
                     {
-                        npTxWblk.fetch_add(1, std::memory_order_relaxed);
                         preciseSleepMicros(1000);
                         continue;
                     }
@@ -1471,7 +1332,6 @@ struct Overload {
 #else
                     if (errno == EWOULDBLOCK || errno == EAGAIN)
                     {
-                        npTxWblk.fetch_add(1, std::memory_order_relaxed);
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         continue;
                     }
@@ -1500,23 +1360,11 @@ struct Overload {
             // Read only the free portion of a partially filled peer buffer.
             const auto& fragment = request.token->Packet.RxData->FragmentTable[0];
             const unsigned int maxReceiveSize = (unsigned int)fragment.FragmentLength;
-            const auto receiveStart = std::chrono::high_resolution_clock::now();
             const auto receivedBytes = recv(
                 request.socket,
                 (char*)fragment.FragmentBuffer,
                 maxReceiveSize,
                 MSG_DONTWAIT);
-            const unsigned long long receiveDurationNs =
-                (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::high_resolution_clock::now() - receiveStart).count();
-            npRxRecv.fetch_add(1, std::memory_order_relaxed);
-            npRxRecvNs.fetch_add(receiveDurationNs, std::memory_order_relaxed);
-            const unsigned long long previousMaxNs =
-                npRxRecvMaxNs.load(std::memory_order_relaxed);
-            if (receiveDurationNs > previousMaxNs)
-            {
-                npRxRecvMaxNs.store(receiveDurationNs, std::memory_order_relaxed);
-            }
 
             if (receivedBytes > 0)
             {
@@ -1524,8 +1372,6 @@ struct Overload {
                 // Publish the length before the success status observed by the main loop.
                 std::atomic_thread_fence(std::memory_order_release);
                 request.token->CompletionToken.Status = EFI_SUCCESS;
-                npRxOk.fetch_add(1, std::memory_order_relaxed);
-                npRxBytes.fetch_add((unsigned long long)receivedBytes, std::memory_order_relaxed);
             }
             else if (receivedBytes == 0)
             {
@@ -1590,37 +1436,6 @@ struct Overload {
         pt.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
         SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
 
-        // Measure the actual retry sleep used in network health logs.
-        {
-            LARGE_INTEGER frequency;
-            LARGE_INTEGER start;
-            LARGE_INTEGER end;
-            QueryPerformanceFrequency(&frequency);
-            QueryPerformanceCounter(&start);
-            for (int sample = 0; sample < 10; sample++)
-            {
-                preciseSleepMicros(1000);
-            }
-            QueryPerformanceCounter(&end);
-            npSleepUs = (unsigned long long)(
-                ((end.QuadPart - start.QuadPart) * 1000000ULL / frequency.QuadPart) / 10);
-            if (!npSleepUs)
-            {
-                npSleepUs = 1;
-            }
-
-            CHAR16 message[256];
-            setText(message, L"[NETPROBE] preciseSleep(1000us) actual avg = ");
-            appendNumber(message, npSleepUs, FALSE);
-            appendText(message, L" us/call; io_thread_pairs = ");
-            appendNumber(
-                message,
-                (unsigned long long)(
-                    NUMBER_OF_INCOMING_CONNECTIONS + NUMBER_OF_OUTGOING_CONNECTIONS),
-                FALSE);
-            logToConsole(message);
-            fflush(stdout);
-        }
         #endif
 
         ih = new EFI_HANDLE;
@@ -1661,11 +1476,6 @@ struct Overload {
             std::thread receiveProcessorThread(receiveProcessor);
             receiveProcessorThread.detach();
         }
-#ifdef _MSC_VER
-        std::thread netprobeThread(netprobeProcessor);
-        netprobeThread.detach();
-#endif
-
         // Reserve space
         incomingSocketMap.reserve(1024);
     }
