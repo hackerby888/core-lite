@@ -218,12 +218,12 @@ public:
             jsonWriter["commentStyle"] = "None";
             jsonWriter["indentation"] = "";
             req->setBody(Json::writeString(jsonWriter, body));
+            req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         }
 
         for (const auto& header : headers) {
             req->addHeader(header.first, header.second);
         }
-        req->addHeader("Content-Type", "application/json");
 
         // Capture client + callback by value: the request is async and outlives this frame, so by-reference captures dangle on completion.
         client->sendRequest(req, [client, callback](drogon::ReqResult _result, const drogon::HttpResponsePtr &_resp) {

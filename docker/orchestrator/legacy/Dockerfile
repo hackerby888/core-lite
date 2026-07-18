@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     zlib1g-dev \
     libssl-dev \
     libhiredis-dev \
+    libc-ares-dev \
     git \
     && rm -rf /var/lib/apt/lists/*
 
