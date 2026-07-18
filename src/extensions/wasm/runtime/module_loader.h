@@ -55,6 +55,12 @@ static void unloadSlot(EngineSlot& slot)
         slot.module = nullptr;
     }
 
+    if (slot.moduleBuffer)
+    {
+        free(slot.moduleBuffer);
+        slot.moduleBuffer = nullptr;
+    }
+
     for (uint32_t entryIndex = 0; entryIndex < slot.entryCount; ++entryIndex)
     {
         if (slot.entryClosures[entryIndex])
@@ -83,48 +89,40 @@ static void unloadSlot(EngineSlot& slot)
 
     slot.hasMigration = false;
     slot.entryCount = 0;
+    slot.loaded = false;
 }
 
 static bool prepareModuleBuffer(
-    EngineSlot& slot,
+    ModuleResources& moduleSet,
     const unsigned char* bytes,
     unsigned int length)
 {
     // WAMR mutates and retains this buffer for the module lifetime.
-    if (slot.moduleBuffer)
-    {
-        free(slot.moduleBuffer);
-        slot.moduleBuffer = nullptr;
-    }
-
-    slot.moduleBuffer = (unsigned char*)malloc(length);
-    if (!slot.moduleBuffer)
+    moduleSet.moduleBuffer = (unsigned char*)malloc(length);
+    if (!moduleSet.moduleBuffer)
     {
         logToConsole(L"LITEWASM: oom");
         return false;
     }
 
-    copyMem(slot.moduleBuffer, bytes, length);
+    copyMem(moduleSet.moduleBuffer, bytes, length);
     return true;
 }
 
 static bool loadModule(
-    EngineSlot& slot,
     unsigned int length,
     ModuleResources& moduleSet)
 {
     char error[192];
 
     moduleSet.module = wasm_runtime_load(
-        slot.moduleBuffer,
+        moduleSet.moduleBuffer,
         length,
         error,
         sizeof(error));
     if (!moduleSet.module)
     {
         logToConsole(L"LITEWASM: load failed");
-        free(slot.moduleBuffer);
-        slot.moduleBuffer = nullptr;
         return false;
     }
 
@@ -156,6 +154,7 @@ static bool findRequiredExports(
     wasm_module_inst_t instance,
     RequiredExports& exports)
 {
+    exports.contractIndex = wasm_runtime_lookup_function(instance, "contract_index");
     exports.stateAddress = wasm_runtime_lookup_function(instance, "state_addr");
     exports.stateSize = wasm_runtime_lookup_function(instance, "state_size");
     exports.ioBase = wasm_runtime_lookup_function(instance, "io_base");
@@ -163,7 +162,8 @@ static bool findRequiredExports(
     exports.registrationInfo = wasm_runtime_lookup_function(instance, "reg_info");
     exports.dispatch = wasm_runtime_lookup_function(instance, "dispatch");
 
-    if (!exports.stateAddress
+    if (!exports.contractIndex
+        || !exports.stateAddress
         || !exports.stateSize
         || !exports.ioBase
         || !exports.registrationCount
@@ -177,15 +177,86 @@ static bool findRequiredExports(
     return true;
 }
 
-static bool discoverMemoryLayout(
-    EngineSlot& slot,
+static bool validateContractIndex(
+    unsigned int targetContractIndex,
     const ModuleResources& moduleSet,
-    const RequiredExports& exports,
-    uint32_t*& arenaTop)
+    const RequiredExports& exports)
 {
-    slot.stateOffset = callU32(moduleSet.execEnv, exports.stateAddress);
-    slot.stateSize = callU32(moduleSet.execEnv, exports.stateSize);
-    slot.ioBaseOffset = callU32(moduleSet.execEnv, exports.ioBase);
+    wasm_valkind_t resultType = WASM_I32;
+    if (wasm_func_get_param_count(exports.contractIndex, moduleSet.instance) != 0
+        || wasm_func_get_result_count(exports.contractIndex, moduleSet.instance) != 1)
+    {
+        logToConsole(L"LITEWASM: contract_index must have signature () -> i32");
+        return false;
+    }
+
+    wasm_func_get_result_types(
+        exports.contractIndex,
+        moduleSet.instance,
+        &resultType);
+    if (resultType != WASM_I32)
+    {
+        logToConsole(L"LITEWASM: contract_index must have signature () -> i32");
+        return false;
+    }
+
+    uint32_t arguments[1] = { 0 };
+    if (!wasm_runtime_call_wasm(
+            moduleSet.execEnv,
+            exports.contractIndex,
+            0,
+            arguments))
+    {
+        const char* exception = wasm_runtime_get_exception(moduleSet.instance);
+        logColorToScreen(
+            "ERROR",
+            std::string("LITEWASM: contract_index() failed: ")
+                + (exception ? exception : "unknown trap"));
+        return false;
+    }
+
+    const unsigned int compiledContractIndex = arguments[0];
+    if (compiledContractIndex != targetContractIndex)
+    {
+        logColorToScreen(
+            "ERROR",
+            "LITEWASM: artifact slot mismatch: compiled "
+                + std::to_string(compiledContractIndex)
+                + ", target "
+                + std::to_string(targetContractIndex));
+        return false;
+    }
+
+    return true;
+}
+
+static bool callU32Checked(
+    const ModuleResources& moduleSet,
+    wasm_function_inst_t function,
+    uint32_t& result)
+{
+    uint32_t arguments[1] = { 0 };
+    if (!wasm_runtime_call_wasm(moduleSet.execEnv, function, 0, arguments))
+    {
+        logToConsole(L"LITEWASM: metadata export trapped");
+        return false;
+    }
+
+    result = arguments[0];
+    return true;
+}
+
+static bool discoverMemoryLayout(
+    ModuleLayout& layout,
+    const ModuleResources& moduleSet,
+    const RequiredExports& exports)
+{
+    if (!callU32Checked(moduleSet, exports.stateAddress, layout.stateOffset)
+        || !callU32Checked(moduleSet, exports.stateSize, layout.stateSize)
+        || !callU32Checked(moduleSet, exports.ioBase, layout.ioBaseOffset))
+    {
+        return false;
+    }
 
     wasm_global_inst_t arenaGlobal = {};
     if (wasm_runtime_get_export_global_inst(
@@ -201,14 +272,16 @@ static bool discoverMemoryLayout(
             return false;
         }
 
-        arenaTop = static_cast<uint32_t*>(arenaGlobal.global_data);
+        layout.arenaTop = static_cast<uint32_t*>(arenaGlobal.global_data);
     }
 
     wasm_function_inst_t ioSize = wasm_runtime_lookup_function(
         moduleSet.instance,
         "io_size");
+    uint32_t ioCapacity = 0;
     if (ioSize
-        && callU32(moduleSet.execEnv, ioSize) < WASM_IO_CAPACITY)
+        && (!callU32Checked(moduleSet, ioSize, ioCapacity)
+            || ioCapacity < WASM_IO_CAPACITY))
     {
         logToConsole(
             L"LITEWASM: contract io region too small for the engine carve (rebuild the contract)");
@@ -222,13 +295,17 @@ static void adoptModule(
     EngineSlot& slot,
     ModuleResources& moduleSet,
     const RequiredExports& exports,
-    uint32_t* arenaTop)
+    const ModuleLayout& layout)
 {
+    slot.moduleBuffer = moduleSet.moduleBuffer;
     slot.module = moduleSet.module;
     slot.instance = moduleSet.instance;
     slot.loadExecEnv = moduleSet.execEnv;
     slot.dispatchFunction = exports.dispatch;
-    slot.arenaTop = arenaTop;
+    slot.stateOffset = layout.stateOffset;
+    slot.stateSize = layout.stateSize;
+    slot.ioBaseOffset = layout.ioBaseOffset;
+    slot.arenaTop = layout.arenaTop;
     moduleSet.release();
 }
 

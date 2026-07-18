@@ -20,22 +20,15 @@ namespace Wasm::Runtime
     }
 
     EngineSlot& slot = engineSlots[slotOffset];
-    StateSnapshot previousState;
 
     ensureThreadEnvironment();
-    captureState(slot, contractIndex, previousState);
-    if (slot.instance)
-    {
-        unloadSlot(slot);
-    }
-
-    if (!prepareModuleBuffer(slot, bytes, length))
+    ModuleResources moduleSet;
+    if (!prepareModuleBuffer(moduleSet, bytes, length))
     {
         return false;
     }
 
-    ModuleResources moduleSet;
-    if (!loadModule(slot, length, moduleSet))
+    if (!loadModule(length, moduleSet))
     {
         return false;
     }
@@ -46,13 +39,22 @@ namespace Wasm::Runtime
         return false;
     }
 
-    uint32_t* arenaTop = nullptr;
-    if (!discoverMemoryLayout(slot, moduleSet, exports, arenaTop))
+    if (!validateContractIndex(contractIndex, moduleSet, exports))
     {
         return false;
     }
 
-    adoptModule(slot, moduleSet, exports, arenaTop);
+    ModuleLayout layout;
+    if (!discoverMemoryLayout(layout, moduleSet, exports))
+    {
+        return false;
+    }
+
+    StateSnapshot previousState;
+    captureState(slot, contractIndex, previousState);
+    unloadSlot(slot);
+
+    adoptModule(slot, moduleSet, exports, layout);
     takeOverState(slot, contractIndex);
     configureMigration(slot, contractIndex);
     restoreState(slot, contractIndex, previousState);

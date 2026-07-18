@@ -208,6 +208,7 @@ struct ModuleResources
     wasm_module_t module = nullptr;
     wasm_module_inst_t instance = nullptr;
     wasm_exec_env_t execEnv = nullptr;
+    unsigned char* moduleBuffer = nullptr;
 
     ~ModuleResources()
     {
@@ -225,6 +226,11 @@ struct ModuleResources
         {
             wasm_runtime_unload(module);
         }
+
+        if (moduleBuffer)
+        {
+            free(moduleBuffer);
+        }
     }
 
     void release()
@@ -232,6 +238,7 @@ struct ModuleResources
         module = nullptr;
         instance = nullptr;
         execEnv = nullptr;
+        moduleBuffer = nullptr;
     }
 
     ModuleResources() = default;
@@ -282,12 +289,21 @@ struct StateSnapshot
 
 struct RequiredExports
 {
+    wasm_function_inst_t contractIndex = nullptr;
     wasm_function_inst_t stateAddress = nullptr;
     wasm_function_inst_t stateSize = nullptr;
     wasm_function_inst_t ioBase = nullptr;
     wasm_function_inst_t registrationCount = nullptr;
     wasm_function_inst_t registrationInfo = nullptr;
     wasm_function_inst_t dispatch = nullptr;
+};
+
+struct ModuleLayout
+{
+    uint32_t stateOffset = 0;
+    uint32_t stateSize = 0;
+    uint32_t ioBaseOffset = 0;
+    uint32_t* arenaTop = nullptr;
 };
 
 struct EntryInfo

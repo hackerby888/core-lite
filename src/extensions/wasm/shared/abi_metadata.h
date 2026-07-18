@@ -1,7 +1,7 @@
 #pragma once
 
 // Canonical rows shared by WAMR registration and SDK metadata generation.
-#define WASM_ABI_VERSION 1u
+#define WASM_ABI_VERSION 2u
 
 // G/H selects generated or handwritten adapters; Q/I selects QPI-bound or infrastructure calls.
 

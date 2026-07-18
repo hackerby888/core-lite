@@ -9,8 +9,6 @@
 #define WASM_MAX_MODULE_SIZE (4u * 1024u * 1024u)
 #endif
 
-#define WASM_RESERVED_SLOT_COUNT 4
-
 namespace Wasm::Runtime
 {
 
@@ -45,12 +43,12 @@ static unsigned char receivedChunkBits[(WASM_MAX_MODULE_SIZE / 1008u) / 8u + 1u]
 
 static inline unsigned int reservedSlotBase()
 {
-    return LITEDYN0_CONTRACT_INDEX;
+    return WASM_RESERVED_SLOT_BASE;
 }
 
 static inline int reservedSlotOffset(unsigned int contractIndex)
 {
-    const int slotOffset = (int)contractIndex - (int)LITEDYN0_CONTRACT_INDEX;
+    const int slotOffset = (int)contractIndex - (int)WASM_RESERVED_SLOT_BASE;
     if (slotOffset < 0 || slotOffset >= (int)WASM_RESERVED_SLOT_COUNT)
     {
         return -1;

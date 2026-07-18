@@ -354,7 +354,10 @@ constexpr unsigned short TESTEXD_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #define WASM_RESERVED_SLOT_STATE_SIZE MAX_CONTRACT_STATE_SIZE
 #endif
 
-constexpr unsigned short LITEDYN0_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
+constexpr unsigned short WASM_RESERVED_SLOT_BASE = (CONTRACT_INDEX + 1);
+constexpr unsigned short WASM_RESERVED_SLOT_COUNT = 4;
+
+constexpr unsigned short LITEDYN0_CONTRACT_INDEX = WASM_RESERVED_SLOT_BASE + 0;
 #undef CONTRACT_INDEX
 #undef CONTRACT_STATE_TYPE
 #undef CONTRACT_STATE2_TYPE
@@ -363,7 +366,7 @@ constexpr unsigned short LITEDYN0_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #define CONTRACT_STATE2_TYPE LITEDYN0_2
 #include "extensions/wasm/runtime/reserved_slot_contract.h"
 
-constexpr unsigned short LITEDYN1_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
+constexpr unsigned short LITEDYN1_CONTRACT_INDEX = WASM_RESERVED_SLOT_BASE + 1;
 #undef CONTRACT_INDEX
 #undef CONTRACT_STATE_TYPE
 #undef CONTRACT_STATE2_TYPE
@@ -372,7 +375,7 @@ constexpr unsigned short LITEDYN1_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #define CONTRACT_STATE2_TYPE LITEDYN1_2
 #include "extensions/wasm/runtime/reserved_slot_contract.h"
 
-constexpr unsigned short LITEDYN2_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
+constexpr unsigned short LITEDYN2_CONTRACT_INDEX = WASM_RESERVED_SLOT_BASE + 2;
 #undef CONTRACT_INDEX
 #undef CONTRACT_STATE_TYPE
 #undef CONTRACT_STATE2_TYPE
@@ -381,7 +384,7 @@ constexpr unsigned short LITEDYN2_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #define CONTRACT_STATE2_TYPE LITEDYN2_2
 #include "extensions/wasm/runtime/reserved_slot_contract.h"
 
-constexpr unsigned short LITEDYN3_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
+constexpr unsigned short LITEDYN3_CONTRACT_INDEX = WASM_RESERVED_SLOT_BASE + 3;
 #undef CONTRACT_INDEX
 #undef CONTRACT_STATE_TYPE
 #undef CONTRACT_STATE2_TYPE
@@ -389,6 +392,9 @@ constexpr unsigned short LITEDYN3_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #define CONTRACT_STATE_TYPE LITEDYN3
 #define CONTRACT_STATE2_TYPE LITEDYN3_2
 #include "extensions/wasm/runtime/reserved_slot_contract.h"
+static_assert(
+    LITEDYN3_CONTRACT_INDEX + 1 == WASM_RESERVED_SLOT_BASE + WASM_RESERVED_SLOT_COUNT,
+    "Wasm reserved slots must be contiguous");
 #endif
 
 #define MAX_CONTRACT_ITERATION_DURATION 0 // In milliseconds, must be above 0; for now set to 0 to disable timeout, because a rollback mechanism needs to be implemented to properly handle timeout

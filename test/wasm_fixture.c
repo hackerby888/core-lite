@@ -3,6 +3,7 @@ typedef unsigned long long u64; typedef unsigned int u32;
 typedef struct { u64 count, sum; } State;
 static State g_state;
 static unsigned char io_scratch[64*1024];
+__attribute__((export_name("contract_index"))) u32 contract_index(void){return 29;}
 __attribute__((export_name("state_addr"))) u32 state_addr(void){return (u32)(unsigned long)&g_state;}
 __attribute__((export_name("state_size"))) u32 state_size(void){return (u32)sizeof(State);}
 __attribute__((export_name("io_base")))    u32 io_base(void){return (u32)(unsigned long)&io_scratch[0];}

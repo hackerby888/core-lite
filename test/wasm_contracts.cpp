@@ -149,8 +149,17 @@ TEST(WasmContracts, RegistrationDispatchAndStateRoundTrip) {
     WasmFixture w;
     ASSERT_TRUE(w.load());
 
+    wasm_function_inst_t contractIndex = wasm_runtime_lookup_function(w.inst, "contract_index");
+    ASSERT_NE(contractIndex, nullptr);
+    EXPECT_EQ(wasm_func_get_param_count(contractIndex, w.inst), 0u);
+    EXPECT_EQ(wasm_func_get_result_count(contractIndex, w.inst), 1u);
+    wasm_valkind_t resultType = WASM_I64;
+    wasm_func_get_result_types(contractIndex, w.inst, &resultType);
+    EXPECT_EQ(resultType, WASM_I32);
+
     // registration: 2 entries — G (function, it=1) + INC (procedure, it=2)
     uint32_t a[5] = { 0 };
+    EXPECT_EQ(w.call("contract_index", a, 0), 29u);
     EXPECT_EQ(w.call("reg_count", a, 0), 2u);
 
     a[0] = 0; uint32_t io = w.call("io_base", a, 0);
@@ -286,6 +295,23 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
     ASSERT_NE(inst, nullptr) << err;
     wasm_exec_env_t env = wasm_runtime_create_exec_env(inst, 256 * 1024);
     ASSERT_NE(env, nullptr);
+
+    const char* expectedSlotValue = getenv("QINIT_EXPECTED_SLOT");
+    ASSERT_NE(expectedSlotValue, nullptr) << "set QINIT_EXPECTED_SLOT for raw WAMR parity";
+    const uint32_t expectedSlot = (uint32_t)strtoul(expectedSlotValue, nullptr, 10);
+    wasm_function_inst_t contractIndex = wasm_runtime_lookup_function(inst, "contract_index");
+    ASSERT_NE(contractIndex, nullptr) << "missing required contract_index export";
+    ASSERT_EQ(wasm_func_get_param_count(contractIndex, inst), 0u);
+    ASSERT_EQ(wasm_func_get_result_count(contractIndex, inst), 1u);
+    wasm_valkind_t contractIndexResultType = WASM_I64;
+    wasm_func_get_result_types(contractIndex, inst, &contractIndexResultType);
+    ASSERT_EQ(contractIndexResultType, WASM_I32);
+    uint32_t contractIndexArguments[1] = { 0 };
+    ASSERT_TRUE(wasm_runtime_call_wasm(env, contractIndex, 0, contractIndexArguments))
+        << wasm_runtime_get_exception(inst);
+    ASSERT_EQ(contractIndexArguments[0], expectedSlot)
+        << "artifact slot mismatch: compiled " << contractIndexArguments[0]
+        << ", target " << expectedSlot;
 
     bool trapped = false;
     auto call = [&](const char* fn, uint32_t* a, uint32_t n, bool expectSuccess = true) -> uint32_t {

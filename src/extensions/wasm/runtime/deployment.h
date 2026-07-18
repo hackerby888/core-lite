@@ -99,13 +99,24 @@ static void runPendingMigration(unsigned int contractIndex);
     unsigned long long sessionId,
     unsigned int targetSlot,
     const unsigned char* finalHash,
-    unsigned int /*abiVersion*/,
+    unsigned int abiVersion,
     unsigned int /*stateLayoutVersion*/,
     const char* name)
 {
     const int slotOffset = reservedSlotOffset(targetSlot);
     if (slotOffset < 0)
     {
+        return;
+    }
+
+    if (abiVersion != WASM_ABI_VERSION)
+    {
+        logColorToScreen(
+            "ERROR",
+            "LITEDYN: unsupported Wasm ABI version "
+                + std::to_string(abiVersion)
+                + "; expected "
+                + std::to_string(WASM_ABI_VERSION));
         return;
     }
 
@@ -121,20 +132,6 @@ static void runPendingMigration(unsigned int contractIndex);
             return;
         }
     }
-
-    ContractSlot& slot = contractSlots[slotOffset];
-
-    copyMem(slot.codeHash, finalHash, 32);
-    if (name)
-    {
-        copyMem(slot.name, name, 32);
-        slot.name[31] = 0;
-    }
-
-    slot.armed = true;
-    logToConsole(L"LITEDYN: Deploy accepted, slot armed");
-    slot.constructed = slot.everInitialized;
-    slot.version++;
 
     bool loadOk = false;
     const unsigned char* artifact = moduleUploadBuffer;
@@ -156,10 +153,25 @@ static void runPendingMigration(unsigned int contractIndex);
 
     if (!loadOk)
     {
-        logToConsole(L"LITEDYN: ERROR load failed - slot armed but not runnable");
+        logToConsole(L"LITEDYN: ERROR load failed - resident slot unchanged");
+        moduleUpload.active = false;
+        return;
     }
 
-    if (loadOk && hasPendingMigration(targetSlot))
+    ContractSlot& slot = contractSlots[slotOffset];
+    copyMem(slot.codeHash, finalHash, 32);
+    if (name)
+    {
+        copyMem(slot.name, name, 32);
+        slot.name[31] = 0;
+    }
+
+    slot.armed = true;
+    slot.constructed = slot.everInitialized;
+    slot.version++;
+    logToConsole(L"LITEDYN: Deploy accepted, slot armed");
+
+    if (hasPendingMigration(targetSlot))
     {
         slot.needsMigrate = true;
         logToConsole(L"LITEDYN: migrate scheduled for next tick");
@@ -253,7 +265,7 @@ static bool hasPendingActivation(unsigned int /*tick*/)
             continue;
         }
 
-        const unsigned int contractIndex = LITEDYN0_CONTRACT_INDEX + slotOffset;
+        const unsigned int contractIndex = WASM_RESERVED_SLOT_BASE + slotOffset;
         if (slot.needsMigrate)
         {
             runPendingMigration(contractIndex);
@@ -290,7 +302,7 @@ static bool hasPendingActivation(unsigned int /*tick*/)
 
     for (unsigned int slotOffset = 0; slotOffset < WASM_RESERVED_SLOT_COUNT; slotOffset++)
     {
-        const unsigned int contractIndex = LITEDYN0_CONTRACT_INDEX + slotOffset;
+        const unsigned int contractIndex = WASM_RESERVED_SLOT_BASE + slotOffset;
 
         contractError[contractIndex] = NoContractError;
         if (getContractFeeReserve(contractIndex) <= 0)

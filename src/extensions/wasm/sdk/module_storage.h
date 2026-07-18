@@ -69,6 +69,12 @@ static void ensureModuleRegistered()
 
 extern "C"
 {
+LH_EXPORT(contract_index)
+unsigned int contract_index()
+{
+    return CONTRACT_INDEX;
+}
+
 LH_EXPORT(state_addr)
 unsigned int state_addr()
 {

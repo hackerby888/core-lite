@@ -532,7 +532,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
         for (unsigned int i = 0; i < WASM_RESERVED_SLOT_COUNT; i++)
         {
             const Wasm::Runtime::ContractSlot &s = Wasm::Runtime::contractSlots[i];
-            unsigned int idx = LITEDYN0_CONTRACT_INDEX + i;
+            unsigned int idx = WASM_RESERVED_SLOT_BASE + i;
             Json::Value c;
             c["index"] = idx;
             c["armed"] = s.armed;
@@ -567,7 +567,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
             c["lastError"] = Wasm::Runtime::lastTrap(idx);   // most recent dispatch trap reason (empty if last call ok) — for tooling
             arr.append(c);
         }
-        json["slotBase"] = (unsigned int)LITEDYN0_CONTRACT_INDEX;
+        json["slotBase"] = (unsigned int)WASM_RESERVED_SLOT_BASE;
         json["slotCount"] = (unsigned int)WASM_RESERVED_SLOT_COUNT;
         json["contracts"] = arr;
         cb(HttpResponse::newHttpJsonResponse(json));
@@ -579,7 +579,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
     {
         Json::Value json;
         int idx = std::atoi(req->getParameter("slot").c_str());
-        int local = idx - (int)LITEDYN0_CONTRACT_INDEX;
+        int local = idx - (int)WASM_RESERVED_SLOT_BASE;
         if (local < 0 || local >= (int)WASM_RESERVED_SLOT_COUNT)
         {
             json["ok"] = false; json["error"] = "bad slot";
@@ -717,9 +717,9 @@ class RpcLiveController : public HttpController<RpcLiveController>
         unsigned long long off = strtoull(req->getParameter("off").c_str(), nullptr, 10);
         unsigned long long len = strtoull(req->getParameter("len").c_str(), nullptr, 10);
         // dynamic wasm slot (idx >= dyn base) -> resident wasm state; otherwise a native system contract (1..contractCount-1).
-        const int local = idx - (int)LITEDYN0_CONTRACT_INDEX;
+        const int local = idx - (int)WASM_RESERVED_SLOT_BASE;
         bool ok; unsigned long long ss;
-        if (idx >= (int)LITEDYN0_CONTRACT_INDEX) {
+        if (idx >= (int)WASM_RESERVED_SLOT_BASE) {
             ok = (local >= 0 && local < (int)WASM_RESERVED_SLOT_COUNT && Wasm::Runtime::isContractLoaded(idx) && contractStates[idx]);
             ss = ok ? Wasm::Runtime::effectiveStateSize(idx, contractDescriptions[idx].stateSize) : 0;
         } else {
@@ -744,9 +744,9 @@ class RpcLiveController : public HttpController<RpcLiveController>
     {
         Json::Value json;
         int idx = std::atoi(req->getParameter("slot").c_str());
-        const int local = idx - (int)LITEDYN0_CONTRACT_INDEX;
+        const int local = idx - (int)WASM_RESERVED_SLOT_BASE;
         bool ok; unsigned long long ss;
-        if (idx >= (int)LITEDYN0_CONTRACT_INDEX) {
+        if (idx >= (int)WASM_RESERVED_SLOT_BASE) {
             ok = (local >= 0 && local < (int)WASM_RESERVED_SLOT_COUNT && Wasm::Runtime::isContractLoaded(idx) && contractStates[idx]);
             ss = ok ? Wasm::Runtime::effectiveStateSize(idx, contractDescriptions[idx].stateSize) : 0;
         } else {
