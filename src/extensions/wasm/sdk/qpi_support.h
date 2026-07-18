@@ -4,7 +4,7 @@
 #ifdef LITE_WASM_TU_BUILD
 
 #include "platform/memory.h"
-#include "extensions/wasm/lite_dyn_abi.h"
+#include "extensions/wasm/shared/abi_types.h"
 
 // QPI memory helpers
 
@@ -196,46 +196,46 @@ bool isArraySortedWithoutDuplicates(
 
 // Function-local storage
 
-static constexpr unsigned int LITE_WASM_LOCALS_CAPACITY = 2u << 20;
-static constexpr unsigned int LITE_WASM_LOCALS_DEPTH = 256;
+static constexpr unsigned int WASM_LOCALS_CAPACITY = 2u << 20;
+static constexpr unsigned int WASM_LOCALS_DEPTH = 256;
 
 namespace
 {
-unsigned char g_liteWasmLocals[LITE_WASM_LOCALS_CAPACITY];
-unsigned long g_liteWasmLocalsTop = 0;
-unsigned long g_liteWasmLocalsMarks[LITE_WASM_LOCALS_DEPTH];
-unsigned int g_liteWasmLocalsDepth = 0;
+unsigned char localsStorage[WASM_LOCALS_CAPACITY];
+unsigned long localsTop = 0;
+unsigned long localsMarks[WASM_LOCALS_DEPTH];
+unsigned int localsDepth = 0;
 } // namespace
 
 void* QPI::QpiContextFunctionCall::__qpiAllocLocals(unsigned int sizeOfLocals) const
 {
-    const unsigned long offset = g_liteWasmLocalsTop;
-    if (g_liteWasmLocalsDepth < LITE_WASM_LOCALS_DEPTH)
+    const unsigned long offset = localsTop;
+    if (localsDepth < WASM_LOCALS_DEPTH)
     {
-        g_liteWasmLocalsMarks[g_liteWasmLocalsDepth++] = offset;
+        localsMarks[localsDepth++] = offset;
     }
 
-    g_liteWasmLocalsTop = (offset + sizeOfLocals + 7) & ~7ul;
-    __builtin_memset(&g_liteWasmLocals[offset], 0, sizeOfLocals);
-    return (void*)&g_liteWasmLocals[offset];
+    localsTop = (offset + sizeOfLocals + 7) & ~7ul;
+    __builtin_memset(&localsStorage[offset], 0, sizeOfLocals);
+    return (void*)&localsStorage[offset];
 }
 
 void QPI::QpiContextFunctionCall::__qpiFreeLocals() const
 {
-    if (g_liteWasmLocalsDepth > 0)
+    if (localsDepth > 0)
     {
-        g_liteWasmLocalsTop = g_liteWasmLocalsMarks[--g_liteWasmLocalsDepth];
+        localsTop = localsMarks[--localsDepth];
     }
 }
 
 // Asset iterator host bridge
 
-static_assert(sizeof(LiteAssetEntry) == 80, "LiteAssetEntry ABI size");
-static_assert(offsetof(LiteAssetEntry, owner) == 0, "LiteAssetEntry owner offset");
-static_assert(offsetof(LiteAssetEntry, possessor) == 32, "LiteAssetEntry possessor offset");
-static_assert(offsetof(LiteAssetEntry, shares) == 64, "LiteAssetEntry shares offset");
-static_assert(offsetof(LiteAssetEntry, ownershipManagingContract) == 72, "LiteAssetEntry ownership-management offset");
-static_assert(offsetof(LiteAssetEntry, possessionManagingContract) == 74, "LiteAssetEntry possession-management offset");
+static_assert(sizeof(Wasm::AssetEntry) == 80, "AssetEntry ABI size");
+static_assert(offsetof(Wasm::AssetEntry, owner) == 0, "AssetEntry owner offset");
+static_assert(offsetof(Wasm::AssetEntry, possessor) == 32, "AssetEntry possessor offset");
+static_assert(offsetof(Wasm::AssetEntry, shares) == 64, "AssetEntry shares offset");
+static_assert(offsetof(Wasm::AssetEntry, ownershipManagingContract) == 72, "AssetEntry ownership-management offset");
+static_assert(offsetof(Wasm::AssetEntry, possessionManagingContract) == 74, "AssetEntry possession-management offset");
 __attribute__((import_module("lhost"), import_name("assetEnumerate")))
 extern "C" unsigned int lh_assetEnumerate(
     unsigned int kind,
@@ -247,7 +247,7 @@ extern "C" unsigned int lh_assetEnumerate(
 
 namespace
 {
-LiteAssetEntry g_liteAssetEntries[LITE_ASSET_ENTRY_CAPACITY];
+Wasm::AssetEntry assetEntries[WASM_ASSET_ENTRY_CAPACITY];
 } // namespace
 
 void QPI::AssetOwnershipIterator::begin(
@@ -261,8 +261,8 @@ void QPI::AssetOwnershipIterator::begin(
         &_issuance,
         &_ownership,
         &_ownership,
-        g_liteAssetEntries,
-        LITE_ASSET_ENTRY_CAPACITY);
+        assetEntries,
+        WASM_ASSET_ENTRY_CAPACITY);
     _ownershipIdx = 0;
 }
 
@@ -291,18 +291,18 @@ QPI::id QPI::AssetOwnershipIterator::owner() const
 {
     QPI::id ownerId;
 
-    copyMem(&ownerId, g_liteAssetEntries[_ownershipIdx].owner, 32);
+    copyMem(&ownerId, assetEntries[_ownershipIdx].owner, 32);
     return ownerId;
 }
 
 QPI::sint64 QPI::AssetOwnershipIterator::numberOfOwnedShares() const
 {
-    return g_liteAssetEntries[_ownershipIdx].shares;
+    return assetEntries[_ownershipIdx].shares;
 }
 
 QPI::uint16 QPI::AssetOwnershipIterator::ownershipManagingContract() const
 {
-    return g_liteAssetEntries[_ownershipIdx].ownershipManagingContract;
+    return assetEntries[_ownershipIdx].ownershipManagingContract;
 }
 
 void QPI::AssetPossessionIterator::begin(
@@ -318,8 +318,8 @@ void QPI::AssetPossessionIterator::begin(
         &_issuance,
         &_ownership,
         &_possession,
-        g_liteAssetEntries,
-        LITE_ASSET_ENTRY_CAPACITY);
+        assetEntries,
+        WASM_ASSET_ENTRY_CAPACITY);
     _ownershipIdx = 0;
 }
 
@@ -338,13 +338,13 @@ QPI::id QPI::AssetPossessionIterator::possessor() const
 {
     QPI::id possessorId;
 
-    copyMem(&possessorId, g_liteAssetEntries[_ownershipIdx].possessor, 32);
+    copyMem(&possessorId, assetEntries[_ownershipIdx].possessor, 32);
     return possessorId;
 }
 
 QPI::sint64 QPI::AssetPossessionIterator::numberOfPossessedShares() const
 {
-    return g_liteAssetEntries[_ownershipIdx].shares;
+    return assetEntries[_ownershipIdx].shares;
 }
 
 #endif

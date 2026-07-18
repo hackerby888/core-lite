@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qinit core-header snapshot: clang -M closure ∪ all contracts ∪ contract_def.h ∪ lite_contract_calls.h.
+# qinit core-header snapshot: native/Wasm clang -M closures plus contracts and inter-contract support.
 # Output <out>/core-headers.tar.gz (+ .sha256); layout mirrors the repo so -I resolves 1:1.
 set -euo pipefail
 
@@ -21,7 +21,7 @@ struct CONTRACT_STATE_TYPE : public ContractBase {
 };
 EOF
 
-# Mirror qinit packages/build/src/recipe.ts genWrapper so the -M closure matches a real .so build.
+# Mirror qinit packages/build/src/recipe.ts native wrapper directly.
 cat > "$TMP/Stub.wrapper.cpp" <<EOF
 #define NO_UEFI
 #include <cstdint>
@@ -33,23 +33,62 @@ cat > "$TMP/Stub.wrapper.cpp" <<EOF
 #include <utility>
 #include <array>
 #include <limits>
-#define LITE_DYN_SO_BUILD
+#define WASM_NATIVE_TU_BUILD
 #include "contract_core/pre_qpi_def.h"
 #include "contracts/qpi.h"
+#include "contracts/math_lib.h"
 #include "contract_core/qpi_proposal_voting.h"
 #include "oracle_core/oracle_interfaces_def.h"
 #define CONTRACT_INDEX 28
+#define Stub_CONTRACT_INDEX 28
 #define CONTRACT_STATE_TYPE Stub
 #define CONTRACT_STATE2_TYPE Stub2
+#include "extensions/wasm/sdk/intercontract_calls.h"
 #include "$TMP/Stub.h"
 #include "contract_core/qpi_collection_impl.h"
 #include "contract_core/qpi_linked_list_impl.h"
-#define __acquireScratchpad __lite_cb_acquireScratchpad_unused
-#define __releaseScratchpad __lite_cb_releaseScratchpad_unused
+#define __acquireScratchpad __wasm_native_cb_acquireScratchpad_unused
+#define __releaseScratchpad __wasm_native_cb_releaseScratchpad_unused
 #include "contract_core/qpi_hash_map_impl.h"
 #undef __acquireScratchpad
 #undef __releaseScratchpad
-#include "extensions/wasm/lite_dyn_abi.h"
+#include "extensions/wasm/shared/abi_types.h"
+EOF
+
+# Mirror the Wasm target directly. Keep this independent from the native wrapper so target-specific
+# headers cannot drift through include-string replacement.
+cat > "$TMP/Stub.wasm.wrapper.cpp" <<EOF
+#define NO_UEFI
+#include <cstdint>
+#include <cstddef>
+#include <cstring>
+#include <cstdlib>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <array>
+#include <limits>
+#define LITE_WASM_TU_BUILD
+#include "contract_core/pre_qpi_def.h"
+#include "contracts/qpi.h"
+#include "contracts/math_lib.h"
+#include "contract_core/qpi_proposal_voting.h"
+#include "oracle_core/oracle_interfaces_def.h"
+#define CONTRACT_INDEX 28
+#define Stub_CONTRACT_INDEX 28
+#define CONTRACT_STATE_TYPE Stub
+#define CONTRACT_STATE2_TYPE Stub2
+#include "extensions/wasm/sdk/intercontract_calls.h"
+#include "extensions/wasm/sdk/qpi_support.h"
+#include "$TMP/Stub.h"
+#include "contract_core/qpi_collection_impl.h"
+#include "contract_core/qpi_linked_list_impl.h"
+#define __acquireScratchpad __wasm_native_cb_acquireScratchpad_unused
+#define __releaseScratchpad __wasm_native_cb_releaseScratchpad_unused
+#include "contract_core/qpi_hash_map_impl.h"
+#undef __acquireScratchpad
+#undef __releaseScratchpad
+#include "extensions/wasm/sdk/module_runtime.h"
 EOF
 
 SNAP="$TMP/core-headers"
@@ -60,29 +99,23 @@ copy() { local f="$1"; [ -f "$f" ] || return 0; local rel; rel="$(realpath --rel
 DEPS="$("$CLANG" -std=c++20 -fPIC -mavx2 -I"$CORE" -I"$CORE/src" -M "$TMP/Stub.wrapper.cpp" | tr ' \\' '\n\n' | grep "^$CORE/" || true)"
 for f in $DEPS; do copy "$f"; done
 
-# WASM closure: contracts are compiled TO wasm, which pulls headers the native (.so, -mavx2) wrapper never
-# references — lite_wasm_tu.h (swapped in for lite_dyn_abi.h), the force -include'd lite_wasm_intrinsics.h, and
-# the simde/x86 m256i headers the wasm path takes (native uses real SSE). Compute that closure with the real
-# wasm target+sysroot and add it, or the cached snapshot fails: 'lite_wasm_intrinsics.h file not found'.
-SHIM="$CORE/src/extensions/wasm/lite_wasm_intrinsics.h"
-sed -e 's|#define LITE_DYN_SO_BUILD|#define LITE_WASM_TU_BUILD|' \
-    -e 's|#include "extensions/wasm/lite_dyn_abi.h"|#include "extensions/wasm/lite_wasm_tu.h"|' \
-    "$TMP/Stub.wrapper.cpp" > "$TMP/Stub.wasm.wrapper.cpp"
+# Wasm contracts also pull the SDK runtime, platform shim, and simde/x86 m256i headers. Compute that
+# closure with the real target and sysroot.
+SHIM="$CORE/src/extensions/wasm/sdk/platform_intrinsics.h"
 if [ -n "${WASM_CLANG:-}" ]; then
   WDEPS="$("$WASM_CLANG" --target=wasm32-wasi -std=c++20 -fno-exceptions -fno-rtti \
     ${WASI_SYSROOT:+--sysroot="$WASI_SYSROOT"} -include "$SHIM" -I"$CORE" -I"$CORE/src" \
     -M "$TMP/Stub.wasm.wrapper.cpp" | tr ' \\' '\n\n' | grep "^$CORE/" || true)"
   for f in $WDEPS; do copy "$f"; done
 else
-  echo "WARN: WASM_CLANG unset — wasm header closure (simde / lite_wasm_*) NOT captured; snapshot incomplete for wasm" >&2
+  echo "WARN: WASM_CLANG unset — Wasm SDK header closure not captured; snapshot incomplete for Wasm" >&2
 fi
-copy "$SHIM"                                       # -include'd by the wasm compile
-copy "$CORE/src/extensions/wasm/lite_wasm_tu.h"         # wasm TU binding (swapped in)
+copy "$SHIM" # force-included by the Wasm compile
 
 # Inter-contract: every contract header (callee types), the index map, the call-macro header.
 for f in "$CORE"/src/contracts/*.h; do copy "$f"; done
 copy "$CORE/src/contract_core/contract_def.h"
-copy "$CORE/src/extensions/wasm/lite_contract_calls.h"
+copy "$CORE/src/extensions/wasm/sdk/intercontract_calls.h"
 
 mkdir -p "$OUT"
 tar czf "$OUT/core-headers.tar.gz" -C "$SNAP" .

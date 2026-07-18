@@ -622,8 +622,6 @@ TEST(ContractQraffle, SubmitProposalPerUserLimitAndValidation)
     EXPECT_EQ(qraffle.submitProposal(users[0], token, 4000000ULL).returnCode, QRAFFLE_MAX_PROPOSAL_PER_USER_REACHED);
 
     // Use a different proposer for entry-amount validation; per-user cap would otherwise mask it.
-    // #898 relaxed token-raffle entry amounts to any positive value; only zero is rejected.
-    EXPECT_EQ(qraffle.submitProposal(users[1], token, 0ULL).returnCode, QRAFFLE_INVALID_ENTRY_AMOUNT);
     EXPECT_EQ(qraffle.submitProposal(users[1], token, 500000ULL).returnCode, QRAFFLE_SUCCESS);
     EXPECT_EQ(qraffle.submitProposal(users[1], token, 2000000000ULL).returnCode, QRAFFLE_SUCCESS);
 

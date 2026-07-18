@@ -6,10 +6,14 @@
 #include <type_traits>
 #include <array>
 #include "wasm_export.h"
-#include "extensions/wasm/lite_abi_metadata.h"
-#include "extensions/wasm/lite_wasm_debug.h"
+#include "extensions/wasm/shared/abi_metadata.h"
+#include "extensions/wasm/shared/abi_types.h"
+#include "extensions/wasm/runtime/trace.h"
 
-struct LiteWasmCallCtx
+namespace Wasm::Runtime
+{
+
+struct CallContext
 {
     const void* ctx;
     uint32_t arenaBase;
@@ -18,12 +22,12 @@ struct LiteWasmCallCtx
     void* trace = nullptr;
 };
 
-static inline LiteWasmCallCtx* liteWasmCallContext(wasm_exec_env_t execEnv)
+static inline CallContext* activeCallContext(wasm_exec_env_t execEnv)
 {
-    return (LiteWasmCallCtx*)wasm_runtime_get_user_data(execEnv);
+    return (CallContext*)wasm_runtime_get_user_data(execEnv);
 }
 
-static inline void* liteWasmNativeAddress(wasm_exec_env_t execEnv, uint32_t offset)
+static inline void* nativeAddress(wasm_exec_env_t execEnv, uint32_t offset)
 {
     if (!offset)
     {
@@ -33,15 +37,15 @@ static inline void* liteWasmNativeAddress(wasm_exec_env_t execEnv, uint32_t offs
     return wasm_runtime_addr_app_to_native(wasm_runtime_get_module_inst(execEnv), offset);
 }
 
-static inline void liteWasmTraceCall(
-    LiteWasmCallCtx* callContext,
+static inline void traceHostCall(
+    CallContext* callContext,
     const char* name,
     const std::string& detail)
 {
     if (callContext && callContext->trace)
     {
-        liteWasmTraceHostCall(
-            (LiteWasmTraceEntry*)callContext->trace,
+        recordHostCall(
+            (TraceEntry*)callContext->trace,
             name,
             detail);
     }
@@ -49,7 +53,7 @@ static inline void liteWasmTraceCall(
 
 // WAMR signatures use i/I/f/F for i32/i64/f32/f64. Pointers and narrow integers use i32.
 template<class T>
-constexpr size_t liteSafeSizeof()
+constexpr size_t safeSizeOf()
 {
     if constexpr (std::is_void_v<T>)
     {
@@ -62,7 +66,7 @@ constexpr size_t liteSafeSizeof()
 }
 
 template<class T>
-constexpr char liteWasmSigChar()
+constexpr char signatureCharacter()
 {
     if constexpr (std::is_void_v<T>)
     {
@@ -78,24 +82,24 @@ constexpr char liteWasmSigChar()
     }
     else
     {
-        return liteSafeSizeof<T>() <= 4 ? 'i' : 'I';
+        return safeSizeOf<T>() <= 4 ? 'i' : 'I';
     }
 }
 
 template<class T>
-using liteWasmAbi =
+using AbiType =
     std::conditional_t<std::is_void_v<T>, void,
       std::conditional_t<std::is_pointer_v<T>, uint32_t,
-        std::conditional_t<(std::is_integral_v<T> && liteSafeSizeof<T>() <= 4), uint32_t, T>>>;
+        std::conditional_t<(std::is_integral_v<T> && safeSizeOf<T>() <= 4), uint32_t, T>>>;
 
 template<class Parameter>
-static inline Parameter liteWasmConvertArgument(
+static inline Parameter convertArgument(
     wasm_exec_env_t execEnv,
-    liteWasmAbi<Parameter> argument)
+    AbiType<Parameter> argument)
 {
     if constexpr (std::is_pointer_v<Parameter>)
     {
-        return (Parameter)liteWasmNativeAddress(execEnv, (uint32_t)argument);
+        return (Parameter)nativeAddress(execEnv, (uint32_t)argument);
     }
     else
     {
@@ -104,20 +108,20 @@ static inline Parameter liteWasmConvertArgument(
 }
 
 template<class Ret, class... Args>
-constexpr std::array<char, 4 + sizeof...(Args)> liteWasmSig()
+constexpr std::array<char, 4 + sizeof...(Args)> makeSignature()
 {
     std::array<char, 4 + sizeof...(Args)> signature{};
     int offset = 0;
     signature[offset++] = '(';
 
-    const char parameterTypes[] = { liteWasmSigChar<Args>()..., '\0' };
+    const char parameterTypes[] = { signatureCharacter<Args>()..., '\0' };
     for (size_t index = 0; index < sizeof...(Args); index++)
     {
         signature[offset++] = parameterTypes[index];
     }
 
     signature[offset++] = ')';
-    const char returnType = liteWasmSigChar<Ret>();
+    const char returnType = signatureCharacter<Ret>();
     if (returnType)
     {
         signature[offset++] = returnType;
@@ -127,7 +131,7 @@ constexpr std::array<char, 4 + sizeof...(Args)> liteWasmSig()
     return signature;
 }
 
-constexpr bool liteCstrEq(const char* left, const char* right)
+constexpr bool equalStrings(const char* left, const char* right)
 {
     while (*left && *left == *right)
     {
@@ -139,53 +143,53 @@ constexpr bool liteCstrEq(const char* left, const char* right)
 }
 
 template<auto Member>
-struct LiteQpiImport;
+struct QpiImport;
 
-template<class R, class... A, R(*LiteHostServices::*Member)(const void*, A...)>
-struct LiteQpiImport<Member>
+template<class R, class... A, R(*HostServices::*Member)(const void*, A...)>
+struct QpiImport<Member>
 {
-    static liteWasmAbi<R> call(wasm_exec_env_t execEnv, liteWasmAbi<A>... arguments)
+    static AbiType<R> call(wasm_exec_env_t execEnv, AbiType<A>... arguments)
     {
-        LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+        CallContext* callContext = activeCallContext(execEnv);
 
         if constexpr (std::is_void_v<R>)
         {
-            (g_liteHostServices.*Member)(
+            (hostServices.*Member)(
                 callContext->ctx,
-                liteWasmConvertArgument<A>(execEnv, arguments)...);
+                convertArgument<A>(execEnv, arguments)...);
         }
         else
         {
-            return (liteWasmAbi<R>)(g_liteHostServices.*Member)(
+            return (AbiType<R>)(hostServices.*Member)(
                 callContext->ctx,
-                liteWasmConvertArgument<A>(execEnv, arguments)...);
+                convertArgument<A>(execEnv, arguments)...);
         }
     }
 
-    static constexpr auto sig = liteWasmSig<R, A...>();
+    static constexpr auto sig = makeSignature<R, A...>();
 };
 
 template<auto Member>
-struct LiteInfraImport;
+struct InfrastructureImport;
 
-template<class R, class... A, R(*LiteHostServices::*Member)(A...)>
-struct LiteInfraImport<Member>
+template<class R, class... A, R(*HostServices::*Member)(A...)>
+struct InfrastructureImport<Member>
 {
-    static liteWasmAbi<R> call(wasm_exec_env_t execEnv, liteWasmAbi<A>... arguments)
+    static AbiType<R> call(wasm_exec_env_t execEnv, AbiType<A>... arguments)
     {
         if constexpr (std::is_void_v<R>)
         {
-            (g_liteHostServices.*Member)(
-                liteWasmConvertArgument<A>(execEnv, arguments)...);
+            (hostServices.*Member)(
+                convertArgument<A>(execEnv, arguments)...);
         }
         else
         {
-            return (liteWasmAbi<R>)(g_liteHostServices.*Member)(
-                liteWasmConvertArgument<A>(execEnv, arguments)...);
+            return (AbiType<R>)(hostServices.*Member)(
+                convertArgument<A>(execEnv, arguments)...);
         }
     }
 
-    static constexpr auto sig = liteWasmSig<R, A...>();
+    static constexpr auto sig = makeSignature<R, A...>();
 };
 
 // Bespoke wrappers retain derived signatures through the ABI rows below.
@@ -194,7 +198,7 @@ static uint32_t w_acquireScratch(
     uint64_t size,
     uint32_t initializeToZero)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
     const uint32_t alignedSize = (uint32_t)((size + 7) & ~7ull);
 
     if (!callContext || callContext->arenaBump + alignedSize > callContext->arenaEnd)
@@ -210,7 +214,7 @@ static uint32_t w_acquireScratch(
 
     if (initializeToZero)
     {
-        setMem(liteWasmNativeAddress(execEnv, allocationOffset), alignedSize, 0);
+        setMem(nativeAddress(execEnv, allocationOffset), alignedSize, 0);
     }
 
     return allocationOffset;
@@ -229,31 +233,31 @@ static void w_logBytes(
     uint32_t messageOffset,
     uint32_t size)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    void* message = liteWasmNativeAddress(execEnv, messageOffset);
+    CallContext* callContext = activeCallContext(execEnv);
+    void* message = nativeAddress(execEnv, messageOffset);
 
     if (callContext && callContext->trace)
     {
-        liteWasmTraceLog(
-            (LiteWasmTraceEntry*)callContext->trace,
+        recordLog(
+            (TraceEntry*)callContext->trace,
             (unsigned char)type,
             message,
             size);
     }
 
-    g_liteHostServices.logBytes(contractIndex, (unsigned char)type, message, size);
+    hostServices.logBytes(contractIndex, (unsigned char)type, message, size);
 }
 
 static int64_t w_transfer(wasm_exec_env_t execEnv, uint32_t destinationOffset, int64_t amount)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    void* destination = liteWasmNativeAddress(execEnv, destinationOffset);
+    CallContext* callContext = activeCallContext(execEnv);
+    void* destination = nativeAddress(execEnv, destinationOffset);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "transfer",
-        liteWasmHex(destination, 8) + ".. " + std::to_string(amount));
-    return g_liteHostServices.transfer(callContext->ctx, destination, amount);
+        hex(destination, 8) + ".. " + std::to_string(amount));
+    return hostServices.transfer(callContext->ctx, destination, amount);
 }
 
 static int64_t w_transferTyped(
@@ -262,15 +266,15 @@ static int64_t w_transferTyped(
     int64_t amount,
     uint32_t transferType)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    void* destination = liteWasmNativeAddress(execEnv, destinationOffset);
+    CallContext* callContext = activeCallContext(execEnv);
+    void* destination = nativeAddress(execEnv, destinationOffset);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "transferTyped",
-        liteWasmHex(destination, 8) + ".. " + std::to_string(amount)
+        hex(destination, 8) + ".. " + std::to_string(amount)
             + " t=" + std::to_string(transferType));
-    return g_liteHostServices.transferTyped(
+    return hostServices.transferTyped(
         callContext->ctx,
         destination,
         amount,
@@ -279,21 +283,21 @@ static int64_t w_transferTyped(
 
 static void w_abort(wasm_exec_env_t execEnv, uint32_t errorCode)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(callContext, "abort", std::to_string(errorCode));
-    g_liteHostServices.abort(callContext->ctx, errorCode);
+    traceHostCall(callContext, "abort", std::to_string(errorCode));
+    hostServices.abort(callContext->ctx, errorCode);
 }
 
 static int64_t w_burn(wasm_exec_env_t execEnv, int64_t amount, uint32_t contractIndex)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "burn",
         std::to_string(amount) + " for " + std::to_string(contractIndex));
-    return g_liteHostServices.burn(callContext->ctx, amount, contractIndex);
+    return hostServices.burn(callContext->ctx, amount, contractIndex);
 }
 
 static int64_t w_issueAsset(
@@ -304,16 +308,16 @@ static int64_t w_issueAsset(
     int64_t shares,
     uint64_t unit)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "issueAsset",
         "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
-    return g_liteHostServices.issueAsset(
+    return hostServices.issueAsset(
         callContext->ctx,
         name,
-        liteWasmNativeAddress(execEnv, issuerOffset),
+        nativeAddress(execEnv, issuerOffset),
         (signed char)decimals,
         shares,
         unit);
@@ -328,20 +332,20 @@ static int64_t w_transferShares(
     int64_t shares,
     uint32_t newOwnerOffset)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "transferShares",
         "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
-    return g_liteHostServices.transferShareOwnershipAndPossession(
+    return hostServices.transferShareOwnershipAndPossession(
         callContext->ctx,
         name,
-        liteWasmNativeAddress(execEnv, issuerOffset),
-        liteWasmNativeAddress(execEnv, ownerOffset),
-        liteWasmNativeAddress(execEnv, possessorOffset),
+        nativeAddress(execEnv, issuerOffset),
+        nativeAddress(execEnv, ownerOffset),
+        nativeAddress(execEnv, possessorOffset),
         shares,
-        liteWasmNativeAddress(execEnv, newOwnerOffset));
+        nativeAddress(execEnv, newOwnerOffset));
 }
 
 static int64_t w_acquireShares(
@@ -355,18 +359,18 @@ static int64_t w_acquireShares(
     uint32_t sourcePossessionManagement,
     int64_t fee)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "acquireShares",
         "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
-    return g_liteHostServices.acquireShares(
+    return hostServices.acquireShares(
         callContext->ctx,
         name,
-        liteWasmNativeAddress(execEnv, issuerOffset),
-        liteWasmNativeAddress(execEnv, ownerOffset),
-        liteWasmNativeAddress(execEnv, possessorOffset),
+        nativeAddress(execEnv, issuerOffset),
+        nativeAddress(execEnv, ownerOffset),
+        nativeAddress(execEnv, possessorOffset),
         shares,
         (unsigned short)sourceOwnershipManagement,
         (unsigned short)sourcePossessionManagement,
@@ -384,18 +388,18 @@ static int64_t w_releaseShares(
     uint32_t destinationPossessionManagement,
     int64_t fee)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "releaseShares",
         "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
-    return g_liteHostServices.releaseShares(
+    return hostServices.releaseShares(
         callContext->ctx,
         name,
-        liteWasmNativeAddress(execEnv, issuerOffset),
-        liteWasmNativeAddress(execEnv, ownerOffset),
-        liteWasmNativeAddress(execEnv, possessorOffset),
+        nativeAddress(execEnv, issuerOffset),
+        nativeAddress(execEnv, ownerOffset),
+        nativeAddress(execEnv, possessorOffset),
         shares,
         (unsigned short)destinationOwnershipManagement,
         (unsigned short)destinationPossessionManagement,
@@ -411,16 +415,16 @@ static uint32_t w_assetEnumerate(
     uint32_t outputOffset,
     uint32_t capacity)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(callContext, "assetEnumerate", "kind=" + std::to_string(kind));
-    return g_liteHostServices.assetEnumerate(
+    traceHostCall(callContext, "assetEnumerate", "kind=" + std::to_string(kind));
+    return hostServices.assetEnumerate(
         callContext->ctx,
         kind,
-        liteWasmNativeAddress(execEnv, issuanceOffset),
-        liteWasmNativeAddress(execEnv, ownershipOffset),
-        liteWasmNativeAddress(execEnv, possessionOffset),
-        liteWasmNativeAddress(execEnv, outputOffset),
+        nativeAddress(execEnv, issuanceOffset),
+        nativeAddress(execEnv, ownershipOffset),
+        nativeAddress(execEnv, possessionOffset),
+        nativeAddress(execEnv, outputOffset),
         capacity);
 }
 
@@ -430,8 +434,8 @@ static uint32_t w_dayOfWeek(
     uint32_t month,
     uint32_t day)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    return g_liteHostServices.dayOfWeek(
+    CallContext* callContext = activeCallContext(execEnv);
+    return hostServices.dayOfWeek(
         callContext->ctx,
         (unsigned char)year,
         (unsigned char)month,
@@ -444,12 +448,12 @@ static uint32_t w_signatureValidity(
     uint32_t digestOffset,
     uint32_t signatureOffset)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    return g_liteHostServices.signatureValidity(
+    CallContext* callContext = activeCallContext(execEnv);
+    return hostServices.signatureValidity(
         callContext->ctx,
-        liteWasmNativeAddress(execEnv, entityOffset),
-        liteWasmNativeAddress(execEnv, digestOffset),
-        liteWasmNativeAddress(execEnv, signatureOffset));
+        nativeAddress(execEnv, entityOffset),
+        nativeAddress(execEnv, digestOffset),
+        nativeAddress(execEnv, signatureOffset));
 }
 
 static int64_t w_bidInIPO(
@@ -458,8 +462,8 @@ static int64_t w_bidInIPO(
     int64_t price,
     uint32_t quantity)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    return g_liteHostServices.bidInIPO(callContext->ctx, contractIndex, price, quantity);
+    CallContext* callContext = activeCallContext(execEnv);
+    return hostServices.bidInIPO(callContext->ctx, contractIndex, price, quantity);
 }
 
 static void w_ipoBidId(
@@ -468,12 +472,12 @@ static void w_ipoBidId(
     uint32_t bidIndex,
     uint32_t outputOffset)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    g_liteHostServices.ipoBidId(
+    CallContext* callContext = activeCallContext(execEnv);
+    hostServices.ipoBidId(
         callContext->ctx,
         contractIndex,
         bidIndex,
-        liteWasmNativeAddress(execEnv, outputOffset));
+        nativeAddress(execEnv, outputOffset));
 }
 
 static int64_t w_ipoBidPrice(
@@ -481,8 +485,8 @@ static int64_t w_ipoBidPrice(
     uint32_t contractIndex,
     uint32_t bidIndex)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    return g_liteHostServices.ipoBidPrice(callContext->ctx, contractIndex, bidIndex);
+    CallContext* callContext = activeCallContext(execEnv);
+    return hostServices.ipoBidPrice(callContext->ctx, contractIndex, bidIndex);
 }
 
 static void w_computeMiningFunction(
@@ -492,33 +496,33 @@ static void w_computeMiningFunction(
     uint32_t nonceOffset,
     uint32_t outputOffset)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    g_liteHostServices.computeMiningFunction(
+    CallContext* callContext = activeCallContext(execEnv);
+    hostServices.computeMiningFunction(
         callContext->ctx,
-        liteWasmNativeAddress(execEnv, seedOffset),
-        liteWasmNativeAddress(execEnv, publicKeyOffset),
-        liteWasmNativeAddress(execEnv, nonceOffset),
-        liteWasmNativeAddress(execEnv, outputOffset));
+        nativeAddress(execEnv, seedOffset),
+        nativeAddress(execEnv, publicKeyOffset),
+        nativeAddress(execEnv, nonceOffset),
+        nativeAddress(execEnv, outputOffset));
 }
 
 static void w_initMiningSeed(wasm_exec_env_t execEnv, uint32_t seedOffset)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    g_liteHostServices.initMiningSeed(
+    CallContext* callContext = activeCallContext(execEnv);
+    hostServices.initMiningSeed(
         callContext->ctx,
-        liteWasmNativeAddress(execEnv, seedOffset));
+        nativeAddress(execEnv, seedOffset));
 }
 
 static uint32_t w_getOracleQueryStatus(wasm_exec_env_t execEnv, int64_t queryId)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    return g_liteHostServices.getOracleQueryStatus(callContext->ctx, queryId);
+    CallContext* callContext = activeCallContext(execEnv);
+    return hostServices.getOracleQueryStatus(callContext->ctx, queryId);
 }
 
 static uint32_t w_unsubscribeOracle(wasm_exec_env_t execEnv, int32_t subscriptionId)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    return g_liteHostServices.unsubscribeOracle(callContext->ctx, subscriptionId);
+    CallContext* callContext = activeCallContext(execEnv);
+    return hostServices.unsubscribeOracle(callContext->ctx, subscriptionId);
 }
 
 static int64_t w_queryOracle(
@@ -530,16 +534,16 @@ static int64_t w_queryOracle(
     uint32_t timeoutMilliseconds,
     int64_t fee)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "queryOracle",
         "iface=" + std::to_string(interfaceIndex));
-    return g_liteHostServices.queryOracle(
+    return hostServices.queryOracle(
         callContext->ctx,
         interfaceIndex,
-        liteWasmNativeAddress(execEnv, queryOffset),
+        nativeAddress(execEnv, queryOffset),
         querySize,
         notificationProcedureId,
         timeoutMilliseconds,
@@ -556,16 +560,16 @@ static int32_t w_subscribeOracle(
     uint32_t notifyWithPreviousReply,
     int64_t fee)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "subscribeOracle",
         "iface=" + std::to_string(interfaceIndex));
-    return g_liteHostServices.subscribeOracle(
+    return hostServices.subscribeOracle(
         callContext->ctx,
         interfaceIndex,
-        liteWasmNativeAddress(execEnv, queryOffset),
+        nativeAddress(execEnv, queryOffset),
         querySize,
         notificationProcedureId,
         periodMilliseconds,
@@ -579,11 +583,11 @@ static uint32_t w_getOracleQuery(
     uint32_t outputOffset,
     uint32_t size)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    return g_liteHostServices.getOracleQuery(
+    CallContext* callContext = activeCallContext(execEnv);
+    return hostServices.getOracleQuery(
         callContext->ctx,
         queryId,
-        liteWasmNativeAddress(execEnv, outputOffset),
+        nativeAddress(execEnv, outputOffset),
         size);
 }
 
@@ -593,20 +597,20 @@ static uint32_t w_getOracleReply(
     uint32_t outputOffset,
     uint32_t size)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
-    return g_liteHostServices.getOracleReply(
+    CallContext* callContext = activeCallContext(execEnv);
+    return hostServices.getOracleReply(
         callContext->ctx,
         queryId,
-        liteWasmNativeAddress(execEnv, outputOffset),
+        nativeAddress(execEnv, outputOffset),
         size);
 }
 
 static uint32_t w_distributeDividends(wasm_exec_env_t execEnv, int64_t amountPerShare)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(callContext, "distributeDividends", std::to_string(amountPerShare));
-    return g_liteHostServices.distributeDividends(callContext->ctx, amountPerShare);
+    traceHostCall(callContext, "distributeDividends", std::to_string(amountPerShare));
+    return hostServices.distributeDividends(callContext->ctx, amountPerShare);
 }
 
 static int32_t w_liteCallFunction(
@@ -618,19 +622,19 @@ static int32_t w_liteCallFunction(
     uint32_t outputOffset,
     uint32_t outputSize)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "callFunction",
         "-> " + std::to_string(contractIndex) + "/" + std::to_string(inputType));
-    return g_liteHostServices.liteCallFunction(
+    return hostServices.liteCallFunction(
         callContext->ctx,
         contractIndex,
         (unsigned short)inputType,
-        liteWasmNativeAddress(execEnv, inputOffset),
+        nativeAddress(execEnv, inputOffset),
         inputSize,
-        liteWasmNativeAddress(execEnv, outputOffset),
+        nativeAddress(execEnv, outputOffset),
         outputSize);
 }
 
@@ -644,20 +648,20 @@ static int32_t w_liteInvokeProcedure(
     uint32_t outputSize,
     int64_t invocationReward)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "invokeProcedure",
         "-> " + std::to_string(contractIndex) + "/" + std::to_string(inputType)
             + " reward " + std::to_string(invocationReward));
-    return g_liteHostServices.liteInvokeProcedure(
+    return hostServices.liteInvokeProcedure(
         callContext->ctx,
         contractIndex,
         (unsigned short)inputType,
-        liteWasmNativeAddress(execEnv, inputOffset),
+        nativeAddress(execEnv, inputOffset),
         inputSize,
-        liteWasmNativeAddress(execEnv, outputOffset),
+        nativeAddress(execEnv, outputOffset),
         outputSize,
         invocationReward);
 }
@@ -668,16 +672,16 @@ static int32_t w_liteSetShareholderProposal(
     uint32_t proposalOffset,
     int64_t invocationReward)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "setShareholderProposal",
         "-> " + std::to_string(contractIndex));
-    return g_liteHostServices.setShareholderProposal(
+    return hostServices.setShareholderProposal(
         callContext->ctx,
         contractIndex,
-        liteWasmNativeAddress(execEnv, proposalOffset),
+        nativeAddress(execEnv, proposalOffset),
         invocationReward);
 }
 
@@ -688,42 +692,44 @@ static int32_t w_liteSetShareholderVotes(
     uint32_t voteSize,
     int64_t invocationReward)
 {
-    LiteWasmCallCtx* callContext = liteWasmCallContext(execEnv);
+    CallContext* callContext = activeCallContext(execEnv);
 
-    liteWasmTraceCall(
+    traceHostCall(
         callContext,
         "setShareholderVotes",
         "-> " + std::to_string(contractIndex));
-    return g_liteHostServices.setShareholderVotes(
+    return hostServices.setShareholderVotes(
         callContext->ctx,
         contractIndex,
-        liteWasmNativeAddress(execEnv, voteOffset),
+        nativeAddress(execEnv, voteOffset),
         voteSize,
         invocationReward);
 }
 
 // Every declared signature is checked against the type-derived WAMR signature.
-#define LHOST_AS_GQ(nm, m, lit)     static_assert(liteCstrEq(LiteQpiImport<&LiteHostServices::m>::sig.data(),   lit), "wasm sig drift: " nm);
-#define LHOST_AS_GI(nm, m, lit)     static_assert(liteCstrEq(LiteInfraImport<&LiteHostServices::m>::sig.data(), lit), "wasm sig drift: " nm);
-#define LHOST_AS_HQ(nm, m, wfn, lit) static_assert(liteCstrEq(LiteQpiImport<&LiteHostServices::m>::sig.data(),   lit), "wasm sig drift: " nm);
-#define LHOST_AS_HI(nm, m, wfn, lit) static_assert(liteCstrEq(LiteInfraImport<&LiteHostServices::m>::sig.data(), lit), "wasm sig drift: " nm);
-LITE_LHOST_ABI_ROWS(LHOST_AS_GQ, LHOST_AS_GI, LHOST_AS_HQ, LHOST_AS_HI)
+#define LHOST_AS_GQ(nm, m, lit)     static_assert(equalStrings(QpiImport<&HostServices::m>::sig.data(),   lit), "wasm sig drift: " nm);
+#define LHOST_AS_GI(nm, m, lit)     static_assert(equalStrings(InfrastructureImport<&HostServices::m>::sig.data(), lit), "wasm sig drift: " nm);
+#define LHOST_AS_HQ(nm, m, wfn, lit) static_assert(equalStrings(QpiImport<&HostServices::m>::sig.data(),   lit), "wasm sig drift: " nm);
+#define LHOST_AS_HI(nm, m, wfn, lit) static_assert(equalStrings(InfrastructureImport<&HostServices::m>::sig.data(), lit), "wasm sig drift: " nm);
+WASM_LHOST_ABI_ROWS(LHOST_AS_GQ, LHOST_AS_GI, LHOST_AS_HQ, LHOST_AS_HI)
 
 // Generated rows use templates; handwritten rows use their named adapters.
-#define LHOST_ROW_GQ(nm, m, lit)      { nm, (void*)&LiteQpiImport<&LiteHostServices::m>::call,   LiteQpiImport<&LiteHostServices::m>::sig.data(),   NULL },
-#define LHOST_ROW_GI(nm, m, lit)      { nm, (void*)&LiteInfraImport<&LiteHostServices::m>::call, LiteInfraImport<&LiteHostServices::m>::sig.data(), NULL },
-#define LHOST_ROW_HQ(nm, m, wfn, lit) { nm, (void*)wfn,                                          LiteQpiImport<&LiteHostServices::m>::sig.data(),   NULL },
-#define LHOST_ROW_HI(nm, m, wfn, lit) { nm, (void*)wfn,                                          LiteInfraImport<&LiteHostServices::m>::sig.data(), NULL },
-static NativeSymbol g_liteWasmNatives[] =
+#define LHOST_ROW_GQ(nm, m, lit)      { nm, (void*)&QpiImport<&HostServices::m>::call,   QpiImport<&HostServices::m>::sig.data(),   NULL },
+#define LHOST_ROW_GI(nm, m, lit)      { nm, (void*)&InfrastructureImport<&HostServices::m>::call, InfrastructureImport<&HostServices::m>::sig.data(), NULL },
+#define LHOST_ROW_HQ(nm, m, wfn, lit) { nm, (void*)wfn,                                          QpiImport<&HostServices::m>::sig.data(),   NULL },
+#define LHOST_ROW_HI(nm, m, wfn, lit) { nm, (void*)wfn,                                          InfrastructureImport<&HostServices::m>::sig.data(), NULL },
+static NativeSymbol nativeSymbols[] =
 {
-    LITE_LHOST_ABI_ROWS(LHOST_ROW_GQ, LHOST_ROW_GI, LHOST_ROW_HQ, LHOST_ROW_HI)
+    WASM_LHOST_ABI_ROWS(LHOST_ROW_GQ, LHOST_ROW_GI, LHOST_ROW_HQ, LHOST_ROW_HI)
 };
-static const uint32_t g_liteWasmNativesCount =
-    (uint32_t)(sizeof(g_liteWasmNatives) / sizeof(g_liteWasmNatives[0]));
+static const uint32_t nativeSymbolCount =
+    (uint32_t)(sizeof(nativeSymbols) / sizeof(nativeSymbols[0]));
 
 // The extra vtable slot is abiVersion.
 static_assert(
-    sizeof(LiteHostServices) == sizeof(void*) * (g_liteWasmNativesCount + 1),
-    "wasm import table (g_liteWasmNatives) out of sync with the host vtable (LiteHostServices)");
+    sizeof(HostServices) == sizeof(void*) * (nativeSymbolCount + 1),
+    "wasm import table (nativeSymbols) out of sync with the host vtable (HostServices)");
+
+} // namespace Wasm::Runtime
 
 #endif // LITE_WASM_SC

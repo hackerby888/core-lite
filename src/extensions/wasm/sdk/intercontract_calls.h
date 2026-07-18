@@ -3,7 +3,10 @@
 // Qinit supplies each generated input-type constant before including contract source.
 #if defined(LITE_WASM_TU_BUILD)
 
-int liteCallFunction(
+namespace Wasm::Sdk
+{
+
+int callFunction(
     const void* callerContext,
     unsigned int calleeIndex,
     unsigned short inputType,
@@ -11,7 +14,7 @@ int liteCallFunction(
     unsigned int inputSize,
     void* output,
     unsigned int outputSize);
-int liteInvokeProcedure(
+int invokeProcedure(
     const void* callerContext,
     unsigned int calleeIndex,
     unsigned short inputType,
@@ -21,11 +24,13 @@ int liteInvokeProcedure(
     unsigned int outputSize,
     long long invocationReward);
 
+} // namespace Wasm::Sdk
+
 // Calls remain restricted to lower-index contracts.
 #undef CALL_OTHER_CONTRACT_FUNCTION_E
 #define CALL_OTHER_CONTRACT_FUNCTION_E(contractStateType, function, input, output, errorVar) \
     static_assert(contractStateType::__contract_index < CONTRACT_INDEX, "lite: can only call a lower-index contract"); \
-    QPI::InterContractCallError errorVar = (QPI::InterContractCallError)liteCallFunction( \
+    QPI::InterContractCallError errorVar = (QPI::InterContractCallError)Wasm::Sdk::callFunction( \
         &qpi, contractStateType::__contract_index, contractStateType##_##function##_inputType, \
         &(input), sizeof(input), &(output), sizeof(output))
 
@@ -36,7 +41,7 @@ int liteInvokeProcedure(
 #undef INVOKE_OTHER_CONTRACT_PROCEDURE_E
 #define INVOKE_OTHER_CONTRACT_PROCEDURE_E(contractStateType, procedure, input, output, invocationReward, errorVar) \
     static_assert(contractStateType::__contract_index < CONTRACT_INDEX, "lite: can only call a lower-index contract"); \
-    QPI::InterContractCallError errorVar = (QPI::InterContractCallError)liteInvokeProcedure( \
+    QPI::InterContractCallError errorVar = (QPI::InterContractCallError)Wasm::Sdk::invokeProcedure( \
         &qpi, contractStateType::__contract_index, contractStateType##_##procedure##_inputType, \
         &(input), sizeof(input), &(output), sizeof(output), (invocationReward))
 

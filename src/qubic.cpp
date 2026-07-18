@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <map>
 #include <vector>
 #include <thread>
@@ -80,7 +81,6 @@
 
 // #define INCLUDE_CONTRACT_TEST_EXAMPLES
 
-// #define OLD_QBAY
 
 // contract_def.h needs to be included first to make sure that contracts have minimal access
 #include "contract_core/contract_def.h"
@@ -189,11 +189,11 @@ static volatile bool isReprocessingSolutions = false;
 #if defined(__linux__) && defined(LITE_WASM_SC)
 #include "extensions/k12_engine.h"
 #endif
-#include "extensions/wasm/lite_sc_engine_adapter.h"
-#include "extensions/wasm/lite_dynamic_contracts.h"
-#include "extensions/wasm/lite_wasm_contracts.h"
+#include "extensions/wasm/runtime/extension.h"
 #include "extensions/test_invalid_solution.h"
+#if !defined(LITE_WASM_SC)
 #include "extensions/k12_state_digest_cache.h"
+#endif
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
 #ifdef _WIN32
@@ -587,7 +587,7 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
         {
 #ifdef LITE_WASM_SC
             // wasm slots hash only the contract's real state (not the 1GB slot reserve); no-op for others.
-            const unsigned long long size = digestIndex < contractCount ? liteWasmEffectiveStateSize(digestIndex, contractDescriptions[digestIndex].stateSize) : 0;
+            const unsigned long long size = digestIndex < contractCount ? Wasm::Runtime::effectiveStateSize(digestIndex, contractDescriptions[digestIndex].stateSize) : 0;
 #else
             const unsigned long long size = digestIndex < contractCount ? contractDescriptions[digestIndex].stateSize : 0;
 #endif
@@ -607,7 +607,7 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
                 // wasm slots: contractStates[idx] aliases the resident state, hashed at `size` (its real span).
                 const unsigned long long startTime = __rdtsc();
 #if defined(LITE_WASM_SC)
-                liteSCDigest(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
+                Wasm::Runtime::hashContractState(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
 #else
                 if (!bypassCache && K12StateDigestCache::gK12StateDigestCacheEnabled && K12StateDigestCache::isCached(digestIndex))
                     K12StateDigestCache::computeDigest(digestIndex, &contractStateDigests[digestIndex]);
@@ -661,12 +661,14 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
 
 // Quorum-mismatch recovery: rebuild every contract digest canonically (cache bypassed) and resync the
 // incremental cache, so a digest-cache error self-heals instead of forking the node.
+#if !defined(LITE_WASM_SC)
 static void recomputeComputerDigestFull(m256i& digest)
 {
     setMem(contractStateChangeFlags, MAX_NUMBER_OF_CONTRACTS / 8, 0xFF);
     K12StateDigestCache::invalidateAll();
     getComputerDigest(digest, /*bypassCache=*/true);
 }
+#endif
 
 static void getSpectrumDigest(m256i& digest)
 {
@@ -3047,8 +3049,8 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
 #ifdef LITE_WASM_SC
             if (transaction->destinationPublicKey == m256i(99999ULL, 0, 0, 0))
             {
-                // Lite dynamic-contract deploy txs use a dedicated address (NOT the core zero address).
-                liteDynDispatchTx(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
+                // Wasm deployment transactions use a dedicated address, not the core zero address.
+                Wasm::Runtime::dispatchDeploymentTransaction(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
             }
             else
 #endif
@@ -3454,10 +3456,10 @@ static void processTick(unsigned long long processorNumber)
 
 #ifdef LITE_WASM_SC
     // Construct armed dynamic-contract slots under SC_INITIALIZE_TX framing (design B').
-    if (liteDynPendingForTick(system.tick))
+    if (Wasm::Runtime::hasPendingActivation(system.tick))
     {
         logger.registerNewTx(system.tick, logger.SC_INITIALIZE_TX);
-        liteDynConstructPending();
+        Wasm::Runtime::activatePendingContracts();
     }
 #endif
     PROFILE_NAMED_SCOPE_BEGIN("processTick(): BEGIN_TICK");
@@ -6871,6 +6873,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     gTickNumberOfComputors = tickNumberOfComputors;
                     gTickTotalNumberOfComputors = tickTotalNumberOfComputors;
 
+#if !defined(LITE_WASM_SC)
                     // K12 state-cache safety net: only at ticks where the computer digest is consensus-validated.
                     // If enough computors voted but quorum doesn't match our etalon, an incremental-cache error
                     // could be the cause, so recompute the computer digest canonically (cache bypassed) and re-tally
@@ -6894,6 +6897,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                             }
                         }
                     }
+#endif
 
                     if (tickNumberOfComputors >= QUORUM)
                     {
@@ -7144,7 +7148,9 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 }
             }
         }
-        liteSCEvictTick(); // LRU-evict cold contract-state chunks down to the RAM cap (no-op under cap / engine off)
+#ifdef LITE_WASM_SC
+        Wasm::Runtime::evictContractState(); // LRU-evict cold contract-state chunks down to the RAM cap (no-op under cap / engine off)
+#endif
         tickerLoopNumerator += __rdtsc() - curTimeTick;
         tickerLoopDenominator++;
     }
@@ -7344,7 +7350,7 @@ static bool saveContractStateFiles(CHAR16* directory)
         contractStateLock[contractIndex].acquireRead();
 #ifdef LITE_WASM_SC
         // wasm slots alias a resident state smaller than the 1GB reserve; save its real span (avoid OOB read).
-        const unsigned long long saveSize = liteWasmEffectiveStateSize(contractIndex, contractDescriptions[contractIndex].stateSize);
+        const unsigned long long saveSize = Wasm::Runtime::effectiveStateSize(contractIndex, contractDescriptions[contractIndex].stateSize);
 #else
         const unsigned long long saveSize = contractDescriptions[contractIndex].stateSize;
 #endif
@@ -7481,7 +7487,7 @@ static bool initialize()
         {
             unsigned long long size = contractDescriptions[contractIndex].stateSize;
 #if defined(LITE_WASM_SC)
-            const bool contractStateAllocOk = liteSCAlloc(contractIndex, size);
+            const bool contractStateAllocOk = Wasm::Runtime::allocateContractState(contractIndex, size);
 #else
             // cached contracts need page-aligned state for per-chunk mprotect; off-path keeps the plain alloc
             const bool contractStateAllocOk = K12StateDigestCache::wantsPageAlignedAlloc(size)
@@ -7764,8 +7770,8 @@ static bool initialize()
     // universe needs to be initialized before initializing contract errors
     initializeContractErrors();
 #ifdef LITE_WASM_SC
-    liteDynBootDeploy();
-    liteWasmRuntimeInit();
+    Wasm::Runtime::initializeDeployment();
+    Wasm::Runtime::initializeEngine();
 #endif
 
     if (loadMiningSeedFromFile)
@@ -7900,14 +7906,10 @@ static bool initialize()
     emptyTickResolver.tick = 0;
     emptyTickResolver.lastTryClock = 0;
 
-    // contract states are now allocated, loaded and constructed; arm the per-chunk K12 digest cache
-#if defined(LITE_WASM_SC)
-    // the userfaultfd contract-state engine (and the demand-zero contract-level path) own these buffers and
-    // already do incremental per-chunk digest caching; arming the mprotect cache on the same evictable, often
-    // non-page-aligned regions would fight fault delivery and re-hash evicted-to-zero chunks.
-    K12StateDigestCache::gK12StateDigestCacheEnabled = false;
-#endif
+    // Wasm state uses userfaultfd or its demand-zero fallback; never protect it twice.
+#if !defined(LITE_WASM_SC)
     K12StateDigestCache::init();
+#endif
 
     return true;
 }
@@ -7945,7 +7947,11 @@ static void deinitialize()
     {
         if (contractStates[contractIndex])
         {
-            liteSCFree(contractIndex); // engine/demand-zero builds: OS reclaims memfd/mmap at exit (no freePool -> no darwin abort)
+#ifdef LITE_WASM_SC
+            Wasm::Runtime::freeContractState(contractIndex); // engine/demand-zero builds: OS reclaims memfd/mmap at exit (no freePool -> no darwin abort)
+#else
+            freePool(contractStates[contractIndex]);
+#endif
         }
     }
 
@@ -9758,11 +9764,16 @@ void processArgs(int argc, const char* argv[]) {
         ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
         ("swap-dirty-track", "Auto-track dirty SwapVM cache pages via mprotect+SIGSEGV (Linux only): skip the writeback (and compression) for pages never modified since load. Trades a small mprotect/fault cost for less disk I/O. Off by default.")
         ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
+#if !defined(LITE_WASM_SC)
         ("no-k12-state-cache", "Disable the incremental smart-contract state digest cache (Linux). Default on: only changed 8KB chunks are re-hashed via mprotect+SIGSEGV dirty tracking. Pass to fall back to full one-shot K12 every tick.")
         ("k12-state-cache-verify", "Self-check the K12 state-digest cache: each digest also runs the one-shot and stalls loudly on any mismatch. For soak/CI; small per-tick cost. Off by default.")
+#endif
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"))
+#ifdef LITE_SC_ENGINE
         ("sc-evict-mode", "Contract-state engine eviction backend: 'compress' (in-RAM zstd, fast spawn; default) or 'disk' (per-contract file, lowest RAM, persistent). Testnet dynamic-contract only.", cxxopts::value<std::string>()->default_value("compress"))
-        ("max-sc-mem", "Contract-state RAM cap in GB (testnet dynamic-contract); engine evicts cold chunks to stay under it.", cxxopts::value<unsigned long long>()->default_value("1"));
+        ("max-sc-mem", "Contract-state RAM cap in GB (testnet dynamic-contract); engine evicts cold chunks to stay under it.", cxxopts::value<unsigned long long>()->default_value("1"))
+#endif
+        ;
     auto result = options.parse(argc, argv);
 
     auto unmatched = result.unmatched();
@@ -9790,6 +9801,7 @@ void processArgs(int argc, const char* argv[]) {
         gSwapDirtyTrackEnabled = true;
         logColorToScreen("INFO", "Swap dirty tracking enabled: clean SwapVM cache pages skip writeback on eviction");
     }
+#if !defined(LITE_WASM_SC)
     if (result.count("no-k12-state-cache")) {
         K12StateDigestCache::gK12StateDigestCacheEnabled = false;
         logColorToScreen("INFO", "K12 state-digest cache disabled: full one-shot K12 every tick");
@@ -9798,6 +9810,7 @@ void processArgs(int argc, const char* argv[]) {
         K12StateDigestCache::gK12StateDigestCacheVerify = true;
         logColorToScreen("INFO", "K12 state-digest cache self-verify enabled: each digest also runs the one-shot");
     }
+#endif
 #endif
 
     if (result.count("peers")) {
@@ -10050,7 +10063,10 @@ void watchAndCheckin()
                         isFetched = true;
                         if (result == drogon::ReqResult::Ok)
                         {
-                           isSuccess = true;
+                            // print the json response for debugging
+                            auto body = resp->body();
+                            printf("Check-in response: %.*s\n", (int)body.size(), body.data());
+                            isSuccess = true;
                         }
                         else
                         {
@@ -10094,10 +10110,12 @@ void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
     // slot dirty, restore write access, and resume the store. Any other fault hits the crash path below.
     if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr))
         return;
+#if !defined(LITE_WASM_SC)
     // A write to an armed read-only contract-state chunk faults here: mark the chunk dirty (needs si_addr),
     // restore write access, resume the store. Only changed chunks are re-hashed on the next digest.
     if (sig == SIGSEGV && si && K12StateDigestCache::tryMarkDirty(si->si_addr))
         return;
+#endif
 #else
     (void)si;
 #endif

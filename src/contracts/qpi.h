@@ -938,6 +938,19 @@ namespace QPI
 	typedef BitArray<2048> bit_2048;
 	typedef BitArray<4096> bit_4096;
 
+	constexpr bit_2 BIT2_ZERO = {};
+	constexpr bit_4 BIT4_ZERO = {};
+	constexpr bit_8 BIT8_ZERO = {};
+	constexpr bit_16 BIT16_ZERO = {};
+	constexpr bit_32 BIT32_ZERO = {};
+	constexpr bit_64 BIT64_ZERO = {};
+	constexpr bit_128 BIT128_ZERO = {};
+	constexpr bit_256 BIT256_ZERO = {};
+	constexpr bit_512 BIT512_ZERO = {};
+	constexpr bit_1024 BIT1024_ZERO = {};
+	constexpr bit_2048 BIT2048_ZERO = {};
+	constexpr bit_4096 BIT4096_ZERO = {};
+
 
 	// Array of L elements of type T (L must be 2^N)
 	template <typename T, uint64 L>
@@ -2542,8 +2555,7 @@ namespace QPI
 		// Returns the id of the user/contract who has triggered this contract; returns NULL_ID if there has been no user/contract
 		id invocator() const { return _invocator; }
 
-		// Wasm host-bridge only (extensions/wasm/lite_oracle_bridge.h): the running contract's index, so the host can
-		// drive oracleEngine on the contract's behalf. Read-only; the index is otherwise protected.
+		// Wasm host bridge only: active contract index used to charge oracle fees.
 		unsigned int __qpiCurrentContractIndex() const { return _currentContractIndex; }
 
 		// Returns the ID of the entity who has made this IPO bid or NULL_ID if the ipoContractIndex or ipoBidIndex are invalid.

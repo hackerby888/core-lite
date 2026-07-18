@@ -11,13 +11,17 @@ cmake -S . -B build-node \
 
 CMake rejects `LITE_WASM_SC` without either prerequisite. WAMR always uses the classic interpreter with call-stack capture, and a build without the switch does not link WAMR or libffi.
 
-The main files are:
+The source is split by dependency direction:
 
-- `lite_dynamic_contracts.h`: deployment wire decoding and host-service adapters.
-- `lite_wasm_contracts.h`: WAMR loading, state takeover, registration, dispatch, and migration.
-- `lite_wasm_imports.h`: the stable `"lhost"` import table.
-- `lite_wasm_tu.h`: contract-side imports, exports, registration, and dispatch.
-- `lite_wasm_debug.h`: trace-ring, trap, and state-diff support.
+- `shared/` contains ABI metadata and binary types used by both sides.
+- `sdk/` contains contract-side intrinsics, QPI forwarding, registration, storage, and dispatch.
+- `runtime/` contains node-side state, deployment, WAMR loading, host services, tracing, and registration.
+
+`runtime/extension.h` is the node's single Wasm include and fixes runtime dependency order.
+`sdk/module_runtime.h` is Qinit's final post-contract include and aggregates the contract-side
+runtime pieces. Runtime and SDK headers may include `shared/` and headers within their own side, but
+must not include each other. `runtime/reserved_slot_contract.h` is intentionally a repeatedly
+included fragment and therefore has no include guard.
 
 `LITE_WASM_TU_BUILD` remains the contract-side compilation guard. `LITE_SC_ENGINE`, `LITE_SC_CONTRACT_LEVEL`, and `LITE_SC_NO_ENGINE` are internal state-backend controls, not user-facing Wasm feature switches.
 

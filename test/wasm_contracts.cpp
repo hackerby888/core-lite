@@ -1,7 +1,7 @@
 // Regression test for the wasm-contract dispatch/reg/state ABI (WASM_CONTRACTS.md §13). Loads the embedded
 // fixture contract.wasm (engine ABI: state_addr/state_size/io_base/reg_count/reg_info/dispatch) in WAMR and
 // checks registration + dispatch (function + procedure) + state round-trip. This is the contract<->runtime
-// contract that both the node engine (lite_wasm_contracts.h) and the contract binding (lite_wasm_tu.h) rely on.
+// contract that both the node runtime and the contract SDK binding rely on.
 // Built only with -DLITE_WASM_SC (the test CMake adds WAMR/vmlib + this source then).
 #ifdef LITE_WASM_SC
 
@@ -12,7 +12,7 @@
 #include <vector>
 #include "gtest/gtest.h"
 #include "wasm_export.h"
-#include "extensions/wasm/lite_wasm_arena.h"
+#include "extensions/wasm/runtime/arena_scope.h"
 #include "wasm_contract_fixture.h"
 
 namespace {
@@ -62,15 +62,15 @@ TEST(WasmContracts, ArenaTopResetsAndNestedRestores) {
     uint32_t top = 999;
 
     {
-        LiteWasmArenaScope outer(depth, &top, 100);
+        Wasm::Runtime::ArenaScope outer(depth, &top, 100, 100);
         EXPECT_EQ(depth, 1u);
         EXPECT_EQ(top, 100u);
 
         top = 160;
         {
-            LiteWasmArenaScope nested(depth, &top, 100);
+            Wasm::Runtime::ArenaScope nested(depth, &top, 100, 200);
             EXPECT_EQ(depth, 2u);
-            EXPECT_EQ(top, 160u);
+            EXPECT_EQ(top, 200u);
             top = 224;
         }
         EXPECT_EQ(depth, 1u);
@@ -81,18 +81,85 @@ TEST(WasmContracts, ArenaTopResetsAndNestedRestores) {
 
     // The next independent call discards the previous call's temporary allocations.
     {
-        LiteWasmArenaScope nextOuter(depth, &top, 100);
+        Wasm::Runtime::ArenaScope nextOuter(depth, &top, 100, 100);
         EXPECT_EQ(top, 100u);
     }
     EXPECT_EQ(depth, 0u);
+}
+
+TEST(WasmContracts, NestedCallUsesIsolatedFrame) {
+    using namespace Wasm::Runtime;
+
+    const MemoryLayout fixed = fixedMemoryLayout(4096);
+    const uint32_t parentArenaTop = fixed.arenaOffset + 3;
+    const uint32_t parentHostBump = fixed.arenaOffset + 21;
+    const uint32_t expectedInput = (parentHostBump + 7u) & ~7u;
+    const uint32_t arenaEnd = expectedInput + WASM_DISPATCH_FRAME_CAPACITY + 64;
+    MemoryLayout nested = {};
+
+    ASSERT_TRUE(nestedMemoryLayout(
+        fixed,
+        arenaEnd,
+        parentArenaTop,
+        parentHostBump,
+        nested));
+    EXPECT_EQ(nested.inputOffset, expectedInput);
+    EXPECT_EQ(nested.outputOffset, expectedInput + WASM_INPUT_CAPACITY);
+    EXPECT_EQ(
+        nested.localsOffset,
+        expectedInput + WASM_INPUT_CAPACITY + WASM_OUTPUT_CAPACITY);
+    EXPECT_EQ(
+        nested.arenaOffset,
+        expectedInput + WASM_DISPATCH_FRAME_CAPACITY);
+    EXPECT_GE(nested.inputOffset, fixed.arenaOffset);
+
+    std::vector<unsigned char> memory(arenaEnd + 1, 0);
+    memset(memory.data() + fixed.inputOffset, 0x11, WASM_INPUT_CAPACITY);
+    memset(memory.data() + fixed.outputOffset, 0x22, WASM_OUTPUT_CAPACITY);
+    memset(memory.data() + fixed.localsOffset, 0x33, WASM_LOCALS_CAPACITY);
+    memset(memory.data() + nested.inputOffset, 0x44, WASM_DISPATCH_FRAME_CAPACITY);
+
+    EXPECT_EQ(memory[fixed.inputOffset], 0x11);
+    EXPECT_EQ(memory[fixed.outputOffset], 0x22);
+    EXPECT_EQ(memory[fixed.localsOffset], 0x33);
+
+    MemoryLayout exhausted = {};
+    EXPECT_FALSE(nestedMemoryLayout(
+        fixed,
+        nested.arenaOffset - 1,
+        parentArenaTop,
+        parentHostBump,
+        exhausted));
+}
+
+TEST(WasmContracts, EntryLocalsAreFullyZeroed) {
+    std::vector<unsigned char> locals(
+        Wasm::Runtime::WASM_LOCALS_CAPACITY,
+        0xa5);
+
+    Wasm::Runtime::zeroEntryLocals(locals.data());
+
+    for (unsigned char byte : locals)
+    {
+        ASSERT_EQ(byte, 0);
+    }
 }
 
 TEST(WasmContracts, RegistrationDispatchAndStateRoundTrip) {
     WasmFixture w;
     ASSERT_TRUE(w.load());
 
+    wasm_function_inst_t contractIndex = wasm_runtime_lookup_function(w.inst, "contract_index");
+    ASSERT_NE(contractIndex, nullptr);
+    EXPECT_EQ(wasm_func_get_param_count(contractIndex, w.inst), 0u);
+    EXPECT_EQ(wasm_func_get_result_count(contractIndex, w.inst), 1u);
+    wasm_valkind_t resultType = WASM_I64;
+    wasm_func_get_result_types(contractIndex, w.inst, &resultType);
+    EXPECT_EQ(resultType, WASM_I32);
+
     // registration: 2 entries — G (function, it=1) + INC (procedure, it=2)
     uint32_t a[5] = { 0 };
+    EXPECT_EQ(w.call("contract_index", a, 0), 29u);
     EXPECT_EQ(w.call("reg_count", a, 0), 2u);
 
     a[0] = 0; uint32_t io = w.call("io_base", a, 0);
@@ -228,6 +295,23 @@ TEST(WasmContracts, CrossHostStateEquivalence) {
     ASSERT_NE(inst, nullptr) << err;
     wasm_exec_env_t env = wasm_runtime_create_exec_env(inst, 256 * 1024);
     ASSERT_NE(env, nullptr);
+
+    const char* expectedSlotValue = getenv("QINIT_EXPECTED_SLOT");
+    ASSERT_NE(expectedSlotValue, nullptr) << "set QINIT_EXPECTED_SLOT for raw WAMR parity";
+    const uint32_t expectedSlot = (uint32_t)strtoul(expectedSlotValue, nullptr, 10);
+    wasm_function_inst_t contractIndex = wasm_runtime_lookup_function(inst, "contract_index");
+    ASSERT_NE(contractIndex, nullptr) << "missing required contract_index export";
+    ASSERT_EQ(wasm_func_get_param_count(contractIndex, inst), 0u);
+    ASSERT_EQ(wasm_func_get_result_count(contractIndex, inst), 1u);
+    wasm_valkind_t contractIndexResultType = WASM_I64;
+    wasm_func_get_result_types(contractIndex, inst, &contractIndexResultType);
+    ASSERT_EQ(contractIndexResultType, WASM_I32);
+    uint32_t contractIndexArguments[1] = { 0 };
+    ASSERT_TRUE(wasm_runtime_call_wasm(env, contractIndex, 0, contractIndexArguments))
+        << wasm_runtime_get_exception(inst);
+    ASSERT_EQ(contractIndexArguments[0], expectedSlot)
+        << "artifact slot mismatch: compiled " << contractIndexArguments[0]
+        << ", target " << expectedSlot;
 
     bool trapped = false;
     auto call = [&](const char* fn, uint32_t* a, uint32_t n, bool expectSuccess = true) -> uint32_t {
