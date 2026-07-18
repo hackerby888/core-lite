@@ -5,7 +5,8 @@
 #ifdef NO_UEFI
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
+#include <limits>
+#include "host_file.h"
 #endif
 #include <lib/platform_common/processor.h>
 #include <lib/platform_common/compiler_optimization.h>
@@ -14,6 +15,11 @@
 #include "console_logging.h"
 #include "concurrency.h"
 #include "memory.h"
+
+#ifdef NO_UEFI
+static_assert(sizeof(CHAR16) == 2);
+static_assert(sizeof(wchar_t) == 2);
+#endif
 
 // If you get an error reading and writing files, set the chunk sizes below to
 // the cluster size set for formatting you disk. If you have no idea about the
@@ -36,36 +42,37 @@ static EFI_FILE_PROTOCOL* root = NULL;
 class AsyncFileIO;
 static AsyncFileIO* gAsyncFileIO = NULL;
 
-static bool q_wfopen_s(FILE **file, const CHAR16 *fileName, const CHAR16 *directory, const CHAR16 *mode, bool createFileIfNotExist = false) {
-    if (!file) return (bool)EINVAL;
-
-    // Convert filename
-    std::string fileNameUtf8 = wchar_to_string(fileName);
-
-    // Convert directory if provided
-    std::string directoryUtf8 = directory ? wchar_to_string(directory) : "";
-
-    // Convert mode
-    std::string modeUtf8 = wchar_to_string(mode);
-
-    // Try to open
-    std::string fullPath = directoryUtf8.empty() ? fileNameUtf8 : (directoryUtf8 + "/" + fileNameUtf8);
-    if (createFileIfNotExist && !std::filesystem::exists(fullPath))
-    {
-        std::ofstream ofs(fullPath);
-        if (!ofs)
-        {
-            return errno;
-        }
-    }
-    FILE* f = std::fopen(fullPath.c_str(), modeUtf8.c_str());
-
-    if (!f) return errno;
-
-    *file = f;
-
-    return 0;
+#ifdef NO_UEFI
+static bool hasHostDirectory(const CHAR16* directory)
+{
+    return directory && directory[0];
 }
+
+static std::filesystem::path getHostPath(const CHAR16* path)
+{
+    if (!path || !path[0])
+    {
+        return {};
+    }
+#ifdef _WIN32
+    return std::filesystem::path(path);
+#else
+    return std::filesystem::path(wchar_to_string(path));
+#endif
+}
+
+static std::filesystem::path getHostFilePath(const CHAR16* fileName, const CHAR16* directory)
+{
+    const std::filesystem::path filePath = getHostPath(fileName);
+    if (!hasHostDirectory(directory))
+    {
+        return filePath;
+    }
+
+    return getHostPath(directory) / filePath;
+}
+
+#endif
 
 #ifndef NDEBUG
 static void addDebugMessage(const CHAR16* msg);
@@ -74,17 +81,19 @@ static void addDebugMessage(const CHAR16* msg);
 static long long getFileSize(CHAR16* fileName, CHAR16* directory = NULL)
 {
 #ifdef NO_UEFI
-    std::string dirNameStr = wchar_to_string(directory);
-    std::string fileNameStr = wchar_to_string(fileName);
-    std::filesystem::path filePath;
-    filePath = dirNameStr + "/" + fileNameStr;
-
-    if (!std::filesystem::exists(filePath))
+    if (!fileName || !fileName[0])
     {
         return -1;
     }
 
-    return std::filesystem::file_size(filePath);
+    std::error_code error;
+    const std::uintmax_t fileSize = std::filesystem::file_size(getHostFilePath(fileName, directory), error);
+    if (error || fileSize > static_cast<std::uintmax_t>(std::numeric_limits<long long>::max()))
+    {
+        return -1;
+    }
+
+    return static_cast<long long>(fileSize);
 #else
     EFI_STATUS status;
     EFI_FILE_PROTOCOL* file;
@@ -133,8 +142,14 @@ static bool checkDir(const CHAR16* dirName)
 {
 #ifdef NO_UEFI
     ASSERT(isMainProcessor());
-    std::string dirNameStr = wchar_to_string(dirName);
-    return std::filesystem::exists(dirNameStr) && std::filesystem::is_directory(dirNameStr);
+    if (!hasHostDirectory(dirName))
+    {
+        return false;
+    }
+
+    std::error_code error;
+    const bool isDirectory = std::filesystem::is_directory(getHostPath(dirName), error);
+    return !error && isDirectory;
 #else
     ASSERT(isMainProcessor());
     EFI_FILE_PROTOCOL* file;
@@ -154,14 +169,23 @@ static bool createDir(const CHAR16* dirName)
 {
 #ifdef NO_UEFI
     ASSERT(isMainProcessor());
-    std::string dirNameStr = wchar_to_string(dirName);
-    if (checkDir(dirName))
+    if (!hasHostDirectory(dirName))
+    {
+        return false;
+    }
+
+    const std::filesystem::path directoryPath = getHostPath(dirName);
+    std::error_code error;
+    if (std::filesystem::create_directory(directoryPath, error))
     {
         return true;
     }
+    if (error)
+    {
+        return false;
+    }
 
-    // Create a directory
-    return std::filesystem::create_directory(dirNameStr);
+    return std::filesystem::is_directory(directoryPath, error) && !error;
 #else
     ASSERT(isMainProcessor());
     EFI_STATUS status;
@@ -193,17 +217,14 @@ static bool removeFile(CHAR16* directory, CHAR16* fileName)
 {
 #ifdef NO_UEFI
     ASSERT(isMainProcessor());
-    std::string dirNameStr = wchar_to_string(directory);
-    std::string fileNameStr = wchar_to_string(fileName);
-    std::filesystem::path filePath;
-    filePath = dirNameStr + "/" + fileNameStr;
-
-    if (!std::filesystem::exists(filePath))
+    if (!fileName || !fileName[0])
     {
-        return true;
+        return false;
     }
 
-    return std::filesystem::remove(filePath);
+    std::error_code error;
+    std::filesystem::remove(getHostFilePath(fileName, directory), error);
+    return !error;
 #else
     ASSERT(isMainProcessor());
     long long fileSz = getFileSize(fileName, directory);
@@ -292,12 +313,35 @@ static bool removeDir(CHAR16* dirName)
 {
 #ifdef NO_UEFI
     ASSERT(isMainProcessor());
-    std::string dirNameStr = wchar_to_string(dirName);
-    if (!std::filesystem::exists(dirNameStr) || !std::filesystem::is_directory(dirNameStr))
+    if (!hasHostDirectory(dirName))
+    {
+        return false;
+    }
+
+    const std::filesystem::path directoryPath = getHostPath(dirName);
+    std::error_code error;
+    const bool exists = std::filesystem::exists(directoryPath, error);
+    if (error)
+    {
+        return false;
+    }
+    if (!exists)
     {
         return true;
     }
-    return std::filesystem::remove_all(dirNameStr) > 0;
+
+    const bool isDirectory = std::filesystem::is_directory(directoryPath, error);
+    if (error)
+    {
+        return false;
+    }
+    if (!isDirectory)
+    {
+        return true;
+    }
+
+    std::filesystem::remove_all(directoryPath, error);
+    return !error;
 #else
     logToConsole(L"removeDir is not supported in UEFI mode");
     return false;
@@ -308,11 +352,7 @@ static long long load(const CHAR16* fileName, unsigned long long totalSize, unsi
 {
 #ifdef NO_UEFI
     FILE* file = nullptr;
-    if (directory != NULL)
-    {
-        createDir(directory);
-    }
-    if (q_wfopen_s(&file, fileName, directory, L"rb") != 0 || !file)
+    if (openHostFile(&file, getHostFilePath(fileName, directory), HostFileMode::ReadBinary) != 0 || !file)
     {
 #ifdef _MSC_VER
         wprintf(L"Error opening file %s!\n", fileName);
@@ -321,7 +361,9 @@ static long long load(const CHAR16* fileName, unsigned long long totalSize, unsi
 #endif
         return -1;
     }
-    if (fread(buffer, 1, totalSize, file) != totalSize)
+    const bool readSucceeded = fread(buffer, 1, totalSize, file) == totalSize;
+    const bool closeSucceeded = fclose(file) == 0;
+    if (!readSucceeded || !closeSucceeded)
     {
 #ifdef _MSC_VER
         wprintf(L"Error reading %llu bytes from %s!\n", totalSize, fileName);
@@ -330,7 +372,6 @@ static long long load(const CHAR16* fileName, unsigned long long totalSize, unsi
 #endif
         return -1;
     }
-    fclose(file);
     return totalSize;
 #else
     EFI_STATUS status;
@@ -399,11 +440,11 @@ static long long save(const CHAR16* fileName, unsigned long long totalSize, cons
 {
 #ifdef NO_UEFI
     FILE* file = nullptr;
-    if (directory != NULL)
+    if (hasHostDirectory(directory) && !createDir(directory))
     {
-        createDir(directory);
+        return -1;
     }
-    if (q_wfopen_s(&file, fileName, directory, L"wb", true) != 0 || !file)
+    if (openHostFile(&file, getHostFilePath(fileName, directory), HostFileMode::WriteBinary) != 0 || !file)
     {
 #ifdef _MSC_VER
         wprintf(L"Error opening file %s!\n", fileName);
@@ -412,7 +453,9 @@ static long long save(const CHAR16* fileName, unsigned long long totalSize, cons
 #endif
         return -1;
     }
-    if (fwrite(buffer, 1, totalSize, file) != totalSize)
+    const bool writeSucceeded = fwrite(buffer, 1, totalSize, file) == totalSize;
+    const bool closeSucceeded = fclose(file) == 0;
+    if (!writeSucceeded || !closeSucceeded)
     {
 #ifdef _MSC_VER
         wprintf(L"Error writting %llu bytes from %s!\n", totalSize, fileName);
@@ -421,7 +464,6 @@ static long long save(const CHAR16* fileName, unsigned long long totalSize, cons
 #endif
         return -1;
     }
-    fclose(file);
     return totalSize;
 #else
     EFI_STATUS status;
@@ -1071,7 +1113,18 @@ public:
         ACQUIRE(mRemoveFilePathQueueLock);
         int index = mRemoveFilePathQueueCount;
         setText(mRemoveFileNameQueue[index], fileName);
+#ifdef NO_UEFI
+        if (hasHostDirectory(directory))
+        {
+            setText(mRemoveFileDirQueue[index], directory);
+        }
+        else
+        {
+            mRemoveFileDirQueue[index][0] = 0;
+        }
+#else
         setText(mRemoveFileDirQueue[index], directory);
+#endif
         mRemoveFilePathQueueCount++;
         RELEASE(mRemoveFilePathQueueLock);
 

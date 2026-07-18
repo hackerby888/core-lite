@@ -100,8 +100,8 @@ public:
 
         // TODO: define file object in platform lib, including writeStringToFile()
 #ifdef NO_UEFI
-        FILE* file = fopen("profiling.csv", "wb");
-        if (!file)
+        FILE* file = nullptr;
+        if (openHostFile(&file, getHostPath(L"profiling.csv"), HostFileMode::WriteBinary) != 0)
             return false;
 #else
         ASSERT(root);

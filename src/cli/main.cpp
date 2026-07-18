@@ -4,7 +4,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <cerrno>
+#include <filesystem>
 #include <string>
+
+#include "platform/host_file.h"
 
 // NO_UEFI stubs for platform/memory.h.
 void setMem(void* buffer, unsigned long long size, unsigned char value)
@@ -131,9 +134,10 @@ static int cmdReadEntity(int argc, char** argv)
         }
     }
 
-    FILE* f = fopen(filePath, "rb");
-    if (!f) {
-        fprintf(stderr, "ERROR: cannot open spectrum file '%s': %s\n", filePath, strerror(errno));
+    FILE* f = nullptr;
+    const int openError = openHostFile(&f, std::filesystem::path(filePath), HostFileMode::ReadBinary);
+    if (openError != 0) {
+        fprintf(stderr, "ERROR: cannot open spectrum file '%s': %s\n", filePath, strerror(openError));
         return 1;
     }
 
@@ -244,9 +248,10 @@ static int cmdReadScoreCache(int argc, char** argv)
         }
     }
 
-    FILE* f = fopen(filePath, "rb");
-    if (!f) {
-        fprintf(stderr, "ERROR: cannot open score cache file '%s': %s\n", filePath, strerror(errno));
+    FILE* f = nullptr;
+    const int openError = openHostFile(&f, std::filesystem::path(filePath), HostFileMode::ReadBinary);
+    if (openError != 0) {
+        fprintf(stderr, "ERROR: cannot open score cache file '%s': %s\n", filePath, strerror(openError));
         return 1;
     }
 

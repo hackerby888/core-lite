@@ -96,10 +96,353 @@ public:
 
 static FileSystemWrapper fileSystem;
 
+class TestNoUefiFileIO : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        cleanTestPaths();
+    }
+
+    void TearDown() override
+    {
+        cleanTestPaths();
+    }
+
+private:
+    static void cleanTestPaths()
+    {
+        static const char* paths[] = {
+            "tmp_file_no_uefi_root.bin",
+            "tmp_file_no_uefi_empty.bin",
+            "tmp_file_no_uefi_async.bin",
+            "tmp_file_no_uefi_missing.bin",
+            "tmp_file_no_uefi_short.bin",
+            "tmp_file_no_uefi_dir",
+            "tmp_file_no_uefi_explicit.bin",
+            "tmp_file_no_uefi_existing_dir",
+            "tmp_file_no_uefi_overwrite_dir",
+            "tmp_file_no_uefi_overwrite.bin",
+            "tmp_file_no_uefi_collision",
+            "tmp_file_no_uefi_collision_payload.bin",
+            "tmp_file_no_uefi_remove_dir",
+            "tmp_file_no_uefi_async_dir",
+            "tmp_file_no_uefi_async_explicit.bin",
+            "tmp_file_no_uefi_missing_dir",
+            "tmp_file_no_uefi_file_size_dir",
+            "tmp_file_no_uefi_missing_size_dir",
+            "tmp_file_no_uefi_missing_size.bin",
+        };
+
+        for (const char* path : paths)
+        {
+            std::error_code error;
+            std::filesystem::remove_all(path, error);
+        }
+
+#ifdef _WIN32
+        std::error_code error;
+        std::filesystem::remove_all(std::filesystem::path(L"tmp_file_no_uefi_\u0E44\u0E17\u0E22"), error);
+#endif
+    }
+};
+
+TEST_F(TestNoUefiFileIO, HostFileOpenRejectsInvalidArguments)
+{
+    CHAR16 fileName[] = L"tmp_file_no_uefi_missing.bin";
+    const std::filesystem::path filePath = getHostFilePath(fileName, nullptr);
+    FILE* file = nullptr;
+
+    EXPECT_EQ(openHostFile(nullptr, filePath, HostFileMode::ReadBinary), EINVAL);
+    EXPECT_EQ(openHostFile(&file, {}, HostFileMode::ReadBinary), EINVAL);
+    EXPECT_EQ(openHostFile(&file, filePath, static_cast<HostFileMode>(255)), EINVAL);
+    EXPECT_EQ(file, nullptr);
+}
+
+TEST_F(TestNoUefiFileIO, HostFileOpenReturnsMissingFileError)
+{
+    CHAR16 fileName[] = L"tmp_file_no_uefi_missing.bin";
+    const std::filesystem::path filePath = getHostFilePath(fileName, nullptr);
+    FILE* file = nullptr;
+
+    EXPECT_EQ(openHostFile(&file, filePath, HostFileMode::ReadBinary), ENOENT);
+    EXPECT_EQ(file, nullptr);
+}
+
+TEST_F(TestNoUefiFileIO, HostFileModesRoundTrip)
+{
+    CHAR16 fileName[] = L"tmp_file_no_uefi_missing.bin";
+    const std::filesystem::path filePath = getHostFilePath(fileName, nullptr);
+    FILE* file = nullptr;
+    const unsigned char expected = 0x5A;
+    unsigned char actual = 0;
+
+    EXPECT_EQ(openHostFile(&file, filePath, HostFileMode::WriteBinary), 0);
+    ASSERT_NE(file, nullptr);
+    EXPECT_EQ(fwrite(&expected, 1, sizeof(expected), file), sizeof(expected));
+    EXPECT_EQ(fclose(file), 0);
+
+    file = nullptr;
+    EXPECT_EQ(openHostFile(&file, filePath, HostFileMode::ReadBinary), 0);
+    ASSERT_NE(file, nullptr);
+    EXPECT_EQ(fread(&actual, 1, sizeof(actual), file), sizeof(actual));
+    EXPECT_EQ(fclose(file), 0);
+    EXPECT_EQ(actual, expected);
+}
+
+TEST_F(TestNoUefiFileIO, HostFileWriteBinaryTruncatesExistingFile)
+{
+    CHAR16 fileName[] = L"tmp_file_no_uefi_missing.bin";
+    const std::filesystem::path filePath = getHostFilePath(fileName, nullptr);
+    const unsigned char initial[] = { 1, 2, 3 };
+    const unsigned char replacement = 4;
+    FILE* file = nullptr;
+
+    ASSERT_EQ(openHostFile(&file, filePath, HostFileMode::WriteBinary), 0);
+    ASSERT_NE(file, nullptr);
+    ASSERT_EQ(fwrite(initial, 1, sizeof(initial), file), sizeof(initial));
+    ASSERT_EQ(fclose(file), 0);
+
+    file = nullptr;
+    ASSERT_EQ(openHostFile(&file, filePath, HostFileMode::WriteBinary), 0);
+    ASSERT_NE(file, nullptr);
+    ASSERT_EQ(fwrite(&replacement, 1, sizeof(replacement), file), sizeof(replacement));
+    ASSERT_EQ(fclose(file), 0);
+
+    std::error_code error;
+    const std::uintmax_t fileSize = std::filesystem::file_size(filePath, error);
+    ASSERT_FALSE(error);
+    EXPECT_EQ(fileSize, sizeof(replacement));
+}
+
+TEST_F(TestNoUefiFileIO, CreateDirIsIdempotent)
+{
+    CHAR16 directory[] = L"tmp_file_no_uefi_existing_dir";
+
+    EXPECT_FALSE(checkDir(directory));
+    ASSERT_TRUE(createDir(directory));
+    EXPECT_TRUE(checkDir(directory));
+    EXPECT_TRUE(createDir(directory));
+    EXPECT_TRUE(checkDir(directory));
+}
+
+TEST_F(TestNoUefiFileIO, SaveOverwritesFileInExistingDirectory)
+{
+    CHAR16 directory[] = L"tmp_file_no_uefi_overwrite_dir";
+    CHAR16 fileName[] = L"tmp_file_no_uefi_overwrite.bin";
+    const unsigned char initial[] = { 1, 2, 3, 4 };
+    const unsigned char replacement[] = { 5, 6 };
+    unsigned char actual[sizeof(replacement)] = {};
+    const std::filesystem::path expectedPath =
+        std::filesystem::path("tmp_file_no_uefi_overwrite_dir") / "tmp_file_no_uefi_overwrite.bin";
+
+    ASSERT_TRUE(createDir(directory));
+    ASSERT_EQ(save(fileName, sizeof(initial), initial, directory), sizeof(initial));
+    ASSERT_TRUE(std::filesystem::is_regular_file(expectedPath));
+    EXPECT_FALSE(std::filesystem::exists("tmp_file_no_uefi_overwrite.bin"));
+
+    ASSERT_EQ(save(fileName, sizeof(replacement), replacement, directory), sizeof(replacement));
+    EXPECT_EQ(getFileSize(fileName, directory), sizeof(replacement));
+    ASSERT_EQ(load(fileName, sizeof(actual), actual, directory), sizeof(actual));
+    EXPECT_EQ(memcmp(actual, replacement, sizeof(replacement)), 0);
+}
+
+TEST_F(TestNoUefiFileIO, DirectoryCollisionFailsWithoutFallback)
+{
+    CHAR16 directory[] = L"tmp_file_no_uefi_collision";
+    CHAR16 fileName[] = L"tmp_file_no_uefi_collision_payload.bin";
+    const unsigned char sentinel = 0x4A;
+    const unsigned char payload = 0x7B;
+
+    ASSERT_EQ(save(directory, sizeof(sentinel), &sentinel, nullptr), sizeof(sentinel));
+    ASSERT_TRUE(std::filesystem::is_regular_file("tmp_file_no_uefi_collision"));
+    EXPECT_FALSE(checkDir(directory));
+    EXPECT_FALSE(createDir(directory));
+    EXPECT_EQ(save(fileName, sizeof(payload), &payload, directory), -1);
+    EXPECT_TRUE(std::filesystem::is_regular_file("tmp_file_no_uefi_collision"));
+    EXPECT_EQ(std::filesystem::file_size("tmp_file_no_uefi_collision"), sizeof(sentinel));
+    EXPECT_FALSE(std::filesystem::exists("tmp_file_no_uefi_collision_payload.bin"));
+}
+
+TEST_F(TestNoUefiFileIO, RemoveDirIsRecursiveAndIdempotent)
+{
+    CHAR16 directory[] = L"tmp_file_no_uefi_remove_dir";
+    const std::filesystem::path nestedDirectory =
+        std::filesystem::path("tmp_file_no_uefi_remove_dir") / "nested";
+    const std::filesystem::path nestedFile = nestedDirectory / "state.bin";
+    std::error_code error;
+
+    EXPECT_TRUE(removeDir(directory));
+    ASSERT_TRUE(std::filesystem::create_directories(nestedDirectory, error));
+    ASSERT_FALSE(error);
+    {
+        std::ofstream output(nestedFile, std::ios::binary);
+        ASSERT_TRUE(output);
+        output.put(static_cast<char>(0x5A));
+        ASSERT_TRUE(output);
+    }
+    ASSERT_TRUE(std::filesystem::is_regular_file(nestedFile));
+
+    EXPECT_TRUE(removeDir(directory));
+    EXPECT_FALSE(std::filesystem::exists("tmp_file_no_uefi_remove_dir"));
+    EXPECT_TRUE(removeDir(directory));
+}
+
+TEST_F(TestNoUefiFileIO, AsyncRemoveUsesExplicitDirectoryOnly)
+{
+    CHAR16 directory[] = L"tmp_file_no_uefi_async_dir";
+    CHAR16 fileName[] = L"tmp_file_no_uefi_async_explicit.bin";
+    const unsigned char directoryData = 0x31;
+    const unsigned char workingDirectoryData = 0x62;
+    const std::filesystem::path directoryFile =
+        std::filesystem::path("tmp_file_no_uefi_async_dir") / "tmp_file_no_uefi_async_explicit.bin";
+
+    ASSERT_EQ(save(fileName, sizeof(directoryData), &directoryData, directory), sizeof(directoryData));
+    ASSERT_EQ(save(fileName, sizeof(workingDirectoryData), &workingDirectoryData, nullptr),
+              sizeof(workingDirectoryData));
+    ASSERT_TRUE(std::filesystem::is_regular_file(directoryFile));
+    ASSERT_TRUE(std::filesystem::is_regular_file("tmp_file_no_uefi_async_explicit.bin"));
+
+    EXPECT_EQ(asyncRemoveFile(fileName, directory), 0);
+    EXPECT_FALSE(std::filesystem::exists(directoryFile));
+    EXPECT_TRUE(std::filesystem::is_regular_file("tmp_file_no_uefi_async_explicit.bin"));
+    EXPECT_EQ(getFileSize(fileName, nullptr), sizeof(workingDirectoryData));
+
+    EXPECT_EQ(asyncRemoveFile(fileName, directory), 0);
+    EXPECT_TRUE(std::filesystem::is_regular_file("tmp_file_no_uefi_async_explicit.bin"));
+}
+
+TEST_F(TestNoUefiFileIO, MissingFileSizeReturnsMinusOne)
+{
+    CHAR16 directory[] = L"tmp_file_no_uefi_missing_size_dir";
+    CHAR16 fileName[] = L"tmp_file_no_uefi_missing_size.bin";
+
+    ASSERT_TRUE(createDir(directory));
+    EXPECT_EQ(getFileSize(fileName, nullptr), -1);
+    EXPECT_EQ(getFileSize(fileName, directory), -1);
+}
+
+TEST_F(TestNoUefiFileIO, NullDirectoryUsesWorkingDirectory)
+{
+    CHAR16 fileName[] = L"tmp_file_no_uefi_root.bin";
+    const unsigned char expected[] = { 1, 2, 3, 4 };
+    unsigned char actual[sizeof(expected)] = {};
+
+    ASSERT_EQ(save(fileName, sizeof(expected), expected, nullptr), sizeof(expected));
+    ASSERT_TRUE(std::filesystem::is_regular_file("tmp_file_no_uefi_root.bin"));
+    EXPECT_EQ(getFileSize(fileName, nullptr), sizeof(expected));
+    ASSERT_EQ(load(fileName, sizeof(actual), actual, nullptr), sizeof(actual));
+    EXPECT_EQ(memcmp(actual, expected, sizeof(expected)), 0);
+    EXPECT_TRUE(removeFile(nullptr, fileName));
+    EXPECT_FALSE(std::filesystem::exists("tmp_file_no_uefi_root.bin"));
+    EXPECT_TRUE(removeFile(nullptr, fileName));
+}
+
+TEST_F(TestNoUefiFileIO, EmptyDirectoryUsesWorkingDirectory)
+{
+    CHAR16 fileName[] = L"tmp_file_no_uefi_empty.bin";
+    CHAR16 directory[] = L"";
+    const unsigned char expected[] = { 5, 6, 7 };
+
+    ASSERT_EQ(save(fileName, sizeof(expected), expected, directory), sizeof(expected));
+    ASSERT_TRUE(std::filesystem::is_regular_file("tmp_file_no_uefi_empty.bin"));
+    EXPECT_EQ(getFileSize(fileName, directory), sizeof(expected));
+    EXPECT_TRUE(removeFile(directory, fileName));
+    EXPECT_FALSE(std::filesystem::exists("tmp_file_no_uefi_empty.bin"));
+}
+
+TEST_F(TestNoUefiFileIO, ExplicitDirectoryIsUsedConsistently)
+{
+    CHAR16 fileName[] = L"tmp_file_no_uefi_explicit.bin";
+    CHAR16 directory[] = L"tmp_file_no_uefi_dir";
+    const unsigned char expected[] = { 8, 9, 10 };
+    unsigned char actual[sizeof(expected)] = {};
+    const std::filesystem::path expectedPath =
+        std::filesystem::path("tmp_file_no_uefi_dir") / "tmp_file_no_uefi_explicit.bin";
+
+    ASSERT_EQ(save(fileName, sizeof(expected), expected, directory), sizeof(expected));
+    EXPECT_TRUE(checkDir(directory));
+    EXPECT_TRUE(std::filesystem::is_regular_file(expectedPath));
+    EXPECT_FALSE(std::filesystem::exists("tmp_file_no_uefi_explicit.bin"));
+    EXPECT_EQ(getFileSize(fileName, directory), sizeof(expected));
+    ASSERT_EQ(load(fileName, sizeof(actual), actual, directory), sizeof(actual));
+    EXPECT_EQ(memcmp(actual, expected, sizeof(expected)), 0);
+    EXPECT_TRUE(removeFile(directory, fileName));
+    EXPECT_TRUE(removeDir(directory));
+}
+
+TEST_F(TestNoUefiFileIO, AsyncRemoveSupportsNullDirectory)
+{
+    CHAR16 fileName[] = L"tmp_file_no_uefi_async.bin";
+    const unsigned char data[] = { 11 };
+
+    ASSERT_EQ(save(fileName, sizeof(data), data, nullptr), sizeof(data));
+    ASSERT_TRUE(std::filesystem::exists("tmp_file_no_uefi_async.bin"));
+    EXPECT_EQ(asyncRemoveFile(fileName, nullptr), 0);
+    EXPECT_FALSE(std::filesystem::exists("tmp_file_no_uefi_async.bin"));
+}
+
+TEST_F(TestNoUefiFileIO, LoadDoesNotCreateMissingDirectory)
+{
+    CHAR16 fileName[] = L"missing.bin";
+    CHAR16 directory[] = L"tmp_file_no_uefi_missing_dir";
+    unsigned char data = 0;
+
+    EXPECT_EQ(load(fileName, sizeof(data), &data, directory), -1);
+    EXPECT_FALSE(std::filesystem::exists("tmp_file_no_uefi_missing_dir"));
+}
+
+TEST_F(TestNoUefiFileIO, FileSizeRejectsDirectory)
+{
+    CHAR16 directory[] = L"tmp_file_no_uefi_file_size_dir";
+
+    ASSERT_TRUE(createDir(directory));
+    EXPECT_EQ(getFileSize(directory, nullptr), -1);
+}
+
+TEST_F(TestNoUefiFileIO, ShortReadReturnsFailureAndClosesFile)
+{
+    CHAR16 fileName[] = L"tmp_file_no_uefi_short.bin";
+    const unsigned char saved = 12;
+    unsigned char loaded[2] = {};
+
+    ASSERT_EQ(save(fileName, sizeof(saved), &saved, nullptr), sizeof(saved));
+    EXPECT_EQ(load(fileName, sizeof(loaded), loaded, nullptr), -1);
+    EXPECT_TRUE(removeFile(nullptr, fileName));
+}
+
+#ifdef __linux__
+TEST_F(TestNoUefiFileIO, WriteFailureReturnsError)
+{
+    CHAR16 fileName[] = L"/dev/full";
+    unsigned char data[64 * 1024];
+    memset(data, 0x5A, sizeof(data));
+
+    EXPECT_EQ(save(fileName, sizeof(data), data, nullptr), -1);
+}
+#endif
+
+#ifdef _WIN32
+TEST_F(TestNoUefiFileIO, NativeUnicodePathRoundTrip)
+{
+    CHAR16 directory[] = L"tmp_file_no_uefi_\u0E44\u0E17\u0E22";
+    CHAR16 fileName[] = L"\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25.bin";
+    const unsigned char expected[] = { 0x12, 0x34, 0x56 };
+    unsigned char actual[sizeof(expected)] = {};
+
+    ASSERT_TRUE(removeDir(directory));
+    ASSERT_EQ(save(fileName, sizeof(expected), expected, directory), sizeof(expected));
+    ASSERT_EQ(load(fileName, sizeof(actual), actual, directory), sizeof(actual));
+    EXPECT_EQ(memcmp(actual, expected, sizeof(expected)), 0);
+    EXPECT_TRUE(removeFile(directory, fileName));
+    EXPECT_TRUE(removeDir(directory));
+}
+#endif
+
 long long loadFile(CHAR16* fileName, unsigned long long totalSize, char* buffer)
 {
     FILE* file = nullptr;
-    if (q_wfopen_s(&file, fileName, 0, L"rb") != 0 || !file)
+    if (openHostFile(&file, getHostFilePath(fileName, nullptr), HostFileMode::ReadBinary) != 0 || !file)
     {
         wprintf(L"Error opening file %s!\n", fileName);
         return -1;
@@ -116,7 +459,7 @@ long long loadFile(CHAR16* fileName, unsigned long long totalSize, char* buffer)
 long long saveFile(CHAR16* fileName, unsigned long long totalSize, const char* buffer)
 {
     FILE* file = nullptr;
-    if (q_wfopen_s(&file, fileName, 0, L"wb") != 0 || !file)
+    if (openHostFile(&file, getHostFilePath(fileName, nullptr), HostFileMode::WriteBinary) != 0 || !file)
     {
         wprintf(L"Error opening file %s!\n", fileName);
         return -1;
@@ -681,4 +1024,3 @@ TEST(TestAsyncFileIO, FindKLargestKDuplicated)
         EXPECT_EQ(priorityArray[j]._value, value);
     }
 }
-
