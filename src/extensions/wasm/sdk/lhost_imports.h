@@ -64,7 +64,7 @@ LH_IMPORT(prevSpectrumDigest) void lh_prevSpectrumDigest(void* out32);
 LH_IMPORT(prevUniverseDigest) void lh_prevUniverseDigest(void* out32);
 LH_IMPORT(prevComputerDigest) void lh_prevComputerDigest(void* out32);
 LH_IMPORT(isAssetIssued)  unsigned int lh_isAssetIssued(const void* issuer32, unsigned long long assetName);
-LH_IMPORT(issueAsset)     long long lh_issueAsset(unsigned long long name, const void* issuer32, unsigned int decimals, long long shares, unsigned long long unit);
+LH_IMPORT(issueAsset) long long lh_issueAsset(unsigned long long name, const void* issuer32, unsigned int decimals, long long shares, unsigned long long unit);
 LH_IMPORT(numberOfShares) long long lh_numberOfShares(const void* asset, const void* ownSel, const void* posSel);
 LH_IMPORT(numberOfPossessedShares) long long lh_numberOfPossessedShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, unsigned int om, unsigned int pm);
 LH_IMPORT(assetEnumerate) unsigned int lh_assetEnumerate(unsigned int kind, const void* issuance, const void* ownership, const void* possession, void* out, unsigned int capacity);

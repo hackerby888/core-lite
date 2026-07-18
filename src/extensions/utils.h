@@ -16,7 +16,7 @@
 #pragma warning(disable: 4996)
 #endif
 
-// Page size used by the contract-state engine. Windows variant added with the cross-platform port.
+// Page size used by the contract-state engine.
 #ifndef _WIN32
 #define SYSTEM_PAGE_SIZE sysconf(_SC_PAGESIZE)
 #endif
@@ -96,17 +96,21 @@ static int exec(const char* cmd) {
     return WEXITSTATUS(status);     // return exit code like system()
 }
 #elif defined(_WIN32)
-static int exec(const char* cmd) {
-    FILE* pipe = _popen(cmd, "r");  // "r" = read output (even if we ignore it)
-    if (!pipe) return -1;
-
-    // just discard output like system() does
-    char buffer[128];
-    while (fgets(buffer, sizeof(buffer), pipe)) {
-        // no need to store or print
+static int exec(const char* command)
+{
+    FILE* pipe = _popen(command, "r");
+    if (!pipe)
+    {
+        return -1;
     }
 
-    return _pclose(pipe);           // returns the command's exit code directly
+    char buffer[128];
+    while (fgets(buffer, sizeof(buffer), pipe))
+    {
+        // Discard command output.
+    }
+
+    return _pclose(pipe);
 }
 #endif
 
@@ -129,7 +133,7 @@ static void hexToByte(const std::string& hex, const int sizeInByte, unsigned cha
     if (hex.length() != sizeInByte * 2)
     {
 #if defined(LITEDYN_CONTRACT_TU)
-        return; // dynamic-contract TU compiles -fno-exceptions; this node-only helper isn't called there
+        return;
 #else
         throw std::invalid_argument("Hex string length does not match the expected size");
 #endif
@@ -208,10 +212,10 @@ static inline std::vector<uint8_t> base64_decode(const std::string &in) {
 }
 
 #ifndef _WIN32
-// Round up to a multiple of the system page size (contract-state engine).
+// Round up to the system page size.
 static size_t alignToPageSize(size_t address)
 {
-    size_t page_size = SYSTEM_PAGE_SIZE;
-    return (address + page_size - 1) & ~(page_size - 1);
+    const size_t pageSize = SYSTEM_PAGE_SIZE;
+    return (address + pageSize - 1) & ~(pageSize - 1);
 }
 #endif

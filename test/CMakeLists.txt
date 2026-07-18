@@ -19,7 +19,7 @@ FetchContent_MakeAvailable(googletest)
 get_filename_component(PROJECT_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
 if(IS_ARM)
-    # x86 <cpuid.h> shim for arm (must precede the system include) — see lib/platform_common/qintrin.h
+    # Prefer the ARM shim over the system x86 CPUID header.
     include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_common/arm_shims)
 endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_common)
@@ -82,8 +82,7 @@ add_executable(
 		oracle_engine.cpp
 )
 
-# Define logging VM page sizes uniformly for every test TU — they bake into the logging-buffer template type,
-# so divergent values across TUs cause conflicting layouts (ODR -> heap corruption at teardown).
+# Keep logging template sizes identical across every test translation unit.
 target_compile_definitions(qubic_core_tests PRIVATE
     LOG_BUFFER_PAGE_SIZE=10000000ULL
     PMAP_LOG_PAGE_SIZE=1000000ULL
@@ -96,7 +95,7 @@ apply_test_compiler_flags(qubic_core_tests)
 
 # Add additional test-specific flags if needed
 if((IS_CLANG OR IS_GCC) AND IS_ARM)
-  # arm: x86 bit/rng intrinsics (-mrdrnd/-mbmi/-mlzcnt) are invalid; provided via SIMDe + qintrin shims
+  # ARM receives x86 intrinsics through SIMDe.
   target_compile_options(qubic_core_tests PRIVATE -fshort-wchar -w)
 elseif(IS_CLANG OR IS_GCC)
   target_compile_options(
@@ -119,8 +118,7 @@ target_link_libraries(
   Blosc2::blosc2_static
 )
 
-# Contract-state engine digest-equivalence test (consensus invariant). k12_engine.h is Linux-only
-# (userfaultfd) and the test uses rdrand, so x86-Linux only; needs zstd (the engine's compress mode).
+# The contract-state engine test requires Linux userfaultfd and x86 RDRAND.
 if(NOT WIN32 AND NOT APPLE AND NOT IS_ARM)
     target_sources(qubic_core_tests PRIVATE k12_engine.cpp)
     target_link_libraries(qubic_core_tests PRIVATE zstd)

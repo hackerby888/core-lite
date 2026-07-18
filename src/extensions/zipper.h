@@ -2,9 +2,7 @@
 
 #ifdef __linux__
 
-// Skip Blosc2 (SwapVM page compression) when it isn't usable/needed: its headers pull the x86-only
-// <immintrin.h>, which breaks the aarch64 build (node AND tests), and RAM-only builds (CMAKE_NO_USE_SWAP)
-// don't use swap at all. Gate by arch too — CMAKE_NO_USE_SWAP only reaches the Qubic target, not the test target.
+// Blosc2 is unavailable on aarch64 and unnecessary in RAM-only builds.
 #if !defined(CMAKE_NO_USE_SWAP) && !defined(__aarch64__)
 
 #include <blosc2.h>
@@ -81,7 +79,7 @@ public:
     }
 };
 
-#else  // CMAKE_NO_USE_SWAP — no Blosc2; stub keeps the API for the (never-taken) swap call sites.
+#else
 #include <vector>
 #include <stdexcept>
 #include <cstddef>
@@ -89,8 +87,21 @@ public:
 class Zipper
 {
 public:
-    static std::vector<unsigned char> zip(unsigned char*, size_t, int = 0) { throw std::runtime_error("Zipper: NO_USE_SWAP build"); }
-    static std::vector<unsigned char> unzip(unsigned char*, size_t, int = 0) { throw std::runtime_error("Zipper: NO_USE_SWAP build"); }
+    static std::vector<unsigned char> zip(
+        unsigned char*,
+        size_t,
+        int = 0)
+    {
+        throw std::runtime_error("Zipper: NO_USE_SWAP build");
+    }
+
+    static std::vector<unsigned char> unzip(
+        unsigned char*,
+        size_t,
+        int = 0)
+    {
+        throw std::runtime_error("Zipper: NO_USE_SWAP build");
+    }
 };
 
 #endif // CMAKE_NO_USE_SWAP

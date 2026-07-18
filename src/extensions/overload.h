@@ -45,26 +45,43 @@ static volatile bool listOfPeersIsStaticLiteNode = false;
 #define CreateEvent CreateEvent
 #include "platform/console_logging.h"
 
-// High-resolution sleep. The default Windows Sleep/sleep_for granularity is ~15.6ms (and stays coarse
-// when the process is backgrounded/power-throttled even with timeBeginPeriod), so the tick's socket-drain
-// and vote loops — which sleep 1ms and retry — actually pace at 15.6ms and stall ticks to tens of seconds.
-// A per-thread CREATE_WAITABLE_TIMER_HIGH_RESOLUTION timer (Win10 1803+/Win11) sleeps precisely regardless
-// of timer resolution or EcoQoS; pre-1803 falls back to sleep_for. Non-Windows nanosleep is already precise.
+// Use a high-resolution Windows timer for the network retry loops.
 #ifdef _MSC_VER
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
-#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002   // Win10 1803+; define defensively for older SDK headers
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
-static inline void preciseSleepMicros(long long us) {
-    if (us <= 0) return;
-    static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-    if (timer) {
-        LARGE_INTEGER due; due.QuadPart = -(us * 10);   // 100ns units; negative = relative
-        if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) { WaitForSingleObject(timer, INFINITE); return; }
+static inline void preciseSleepMicros(long long microseconds)
+{
+    if (microseconds <= 0)
+    {
+        return;
     }
-    std::this_thread::sleep_for(std::chrono::microseconds(us));   // pre-1803 fallback
+
+    static thread_local HANDLE timer = CreateWaitableTimerExW(
+        nullptr,
+        nullptr,
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+        TIMER_ALL_ACCESS);
+    if (timer)
+    {
+        LARGE_INTEGER dueTime;
+        dueTime.QuadPart = -(microseconds * 10);
+        if (SetWaitableTimer(timer, &dueTime, 0, nullptr, nullptr, FALSE))
+        {
+            WaitForSingleObject(timer, INFINITE);
+            return;
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(microseconds));
 }
 #else
-static inline void preciseSleepMicros(long long us) { if (us > 0) std::this_thread::sleep_for(std::chrono::microseconds(us)); }
+static inline void preciseSleepMicros(long long microseconds)
+{
+    if (microseconds > 0)
+    {
+        std::this_thread::sleep_for(std::chrono::microseconds(microseconds));
+    }
+}
 #endif
 
 //////////// Custom Data \\\\\\\\\\\
@@ -81,7 +98,7 @@ static std::string nodeAlias = "My Qubic Lite Node";
 static const auto liteNodeStartTime = std::chrono::system_clock::now();
 
 
-// Windows: only the cmake build links drogon/jsoncpp; the legacy Qubic.sln sets NO_RPC to opt out.
+// The legacy Windows solution opts out because it does not link the RPC dependencies.
 #if defined(__linux__) || defined(__APPLE__) || (defined(_WIN32) && !defined(NO_RPC))
 #include <json/config.h>
 #include <json/value.h>
@@ -249,65 +266,88 @@ inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size
     return VirtualAlloc(address, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE) != address;
 }
 
-// ---- Windows lazy commit (overcommit emulation) -------------------------------------------------------
-// Linux/macOS reserve the node's big demand-zero buffers with mmap(MAP_ANONYMOUS): pages cost nothing until
-// WRITTEN (overcommit) and reads of untouched pages hit the shared zero page. Windows MEM_COMMIT charges the
-// WHOLE reserve against the system commit limit up front (even though the working set stays small) — the
-// node's ~16 GB of contract-state + score + scratch reserves (the "Total RAM required 30 GB" boot line, of
-// which ~16.7 GB is committed) then sit right at the commit ceiling of a 16 GB CI VM, so the moment a deploy
-// arms a WAMR contract (+~1 GB) the node tips over the limit. qVirtualAllocLazy reserves only (0 commit) and
-// a vectored handler commits each page on first touch, so the commit charge tracks the written footprint
-// (~2 GB), matching Linux. Per-tick contract-state digest READS are routed through KangarooTwelvePaged
-// (k12_paged.h) so they don't fault every untouched reserve page back into commit.
-struct LazyCommitRegion { uintptr_t base, end; };
+// Emulate demand-zero overcommit by committing Windows pages on first access.
+struct LazyCommitRegion
+{
+    uintptr_t base;
+    uintptr_t end;
+};
 inline LazyCommitRegion g_lazyCommitRegions[128];
-inline volatile long g_lazyCommitRegionCount = 0;   // written only during single-threaded boot allocation
+inline volatile long g_lazyCommitRegionCount = 0;
 inline volatile long g_lazyCommitVehInstalled = 0;
 inline unsigned long g_lazyCommitPageSize = 4096;
 
-inline bool inLazyCommitRegion(uintptr_t a) {
-    long n = g_lazyCommitRegionCount;   // publish barrier in qVirtualAllocLazy makes [0,n) fully initialized
-    for (long i = 0; i < n; i++) if (a >= g_lazyCommitRegions[i].base && a < g_lazyCommitRegions[i].end) return true;
+inline bool inLazyCommitRegion(uintptr_t address)
+{
+    const long regionCount = g_lazyCommitRegionCount;
+    for (long i = 0; i < regionCount; i++)
+    {
+        if (address >= g_lazyCommitRegions[i].base && address < g_lazyCommitRegions[i].end)
+        {
+            return true;
+        }
+    }
     return false;
 }
 
-// First-chance handler: an access fault inside a lazy region means the page is reserved-not-yet-committed ->
-// commit it (zero-filled by the OS) and retry. Fires on any tick-processor/network thread; VirtualAlloc is
-// thread-safe and MEM_COMMIT of an already-committed page is an idempotent no-op, so concurrent faults on the
-// same page are safe. A genuine commit-limit OOM falls through (CONTINUE_SEARCH) rather than spinning.
-static LONG WINAPI lazyCommitVeh(EXCEPTION_POINTERS* xp) {
-    if (xp->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
-    uintptr_t fa = (uintptr_t)xp->ExceptionRecord->ExceptionInformation[1];
-    if (!inLazyCommitRegion(fa)) return EXCEPTION_CONTINUE_SEARCH;
-    uintptr_t page = fa & ~((uintptr_t)g_lazyCommitPageSize - 1);
-    if (VirtualAlloc((void*)page, g_lazyCommitPageSize, MEM_COMMIT, PAGE_READWRITE)) return EXCEPTION_CONTINUE_EXECUTION;
+// Commit reserved pages on first access and let genuine allocation failures propagate.
+static LONG WINAPI lazyCommitVeh(EXCEPTION_POINTERS* exception)
+{
+    if (exception->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const uintptr_t faultAddress =
+        (uintptr_t)exception->ExceptionRecord->ExceptionInformation[1];
+    if (!inLazyCommitRegion(faultAddress))
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const uintptr_t page = faultAddress & ~((uintptr_t)g_lazyCommitPageSize - 1);
+    if (VirtualAlloc((void*)page, g_lazyCommitPageSize, MEM_COMMIT, PAGE_READWRITE))
+    {
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-// Reserve `size` bytes; pages commit on first touch via lazyCommitVeh. Use for big demand-zero buffers that
-// are written by USER-MODE code only (contract state, score, common/processor scratch). NOT for buffers the
-// KERNEL writes (socket recv targets) — the kernel can't fault an uncommitted page in; those stay eager.
-inline void* qVirtualAllocLazy(const unsigned long long size) {
-    if (!_InterlockedCompareExchange(&g_lazyCommitVehInstalled, 1, 0)) {
-        SYSTEM_INFO si; GetSystemInfo(&si);
-        g_lazyCommitPageSize = si.dwPageSize ? si.dwPageSize : 4096;
+// Use lazy allocation only for pages written from user mode, not kernel I/O buffers.
+inline void* qVirtualAllocLazy(const unsigned long long size)
+{
+    if (!_InterlockedCompareExchange(&g_lazyCommitVehInstalled, 1, 0))
+    {
+        SYSTEM_INFO systemInfo;
+        GetSystemInfo(&systemInfo);
+        g_lazyCommitPageSize = systemInfo.dwPageSize ? systemInfo.dwPageSize : 4096;
         AddVectoredExceptionHandler(1 /*first*/, lazyCommitVeh);
     }
-    void* addr = VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE, PAGE_READWRITE);
-    if (!addr) { logToConsole(L"CRITIAL: VirtualAlloc(MEM_RESERVE) failed in qVirtualAllocLazy"); return nullptr; }
-    long i = g_lazyCommitRegionCount;   // boot-time, single-threaded; barrier publishes the count
-    if (i < (long)(sizeof(g_lazyCommitRegions) / sizeof(g_lazyCommitRegions[0]))) {
-        g_lazyCommitRegions[i].base = (uintptr_t)addr;
-        g_lazyCommitRegions[i].end = (uintptr_t)addr + size;
-        _ReadWriteBarrier();
-        g_lazyCommitRegionCount = i + 1;
-    } else {
-        VirtualAlloc(addr, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE);   // registry full: fall back to eager
+
+    void* address = VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE, PAGE_READWRITE);
+    if (!address)
+    {
+        logToConsole(L"CRITIAL: VirtualAlloc(MEM_RESERVE) failed in qVirtualAllocLazy");
+        return nullptr;
     }
-    commitMemMap[(unsigned long long)addr] = true;   // freePoolOrVirtual treats it as virtual (never free())
-    return addr;
+
+    const long regionIndex = g_lazyCommitRegionCount;
+    if (regionIndex < (long)(sizeof(g_lazyCommitRegions) / sizeof(g_lazyCommitRegions[0])))
+    {
+        g_lazyCommitRegions[regionIndex].base = (uintptr_t)address;
+        g_lazyCommitRegions[regionIndex].end = (uintptr_t)address + size;
+        _ReadWriteBarrier();
+        g_lazyCommitRegionCount = regionIndex + 1;
+    }
+    else
+    {
+        VirtualAlloc(address, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE);
+    }
+
+    commitMemMap[(unsigned long long)address] = true;
+    return address;
 }
-#include "k12_paged.h"   // KangarooTwelvePaged — page-aware digest of lazy contract-state reserves
+#include "k12_paged.h"
 #else
 inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false) {
     int prot = commitMem ? (PROT_READ | PROT_WRITE) : PROT_NONE;
@@ -345,15 +385,21 @@ inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size
 
 #endif
 
-// Free a buffer that may be from qVirtualAlloc (mmap/VirtualAlloc) OR the pool (malloc/AllocatePool).
-// freePool (= free) on a qVirtualAlloc'd pointer ABORTS on macOS (libsystem_malloc invalid free) and is UB
-// elsewhere; qVirtualAlloc records its addresses in commitMemMap, so route by that. Shutdown-only use: the OS
-// reclaims the virtual mapping at process exit, so just drop the record (no size is tracked to munmap exactly).
-inline void freePoolOrVirtual(void* p) {
-    if (!p) return;
-    auto it = commitMemMap.find((unsigned long long)p);
-    if (it != commitMemMap.end()) { commitMemMap.erase(it); return; }
-    freePool(p);
+// Route shutdown cleanup according to the original allocator.
+inline void freePoolOrVirtual(void* pointer)
+{
+    if (!pointer)
+    {
+        return;
+    }
+
+    auto allocation = commitMemMap.find((unsigned long long)pointer);
+    if (allocation != commitMemMap.end())
+    {
+        commitMemMap.erase(allocation);
+        return;
+    }
+    freePool(pointer);
 }
 
 void updateTime() {
@@ -482,8 +528,7 @@ struct Overload {
 
     inline static std::vector<std::thread> threads;
     inline static std::unordered_map<unsigned long long, SOCKET> incomingSocketMap;
-    // shared_ptr ownership: detached connect/accept threads capture the element by value so it
-    // survives a concurrent DestroyChild() erase (was a use-after-free on epoch-end teardown).
+    // Detached network threads retain TcpData while a child is removed.
     inline static std::unordered_map<unsigned long long, std::shared_ptr<TcpData>> tcpDataMap;
     inline static std::unordered_map<unsigned long long, EventData> eventDataMap;
     inline static std::unordered_map<unsigned long long, bool> isReceiveThreadSetupMap;
@@ -492,7 +537,8 @@ struct Overload {
     inline static EventQueue<ReceiveRequest> receiveQueue;
 
     inline static std::mutex networkingLock;
-    inline static std::mutex eventMapLock; // guards eventDataMap (CreateEvent/CloseEvent vs startThread callback lookup on AP worker threads)
+    // Guards event callbacks shared with application-processor threads.
+    inline static std::mutex eventMapLock;
 
     // Directly call the setup function without using custom stack.
     static void startThread(EFI_AP_PROCEDURE procedure, void* data, unsigned long long ProcessorNumber, EFI_EVENT WaitEvent, unsigned long long TimeoutInMicroseconds) {
@@ -553,8 +599,7 @@ struct Overload {
 
         // call the event call back
         if (WaitEvent) {
-            // Copy the callback out under the lock, then release before invoking it: the callback may
-            // re-enter CloseEvent (which takes eventMapLock), so holding it here would self-deadlock.
+            // Release the map lock before invoking callbacks that may call CloseEvent.
             void* context = nullptr;
             void (*notifyFunction)(void*, void*) = nullptr;
             bool found = false;
@@ -1113,8 +1158,7 @@ struct Overload {
             setsockopt(clientSocket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
             setsockopt(clientSocket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
 #ifdef _MSC_VER
-            // Nagle + delayed-ACK throttles the many small per-vote sends to ~5-25 msgs/s on Windows
-            // loopback — quorum (451 votes/tick) then takes minutes and the tick stalls at tx=?.
+            // Disable Nagle for small per-vote messages on Windows loopback.
             int nodelay = 1;
             setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
 #endif
@@ -1149,8 +1193,7 @@ struct Overload {
 #endif
 
             CreateChild(NULL, &ListenToken->NewChildHandle);
-            // At this point we dont know the tcp4Protocol for this peer (tcp4Protocol will be inititialzed in peerConnectionNewlyEstablished())
-            // so we map the clientSocket to the handle to process it later in peerConnectionNewlyEstablished()
+            // Save the socket until peerConnectionNewlyEstablished initializes the protocol.
             {
                 std::lock_guard<std::mutex> lock(networkingLock);
                 incomingSocketMap[(unsigned long long)ListenToken->NewChildHandle] = clientSocket;
@@ -1163,8 +1206,8 @@ struct Overload {
     }
 
     static EFI_STATUS Connect(IN void* This, IN EFI_TCP4_CONNECTION_TOKEN* ConnectionToken) {
-        static std::map<int, long long> latestConnectTimestampMap; // map of <ip, timestamp>
-        static std::mutex latestConnectTimestampMapMutex;          // guards latestConnectTimestampMap (concurrent detached connect threads)
+        static std::map<int, long long> latestConnectTimestampMap;
+        static std::mutex latestConnectTimestampMapMutex;
         std::shared_ptr<TcpData> tcpDataPtr;
         TcpData* tcpData = nullptr;
         unsigned long long key = (unsigned long long)This;
@@ -1194,7 +1237,7 @@ struct Overload {
         #endif
 
         unsigned int ipInNumber = *(unsigned int*)tcpData->configData.AccessPoint.RemoteAddress.Addr;
-        // connect in a thread (capture shared_ptr by value so tcpData survives a concurrent DestroyChild)
+        // Keep TcpData alive while the detached connection attempt runs.
         std::thread connectThread([tcpDataPtr, serverAddr, ConnectionToken, ipInNumber]() {
             TcpData* tcpData = tcpDataPtr.get();
             auto now = std::chrono::system_clock::now();
@@ -1218,7 +1261,7 @@ struct Overload {
 #ifdef _MSC_VER
                 u_long mode = 1;
                 ioctlsocket(tcpData->socket, FIONBIO, &mode);
-                int nodelay = 1; // see Accept: Nagle stalls the per-vote sends on Windows loopback
+                int nodelay = 1;
                 setsockopt(tcpData->socket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
 #endif
             }
@@ -1233,69 +1276,124 @@ struct Overload {
         return EFI_SUCCESS;
     }
 
-    // ---- [NETPROBE] loopback I/O health counters (aggregated across the tx/rx thread pool) ----
-    // Distinguishes the two suspects for the Windows-CI tick-stall: slow send/recv SYSCALLS (WFP/filter
-    // traversal on loopback -> high *_ns_avg) vs WOULDBLOCK back-pressure (high wblk). Reset each second.
-    inline static std::atomic<unsigned long long>
-        npTxReqs{0}, npTxSend{0}, npTxBytes{0}, npTxWblk{0}, npTxTmo{0}, npTxSendNs{0}, npTxSendMaxNs{0},
-        npRxRecv{0}, npRxOk{0}, npRxBytes{0}, npRxRecvNs{0}, npRxRecvMaxNs{0};
-    inline static unsigned long long npSleepUs = 1000;   // measured precise-sleep granularity (set at init)
+    // Aggregate loopback I/O health counters once per second.
+    inline static std::atomic<unsigned long long> npTxReqs{0};
+    inline static std::atomic<unsigned long long> npTxSend{0};
+    inline static std::atomic<unsigned long long> npTxBytes{0};
+    inline static std::atomic<unsigned long long> npTxWblk{0};
+    inline static std::atomic<unsigned long long> npTxTmo{0};
+    inline static std::atomic<unsigned long long> npTxSendNs{0};
+    inline static std::atomic<unsigned long long> npTxSendMaxNs{0};
+    inline static std::atomic<unsigned long long> npRxRecv{0};
+    inline static std::atomic<unsigned long long> npRxOk{0};
+    inline static std::atomic<unsigned long long> npRxBytes{0};
+    inline static std::atomic<unsigned long long> npRxRecvNs{0};
+    inline static std::atomic<unsigned long long> npRxRecvMaxNs{0};
+    inline static unsigned long long npSleepUs = 1000;
 
-    // Process CPU time (user+kernel) in 100ns units; 0 where unavailable. Reveals whether the node is
-    // spinning (cores pegged) or idle/blocked (barely any CPU) during the stall.
+    // Return process CPU time in 100 ns units when supported.
     static unsigned long long npProcessCpu100ns()
     {
 #ifdef _MSC_VER
-        FILETIME _c, _e, _k, _u;
-        if (!GetProcessTimes(GetCurrentProcess(), &_c, &_e, &_k, &_u)) return 0;
-        ULARGE_INTEGER _ku, _uu;
-        _ku.LowPart = _k.dwLowDateTime; _ku.HighPart = _k.dwHighDateTime;
-        _uu.LowPart = _u.dwLowDateTime; _uu.HighPart = _u.dwHighDateTime;
-        return _ku.QuadPart + _uu.QuadPart;
+        FILETIME creationTime;
+        FILETIME exitTime;
+        FILETIME kernelTimeParts;
+        FILETIME userTimeParts;
+        if (!GetProcessTimes(
+                GetCurrentProcess(),
+                &creationTime,
+                &exitTime,
+                &kernelTimeParts,
+                &userTimeParts))
+        {
+            return 0;
+        }
+
+        ULARGE_INTEGER kernelTime;
+        kernelTime.LowPart = kernelTimeParts.dwLowDateTime;
+        kernelTime.HighPart = kernelTimeParts.dwHighDateTime;
+        ULARGE_INTEGER userTime;
+        userTime.LowPart = userTimeParts.dwLowDateTime;
+        userTime.HighPart = userTimeParts.dwHighDateTime;
+        return kernelTime.QuadPart + userTime.QuadPart;
 #else
         return 0;
 #endif
     }
 
-    // One probe thread (Windows-started) emits a per-second [NETPROBE] line even if the I/O threads block.
-    // sched_gap_ms = actual gap of this 1s-sleep thread (>>1000 => process scheduling-throttled / descheduled);
-    // cpu_cores_x100 = process CPU cores used x100 (35 => 0.35 cores "barely any CPU"; 400 => 4 cores pegged).
+    // Emit one health sample per second independently of the I/O threads.
     static void netprobeProcessor()
     {
-        auto tPrev = std::chrono::steady_clock::now();
-        unsigned long long cpuPrev = npProcessCpu100ns();
+        auto previousTime = std::chrono::steady_clock::now();
+        unsigned long long previousCpuTime = npProcessCpu100ns();
         while (true)
         {
             std::this_thread::sleep_for(std::chrono::seconds(1));
-            auto tNow = std::chrono::steady_clock::now();
-            unsigned long long wallNs = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(tNow - tPrev).count();
-            tPrev = tNow;
-            unsigned long long cpuNow = npProcessCpu100ns();
-            unsigned long long cpuCoresX100 = wallNs ? ((cpuNow - cpuPrev) * 10000ULL / wallNs) : 0;
-            cpuPrev = cpuNow;
-            unsigned long long txr = npTxReqs.exchange(0), txs = npTxSend.exchange(0), txb = npTxBytes.exchange(0),
-                txw = npTxWblk.exchange(0), txt = npTxTmo.exchange(0), txns = npTxSendNs.exchange(0),
-                txmx = npTxSendMaxNs.exchange(0);
-            unsigned long long rxr = npRxRecv.exchange(0), rxo = npRxOk.exchange(0),
-                rxb = npRxBytes.exchange(0), rxns = npRxRecvNs.exchange(0), rxmx = npRxRecvMaxNs.exchange(0);
-            CHAR16 m[760];
-            setText(m, L"[NETPROBE] cpu_cores_x100="); appendNumber(m, cpuCoresX100, FALSE);
-            appendText(m, L" sched_gap_ms="); appendNumber(m, wallNs / 1000000, FALSE);
-            appendText(m, L" | tx reqs="); appendNumber(m, txr, FALSE);
-            appendText(m, L" send="); appendNumber(m, txs, FALSE);
-            appendText(m, L" wblk="); appendNumber(m, txw, FALSE);
-            appendText(m, L" tmo="); appendNumber(m, txt, FALSE);
-            appendText(m, L" send_ns_avg="); appendNumber(m, txs ? txns / txs : 0, FALSE);
-            appendText(m, L" send_ns_max="); appendNumber(m, txmx, FALSE);
-            appendText(m, L" sleep_ms~="); appendNumber(m, (txw * npSleepUs) / 1000, FALSE);
-            appendText(m, L" txbytes="); appendNumber(m, txb, FALSE);
-            appendText(m, L" || rx recv="); appendNumber(m, rxr, FALSE);
-            appendText(m, L" ok="); appendNumber(m, rxo, FALSE);
-            appendText(m, L" nonok="); appendNumber(m, rxr >= rxo ? rxr - rxo : 0, FALSE);
-            appendText(m, L" recv_ns_avg="); appendNumber(m, rxr ? rxns / rxr : 0, FALSE);
-            appendText(m, L" recv_ns_max="); appendNumber(m, rxmx, FALSE);
-            appendText(m, L" rxbytes="); appendNumber(m, rxb, FALSE);
-            logToConsole(m);
+            const auto currentTime = std::chrono::steady_clock::now();
+            const unsigned long long wallTimeNs =
+                (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    currentTime - previousTime).count();
+            previousTime = currentTime;
+
+            const unsigned long long currentCpuTime = npProcessCpu100ns();
+            const unsigned long long cpuCoresX100 = wallTimeNs
+                ? ((currentCpuTime - previousCpuTime) * 10000ULL / wallTimeNs)
+                : 0;
+            previousCpuTime = currentCpuTime;
+
+            const unsigned long long txRequests = npTxReqs.exchange(0);
+            const unsigned long long txSends = npTxSend.exchange(0);
+            const unsigned long long txBytes = npTxBytes.exchange(0);
+            const unsigned long long txWouldBlock = npTxWblk.exchange(0);
+            const unsigned long long txTimeouts = npTxTmo.exchange(0);
+            const unsigned long long txSendNs = npTxSendNs.exchange(0);
+            const unsigned long long txSendMaxNs = npTxSendMaxNs.exchange(0);
+            const unsigned long long rxReceives = npRxRecv.exchange(0);
+            const unsigned long long rxSuccesses = npRxOk.exchange(0);
+            const unsigned long long rxBytes = npRxBytes.exchange(0);
+            const unsigned long long rxReceiveNs = npRxRecvNs.exchange(0);
+            const unsigned long long rxReceiveMaxNs = npRxRecvMaxNs.exchange(0);
+
+            CHAR16 message[760];
+            setText(message, L"[NETPROBE] cpu_cores_x100=");
+            appendNumber(message, cpuCoresX100, FALSE);
+            appendText(message, L" sched_gap_ms=");
+            appendNumber(message, wallTimeNs / 1000000, FALSE);
+            appendText(message, L" | tx reqs=");
+            appendNumber(message, txRequests, FALSE);
+            appendText(message, L" send=");
+            appendNumber(message, txSends, FALSE);
+            appendText(message, L" wblk=");
+            appendNumber(message, txWouldBlock, FALSE);
+            appendText(message, L" tmo=");
+            appendNumber(message, txTimeouts, FALSE);
+            appendText(message, L" send_ns_avg=");
+            appendNumber(message, txSends ? txSendNs / txSends : 0, FALSE);
+            appendText(message, L" send_ns_max=");
+            appendNumber(message, txSendMaxNs, FALSE);
+            appendText(message, L" sleep_ms~=");
+            appendNumber(message, (txWouldBlock * npSleepUs) / 1000, FALSE);
+            appendText(message, L" txbytes=");
+            appendNumber(message, txBytes, FALSE);
+            appendText(message, L" || rx recv=");
+            appendNumber(message, rxReceives, FALSE);
+            appendText(message, L" ok=");
+            appendNumber(message, rxSuccesses, FALSE);
+            appendText(message, L" nonok=");
+            appendNumber(
+                message,
+                rxReceives >= rxSuccesses ? rxReceives - rxSuccesses : 0,
+                FALSE);
+            appendText(message, L" recv_ns_avg=");
+            appendNumber(
+                message,
+                rxReceives ? rxReceiveNs / rxReceives : 0,
+                FALSE);
+            appendText(message, L" recv_ns_max=");
+            appendNumber(message, rxReceiveMaxNs, FALSE);
+            appendText(message, L" rxbytes=");
+            appendNumber(message, rxBytes, FALSE);
+            logToConsole(message);
             fflush(stdout);
         }
     }
@@ -1308,41 +1406,60 @@ struct Overload {
             npTxReqs.fetch_add(1, std::memory_order_relaxed);
             int totalSentBytes = 0;
             auto& fragment = request.token->Packet.TxData->FragmentTable[0];
-            // Abort a send only after 5s of zero progress (not total time) so big transfers aren't cut mid-stream.
+            // Timeout only after five seconds without forward progress.
             constexpr unsigned long long NO_PROGRESS_TIMEOUT_NS = 5'000'000'000ULL;
             auto lastProgress = std::chrono::high_resolution_clock::now();
             while ((unsigned int)totalSentBytes < fragment.FragmentLength)
             {
-                auto now = std::chrono::high_resolution_clock::now();
-                if ((unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(now - lastProgress).count() > NO_PROGRESS_TIMEOUT_NS) {
+                const auto currentTime = std::chrono::high_resolution_clock::now();
+                const unsigned long long stalledTimeNs =
+                    (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        currentTime - lastProgress).count();
+                if (stalledTimeNs > NO_PROGRESS_TIMEOUT_NS)
+                {
                     request.token->CompletionToken.Status = EFI_TIMEOUT;
                     npTxTmo.fetch_add(1, std::memory_order_relaxed);
                     break;
                 }
-                auto _np0 = std::chrono::high_resolution_clock::now();
-                auto n = send(request.socket, (const char*)fragment.FragmentBuffer + totalSentBytes, fragment.FragmentLength - totalSentBytes, MSG_DONTWAIT | MSG_NOSIGNAL);
-                unsigned long long _npd = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - _np0).count();
-                npTxSend.fetch_add(1, std::memory_order_relaxed); npTxSendNs.fetch_add(_npd, std::memory_order_relaxed);
-                { unsigned long long _c = npTxSendMaxNs.load(std::memory_order_relaxed); if (_npd > _c) npTxSendMaxNs.store(_npd, std::memory_order_relaxed); }
-                if (n > 0)
+
+                const auto sendStart = std::chrono::high_resolution_clock::now();
+                const auto sentBytes = send(
+                    request.socket,
+                    (const char*)fragment.FragmentBuffer + totalSentBytes,
+                    fragment.FragmentLength - totalSentBytes,
+                    MSG_DONTWAIT | MSG_NOSIGNAL);
+                const unsigned long long sendDurationNs =
+                    (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::high_resolution_clock::now() - sendStart).count();
+                npTxSend.fetch_add(1, std::memory_order_relaxed);
+                npTxSendNs.fetch_add(sendDurationNs, std::memory_order_relaxed);
+                const unsigned long long previousMaxNs =
+                    npTxSendMaxNs.load(std::memory_order_relaxed);
+                if (sendDurationNs > previousMaxNs)
                 {
-                    totalSentBytes += n;
-                    npTxBytes.fetch_add((unsigned long long)n, std::memory_order_relaxed);
-                    lastProgress = now;
-                } else if (n == 0)
+                    npTxSendMaxNs.store(sendDurationNs, std::memory_order_relaxed);
+                }
+
+                if (sentBytes > 0)
+                {
+                    totalSentBytes += sentBytes;
+                    npTxBytes.fetch_add((unsigned long long)sentBytes, std::memory_order_relaxed);
+                    lastProgress = currentTime;
+                }
+                else if (sentBytes == 0)
                 {
                     // connection closed
                     request.token->CompletionToken.Status = EFI_ABORTED;
                     break;
                 }
-                else if (n == SOCKET_ERROR)
+                else if (sentBytes == SOCKET_ERROR)
                 {
 #ifdef _MSC_VER
 					int err = WSAGetLastError();
                     if (err == WSAEWOULDBLOCK)
                     {
                         npTxWblk.fetch_add(1, std::memory_order_relaxed);
-                        preciseSleepMicros(1000);   // 1ms — precise (default Windows sleep would be ~15.6ms)
+                        preciseSleepMicros(1000);
                         continue;
                     }
                     else
@@ -1380,33 +1497,41 @@ struct Overload {
         while (true)
         {
             ReceiveRequest request = receiveQueue.pop();
-            // Read at most the free space the caller reserved in its receive buffer
-            // (receiveData() sets this in FragmentLength = BUFFER_SIZE - bytesAlreadyBuffered).
-            // Passing BUFFER_SIZE here overruns peers[i].receiveBuffer whenever it already
-            // holds a partial message, clobbering the adjacent peer's buffer — which then
-            // parses as malformed (size() < header) and gets force-forgotten.
-            const unsigned int maxReceiveSize = (unsigned int)request.token->Packet.RxData->FragmentTable[0].FragmentLength;
-            auto _np0 = std::chrono::high_resolution_clock::now();
-            auto n = recv(request.socket, (char *)request.token->Packet.RxData->FragmentTable[0].FragmentBuffer, maxReceiveSize, MSG_DONTWAIT);
-            unsigned long long _npd = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - _np0).count();
-            npRxRecv.fetch_add(1, std::memory_order_relaxed); npRxRecvNs.fetch_add(_npd, std::memory_order_relaxed);
-            { unsigned long long _c = npRxRecvMaxNs.load(std::memory_order_relaxed); if (_npd > _c) npRxRecvMaxNs.store(_npd, std::memory_order_relaxed); }
-            if (n > 0)
+            // Read only the free portion of a partially filled peer buffer.
+            const auto& fragment = request.token->Packet.RxData->FragmentTable[0];
+            const unsigned int maxReceiveSize = (unsigned int)fragment.FragmentLength;
+            const auto receiveStart = std::chrono::high_resolution_clock::now();
+            const auto receivedBytes = recv(
+                request.socket,
+                (char*)fragment.FragmentBuffer,
+                maxReceiveSize,
+                MSG_DONTWAIT);
+            const unsigned long long receiveDurationNs =
+                (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::high_resolution_clock::now() - receiveStart).count();
+            npRxRecv.fetch_add(1, std::memory_order_relaxed);
+            npRxRecvNs.fetch_add(receiveDurationNs, std::memory_order_relaxed);
+            const unsigned long long previousMaxNs =
+                npRxRecvMaxNs.load(std::memory_order_relaxed);
+            if (receiveDurationNs > previousMaxNs)
             {
-                request.token->Packet.RxData->DataLength = n;
-                // Publish DataLength before Status. The main loop reads Status first, then
-                // DataLength; without this barrier it can observe SUCCESS together with the
-                // stale, buffer-sized DataLength pre-set in receiveData(), over-advancing the
-                // receive cursor into zero-filled buffer so the parser reads size()==0.
+                npRxRecvMaxNs.store(receiveDurationNs, std::memory_order_relaxed);
+            }
+
+            if (receivedBytes > 0)
+            {
+                request.token->Packet.RxData->DataLength = receivedBytes;
+                // Publish the length before the success status observed by the main loop.
                 std::atomic_thread_fence(std::memory_order_release);
                 request.token->CompletionToken.Status = EFI_SUCCESS;
-                npRxOk.fetch_add(1, std::memory_order_relaxed); npRxBytes.fetch_add((unsigned long long)n, std::memory_order_relaxed);
+                npRxOk.fetch_add(1, std::memory_order_relaxed);
+                npRxBytes.fetch_add((unsigned long long)receivedBytes, std::memory_order_relaxed);
             }
-            else if (n == 0)
+            else if (receivedBytes == 0)
             {
                 request.token->CompletionToken.Status = EFI_ABORTED;
             }
-            else if (n == SOCKET_ERROR)
+            else if (receivedBytes == SOCKET_ERROR)
             {
 #ifdef _MSC_VER
 				int err = WSAGetLastError();
@@ -1453,40 +1578,48 @@ struct Overload {
 		// NOTE: In MSVC Release Mode, so the scheduler often just keeps the main thread on one CPU core (the best core), dont need to set affinity because it will slow down the main thread performance
         HANDLE hThread = GetCurrentThread();
         SetThreadAffinityMask(hThread, 1ULL << lastCpu);
-        // Default Windows timer resolution is ~15.6ms, so every sleep_for(1ms) in the request/vote/
-        // transmit loops actually sleeps ~15.6ms — throughput drops ~15x vs Linux and the tick stalls
-        // waiting for quorum votes (tx=?). 1ms resolution restores Linux-like pacing process-wide.
+        // Keep one-millisecond network retries precise on Windows.
         timeBeginPeriod(1);
-        // Windows 11 power-throttles timer-resolution requests of processes it deems background —
-        // e.g. spawned detached with redirected stdio (qinit's launch), or with an occluded console.
-        // The 1ms request above is then silently ignored and the node stalls again (request rate
-        // drops back to ~256/s). Opt out so the request is always honored regardless of window state.
+        // Disable background throttling that overrides the requested timer resolution.
         PROCESS_POWER_THROTTLING_STATE pt;
         memset(&pt, 0, sizeof(pt));
         pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
-        pt.StateMask = 0;   // 0 = throttling OFF for whichever ControlMask bit is set
-        // EcoQoS EXECUTION-SPEED throttling (Win10 1709+/Win11) is a SEPARATE mechanism: a background
-        // process (detached + window-hidden — exactly how qinit launches the node) gets down-clocked, so
-        // the tick loop bodies stay fast (~20us) but the chain crawls to ~136s/tick. This — not timer
-        // resolution — is the CI tick-stall. Force full speed. Set as its OWN call so the Win11-only
-        // timer-resolution flag below can't fail the whole request on Win10.
+        pt.StateMask = 0;
         pt.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
         SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
-        // Win11: also stop it dropping the 1ms timeBeginPeriod request when backgrounded.
         pt.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
         SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
 
-        // [NETPROBE] verify the precise-sleep path actually achieves ~1ms here (a coarse ~15.6ms timer is a
-        // prime suspect for the loopback WOULDBLOCK retry stall). Measure 10x preciseSleepMicros(1000us).
+        // Measure the actual retry sleep used in network health logs.
         {
-            LARGE_INTEGER _qf, _a, _b; QueryPerformanceFrequency(&_qf); QueryPerformanceCounter(&_a);
-            for (int _i = 0; _i < 10; _i++) preciseSleepMicros(1000);
-            QueryPerformanceCounter(&_b);
-            npSleepUs = (unsigned long long)(((_b.QuadPart - _a.QuadPart) * 1000000ULL / _qf.QuadPart) / 10);
-            if (!npSleepUs) npSleepUs = 1;
-            CHAR16 _m[256]; setText(_m, L"[NETPROBE] preciseSleep(1000us) actual avg = "); appendNumber(_m, npSleepUs, FALSE);
-            appendText(_m, L" us/call; io_thread_pairs = "); appendNumber(_m, (unsigned long long)(NUMBER_OF_INCOMING_CONNECTIONS + NUMBER_OF_OUTGOING_CONNECTIONS), FALSE);
-            logToConsole(_m); fflush(stdout);
+            LARGE_INTEGER frequency;
+            LARGE_INTEGER start;
+            LARGE_INTEGER end;
+            QueryPerformanceFrequency(&frequency);
+            QueryPerformanceCounter(&start);
+            for (int sample = 0; sample < 10; sample++)
+            {
+                preciseSleepMicros(1000);
+            }
+            QueryPerformanceCounter(&end);
+            npSleepUs = (unsigned long long)(
+                ((end.QuadPart - start.QuadPart) * 1000000ULL / frequency.QuadPart) / 10);
+            if (!npSleepUs)
+            {
+                npSleepUs = 1;
+            }
+
+            CHAR16 message[256];
+            setText(message, L"[NETPROBE] preciseSleep(1000us) actual avg = ");
+            appendNumber(message, npSleepUs, FALSE);
+            appendText(message, L" us/call; io_thread_pairs = ");
+            appendNumber(
+                message,
+                (unsigned long long)(
+                    NUMBER_OF_INCOMING_CONNECTIONS + NUMBER_OF_OUTGOING_CONNECTIONS),
+                FALSE);
+            logToConsole(message);
+            fflush(stdout);
         }
         #endif
 
@@ -1529,8 +1662,8 @@ struct Overload {
             receiveProcessorThread.detach();
         }
 #ifdef _MSC_VER
-        // [NETPROBE] one probe thread emits the per-second loopback-I/O health line to node.log (Windows only).
-        { std::thread npT(netprobeProcessor); npT.detach(); }
+        std::thread netprobeThread(netprobeProcessor);
+        netprobeThread.detach();
 #endif
 
         // Reserve space

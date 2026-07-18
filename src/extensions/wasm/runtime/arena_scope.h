@@ -67,8 +67,8 @@ static inline void zeroEntryLocals(void* locals)
     std::memset(locals, 0, WASM_LOCALS_CAPACITY);
 }
 
-// Reset compiler temporaries for independent calls. Nested calls advance past their private frame and
-// restore the parent arena when they return.
+// Reset compiler temporaries for independent calls.
+// Nested calls restore their parent arena.
 struct ArenaScope
 {
     uint32_t& depth;

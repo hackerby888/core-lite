@@ -97,10 +97,9 @@ bool qVirtualFreeAndRecommit(void* address, const unsigned long long size) {
 	}
     return VirtualAlloc(address, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE) != address;
 }
-// The lite node's VEH commit-on-write lazy allocator (extensions/overload.h) isn't in the test build;
-// allocPoolWithErrorLog(...lazyCommit=true) still references qVirtualAllocLazy, so provide an eager
-// equivalent here (matches pre-lazy behavior — tests don't exercise the commit-charge path).
-void* qVirtualAllocLazy(const unsigned long long size) {
+// Tests use an eager equivalent of the node's lazy Windows allocator.
+void* qVirtualAllocLazy(const unsigned long long size)
+{
     return qVirtualAlloc(size, /*commitMem=*/true);
 }
 #else

@@ -1431,7 +1431,7 @@ static const unsigned char oracleMachineIPs[][4] = {
 #define ENABLE_QUBIC_LOGGING_EVENT 0
 #endif
 
-// Logging VM page sizes — #ifndef-guarded for uniform -D override; sizes bake into the VM template type, all TUs must agree or layouts conflict (ODR).
+// Allow build-wide logging VM page-size overrides.
 #if defined(TESTNET) && defined(TESTNET_LITE_RAM)
 #ifndef LOG_BUFFER_PAGE_SIZE
 #define LOG_BUFFER_PAGE_SIZE (16000000ULL)   // 16 MB page — LITE testnet

@@ -1,6 +1,4 @@
-// wsmap — per-region working-set map of a process. Diagnostic for the Windows port's RAM usage
-// (WINDOWS_PORT.md "Known issues"): attributes resident pages to VirtualAlloc regions so the
-// page-toucher can be identified. Usage: wsmap <pid> [minMB]
+// Print a process working-set map grouped by VirtualAlloc reservation.
 #include <windows.h>
 #include <psapi.h>
 #include <stdio.h>
@@ -10,63 +8,134 @@
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) { printf("usage: wsmap <pid> [minMB]\n"); return 1; }
-    DWORD pid = (DWORD)atoi(argv[1]);
-    SIZE_T minBytes = (argc > 2 ? (SIZE_T)atoll(argv[2]) : 50) * 1024 * 1024;
+    if (argc < 2)
+    {
+        printf("usage: wsmap <pid> [minMB]\n");
+        return 1;
+    }
+    const DWORD processId = (DWORD)atoi(argv[1]);
+    const SIZE_T minimumBytes =
+        (argc > 2 ? (SIZE_T)atoll(argv[2]) : 50) * 1024 * 1024;
 
-    HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-    if (!h) { printf("OpenProcess failed: %lu\n", GetLastError()); return 1; }
+    HANDLE process = OpenProcess(
+        PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+        FALSE,
+        processId);
+    if (!process)
+    {
+        printf("OpenProcess failed: %lu\n", GetLastError());
+        return 1;
+    }
 
-    SYSTEM_INFO si; GetSystemInfo(&si);
-    const SIZE_T page = si.dwPageSize;
-    const SIZE_T BATCH = 65536; // pages per QueryWorkingSetEx call (64K * 16B = 1MB scratch)
-    PSAPI_WORKING_SET_EX_INFORMATION* wsx =
-        (PSAPI_WORKING_SET_EX_INFORMATION*)malloc(BATCH * sizeof(*wsx));
+    SYSTEM_INFO systemInfo;
+    GetSystemInfo(&systemInfo);
+    const SIZE_T pageSize = systemInfo.dwPageSize;
+    const SIZE_T batchSize = 65536;
+    PSAPI_WORKING_SET_EX_INFORMATION* workingSet =
+        (PSAPI_WORKING_SET_EX_INFORMATION*)malloc(
+            batchSize * sizeof(*workingSet));
 
-    unsigned char* addr = 0;
-    MEMORY_BASIC_INFORMATION mbi;
-    unsigned long long totCommit = 0, totResident = 0;
-    printf("%-16s %10s %10s %10s  %s\n", "base", "size MB", "commit MB", "ws MB", "type/protect");
-    // group by allocation base: regions sharing an AllocationBase are one VirtualAlloc reserve
-    unsigned char* curAllocBase = 0;
-    unsigned long long grpSize = 0, grpCommit = 0, grpResident = 0;
-    DWORD grpProtect = 0, grpType = 0;
+    unsigned char* address = 0;
+    MEMORY_BASIC_INFORMATION memoryInfo;
+    unsigned long long totalCommit = 0;
+    unsigned long long totalResident = 0;
+    printf(
+        "%-16s %10s %10s %10s  %s\n",
+        "base",
+        "size MB",
+        "commit MB",
+        "ws MB",
+        "type/protect");
+
+    unsigned char* currentAllocationBase = 0;
+    unsigned long long groupSize = 0;
+    unsigned long long groupCommit = 0;
+    unsigned long long groupResident = 0;
+    DWORD groupProtect = 0;
+    DWORD groupType = 0;
     for (;;)
     {
-        SIZE_T got = VirtualQueryEx(h, addr, &mbi, sizeof(mbi));
-        int done = (got == 0);
-        if (!done && mbi.State == MEM_FREE) { addr = (unsigned char*)mbi.BaseAddress + mbi.RegionSize; continue; }
-
-        if (done || (unsigned char*)mbi.AllocationBase != curAllocBase)
+        const SIZE_T queried = VirtualQueryEx(
+            process,
+            address,
+            &memoryInfo,
+            sizeof(memoryInfo));
+        const int done = queried == 0;
+        if (!done && memoryInfo.State == MEM_FREE)
         {
-            if (curAllocBase && grpSize >= minBytes)
-                printf("%-16p %10llu %10llu %10llu  type=%lx prot=%lx\n", curAllocBase,
-                       grpSize >> 20, grpCommit >> 20, grpResident >> 20, grpType, grpProtect);
-            if (done) break;
-            curAllocBase = (unsigned char*)mbi.AllocationBase;
-            grpSize = grpCommit = grpResident = 0;
-            grpType = mbi.Type; grpProtect = mbi.AllocationProtect;
+            address = (unsigned char*)memoryInfo.BaseAddress
+                + memoryInfo.RegionSize;
+            continue;
         }
 
-        grpSize += mbi.RegionSize;
-        if (mbi.State == MEM_COMMIT)
+        if (done
+            || (unsigned char*)memoryInfo.AllocationBase
+                != currentAllocationBase)
         {
-            grpCommit += mbi.RegionSize; totCommit += mbi.RegionSize;
-            // count resident pages in batches
-            SIZE_T pages = mbi.RegionSize / page;
-            unsigned char* p = (unsigned char*)mbi.BaseAddress;
+            if (currentAllocationBase && groupSize >= minimumBytes)
+            {
+                printf(
+                    "%-16p %10llu %10llu %10llu  type=%lx prot=%lx\n",
+                    currentAllocationBase,
+                    groupSize >> 20,
+                    groupCommit >> 20,
+                    groupResident >> 20,
+                    groupType,
+                    groupProtect);
+            }
+            if (done)
+            {
+                break;
+            }
+            currentAllocationBase =
+                (unsigned char*)memoryInfo.AllocationBase;
+            groupSize = 0;
+            groupCommit = 0;
+            groupResident = 0;
+            groupType = memoryInfo.Type;
+            groupProtect = memoryInfo.AllocationProtect;
+        }
+
+        groupSize += memoryInfo.RegionSize;
+        if (memoryInfo.State == MEM_COMMIT)
+        {
+            groupCommit += memoryInfo.RegionSize;
+            totalCommit += memoryInfo.RegionSize;
+            SIZE_T pages = memoryInfo.RegionSize / pageSize;
+            unsigned char* pageAddress =
+                (unsigned char*)memoryInfo.BaseAddress;
             while (pages)
             {
-                SIZE_T n = pages > BATCH ? BATCH : pages;
-                for (SIZE_T i = 0; i < n; i++) wsx[i].VirtualAddress = p + i * page;
-                if (QueryWorkingSetEx(h, wsx, (DWORD)(n * sizeof(*wsx))))
-                    for (SIZE_T i = 0; i < n; i++)
-                        if (wsx[i].VirtualAttributes.Valid) { grpResident += page; totResident += page; }
-                p += n * page; pages -= n;
+                const SIZE_T count = pages > batchSize ? batchSize : pages;
+                for (SIZE_T i = 0; i < count; i++)
+                {
+                    workingSet[i].VirtualAddress =
+                        pageAddress + i * pageSize;
+                }
+                if (QueryWorkingSetEx(
+                        process,
+                        workingSet,
+                        (DWORD)(count * sizeof(*workingSet))))
+                {
+                    for (SIZE_T i = 0; i < count; i++)
+                    {
+                        if (workingSet[i].VirtualAttributes.Valid)
+                        {
+                            groupResident += pageSize;
+                            totalResident += pageSize;
+                        }
+                    }
+                }
+                pageAddress += count * pageSize;
+                pages -= count;
             }
         }
-        addr = (unsigned char*)mbi.BaseAddress + mbi.RegionSize;
+        address = (unsigned char*)memoryInfo.BaseAddress
+            + memoryInfo.RegionSize;
     }
-    printf("TOTAL commit=%llu MB resident=%llu MB\n", totCommit >> 20, totResident >> 20);
+    printf(
+        "TOTAL commit=%llu MB resident=%llu MB\n",
+        totalCommit >> 20,
+        totalResident >> 20);
     return 0;
 }

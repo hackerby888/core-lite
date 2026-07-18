@@ -1,6 +1,5 @@
 #pragma once
-// WAMR adapters for the canonical "lhost" import table. Pointers cross the ABI as Wasm32 offsets and are
-// resolved against the active module instance. Keep the ABI row order and signatures unchanged.
+// Resolve Wasm32 offsets for the canonical lhost import table.
 #ifdef LITE_WASM_SC
 #include <cstdint>
 #include <type_traits>
@@ -707,17 +706,53 @@ static int32_t w_liteSetShareholderVotes(
 }
 
 // Every declared signature is checked against the type-derived WAMR signature.
-#define LHOST_AS_GQ(nm, m, lit)     static_assert(equalStrings(QpiImport<&HostServices::m>::sig.data(),   lit), "wasm sig drift: " nm);
-#define LHOST_AS_GI(nm, m, lit)     static_assert(equalStrings(InfrastructureImport<&HostServices::m>::sig.data(), lit), "wasm sig drift: " nm);
-#define LHOST_AS_HQ(nm, m, wfn, lit) static_assert(equalStrings(QpiImport<&HostServices::m>::sig.data(),   lit), "wasm sig drift: " nm);
-#define LHOST_AS_HI(nm, m, wfn, lit) static_assert(equalStrings(InfrastructureImport<&HostServices::m>::sig.data(), lit), "wasm sig drift: " nm);
+#define LHOST_AS_GQ(importName, member, signatureLiteral) \
+    static_assert( \
+        equalStrings( \
+            QpiImport<&HostServices::member>::sig.data(), \
+            signatureLiteral), \
+        "wasm sig drift: " importName);
+#define LHOST_AS_GI(importName, member, signatureLiteral) \
+    static_assert( \
+        equalStrings( \
+            InfrastructureImport<&HostServices::member>::sig.data(), \
+            signatureLiteral), \
+        "wasm sig drift: " importName);
+#define LHOST_AS_HQ(importName, member, adapter, signatureLiteral) \
+    LHOST_AS_GQ(importName, member, signatureLiteral)
+#define LHOST_AS_HI(importName, member, adapter, signatureLiteral) \
+    LHOST_AS_GI(importName, member, signatureLiteral)
 WASM_LHOST_ABI_ROWS(LHOST_AS_GQ, LHOST_AS_GI, LHOST_AS_HQ, LHOST_AS_HI)
 
 // Generated rows use templates; handwritten rows use their named adapters.
-#define LHOST_ROW_GQ(nm, m, lit)      { nm, (void*)&QpiImport<&HostServices::m>::call,   QpiImport<&HostServices::m>::sig.data(),   NULL },
-#define LHOST_ROW_GI(nm, m, lit)      { nm, (void*)&InfrastructureImport<&HostServices::m>::call, InfrastructureImport<&HostServices::m>::sig.data(), NULL },
-#define LHOST_ROW_HQ(nm, m, wfn, lit) { nm, (void*)wfn,                                          QpiImport<&HostServices::m>::sig.data(),   NULL },
-#define LHOST_ROW_HI(nm, m, wfn, lit) { nm, (void*)wfn,                                          InfrastructureImport<&HostServices::m>::sig.data(), NULL },
+#define LHOST_ROW_GQ(importName, member, signatureLiteral) \
+    { \
+        importName, \
+        (void*)&QpiImport<&HostServices::member>::call, \
+        QpiImport<&HostServices::member>::sig.data(), \
+        NULL, \
+    },
+#define LHOST_ROW_GI(importName, member, signatureLiteral) \
+    { \
+        importName, \
+        (void*)&InfrastructureImport<&HostServices::member>::call, \
+        InfrastructureImport<&HostServices::member>::sig.data(), \
+        NULL, \
+    },
+#define LHOST_ROW_HQ(importName, member, adapter, signatureLiteral) \
+    { \
+        importName, \
+        (void*)adapter, \
+        QpiImport<&HostServices::member>::sig.data(), \
+        NULL, \
+    },
+#define LHOST_ROW_HI(importName, member, adapter, signatureLiteral) \
+    { \
+        importName, \
+        (void*)adapter, \
+        InfrastructureImport<&HostServices::member>::sig.data(), \
+        NULL, \
+    },
 static NativeSymbol nativeSymbols[] =
 {
     WASM_LHOST_ABI_ROWS(LHOST_ROW_GQ, LHOST_ROW_GI, LHOST_ROW_HQ, LHOST_ROW_HI)

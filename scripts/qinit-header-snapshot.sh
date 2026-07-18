@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# qinit core-header snapshot: native/Wasm clang -M closures plus contracts and inter-contract support.
-# Output <out>/core-headers.tar.gz (+ .sha256); layout mirrors the repo so -I resolves 1:1.
+# Build qinit's native and Wasm core-header closure.
 set -euo pipefail
 
-CORE="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${1:-$CORE/dist-snapshot}"
+CORE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUTPUT_DIR="${1:-$CORE_ROOT/dist-snapshot}"
 CLANG="${CLANG:-clang++-18}"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+TEMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TEMP_DIR"' EXIT
 
-cat > "$TMP/Stub.h" <<'EOF'
+cat > "$TEMP_DIR/Stub.h" <<'EOF'
 using namespace QPI;
 struct CONTRACT_STATE2_TYPE {};
 struct CONTRACT_STATE_TYPE : public ContractBase {
@@ -21,8 +20,8 @@ struct CONTRACT_STATE_TYPE : public ContractBase {
 };
 EOF
 
-# Mirror qinit packages/build/src/recipe.ts native wrapper directly.
-cat > "$TMP/Stub.wrapper.cpp" <<EOF
+# Mirror qinit's native build wrapper.
+cat > "$TEMP_DIR/Stub.wrapper.cpp" <<EOF
 #define NO_UEFI
 #include <cstdint>
 #include <cstddef>
@@ -44,7 +43,7 @@ cat > "$TMP/Stub.wrapper.cpp" <<EOF
 #define CONTRACT_STATE_TYPE Stub
 #define CONTRACT_STATE2_TYPE Stub2
 #include "extensions/wasm/sdk/intercontract_calls.h"
-#include "$TMP/Stub.h"
+#include "$TEMP_DIR/Stub.h"
 #include "contract_core/qpi_collection_impl.h"
 #include "contract_core/qpi_linked_list_impl.h"
 #define __acquireScratchpad __wasm_native_cb_acquireScratchpad_unused
@@ -55,9 +54,8 @@ cat > "$TMP/Stub.wrapper.cpp" <<EOF
 #include "extensions/wasm/shared/abi_types.h"
 EOF
 
-# Mirror the Wasm target directly. Keep this independent from the native wrapper so target-specific
-# headers cannot drift through include-string replacement.
-cat > "$TMP/Stub.wasm.wrapper.cpp" <<EOF
+# Keep the Wasm wrapper independent from native include substitutions.
+cat > "$TEMP_DIR/Stub.wasm.wrapper.cpp" <<EOF
 #define NO_UEFI
 #include <cstdint>
 #include <cstddef>
@@ -80,7 +78,7 @@ cat > "$TMP/Stub.wasm.wrapper.cpp" <<EOF
 #define CONTRACT_STATE2_TYPE Stub2
 #include "extensions/wasm/sdk/intercontract_calls.h"
 #include "extensions/wasm/sdk/qpi_support.h"
-#include "$TMP/Stub.h"
+#include "$TEMP_DIR/Stub.h"
 #include "contract_core/qpi_collection_impl.h"
 #include "contract_core/qpi_linked_list_impl.h"
 #define __acquireScratchpad __wasm_native_cb_acquireScratchpad_unused
@@ -91,33 +89,70 @@ cat > "$TMP/Stub.wasm.wrapper.cpp" <<EOF
 #include "extensions/wasm/sdk/module_runtime.h"
 EOF
 
-SNAP="$TMP/core-headers"
-mkdir -p "$SNAP"
-copy() { local f="$1"; [ -f "$f" ] || return 0; local rel; rel="$(realpath --relative-to="$CORE" "$f")"; case "$rel" in ../*) return 0;; esac; mkdir -p "$SNAP/$(dirname "$rel")"; cp "$f" "$SNAP/$rel"; }
+SNAPSHOT_DIR="$TEMP_DIR/core-headers"
+mkdir -p "$SNAPSHOT_DIR"
 
-# clang -M => every header the compile touches; keep those under the repo.
-DEPS="$("$CLANG" -std=c++20 -fPIC -mavx2 -I"$CORE" -I"$CORE/src" -M "$TMP/Stub.wrapper.cpp" | tr ' \\' '\n\n' | grep "^$CORE/" || true)"
-for f in $DEPS; do copy "$f"; done
+copy_header()
+{
+  local source_file="$1"
+  if [ ! -f "$source_file" ]; then
+    return 0
+  fi
 
-# Wasm contracts also pull the SDK runtime, platform shim, and simde/x86 m256i headers. Compute that
-# closure with the real target and sysroot.
-SHIM="$CORE/src/extensions/wasm/sdk/platform_intrinsics.h"
+  local relative_path
+  relative_path="$(realpath --relative-to="$CORE_ROOT" "$source_file")"
+  case "$relative_path" in
+    ../*) return 0 ;;
+  esac
+
+  mkdir -p "$SNAPSHOT_DIR/$(dirname "$relative_path")"
+  cp "$source_file" "$SNAPSHOT_DIR/$relative_path"
+}
+
+# Keep every repository header reached by the native wrapper.
+NATIVE_DEPS="$("$CLANG" -std=c++20 -fPIC -mavx2 \
+  -I"$CORE_ROOT" \
+  -I"$CORE_ROOT/src" \
+  -M "$TEMP_DIR/Stub.wrapper.cpp" \
+  | tr ' \\' '\n\n' \
+  | grep "^$CORE_ROOT/" || true)"
+for source_file in $NATIVE_DEPS; do
+  copy_header "$source_file"
+done
+
+# Resolve the Wasm closure with its real target and sysroot.
+PLATFORM_SHIM="$CORE_ROOT/src/extensions/wasm/sdk/platform_intrinsics.h"
 if [ -n "${WASM_CLANG:-}" ]; then
-  WDEPS="$("$WASM_CLANG" --target=wasm32-wasi -std=c++20 -fno-exceptions -fno-rtti \
-    ${WASI_SYSROOT:+--sysroot="$WASI_SYSROOT"} -include "$SHIM" -I"$CORE" -I"$CORE/src" \
-    -M "$TMP/Stub.wasm.wrapper.cpp" | tr ' \\' '\n\n' | grep "^$CORE/" || true)"
-  for f in $WDEPS; do copy "$f"; done
+  WASM_DEPS="$("$WASM_CLANG" --target=wasm32-wasi -std=c++20 \
+    -fno-exceptions \
+    -fno-rtti \
+    ${WASI_SYSROOT:+--sysroot="$WASI_SYSROOT"} \
+    -include "$PLATFORM_SHIM" \
+    -I"$CORE_ROOT" \
+    -I"$CORE_ROOT/src" \
+    -M "$TEMP_DIR/Stub.wasm.wrapper.cpp" \
+    | tr ' \\' '\n\n' \
+    | grep "^$CORE_ROOT/" || true)"
+  for source_file in $WASM_DEPS; do
+    copy_header "$source_file"
+  done
 else
   echo "WARN: WASM_CLANG unset — Wasm SDK header closure not captured; snapshot incomplete for Wasm" >&2
 fi
-copy "$SHIM" # force-included by the Wasm compile
+copy_header "$PLATFORM_SHIM"
 
-# Inter-contract: every contract header (callee types), the index map, the call-macro header.
-for f in "$CORE"/src/contracts/*.h; do copy "$f"; done
-copy "$CORE/src/contract_core/contract_def.h"
-copy "$CORE/src/extensions/wasm/sdk/intercontract_calls.h"
+# Include contract types, the slot map, and inter-contract call macros.
+for source_file in "$CORE_ROOT"/src/contracts/*.h; do
+  copy_header "$source_file"
+done
+copy_header "$CORE_ROOT/src/contract_core/contract_def.h"
+copy_header "$CORE_ROOT/src/extensions/wasm/sdk/intercontract_calls.h"
 
-mkdir -p "$OUT"
-tar czf "$OUT/core-headers.tar.gz" -C "$SNAP" .
-sha256sum "$OUT/core-headers.tar.gz" | awk '{print $1}' > "$OUT/core-headers.sha256"
-echo "snapshot: $OUT/core-headers.tar.gz ($(find "$SNAP" -type f | wc -l) files, sha256 $(cat "$OUT/core-headers.sha256"))"
+mkdir -p "$OUTPUT_DIR"
+tar czf "$OUTPUT_DIR/core-headers.tar.gz" -C "$SNAPSHOT_DIR" .
+sha256sum "$OUTPUT_DIR/core-headers.tar.gz" \
+  | awk '{print $1}' > "$OUTPUT_DIR/core-headers.sha256"
+
+HEADER_COUNT=$(find "$SNAPSHOT_DIR" -type f | wc -l)
+SNAPSHOT_SHA=$(cat "$OUTPUT_DIR/core-headers.sha256")
+echo "snapshot: $OUTPUT_DIR/core-headers.tar.gz ($HEADER_COUNT files, sha256 $SNAPSHOT_SHA)"

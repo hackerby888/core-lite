@@ -15,7 +15,7 @@
 #undef MAX_NUMBER_OF_TICKS_PER_EPOCH
 #define MAX_NUMBER_OF_TICKS_PER_EPOCH 3000
 
-// Logging VM page sizes are set uniformly via -D in test/CMakeLists.txt; do not redefine here (ODR — see note there).
+// Test CMake sets logging VM page sizes for every translation unit.
 
 #include "logging/logging.h"
 

@@ -1,87 +1,95 @@
 #pragma once
-// Page-aware KangarooTwelve for Windows lazy-committed contract-state regions.
-//
-// Why: on Windows the demand-zero contract-state reserves are MEM_RESERVE (commit-on-write via the VEH in
-// overload.h) so the node's commit charge tracks the written footprint (~2 GB) instead of the full ~16 GB of
-// reserves — Linux/macOS get this for free via overcommit + the shared zero page. The per-tick state digest,
-// though, READS the whole effective state span. A plain KangarooTwelve(state, size) would fault every
-// untouched page, the VEH would commit it, and the commit charge would balloon right back to the full reserve.
-//
-// KangarooTwelvePaged hashes the SAME logical bytes without touching reserved pages: it walks the region with
-// VirtualQuery and feeds the hash the real bytes of committed (written) runs and synthesized zeros for reserved
-// (never-written, therefore all-zero) runs. The result is bit-identical to KangarooTwelve over the full buffer
-// — verified by tools/k12paged_test.cpp — so the cross-platform contract-state digest is unchanged.
-//
-// Must be included AFTER kangaroo_twelve.h (uses its KangarooTwelve_F / *_Absorb / permute) and after <windows.h>.
+
+// Hash lazy Windows regions without committing untouched logical-zero pages.
+// Include after kangaroo_twelve.h and windows.h.
 
 #ifdef _WIN32
-#include <cstdint>   // uintptr_t
+#include <cstdint>
 
-// Cached VirtualQuery run so a multi-GB reserved region costs one query, not one per 8 KB chunk.
-struct K12PagedSrc {
+// Cache the current VirtualQuery run across adjacent K12 chunks.
+struct K12PagedSrc
+{
     const unsigned char* base;
-    uintptr_t runBase, runEnd;   // [runBase, runEnd) — the current contiguous same-state run
+    uintptr_t runBase;
+    uintptr_t runEnd;
     bool runCommitted;
     bool valid;
 };
 
-// Absorb [base+off, base+off+len) into `node`, sourcing reserved (uncommitted) pages as zeros without faulting
-// them in. `len` is always <= K12_chunkSize (8192) here — the K12 driver only ever absorbs input a chunk at a
-// time — so ZBUF need only cover one chunk. KangarooTwelve_F_Absorb is a stateful sponge absorb (byteIOIndex
-// persists), so feeding a run in consecutive sub-absorbs is identical to one contiguous absorb.
-static void KangarooTwelve_F_AbsorbPaged(KangarooTwelve_F* node, K12PagedSrc* s,
-                                         unsigned long long off, unsigned int len)
+// Absorb committed bytes and synthesize zeros for reserved pages.
+static void KangarooTwelve_F_AbsorbPaged(
+    KangarooTwelve_F* node,
+    K12PagedSrc* source,
+    unsigned long long offset,
+    unsigned int length)
 {
-    static const unsigned char ZBUF[K12_chunkSize] = { 0 };
-    while (len)
+    static const unsigned char zeroBuffer[K12_chunkSize] = { 0 };
+    while (length)
     {
-        const unsigned char* p = s->base + off;
-        uintptr_t pa = (uintptr_t)p;
-        if (!s->valid || pa < s->runBase || pa >= s->runEnd)
+        const unsigned char* current = source->base + offset;
+        const uintptr_t currentAddress = (uintptr_t)current;
+        if (!source->valid
+            || currentAddress < source->runBase
+            || currentAddress >= source->runEnd)
         {
-            MEMORY_BASIC_INFORMATION mbi;
-            if (VirtualQuery((const void*)p, &mbi, sizeof(mbi)))
+            MEMORY_BASIC_INFORMATION memoryInfo;
+            if (VirtualQuery((const void*)current, &memoryInfo, sizeof(memoryInfo)))
             {
-                s->runBase = (uintptr_t)mbi.BaseAddress;
-                s->runEnd = (uintptr_t)mbi.BaseAddress + (uintptr_t)mbi.RegionSize;
-                // MEM_COMMIT pages hold real (written, or execution-read) state; MEM_RESERVE/MEM_FREE are zero.
-                s->runCommitted = (mbi.State == MEM_COMMIT);
-                s->valid = true;
+                source->runBase = (uintptr_t)memoryInfo.BaseAddress;
+                source->runEnd =
+                    (uintptr_t)memoryInfo.BaseAddress + (uintptr_t)memoryInfo.RegionSize;
+                source->runCommitted = memoryInfo.State == MEM_COMMIT;
+                source->valid = true;
             }
             else
             {
-                // query failed: read the real bytes (safe — never under-hashes written state)
-                s->runBase = pa; s->runEnd = pa + len; s->runCommitted = true; s->valid = true;
+                // Fall back to real bytes so a query failure cannot omit written state.
+                source->runBase = currentAddress;
+                source->runEnd = currentAddress + length;
+                source->runCommitted = true;
+                source->valid = true;
             }
         }
-        uintptr_t avail = s->runEnd - pa;
-        unsigned int take = (avail < (uintptr_t)len) ? (unsigned int)avail : len;   // <= len <= K12_chunkSize
-        if (s->runCommitted) KangarooTwelve_F_Absorb(node, p, take);
-        else                 KangarooTwelve_F_Absorb(node, ZBUF, take);
-        off += take;
-        len -= take;
+
+        const uintptr_t available = source->runEnd - currentAddress;
+        const unsigned int absorbedLength = available < (uintptr_t)length
+            ? (unsigned int)available
+            : length;
+        if (source->runCommitted)
+        {
+            KangarooTwelve_F_Absorb(node, current, absorbedLength);
+        }
+        else
+        {
+            KangarooTwelve_F_Absorb(node, zeroBuffer, absorbedLength);
+        }
+        offset += absorbedLength;
+        length -= absorbedLength;
     }
 }
 
-// Page-aware twin of KangarooTwelve (src/kangaroo_twelve.h). Structurally IDENTICAL — only the two input-absorb
-// sites are routed through KangarooTwelve_F_AbsorbPaged (offset-tracked) instead of advancing an `input` ptr.
-// Keep in lockstep with KangarooTwelve if that ever changes.
-static void KangarooTwelvePaged(const unsigned char* base, unsigned int inputByteLen,
-                                unsigned char* output, unsigned int outputByteLen)
+// Keep this structure aligned with the canonical KangarooTwelve implementation.
+static void KangarooTwelvePaged(
+    const unsigned char* base,
+    unsigned int inputByteLen,
+    unsigned char* output,
+    unsigned int outputByteLen)
 {
     KangarooTwelve_F queueNode;
     KangarooTwelve_F finalNode;
-    unsigned int blockNumber, queueAbsorbedLen;
+    unsigned int blockNumber;
+    unsigned int queueAbsorbedLen;
 
-    K12PagedSrc src; src.base = base; src.valid = false; src.runBase = 0; src.runEnd = 0; src.runCommitted = false;
-    unsigned long long off = 0;
+    K12PagedSrc source{base, 0, 0, false, false};
+    unsigned long long offset = 0;
 
     setMem(&finalNode, sizeof(KangarooTwelve_F), 0);
-    const unsigned int len = inputByteLen ^ ((K12_chunkSize ^ inputByteLen) & -(K12_chunkSize < inputByteLen));
-    KangarooTwelve_F_AbsorbPaged(&finalNode, &src, off, len);
-    off += len;
-    inputByteLen -= len;
-    if (len == K12_chunkSize && inputByteLen)
+    const unsigned int initialLength =
+        inputByteLen ^ ((K12_chunkSize ^ inputByteLen) & -(K12_chunkSize < inputByteLen));
+    KangarooTwelve_F_AbsorbPaged(&finalNode, &source, offset, initialLength);
+    offset += initialLength;
+    inputByteLen -= initialLength;
+    if (initialLength == K12_chunkSize && inputByteLen)
     {
         blockNumber = 1;
         queueAbsorbedLen = 0;
@@ -98,12 +106,14 @@ static void KangarooTwelvePaged(const unsigned char* base, unsigned int inputByt
 
         while (inputByteLen > 0)
         {
-            const unsigned int len = K12_chunkSize ^ ((inputByteLen ^ K12_chunkSize) & -(inputByteLen < K12_chunkSize));
+            const unsigned int chunkLength =
+                K12_chunkSize
+                ^ ((inputByteLen ^ K12_chunkSize) & -(inputByteLen < K12_chunkSize));
             setMem(&queueNode, sizeof(KangarooTwelve_F), 0);
-            KangarooTwelve_F_AbsorbPaged(&queueNode, &src, off, len);
-            off += len;
-            inputByteLen -= len;
-            if (len == K12_chunkSize)
+            KangarooTwelve_F_AbsorbPaged(&queueNode, &source, offset, chunkLength);
+            offset += chunkLength;
+            inputByteLen -= chunkLength;
+            if (chunkLength == K12_chunkSize)
             {
                 ++blockNumber;
                 queueNode.state[queueNode.byteIOIndex] ^= K12_suffixLeaf;
@@ -114,7 +124,7 @@ static void KangarooTwelvePaged(const unsigned char* base, unsigned int inputByt
             }
             else
             {
-                queueAbsorbedLen = len;
+                queueAbsorbedLen = chunkLength;
             }
         }
 
@@ -145,7 +155,7 @@ static void KangarooTwelvePaged(const unsigned char* base, unsigned int inputByt
     }
     else
     {
-        if (len == K12_chunkSize)
+        if (initialLength == K12_chunkSize)
         {
             blockNumber = 1;
             finalNode.state[finalNode.byteIOIndex] ^= 0x03;

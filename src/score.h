@@ -56,9 +56,7 @@ struct ScoreFunction
     void initMiningData(m256i randomSeed)
     {
 #if defined(TESTNET) && defined(LITE_WASM_SC)
-        // testnet dynamic-contract (SC-dev) node only: it does not mine, so skip generating the ~2GB
-        // random2 pool (externalPoolVec/poolVec stay demand-zero, uncommitted). Keep the seed for
-        // system-info responses. Mainnet AND normal testnet keep full mining/consensus.
+        // Development nodes do not need the mining random2 pool.
         currentRandomSeed = randomSeed;
         return;
 #endif

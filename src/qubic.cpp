@@ -19,9 +19,7 @@
 #include "extensions/utils.h"
 #include "platform/msvc_polyfill.h"
 #elif defined(__APPLE__)
-// macOS: same POSIX set, minus <byteswap.h> (concurrency.h uses __builtin_bswap) and minus the
-// libbacktrace backend (boost::stacktrace picks its macOS default). _Unwind_Backtrace is available
-// without _GNU_SOURCE on macOS, so tell boost not to require it.
+// macOS uses the POSIX path without byteswap or libbacktrace.
 #define BOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED
 #include <boost/stacktrace.hpp>
 #include <cstring>
@@ -52,7 +50,7 @@
 // #define TESTNET
 // #define TESTNET_PREFILL_QUS
 // #define TESTNET_LITE_RAM
-// #define LITE_WASM_SC   // testnet-only (contract_def.h); node build enables via -DLITE_WASM_SC
+// #define LITE_WASM_SC   // Enable testnet Wasm contracts through CMake.
 #define USE_SWAP
 
 // ============================================================================
@@ -586,8 +584,11 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
         if (contractStateChangeFlags[digestIndex >> 6] & (1ULL << (digestIndex & 63)))
         {
 #ifdef LITE_WASM_SC
-            // wasm slots hash only the contract's real state (not the 1GB slot reserve); no-op for others.
-            const unsigned long long size = digestIndex < contractCount ? Wasm::Runtime::effectiveStateSize(digestIndex, contractDescriptions[digestIndex].stateSize) : 0;
+            const unsigned long long size = digestIndex < contractCount
+                ? Wasm::Runtime::effectiveStateSize(
+                    digestIndex,
+                    contractDescriptions[digestIndex].stateSize)
+                : 0;
 #else
             const unsigned long long size = digestIndex < contractCount ? contractDescriptions[digestIndex].stateSize : 0;
 #endif
@@ -604,10 +605,12 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
                 // This is currently avoided by calling getComputerDigest() from tick processor only (and in non-concurrent init)
                 contractStateLock[digestIndex].acquireRead();
 
-                // wasm slots: contractStates[idx] aliases the resident state, hashed at `size` (its real span).
                 const unsigned long long startTime = __rdtsc();
 #if defined(LITE_WASM_SC)
-                Wasm::Runtime::hashContractState(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
+                Wasm::Runtime::hashContractState(
+                    digestIndex,
+                    contractStateDigests[digestIndex].m256i_u8,
+                    size);
 #else
                 if (!bypassCache && K12StateDigestCache::gK12StateDigestCacheEnabled && K12StateDigestCache::isCached(digestIndex))
                     K12StateDigestCache::computeDigest(digestIndex, &contractStateDigests[digestIndex]);
@@ -3049,8 +3052,10 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
 #ifdef LITE_WASM_SC
             if (transaction->destinationPublicKey == m256i(99999ULL, 0, 0, 0))
             {
-                // Wasm deployment transactions use a dedicated address, not the core zero address.
-                Wasm::Runtime::dispatchDeploymentTransaction(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
+                Wasm::Runtime::dispatchDeploymentTransaction(
+                    transaction->inputType,
+                    (const unsigned char*)transaction->inputPtr(),
+                    transaction->inputSize);
             }
             else
 #endif
@@ -3455,7 +3460,7 @@ static void processTick(unsigned long long processorNumber)
     }
 
 #ifdef LITE_WASM_SC
-    // Construct armed dynamic-contract slots under SC_INITIALIZE_TX framing (design B').
+    // Activate armed contracts under SC_INITIALIZE_TX framing.
     if (Wasm::Runtime::hasPendingActivation(system.tick))
     {
         logger.registerNewTx(system.tick, logger.SC_INITIALIZE_TX);
@@ -4561,12 +4566,7 @@ static void endEpoch()
             oracleEngine.getRevenuePoints(oracleRevPoints);
             copyMemory(gEpochRevenueData.oracleScore, oracleRevPoints.computorRevPoints);
         }
-        // The 8-computor SC-dev committee (TESTNET + LITE_WASM_SC) serves qinit/contract devs, for
-        // whom consensus economics are irrelevant. The V2 / multi-dimension formulas assume a full-size
-        // committee and a full-length epoch: their sliding window divides by totalTicks (= system.tick -
-        // system.initialTick), which a forced or immediate dev epoch advance makes 0 -> divide-by-zero crash.
-        // Skip the formulas in that mode (revenue is split evenly below); standard testnet + mainnet are
-        // unaffected (the formulas still run and pay out as before).
+        // Development epochs can have no revenue window, so skip windowed formulas.
 #if !(defined(TESTNET) && defined(LITE_WASM_SC))
         computeRevenueV2(gEpochRevenueData);
 
@@ -4589,8 +4589,7 @@ static void endEpoch()
         {
             // Compute initial computor revenue, reducing arbitrator revenue
 #if defined(TESTNET) && defined(LITE_WASM_SC)
-            // SC-dev committee: revenue formulas skipped above; split issuance evenly so the epoch transition
-            // still pays computors + balances the arbitrator without exercising the windowed math.
+            // Split development issuance evenly when windowed formulas are disabled.
             long long revenue = issuancePerComputor;
 #elif USE_REVENUE_MULTI_DIMENSION
             long long revenue = gMultiDimRevenue.revenue[computorIndex];
@@ -7149,7 +7148,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
             }
         }
 #ifdef LITE_WASM_SC
-        Wasm::Runtime::evictContractState(); // LRU-evict cold contract-state chunks down to the RAM cap (no-op under cap / engine off)
+        Wasm::Runtime::evictContractState();
 #endif
         tickerLoopNumerator += __rdtsc() - curTimeTick;
         tickerLoopDenominator++;
@@ -7349,8 +7348,9 @@ static bool saveContractStateFiles(CHAR16* directory)
         CONTRACT_FILE_NAME[sizeof(CONTRACT_FILE_NAME) / sizeof(CONTRACT_FILE_NAME[0]) - 6] = contractIndex % 10 + L'0';
         contractStateLock[contractIndex].acquireRead();
 #ifdef LITE_WASM_SC
-        // wasm slots alias a resident state smaller than the 1GB reserve; save its real span (avoid OOB read).
-        const unsigned long long saveSize = Wasm::Runtime::effectiveStateSize(contractIndex, contractDescriptions[contractIndex].stateSize);
+        const unsigned long long saveSize = Wasm::Runtime::effectiveStateSize(
+            contractIndex,
+            contractDescriptions[contractIndex].stateSize);
 #else
         const unsigned long long saveSize = contractDescriptions[contractIndex].stateSize;
 #endif
@@ -7500,19 +7500,31 @@ static bool initialize()
             }
         }
 
-        // demand-zero (useVirtualMem): the score struct holds a ~1GB random2 pool that SC-dev low-RAM
-        // never fills (see ScoreFunction::initMiningData). Lazy commit -> RSS tracks actual use.
-        if (!allocPoolWithErrorLog(L"score", sizeof(*score), (void**)&score, __LINE__, true, true, /*lazyCommit=*/true))
+        // Commit the large score pools on demand.
+        if (!allocPoolWithErrorLog(
+                L"score",
+                sizeof(*score),
+                (void**)&score,
+                __LINE__,
+                true,
+                true,
+                /*lazyCommit=*/true))
         {
             return false;
         }
-        if (!allocPoolWithErrorLog(L"score", sizeof(*score_qpi), (void**)&score_qpi, __LINE__, true, true, /*lazyCommit=*/true))
+        if (!allocPoolWithErrorLog(
+                L"score",
+                sizeof(*score_qpi),
+                (void**)&score_qpi,
+                __LINE__,
+                true,
+                true,
+                /*lazyCommit=*/true))
         {
             return false;
         }
 #if !(defined(TESTNET) && defined(LITE_WASM_SC))
-        // eager-zero on mainnet/normal testnet (full mining); only the testnet dynamic-contract node
-        // skips it and lets the mmap zero-fill lazily (no 2GB commit).
+        // Full mining builds still initialize the pools eagerly.
         setMem(score, sizeof(*score), 0);
         setMem(score_qpi, sizeof(*score_qpi), 0);
 #endif
@@ -7906,7 +7918,7 @@ static bool initialize()
     emptyTickResolver.tick = 0;
     emptyTickResolver.lastTryClock = 0;
 
-    // Wasm state uses userfaultfd or its demand-zero fallback; never protect it twice.
+    // Wasm state has its own protection and paging lifecycle.
 #if !defined(LITE_WASM_SC)
     K12StateDigestCache::init();
 #endif
@@ -7948,7 +7960,7 @@ static void deinitialize()
         if (contractStates[contractIndex])
         {
 #ifdef LITE_WASM_SC
-            Wasm::Runtime::freeContractState(contractIndex); // engine/demand-zero builds: OS reclaims memfd/mmap at exit (no freePool -> no darwin abort)
+            Wasm::Runtime::freeContractState(contractIndex);
 #else
             freePool(contractStates[contractIndex]);
 #endif
@@ -7963,7 +7975,7 @@ static void deinitialize()
 
     if (score)
     {
-        freePoolOrVirtual(score); // score is demand-zero (qVirtualAlloc) on the low-RAM build -> not freePool-able
+        freePoolOrVirtual(score);
     }
     if (minerSolutionFlags)
     {
@@ -7992,7 +8004,7 @@ static void deinitialize()
     {
         if (processors[processorIndex].buffer)
         {
-            freePoolOrVirtual(processors[processorIndex].buffer); // demand-zero (qVirtualAlloc)
+            freePoolOrVirtual(processors[processorIndex].buffer);
         }
     }
 
@@ -8000,7 +8012,7 @@ static void deinitialize()
     {
         if (peers[i].receiveBuffer)
         {
-            freePoolOrVirtual(peers[i].receiveBuffer); // peer buffers are demand-zero (qVirtualAlloc)
+            freePoolOrVirtual(peers[i].receiveBuffer);
         }
         if (peers[i].transmitData.FragmentTable[0].FragmentBuffer)
         {
@@ -8951,10 +8963,16 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             mpServicesProtocol->GetProcessorInfo(mpServicesProtocol, i, &processorInformation);
             if (processorInformation.StatusFlag == (PROCESSOR_ENABLED_BIT | PROCESSOR_HEALTH_STATUS_BIT))
             {
-                // testnet dynamic-contract: demand-zero the per-processor network buffer (low local traffic
-                // never fills 32MB); mainnet/normal keep eager commit. Capacity unchanged either way.
+                // Commit low-RAM development network buffers on demand.
 #if defined(TESTNET) && defined(LITE_WASM_SC)
-                if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__, true, true, /*lazyCommit=*/true))
+                if (!allocPoolWithErrorLog(
+                        L"processor[i]",
+                        BUFFER_SIZE,
+                        &processors[numberOfProcessors].buffer,
+                        __LINE__,
+                        true,
+                        true,
+                        /*lazyCommit=*/true))
 #else
                 if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))
 #endif
@@ -9770,8 +9788,16 @@ void processArgs(int argc, const char* argv[]) {
 #endif
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"))
 #ifdef LITE_SC_ENGINE
-        ("sc-evict-mode", "Contract-state engine eviction backend: 'compress' (in-RAM zstd, fast spawn; default) or 'disk' (per-contract file, lowest RAM, persistent). Testnet dynamic-contract only.", cxxopts::value<std::string>()->default_value("compress"))
-        ("max-sc-mem", "Contract-state RAM cap in GB (testnet dynamic-contract); engine evicts cold chunks to stay under it.", cxxopts::value<unsigned long long>()->default_value("1"))
+        (
+            "sc-evict-mode",
+            "Contract-state engine eviction backend: 'compress' (in-RAM zstd, "
+            "fast spawn; default) or 'disk' (per-contract file, lowest RAM, "
+            "persistent). Testnet dynamic-contract only.",
+            cxxopts::value<std::string>()->default_value("compress"))
+        (
+            "max-sc-mem",
+            "Contract-state RAM cap in GB (testnet dynamic-contract); engine evicts cold chunks to stay under it.",
+            cxxopts::value<unsigned long long>()->default_value("1"))
 #endif
         ;
     auto result = options.parse(argc, argv);
@@ -9782,13 +9808,22 @@ void processArgs(int argc, const char* argv[]) {
     }
 
 #ifdef LITE_SC_ENGINE
-    if (result.count("sc-evict-mode")) {
-        std::string m = result["sc-evict-mode"].as<std::string>();
-        ContractStateEngine::evictMode = (m == "disk") ? ContractStateEngine::EvictMode::Disk : ContractStateEngine::EvictMode::Compress;
-        logColorToScreen("INFO", "Contract-state evict mode: " + m);
+    if (result.count("sc-evict-mode"))
+    {
+        const std::string evictionMode =
+            result["sc-evict-mode"].as<std::string>();
+        ContractStateEngine::evictMode = evictionMode == "disk"
+            ? ContractStateEngine::EvictMode::Disk
+            : ContractStateEngine::EvictMode::Compress;
+        logColorToScreen(
+            "INFO",
+            "Contract-state evict mode: " + evictionMode);
     }
-    if (result.count("max-sc-mem")) {
-        ContractStateEngine::MAX_RAM_USEAGE = result["max-sc-mem"].as<unsigned long long>() * 1024ULL * 1024 * 1024;
+    if (result.count("max-sc-mem"))
+    {
+        ContractStateEngine::MAX_RAM_USEAGE =
+            result["max-sc-mem"].as<unsigned long long>()
+            * 1024ULL * 1024 * 1024;
     }
 #endif
 
@@ -10044,7 +10079,7 @@ void processArgs(int argc, const char* argv[]) {
     }
 }
 
-#if !defined(NO_RPC)   // all OS ports (linux/macOS/windows): drogon is cross-platform
+#if !defined(NO_RPC)
 void watchAndCheckin()
 {
     // start watch thread
@@ -10106,15 +10141,17 @@ void watchAndCheckin()
 #if defined(__linux__) || defined(__APPLE__)
 void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
 #ifdef __linux__
-    // swap-dirty-track fast path: a write to an armed read-only SwapVM cache page faults here. Mark the
-    // slot dirty, restore write access, and resume the store. Any other fault hits the crash path below.
+    // Handle tracked SwapVM writes before the crash path.
     if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr))
+    {
         return;
+    }
 #if !defined(LITE_WASM_SC)
-    // A write to an armed read-only contract-state chunk faults here: mark the chunk dirty (needs si_addr),
-    // restore write access, resume the store. Only changed chunks are re-hashed on the next digest.
+    // Handle tracked contract-state writes before the crash path.
     if (sig == SIGSEGV && si && K12StateDigestCache::tryMarkDirty(si->si_addr))
+    {
         return;
+    }
 #endif
 #else
     (void)si;
@@ -10180,7 +10217,7 @@ int main(int argc, const char* argv[]) {
     logColorToScreen("INFO", "================== ~~~~~~~~~~~~~~~ ==================\n");
 
     Overload::initializeUefi();
-#if !defined(NO_RPC)   // all OS ports (linux/macOS/windows): drogon is cross-platform
+#if !defined(NO_RPC)
     QubicHttpServer::start(httpPort);
     watchAndCheckin();
 #endif

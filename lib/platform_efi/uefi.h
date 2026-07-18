@@ -1,6 +1,6 @@
 #pragma once
 
-// GCC lacks the __cdecl/__stdcall MSVC keywords (clang accepts them); define empty so EFI fn-ptr typedefs parse.
+// GCC needs empty calling-convention markers for EFI function pointer types.
 #if defined(__GNUC__) && !defined(__clang__)
   #ifndef __cdecl
     #define __cdecl

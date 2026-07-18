@@ -42,7 +42,7 @@ enum ContractError
 };
 
 // Used to store: locals and for first invocation level also input and output
-// alignment 8: QPI locals (m256i/uint64) need it, else the 4-byte size footer misaligns nested CALL locals.
+// Keep nested QPI locals aligned for 64-bit values.
 #if defined(TESTNET) && defined(TESTNET_LITE_RAM)
 typedef StackBuffer<unsigned int, 4 * 1024 * 1024, 8> ContractLocalsStack;
 #else

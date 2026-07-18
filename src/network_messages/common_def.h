@@ -7,8 +7,7 @@
 #define NUMBER_OF_TRANSACTIONS_PER_TICK 4096ULL // Must be 2^N
 #endif
 #define MAX_NUMBER_OF_CONTRACTS 1024 // Must be 1024
-// Dynamic-contract testnet (SC-dev) uses a tiny 8-computor committee so it reaches quorum cheaply on
-// few-core hosts (consensus realism is irrelevant for contract dev). Standard testnet + mainnet keep 676.
+// Use a small committee for local dynamic-contract development.
 #if defined(TESTNET) && defined(LITE_WASM_SC)
 #define NUMBER_OF_COMPUTORS 8
 #else

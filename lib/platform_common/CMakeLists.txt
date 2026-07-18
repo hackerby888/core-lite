@@ -24,8 +24,7 @@ set(C_SOURCES
 set(ASM_OBJECT_LIBS "") # Store object libraries generated from assembly
 
 if(IS_WINDOWS AND ASM_LANG STREQUAL ASM_MASM)
-    # Force MASM (ml64) for the EDK2 X64 .asm. A FetchContent dep (blosc2, when nasm is on PATH) also enables
-    # ASM_NASM, and CMake would otherwise route these .asm to nasm with -fwin32 (wrong object format for x64).
+    # Force EDK2's X64 assembly through MASM instead of NASM.
     set_source_files_properties(
         edk2_mdepkg/Library/BaseLib/X64/LongJump.asm
         edk2_mdepkg/Library/BaseLib/X64/SetJump.asm
@@ -74,11 +73,14 @@ elseif(IS_LINUX_CLANG AND ASM_LANG STREQUAL ASM_NASM)
 endif()
 
 # --- Target Definition ---
-# The x86 LongJump/SetJump.nasm.o are only generated on Linux+clang/gcc (IS_LINUX_CLANG above) and are
-# dead on the OS port anyway (setjmp/longjmp come from the system header). Don't reference them where
-# they aren't built (e.g. macOS) — else CMake errors on the missing source. (Linux path unchanged.)
+# Only Linux builds generate the custom stack assembly objects.
 if(IS_LINUX_CLANG AND ASM_LANG STREQUAL ASM_NASM)
-    add_library(platform_common STATIC ${C_SOURCES} ${CMAKE_CURRENT_BINARY_DIR}/LongJump.nasm.o ${CMAKE_CURRENT_BINARY_DIR}/SetJump.nasm.o)
+    add_library(
+        platform_common STATIC
+        ${C_SOURCES}
+        ${CMAKE_CURRENT_BINARY_DIR}/LongJump.nasm.o
+        ${CMAKE_CURRENT_BINARY_DIR}/SetJump.nasm.o
+    )
 else()
     add_library(platform_common STATIC ${C_SOURCES})
 endif()
