@@ -224,9 +224,9 @@ TEST(ContractStateEngineTest, EvictionReleasesNativePages)
     EXPECT_EQ(info.State, (DWORD)MEM_RESERVE);
 #elif defined(__APPLE__)
     const size_t pageSize = (size_t)sysconf(_SC_PAGESIZE);
-    std::vector<unsigned char> residency(state.engine->getBlockSize() / pageSize);
+    std::vector<char> residency(state.engine->getBlockSize() / pageSize);
     ASSERT_EQ(mincore(state.data, state.engine->getBlockSize(), residency.data()), 0);
-    for (unsigned char page : residency)
+    for (char page : residency)
     {
         EXPECT_EQ(page & 1, 0);
     }

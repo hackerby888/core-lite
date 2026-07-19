@@ -103,9 +103,12 @@ jobs:
           cmake --build build-platform-tests --target qubic_core_tests --parallel
           ./build-platform-tests/test/qubic_core_tests --gtest_filter="$GTEST_FILTER"
 
-      - name: Build and run Windows tests
+      - name: Build Windows tests
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          cmake --build build-platform-tests --config Release --target qubic_core_tests --parallel 4
-          & .\build-platform-tests\test\Release\qubic_core_tests.exe "--gtest_filter=$env:GTEST_FILTER"
+        run: cmake --build build-platform-tests --config Release --target qubic_core_tests --parallel 4
+
+      - name: Run Windows tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& .\build-platform-tests\test\Release\qubic_core_tests.exe "--gtest_filter=$env:GTEST_FILTER"'

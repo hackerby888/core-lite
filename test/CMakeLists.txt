@@ -97,7 +97,9 @@ endif()
 apply_test_compiler_flags(qubic_core_tests)
 
 # Add additional test-specific flags if needed
-if((IS_CLANG OR IS_GCC) AND IS_ARM)
+if(IS_MSVC)
+  target_compile_options(qubic_core_tests PRIVATE /DNOMINMAX /Zc:wchar_t- /WX-)
+elseif((IS_CLANG OR IS_GCC) AND IS_ARM)
   # ARM receives x86 intrinsics through SIMDe.
   target_compile_options(qubic_core_tests PRIVATE -fshort-wchar -w)
 elseif(IS_CLANG OR IS_GCC)
