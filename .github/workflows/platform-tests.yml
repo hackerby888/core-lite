@@ -1,0 +1,111 @@
+name: Platform tests
+
+on:
+  push:
+    branches: [main, develop, feat/dynamic-contracts]
+    paths:
+      - 'src/**'
+      - 'lib/**'
+      - 'test/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'vcpkg.json'
+      - '.github/workflows/platform-tests.yml'
+  pull_request:
+    branches: [main, develop, feat/dynamic-contracts]
+    paths:
+      - 'src/**'
+      - 'lib/**'
+      - 'test/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'vcpkg.json'
+      - '.github/workflows/platform-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GTEST_FILTER: 'K12EngineTest.*:ContractStateEngineTest.*'
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-14
+          - name: Windows
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake nasm jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi
+
+      - name: Cache Windows dependencies
+        if: runner.os == 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: vcpkg-x64-win-rel-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-x64-win-rel-
+
+      - name: Configure Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force triplets-overlay | Out-Null
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x64)',
+            'set(VCPKG_CRT_LINKAGE dynamic)',
+            'set(VCPKG_LIBRARY_LINKAGE dynamic)',
+            'set(VCPKG_BUILD_TYPE release)'
+          ) | Set-Content -Encoding ascii triplets-overlay/x64-windows-rel.cmake
+
+      - name: Configure macOS tests
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S . -B build-platform-tests \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$(xcrun -f clang)" \
+            -DCMAKE_CXX_COMPILER="$(xcrun -f clang++)" \
+            -DBUILD_TESTS=ON \
+            -DBUILD_BINARY=OFF \
+            -DENABLE_AVX512=OFF \
+            -DUSE_SANITIZER=OFF \
+            -DONLY_LOGGING=ON \
+            -DLITE_WASM_SC=ON \
+            -DTESTNET=ON \
+            -DTESTNET_LITE_RAM=ON
+
+      - name: Configure Windows tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vcpkg = "$env:VCPKG_INSTALLATION_ROOT"
+          cmake -S . -B build-platform-tests -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_OVERLAY_TRIPLETS="$PWD/triplets-overlay" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-rel `
+            -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF `
+            -DUSE_SANITIZER=OFF -DONLY_LOGGING=ON -DLITE_WASM_SC=ON `
+            -DTESTNET=ON -DTESTNET_LITE_RAM=ON
+
+      - name: Build and run macOS tests
+        if: runner.os == 'macOS'
+        run: |
+          cmake --build build-platform-tests --target qubic_core_tests --parallel
+          ./build-platform-tests/test/qubic_core_tests --gtest_filter="$GTEST_FILTER"
+
+      - name: Build and run Windows tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake --build build-platform-tests --config Release --target qubic_core_tests --parallel 4
+          & .\build-platform-tests\test\Release\qubic_core_tests.exe "--gtest_filter=$env:GTEST_FILTER"

@@ -1,26 +1,36 @@
 #pragma once
 
-#define _GNU_SOURCE
 #include "contract_core/contract_def.h"
-#include "extensions/utils.h"
-#include "userfaultfd.h"
 #include <K12/kangaroo_twelve_xkcp.h>
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
-#include <fcntl.h>
 #include <iostream>
-#include <linux/userfaultfd.h>
-#include <list>
+#include <memory>
 #include <mutex>
-#include <stdio.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <sys/poll.h>
+#include <stdexcept>
 #include <thread>
-#include <unistd.h>
-#include <unordered_map>
 #include <vector>
-#include <zstd.h>
+
+// qintrin maps AVX2 names to SIMDe on ARM; Blosc2 must see the real target ISA.
+#if (defined(__aarch64__) || defined(_M_ARM64)) && defined(__AVX2__)
+#undef __AVX2__
+#include <blosc2.h>
+#define __AVX2__ 1
+#else
+#include <blosc2.h>
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 class K12Engine
 {
@@ -32,7 +42,7 @@ protected:
 
     // Per-chunk intermediate hashes and dirty flags.
     std::vector<Intermediate> intermediateMap;
-    std::vector<bool> isChunkChangedMap;
+    std::vector<unsigned char> isChunkChangedMap;
     unsigned int maxChunks;
     unsigned char *_state;
     size_t _stateSize;
@@ -164,6 +174,11 @@ public:
         _lastOutputSize = 0;
     }
 
+    ~K12Engine()
+    {
+        delete[] _lastOutput;
+    }
+
     int getHash(unsigned char* output, size_t outputByteLen, bool useCache = true)
     {
         if (_lastOutput && outputByteLen == _lastOutputSize && isAllChunksUnchanged())
@@ -215,734 +230,686 @@ public:
     }
 };
 
-// Add Linux userfaultfd paging to K12Engine.
+// In-RAM contract-state paging shared by Linux, macOS, and Windows.
 class ContractStateEngine : public K12Engine
 {
 public:
-    // Global access tracker for LRU eviction.
 #if defined(TESTNET) && defined(LITE_WASM_SC)
-    static inline size_t MAX_RAM_USEAGE = 1ULL * 1024 * 1024 * 1024;
+    static inline size_t MAX_RAM_USAGE = 1ULL * 1024 * 1024 * 1024;
 #else
-    static inline size_t MAX_RAM_USEAGE = 10ULL * 1024 * 1024 * 1024;
+    static inline size_t MAX_RAM_USAGE = 10ULL * 1024 * 1024 * 1024;
 #endif
-    static inline std::list<unsigned long long> accessList;
-    static inline std::unordered_map<
-        unsigned long long,
-        std::list<unsigned long long>::iterator> accessMap;
 
-    // Cold chunks use either compressed memory or per-contract files.
-    enum class EvictMode
+    enum class BlockState : unsigned char
     {
-        Compress,
-        Disk,
+        Zero,
+        Compressed,
+        Clean,
+        Dirty,
+        Evicting,
     };
-    static inline EvictMode evictMode = EvictMode::Compress;
-    static inline size_t g_compressedBytes = 0;
 
-    // IO related
-    static constexpr size_t MAX_IO_NAME_LEN = 128;
-    static constexpr CHAR16 BASE_DIR[] = L"contract_states/";
-    static inline std::unordered_map<unsigned int, std::mutex> ioLocks;
-
-    // Lazy loading related
-    static inline std::vector<ContractStateEngine*> allEngines;
-    UserFaultFD uffd;
-    size_t nonPaddedSize;
-    size_t paddedSize;
-    unsigned int contractIndex;
-    bool isUffdRegistered = false;
-    std::mutex faultLock;
-    int diskFd = -1;
-    int memfdFd = -1;
-
-    std::vector<bool> isChunkLoadedInMemoryMap;
-    // Compressed chunks replace the disk file in memory mode.
-    std::unordered_map<unsigned int, std::vector<unsigned char>> compressedChunks;
-    std::vector<unsigned char> compressScratch;
-    unsigned char tmpBuffer[K12_chunkSize];
-    // Keep fault loading separate from concurrent eviction writes.
-    unsigned char loadBuffer[K12_chunkSize];
-
-    // Pass allocateState's memfd through the base-class constructor call.
-    static inline thread_local int lastMemfdFd = -1;
-
-    static void* allocateState(size_t size)
+    struct Block
     {
-        size = alignToPageSize(size);
-        int fd = memfd_create("qlite", MFD_CLOEXEC);
-        if (fd == -1)
-        {
-            throw std::runtime_error(
-                "Error: memfd_create failed | Line: " + std::to_string(__LINE__));
-        }
-        if (ftruncate(fd, size) == -1)
-        {
-            close(fd);
-            throw std::runtime_error("Error: ftruncate failed | Line: " + std::to_string(__LINE__));
-        }
-
-        void* buffer = mmap(
-            nullptr,
-            size,
-            PROT_READ | PROT_WRITE,
-            MAP_SHARED,
-            fd,
-            0);
-        if (buffer == MAP_FAILED)
-        {
-            close(fd);
-            throw std::runtime_error("Error: mmap failed | Line: " + std::to_string(__LINE__));
-        }
-
-        // Compressed mode keeps the zero-filled memfd demand-zero.
-        if (evictMode != EvictMode::Compress)
-        {
-            memset(buffer, 0, size);
-        }
-        lastMemfdFd = fd;
-        return buffer;
-    }
+        std::atomic<BlockState> state{BlockState::Zero};
+        std::atomic<bool> recent{false};
+        std::vector<unsigned char> compressed;
+    };
 
     static bool create(unsigned char **state, size_t stateSize, unsigned int contractIndex)
     {
-        static std::once_flag flag;
-        std::call_once(flag, []()
+        if (!state || contractIndex >= contractCount)
         {
-            allEngines.resize(contractCount);
-        });
+            return false;
+        }
 
-        auto engine = new ContractStateEngine(state, stateSize, contractIndex);
-        engine->registerUserFaultFD();
+        initializePager();
 
-        allEngines[contractIndex] = engine;
+        const size_t paddedSize = roundUp(stateSize, sharedBlockSize);
+        void* reservation = reserveState(stateSize);
+        ContractStateEngine* engine;
+        try
+        {
+            engine = new ContractStateEngine(state, reservation, stateSize);
+        }
+        catch (...)
+        {
+            releaseReservation(reservation, paddedSize);
+            throw;
+        }
+        ContractStateEngine* previous = allEngines[contractIndex].exchange(
+            engine,
+            std::memory_order_acq_rel);
+        delete previous;
 
         return true;
     }
 
-    static void registerAllUserFaultFDs()
+    static void release(unsigned int contractIndex)
     {
-        for (auto engine : allEngines)
+        if (contractIndex >= contractCount)
         {
-            if (engine)
-            {
-                engine->registerUserFaultFD();
-            }
+            return;
         }
+
+        delete allEngines[contractIndex].exchange(nullptr, std::memory_order_acq_rel);
     }
 
     static ContractStateEngine* getEngine(unsigned int contractIndex)
     {
-        if (contractIndex < allEngines.size())
+        if (contractIndex < contractCount)
         {
-            return allEngines[contractIndex];
+            return allEngines[contractIndex].load(std::memory_order_acquire);
         }
         return nullptr;
     }
 
-    static void updateAccessTracker(unsigned int contractIndex, unsigned int chunkIndex)
+    static bool handleFault(void* address)
     {
-        unsigned long long key = ((unsigned long long)contractIndex << 32) | chunkIndex;
-        auto it = accessMap.find(key);
-        if (it != accessMap.end())
+        ContractStateEngine* engine = findEngine(address);
+        if (!engine)
         {
-            accessList.splice(accessList.begin(), accessList, it->second);
+            return false;
         }
-        else
-        {
-            accessList.push_front(key);
-            accessMap[key] = accessList.begin();
-        }
-    }
 
-    static size_t getRamUsageByAllEngines()
-    {
-        size_t usage = g_compressedBytes;
-        for (auto engine : allEngines)
+        const size_t blockIndex = engine->blockIndex(address);
+        Block& block = engine->blocks[blockIndex];
+        BlockState state = block.state.load(std::memory_order_acquire);
+
+        while (state == BlockState::Evicting)
         {
-            if (engine)
-            {
-                usage += engine->getTotalMemoryInRam();
-            }
+            state = block.state.load(std::memory_order_acquire);
         }
-        return usage;
+
+        if (state == BlockState::Clean)
+        {
+            BlockState expected = BlockState::Clean;
+            if (block.state.compare_exchange_strong(
+                    expected,
+                    BlockState::Dirty,
+                    std::memory_order_acq_rel))
+            {
+                engine->markBlockChanged(blockIndex);
+                block.recent.store(true, std::memory_order_relaxed);
+                if (!engine->protectBlock(blockIndex, true))
+                {
+                    block.state.store(BlockState::Clean, std::memory_order_release);
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        if (state == BlockState::Dirty)
+        {
+            return true;
+        }
+
+        // ponytail: cold faults are serialized; add a request queue if profiling needs it.
+        while (coldFaultLock.test_and_set(std::memory_order_acquire))
+        {
+        }
+
+        state = block.state.load(std::memory_order_acquire);
+        bool success = true;
+        if (state == BlockState::Zero || state == BlockState::Compressed)
+        {
+            success = requestRestore(engine, blockIndex);
+        }
+        coldFaultLock.clear(std::memory_order_release);
+        return success;
     }
 
     static size_t tryEvictChunks(size_t requiredSize = 0)
     {
-        size_t freedSize = 0;
-        while (getRamUsageByAllEngines() + requiredSize > MAX_RAM_USEAGE && !accessList.empty())
+        size_t freed = 0;
+        size_t attempts = totalBlockCount() * 2;
+        while (getRamUsageByAllEngines() + requiredSize > MAX_RAM_USAGE && attempts--)
         {
-            unsigned long long key = accessList.back();
-            accessList.pop_back();
-            accessMap.erase(key);
-
-            unsigned int contractIndex = (unsigned int)(key >> 32);
-            unsigned int chunkIndex = (unsigned int)(key & 0xFFFFFFFF);
-
-            ContractStateEngine* engine = getEngine(contractIndex);
-            if (engine && engine->isChunkLoadedInMemoryMap[chunkIndex])
-            {
-                if (engine->saveChunkToDisk(chunkIndex))
-                {
-                    freedSize += K12_chunkSize;
-                }
-            }
-        }
-        return freedSize;
-    }
-
-    // Per-engine cursor for bounded resident-chunk scans.
-    static inline std::unordered_map<unsigned int, unsigned int> evictCursor;
-
-    // Evict a bounded batch of cold resident chunks when over the RAM cap.
-    static size_t tryEvictResidentBatch(size_t maxToEvict)
-    {
-        if (getRamUsageByAllEngines() <= MAX_RAM_USEAGE)
-        {
-            return 0;
-        }
-
-        size_t freedSize = 0;
-        size_t evictedCount = 0;
-        for (auto* engine : allEngines)
-        {
-            if (!engine)
-            {
-                continue;
-            }
-
-            unsigned int chunkIndex = evictCursor[engine->contractIndex];
-            for (;
-                 chunkIndex < engine->maxChunks && evictedCount < maxToEvict;
-                 chunkIndex++)
-            {
-                if (!engine->isChunkLoadedInMemoryMap[chunkIndex])
-                {
-                    continue;
-                }
-                unsigned long long key =
-                    ((unsigned long long)engine->contractIndex << 32) | chunkIndex;
-                if (accessMap.find(key) != accessMap.end())
-                {
-                    continue;
-                }
-                if (engine->saveChunkToDisk(chunkIndex))
-                {
-                    freedSize += K12_chunkSize;
-                    evictedCount++;
-                }
-            }
-            evictCursor[engine->contractIndex] =
-                chunkIndex >= engine->maxChunks ? 0 : chunkIndex;
-            if (evictedCount >= maxToEvict)
+            ContractStateEngine* engine;
+            size_t blockIndex;
+            if (!nextClockBlock(engine, blockIndex))
             {
                 break;
             }
+
+            Block& block = engine->blocks[blockIndex];
+            if (block.state.load(std::memory_order_acquire) != BlockState::Clean)
+            {
+                continue;
+            }
+            if (block.recent.exchange(false, std::memory_order_relaxed))
+            {
+                continue;
+            }
+            if (engine->evictBlock(blockIndex))
+            {
+                freed += engine->blockSize;
+            }
         }
-        return freedSize;
+
+        if (getRamUsageByAllEngines() + requiredSize > MAX_RAM_USAGE)
+        {
+            warnOverLimit();
+        }
+        return freed;
     }
 
-    // Seed every chunk with the canonical zero-state intermediate hash.
+    static size_t getRamUsageByAllEngines()
+    {
+        return residentBytes.load(std::memory_order_relaxed)
+            + compressedBytes.load(std::memory_order_relaxed);
+    }
+
+    static size_t getResidentBytes()
+    {
+        return residentBytes.load(std::memory_order_relaxed);
+    }
+
+    static size_t getCompressedBytes()
+    {
+        return compressedBytes.load(std::memory_order_relaxed);
+    }
+
+    size_t getBlockSize() const
+    {
+        return blockSize;
+    }
+
+    int getHashAndProtect(unsigned char* output, size_t outputByteLen)
+    {
+        const int result = getHash(output, outputByteLen);
+        for (size_t i = 0; i < blockCount; i++)
+        {
+            BlockState expected = BlockState::Dirty;
+            if (blocks[i].state.load(std::memory_order_acquire) == BlockState::Dirty
+                && protectBlock(i, false))
+            {
+                blocks[i].state.compare_exchange_strong(
+                    expected,
+                    BlockState::Clean,
+                    std::memory_order_acq_rel);
+            }
+        }
+        return result;
+    }
+
+private:
+    static inline std::atomic<ContractStateEngine*> allEngines[contractCount]{};
+    static inline std::atomic<size_t> residentBytes{0};
+    static inline std::atomic<size_t> compressedBytes{0};
+    static inline std::atomic_flag coldFaultLock = ATOMIC_FLAG_INIT;
+    static inline std::once_flag pagerOnce;
+    static inline size_t systemPageSize = 4096;
+    static inline size_t sharedBlockSize = K12_chunkSize;
+    static inline size_t clockEngineIndex = 0;
+    static inline size_t clockBlockIndex = 0;
+
+    struct PagerRequest
+    {
+        PagerRequest() : engine(nullptr), blockIndex(0), success(false) {}
+
+        std::atomic<ContractStateEngine*> engine;
+        std::atomic<size_t> blockIndex;
+        std::atomic<bool> success;
+    };
+    static inline PagerRequest pagerRequest;
+
+#ifdef _WIN32
+    static inline HANDLE requestEvent = nullptr;
+    static inline HANDLE responseEvent = nullptr;
+#else
+    static inline int requestPipe[2] = {-1, -1};
+    static inline int responsePipe[2] = {-1, -1};
+#endif
+
+    const size_t blockSize;
+    const size_t paddedSize;
+    const size_t blockCount;
+    std::unique_ptr<Block[]> blocks;
+
+    static size_t roundUp(size_t value, size_t alignment)
+    {
+        return (value + alignment - 1) / alignment * alignment;
+    }
+
+    static void* reserveState(size_t size)
+    {
+        const size_t padded = roundUp(size, sharedBlockSize);
+#ifdef _WIN32
+        void* state = VirtualAlloc(nullptr, padded, MEM_RESERVE, PAGE_NOACCESS);
+        if (!state)
+        {
+            throw std::runtime_error("VirtualAlloc(MEM_RESERVE) failed for contract state");
+        }
+#else
+        void* state = mmap(
+            nullptr,
+            padded,
+            PROT_NONE,
+            MAP_PRIVATE | MAP_ANON,
+            -1,
+            0);
+        if (state == MAP_FAILED)
+        {
+            throw std::runtime_error("mmap failed for contract state");
+        }
+#endif
+        return state;
+    }
+
+    static void releaseReservation(void* state, size_t size)
+    {
+#ifdef _WIN32
+        VirtualFree(state, 0, MEM_RELEASE);
+#else
+        munmap(state, size);
+#endif
+    }
+
+    ContractStateEngine(unsigned char **state, void* reservation, size_t stateSize)
+        : K12Engine((unsigned char*)reservation, stateSize),
+          blockSize(sharedBlockSize),
+          paddedSize(roundUp(stateSize, blockSize)),
+          blockCount(paddedSize / blockSize),
+          blocks(new Block[blockCount])
+    {
+        *state = _state;
+        seedZeroStateCache();
+    }
+
+    ~ContractStateEngine()
+    {
+        for (size_t i = 0; i < blockCount; i++)
+        {
+            const BlockState state = blocks[i].state.load(std::memory_order_relaxed);
+            if (state == BlockState::Clean
+                || state == BlockState::Dirty
+                || state == BlockState::Evicting)
+            {
+                residentBytes.fetch_sub(blockSize, std::memory_order_relaxed);
+            }
+            compressedBytes.fetch_sub(blocks[i].compressed.size(), std::memory_order_relaxed);
+        }
+
+        releaseReservation(_state, paddedSize);
+    }
+
     void seedZeroStateCache()
     {
         const int securityLevel = 128;
         const int capacityInBytes = 2 * securityLevel / 8;
         static const unsigned char zeroChunk[K12_chunkSize] = {};
-        Intermediate zeroInter;
-        std::memset(zeroInter.intermediate, 0, maxCapacityInBytes);
-        XKCP::TurboSHAKE_Instance q;
-        XKCP::TurboSHAKE_Initialize(&q, securityLevel);
-        XKCP::TurboSHAKE_Absorb(&q, zeroChunk, K12_chunkSize);
-        XKCP::TurboSHAKE_AbsorbDomainSeparationByte(&q, K12_suffixLeaf);
-        XKCP::TurboSHAKE_Squeeze(&q, zeroInter.intermediate, capacityInBytes);
+        Intermediate zeroIntermediate;
+        std::memset(zeroIntermediate.intermediate, 0, maxCapacityInBytes);
+
+        XKCP::TurboSHAKE_Instance queue;
+        XKCP::TurboSHAKE_Initialize(&queue, securityLevel);
+        XKCP::TurboSHAKE_Absorb(&queue, zeroChunk, K12_chunkSize);
+        XKCP::TurboSHAKE_AbsorbDomainSeparationByte(&queue, K12_suffixLeaf);
+        XKCP::TurboSHAKE_Squeeze(
+            &queue,
+            zeroIntermediate.intermediate,
+            capacityInBytes);
+
         for (unsigned int i = 0; i < maxChunks; i++)
         {
-            intermediateMap[i] = zeroInter;
+            intermediateMap[i] = zeroIntermediate;
             isChunkChangedMap[i] = false;
         }
-        // Recompute the first digest from cached zero-state leaves.
         _lastOutputSize = 0;
     }
 
-    ContractStateEngine(unsigned char **state, size_t stateSize, unsigned int contractIndex)
-        : K12Engine((unsigned char*)allocateState(stateSize), stateSize)
+    static ContractStateEngine* findEngine(void* address)
     {
-        memfdFd = lastMemfdFd;
-        lastMemfdFd = -1;
-        *state = _state;
-        this->contractIndex = contractIndex;
-        this->nonPaddedSize = stateSize;
-        this->paddedSize = alignToPageSize(stateSize);
-        this->isChunkLoadedInMemoryMap.resize(maxChunks);
-        // Compressed mode leaves untouched memfd pages non-resident.
-        const bool bootResident = (evictMode != EvictMode::Compress);
-        for (unsigned int i = 0; i < maxChunks; i++)
+        const uintptr_t fault = (uintptr_t)address;
+        for (size_t i = 0; i < contractCount; i++)
         {
-            isChunkLoadedInMemoryMap[i] = bootResident;
+            ContractStateEngine* engine = allEngines[i].load(std::memory_order_acquire);
+            if (engine
+                && fault >= (uintptr_t)engine->_state
+                && fault < (uintptr_t)engine->_state + engine->paddedSize)
+            {
+                return engine;
+            }
         }
+        return nullptr;
+    }
 
-        // Avoid faulting in zero-state pages for the initial digest.
-        seedZeroStateCache();
+    size_t blockIndex(void* address) const
+    {
+        return ((uintptr_t)address - (uintptr_t)_state) / blockSize;
+    }
 
-        // Disk mode uses one sparse backing file per contract.
-        if (evictMode == EvictMode::Disk)
+    unsigned char* blockAddress(size_t blockIndex) const
+    {
+        return _state + blockIndex * blockSize;
+    }
+
+    void markBlockChanged(size_t blockIndex)
+    {
+        const size_t firstChunk = blockIndex * blockSize / K12_chunkSize;
+        const size_t chunkCount = blockSize / K12_chunkSize;
+        for (size_t i = 0; i < chunkCount && firstChunk + i < maxChunks; i++)
         {
-            createDir(BASE_DIR);
-            char path[64];
-            std::snprintf(path, sizeof(path), "contract_states/contract_%04u.bin", contractIndex);
-            diskFd = open(path, O_RDWR | O_CREAT, 0600);
-            if (diskFd == -1)
-            {
-                throw std::runtime_error(
-                    "Error: open contract state file failed: " + std::string(path));
-            }
-            if (ftruncate(diskFd, paddedSize) == -1)
-            {
-                close(diskFd);
-                throw std::runtime_error("Error: ftruncate failed: " + std::string(path));
-            }
+            markChunkChanged((unsigned int)(firstChunk + i));
         }
     }
 
-    bool loadChunkFromDisk(unsigned int chunkIndex, unsigned char *destBuffer, size_t chunkSize)
+    bool protectBlock(size_t blockIndex, bool writable)
     {
-        std::lock_guard<std::mutex> lock(ioLocks[contractIndex]);
+        unsigned char* address = blockAddress(blockIndex);
+#ifdef _WIN32
+        DWORD oldProtection;
+        return VirtualProtect(
+            address,
+            blockSize,
+            writable ? PAGE_READWRITE : PAGE_READONLY,
+            &oldProtection) != 0;
+#else
+        return mprotect(
+            address,
+            blockSize,
+            writable ? (PROT_READ | PROT_WRITE) : PROT_READ) == 0;
+#endif
+    }
 
-        size_t expectedSize = K12_chunkSize;
-        if (paddedSize % K12_chunkSize != 0 && chunkIndex == maxChunks - 1)
+    bool evictBlock(size_t blockIndex)
+    {
+        Block& block = blocks[blockIndex];
+        BlockState expected = BlockState::Clean;
+        if (!block.state.compare_exchange_strong(
+                expected,
+                BlockState::Evicting,
+                std::memory_order_acq_rel))
         {
-            expectedSize = paddedSize % K12_chunkSize;
-        }
-        if (chunkSize != expectedSize)
-        {
-            std::cout << "Contract " << contractIndex << ": Chunk " << chunkIndex
-                      << " requested size mismatch. Requested: " << chunkSize
-                      << ", expected: " << expectedSize << "\n";
             return false;
         }
 
-        if (evictMode == EvictMode::Compress)
+        unsigned char* address = blockAddress(blockIndex);
+        const bool zero = std::all_of(
+            address,
+            address + blockSize,
+            [](unsigned char byte) { return byte == 0; });
+
+        std::vector<unsigned char> compressed;
+        if (!zero)
         {
-            auto it = compressedChunks.find(chunkIndex);
-            if (it == compressedChunks.end())
+            compressed.resize(blockSize + BLOSC2_MAX_OVERHEAD);
+            const int compressedSize = blosc2_compress(
+                1,
+                BLOSC_NOSHUFFLE,
+                1,
+                address,
+                (int32_t)blockSize,
+                compressed.data(),
+                (int32_t)compressed.size());
+            if (compressedSize <= 0)
             {
-                // Missing compressed chunks are still zero-filled and sparse.
-                setMem(destBuffer, chunkSize, 0);
+                block.state.store(BlockState::Clean, std::memory_order_release);
+                return false;
             }
-            else
-            {
-                const size_t decompressedSize = ZSTD_decompress(
-                    destBuffer,
-                    chunkSize,
-                    it->second.data(),
-                    it->second.size());
-                if (ZSTD_isError(decompressedSize) || decompressedSize != chunkSize)
-                {
-                    std::cout << "Contract " << contractIndex
-                              << ": zstd decompress chunk " << chunkIndex
-                              << " failed\n";
-                    return false;
-                }
-                g_compressedBytes -= it->second.size();
-                compressedChunks.erase(it);
-            }
-            isChunkLoadedInMemoryMap[chunkIndex] = true;
-            return true;
+            compressed.resize((size_t)compressedSize);
         }
 
-        off_t offset = (off_t)chunkIndex * (off_t)K12_chunkSize;
-        ssize_t n = pread(diskFd, destBuffer, chunkSize, offset);
-        if (n != (ssize_t)chunkSize)
+        if (!releasePhysicalBlock(address))
         {
-            std::cout << "Contract " << contractIndex << ": pread chunk " << chunkIndex
-                      << " failed, got " << n << " expected " << chunkSize << "\n";
+            block.state.store(BlockState::Clean, std::memory_order_release);
             return false;
         }
-        isChunkLoadedInMemoryMap[chunkIndex] = true;
+
+        block.compressed = std::move(compressed);
+        residentBytes.fetch_sub(blockSize, std::memory_order_relaxed);
+        compressedBytes.fetch_add(block.compressed.size(), std::memory_order_relaxed);
+        block.state.store(
+            zero ? BlockState::Zero : BlockState::Compressed,
+            std::memory_order_release);
         return true;
     }
 
-    bool saveChunkToDisk(unsigned int chunkIndex)
+    static bool releasePhysicalBlock(unsigned char* address)
     {
-        std::lock_guard<std::mutex> lock(ioLocks[contractIndex]);
+#ifdef _WIN32
+        return VirtualFree(address, sharedBlockSize, MEM_DECOMMIT) != 0;
+#else
+        void* replacement = mmap(
+            address,
+            sharedBlockSize,
+            PROT_NONE,
+            MAP_PRIVATE | MAP_ANON | MAP_FIXED,
+            -1,
+            0);
+        return replacement == address;
+#endif
+    }
 
-        size_t offset = chunkIndex * (size_t)K12_chunkSize;
-        size_t chunkSize = K12_chunkSize;
-        if (paddedSize % K12_chunkSize != 0 && chunkIndex == maxChunks - 1)
+    bool restoreBlock(size_t blockIndex)
+    {
+        Block& block = blocks[blockIndex];
+        const BlockState previous = block.state.load(std::memory_order_acquire);
+        if (previous != BlockState::Zero && previous != BlockState::Compressed)
         {
-            chunkSize = paddedSize % K12_chunkSize;
+            return true;
         }
 
-        // Read through memfd so sparse pages return zeros without UFFD faults.
-        const ssize_t bytesRead = pread(memfdFd, tmpBuffer, chunkSize, (off_t)offset);
-        bool success = bytesRead == (ssize_t)chunkSize;
-        if (!success)
+        unsigned char* address = blockAddress(blockIndex);
+        if (!commitBlock(address))
         {
-            std::cout << "Contract " << contractIndex << ": pread memfd chunk " << chunkIndex
-                      << " failed, got " << bytesRead << " expected " << chunkSize
-                      << " errno=" << errno << " (" << strerror(errno) << ")\n";
+            return false;
         }
-        else if (evictMode == EvictMode::Compress)
+
+        if (previous == BlockState::Compressed)
         {
-            // Store an exact-size level-one zstd blob in the reused scratch buffer.
-            const size_t compressionBound = ZSTD_compressBound(chunkSize);
-            if (compressScratch.size() < compressionBound)
+            const int decompressedSize = blosc2_decompress(
+                block.compressed.data(),
+                (int32_t)block.compressed.size(),
+                address,
+                (int32_t)blockSize);
+            if (decompressedSize != (int)blockSize)
             {
-                compressScratch.resize(compressionBound);
+                releasePhysicalBlock(address);
+                return false;
             }
-            const size_t compressedSize = ZSTD_compress(
-                compressScratch.data(),
-                compressScratch.size(),
-                tmpBuffer,
-                chunkSize,
-                1);
-            if (ZSTD_isError(compressedSize))
-            {
-                std::cout << "Contract " << contractIndex
-                          << ": zstd compress chunk " << chunkIndex
-                          << " failed\n";
-                success = false;
-            }
-            else
-            {
-                compressedChunks[chunkIndex].assign(
-                    compressScratch.data(),
-                    compressScratch.data() + compressedSize);
-                g_compressedBytes += compressedSize;
-            }
+        }
+
+        const bool clean = protectBlock(blockIndex, false);
+        const size_t oldCompressedSize = block.compressed.size();
+        std::vector<unsigned char>().swap(block.compressed);
+        compressedBytes.fetch_sub(oldCompressedSize, std::memory_order_relaxed);
+        residentBytes.fetch_add(blockSize, std::memory_order_relaxed);
+        block.recent.store(true, std::memory_order_relaxed);
+        if (clean)
+        {
+            block.state.store(BlockState::Clean, std::memory_order_release);
         }
         else
         {
-            const ssize_t bytesWritten =
-                pwrite(diskFd, tmpBuffer, chunkSize, (off_t)offset);
-            success = bytesWritten == (ssize_t)chunkSize;
-            if (!success)
+            markBlockChanged(blockIndex);
+            block.state.store(BlockState::Dirty, std::memory_order_release);
+        }
+        return true;
+    }
+
+    static bool commitBlock(unsigned char* address)
+    {
+#ifdef _WIN32
+        return VirtualAlloc(
+            address,
+            sharedBlockSize,
+            MEM_COMMIT,
+            PAGE_READWRITE) == address;
+#else
+        return mmap(
+            address,
+            sharedBlockSize,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANON | MAP_FIXED,
+            -1,
+            0) == address;
+#endif
+    }
+
+    static void initializePager()
+    {
+        std::call_once(pagerOnce, []()
+        {
+#ifdef _WIN32
+            SYSTEM_INFO systemInfo;
+            GetSystemInfo(&systemInfo);
+            systemPageSize = systemInfo.dwPageSize ? systemInfo.dwPageSize : 4096;
+            requestEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            responseEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            if (!requestEvent || !responseEvent)
             {
-                std::cout << "Contract " << contractIndex << ": pwrite disk chunk " << chunkIndex
-                          << " failed, got " << bytesWritten << " expected " << chunkSize
-                          << " errno=" << errno << " (" << strerror(errno) << ")\n";
+                throw std::runtime_error("CreateEvent failed for contract-state pager");
+            }
+            if (!AddVectoredExceptionHandler(1, handleWindowsException))
+            {
+                throw std::runtime_error("AddVectoredExceptionHandler failed for contract-state pager");
+            }
+#else
+            const long pageSize = sysconf(_SC_PAGESIZE);
+            systemPageSize = pageSize > 0 ? (size_t)pageSize : 4096;
+            if (pipe(requestPipe) != 0 || pipe(responsePipe) != 0)
+            {
+                throw std::runtime_error("pipe failed for contract-state pager");
+            }
+#endif
+            sharedBlockSize = K12_chunkSize;
+            while (sharedBlockSize % systemPageSize != 0)
+            {
+                sharedBlockSize += K12_chunkSize;
+            }
+            std::call_once(bloscInitOnce, []() { blosc2_init(); });
+            std::thread(pagerLoop).detach();
+        });
+    }
+
+    static inline std::once_flag bloscInitOnce;
+
+    static void pagerLoop()
+    {
+        while (true)
+        {
+#ifdef _WIN32
+            if (WaitForSingleObject(requestEvent, INFINITE) != WAIT_OBJECT_0)
+            {
+                continue;
+            }
+#else
+            if (!readByte(requestPipe[0]))
+            {
+                continue;
+            }
+#endif
+            ContractStateEngine* engine = pagerRequest.engine.load(std::memory_order_acquire);
+            const size_t blockIndex = pagerRequest.blockIndex.load(std::memory_order_acquire);
+            const bool success = engine && engine->restoreBlock(blockIndex);
+            pagerRequest.success.store(success, std::memory_order_release);
+#ifdef _WIN32
+            SetEvent(responseEvent);
+#else
+            writeByte(responsePipe[1]);
+#endif
+        }
+    }
+
+    static bool requestRestore(ContractStateEngine* engine, size_t blockIndex)
+    {
+        pagerRequest.engine.store(engine, std::memory_order_release);
+        pagerRequest.blockIndex.store(blockIndex, std::memory_order_release);
+        pagerRequest.success.store(false, std::memory_order_release);
+#ifdef _WIN32
+        if (!SetEvent(requestEvent)
+            || WaitForSingleObject(responseEvent, INFINITE) != WAIT_OBJECT_0)
+        {
+            return false;
+        }
+#else
+        if (!writeByte(requestPipe[1]) || !readByte(responsePipe[0]))
+        {
+            return false;
+        }
+#endif
+        return pagerRequest.success.load(std::memory_order_acquire);
+    }
+
+#ifndef _WIN32
+    static bool readByte(int fd)
+    {
+        char byte;
+        ssize_t result;
+        do
+        {
+            result = read(fd, &byte, 1);
+        } while (result < 0 && errno == EINTR);
+        return result == 1;
+    }
+
+    static bool writeByte(int fd)
+    {
+        const char byte = 1;
+        ssize_t result;
+        do
+        {
+            result = write(fd, &byte, 1);
+        } while (result < 0 && errno == EINTR);
+        return result == 1;
+    }
+#else
+    static LONG WINAPI handleWindowsException(EXCEPTION_POINTERS* exception)
+    {
+        if (exception->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        void* address = (void*)exception->ExceptionRecord->ExceptionInformation[1];
+        return handleFault(address)
+            ? EXCEPTION_CONTINUE_EXECUTION
+            : EXCEPTION_CONTINUE_SEARCH;
+    }
+#endif
+
+    static size_t totalBlockCount()
+    {
+        size_t count = 0;
+        for (size_t i = 0; i < contractCount; i++)
+        {
+            ContractStateEngine* engine = allEngines[i].load(std::memory_order_acquire);
+            if (engine)
+            {
+                count += engine->blockCount;
             }
         }
-        if (success)
-        {
-            isChunkLoadedInMemoryMap[chunkIndex] = false;
-        }
-
-        // Release the evicted memfd pages.
-        if (madvise(_state + offset, chunkSize, MADV_REMOVE) == -1)
-        {
-            std::cout << "Contract " << contractIndex << ": madvise failed for chunk " << chunkIndex << "\n";
-            success = false;
-        }
-
-        return success;
+        return count;
     }
 
-    bool flushAllChunksToDisk(bool needToBeChanged = false)
+    static bool nextClockBlock(ContractStateEngine*& engine, size_t& blockIndex)
     {
-        bool allOk = true;
-        for (unsigned int i = 0; i < maxChunks; i++)
+        for (size_t attempts = 0; attempts <= contractCount; attempts++)
         {
-            if ((!needToBeChanged || isChunkChangedMap[i]) && isChunkLoadedInMemoryMap[i])
+            engine = allEngines[clockEngineIndex].load(std::memory_order_acquire);
+            if (engine && clockBlockIndex < engine->blockCount)
             {
-                bool ok = saveChunkToDisk(i);
-                if (!ok)
-                {
-                    std::cout << "Contract " << contractIndex << ": Failed to save chunk " << i << " to disk\n";
-                    allOk = false;
-                }
+                blockIndex = clockBlockIndex++;
+                return true;
             }
+            clockEngineIndex = (clockEngineIndex + 1) % contractCount;
+            clockBlockIndex = 0;
         }
-        return allOk;
+        return false;
     }
 
-    void registerUserFaultFD()
+    static void warnOverLimit()
     {
-        if (isUffdRegistered)
+        static auto lastWarning = std::chrono::steady_clock::time_point::min();
+        const auto now = std::chrono::steady_clock::now();
+        if (lastWarning == std::chrono::steady_clock::time_point::min()
+            || now - lastWarning >= std::chrono::minutes(1))
         {
-            return;
-        }
-
-        // Register missing, minor, and write-protect page faults.
-        uffdio_register reg{};
-        reg.range.start = (uint64_t)_state;
-        reg.range.len = paddedSize;
-        reg.mode = UFFDIO_REGISTER_MODE_WP
-            | UFFDIO_REGISTER_MODE_MISSING
-            | UFFDIO_REGISTER_MODE_MINOR;
-
-        if (ioctl(uffd.get(), UFFDIO_REGISTER, &reg) == -1)
-        {
-            throw std::runtime_error(
-                "Error: UFFDIO_REGISTER ioctl failed for contract "
-                + std::to_string(contractIndex));
-        }
-
-        isUffdRegistered = true;
-
-        std::thread handler([=]()
-            {
-                size_t pageSize = SYSTEM_PAGE_SIZE;
-                pollfd pfd{ uffd.get(), POLLIN, 0 };
-                while (true)
-                {
-                    poll(&pfd, 1, -1);
-                    uffd_msg msg;
-                    if (read(uffd.get(), &msg, sizeof(msg)) != sizeof(msg))
-                    {
-                        continue;
-                    }
-
-                    if (msg.event != UFFD_EVENT_PAGEFAULT)
-                    {
-                        continue;
-                    }
-
-                    const auto flags = msg.arg.pagefault.flags;
-                    const bool isWriteProtect =
-                        flags & UFFD_PAGEFAULT_FLAG_WP;
-                    const bool isMinor = flags & UFFD_PAGEFAULT_FLAG_MINOR;
-                    const bool isMissing = !isWriteProtect && !isMinor;
-
-                    auto accessAddress = msg.arg.pagefault.address;
-
-                    size_t offset = accessAddress - (size_t)_state;
-                    unsigned int chunkIndex = offset / K12_chunkSize;
-
-                    size_t startRange =
-                        (size_t)_state + (chunkIndex * (size_t)K12_chunkSize);
-                    size_t lenRange = std::min(
-                        paddedSize - (chunkIndex * (size_t)K12_chunkSize),
-                        (size_t)K12_chunkSize);
-
-                    {
-                        // Resume a write after recording the dirty chunk.
-                        if (isWriteProtect)
-                        {
-                            updateAccessTracker(contractIndex, chunkIndex);
-                            markChunkChanged(chunkIndex);
-                            uffdio_writeprotect uwp{};
-                            uwp.range.start = startRange;
-                            uwp.range.len = lenRange;
-                            uwp.mode = 0;
-
-                            if (ioctl(uffd.get(), UFFDIO_WRITEPROTECT, &uwp) == -1)
-                            {
-                                std::cout << "Contract " << contractIndex
-                                          << ": UFFDIO_WRITEPROTECT remove failed\n";
-                            }
-                        }
-
-                        // Restore a missing chunk before resuming the faulting thread.
-                        if (isMissing)
-                        {
-                            bool loadOk = false;
-                            do
-                            {
-                                loadOk = loadChunkFromDisk(chunkIndex, loadBuffer, lenRange);
-                                if (!loadOk)
-                                {
-                                    std::cout << "Critical error: Contract " << contractIndex
-                                              << ": Failed to load chunk " << chunkIndex
-                                              << " from disk. Retrying in 1 second...\n";
-                                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                                }
-                            } while (!loadOk);
-                            uffdio_copy copyRequest{};
-                            copyRequest.src = (uint64_t)loadBuffer;
-                            copyRequest.dst = startRange;
-                            copyRequest.len = lenRange;
-                            copyRequest.mode = UFFDIO_CONTINUE_MODE_WP;
-                            if (ioctl(
-                                    uffd.get(),
-                                    UFFDIO_COPY,
-                                    &copyRequest) == -1)
-                            {
-                                std::cout << "Contract " << contractIndex
-                                          << ": UFFDIO_COPY failed\n";
-                            }
-                            if (copyRequest.copy != copyRequest.len)
-                            {
-                                std::cout << "Contract " << contractIndex
-                                          << ": UFFDIO_COPY incomplete copy\n";
-                            }
-                            // Protect the restored chunk from immediate eviction.
-                            updateAccessTracker(contractIndex, chunkIndex);
-                        }
-
-                        // Minor faults restore mappings for resident memfd pages.
-                        if (isMinor)
-                        {
-                            updateAccessTracker(contractIndex, chunkIndex);
-                            uffdio_continue continueRequest{};
-                            continueRequest.range.start = startRange;
-                            continueRequest.range.len = lenRange;
-                            continueRequest.mode = UFFDIO_CONTINUE_MODE_WP;
-                            if (ioctl(
-                                    uffd.get(),
-                                    UFFDIO_CONTINUE,
-                                    &continueRequest) == -1)
-                            {
-                                std::cout << "Contract " << contractIndex
-                                          << ": UFFDIO_CONTINUE failed\n";
-                                while (true)
-                                {
-                                    // Remove the PTE before retrying the continuation.
-                                    if (madvise((void*)startRange, lenRange, MADV_DONTNEED) == -1)
-                                    {
-                                        std::cout << "Contract " << contractIndex
-                                                  << ": madvise failed during UFFDIO_CONTINUE retry\n";
-                                        std::cout << "Error " << errno << ": "
-                                                  << strerror(errno) << "\n";
-                                    }
-                                    if (ioctl(
-                                            uffd.get(),
-                                            UFFDIO_CONTINUE,
-                                            &continueRequest) != -1)
-                                    {
-                                        break;
-                                    }
-                                    std::cout << "Contract " << contractIndex
-                                              << ": UFFDIO_CONTINUE retry failed\n";
-                                    std::cout << "Error " << errno << ": "
-                                              << strerror(errno) << "\n";
-                                    std::cout << "Details: address 0x" << std::hex
-                                              << continueRequest.range.start << std::dec
-                                              << ", length "
-                                              << continueRequest.range.len << "\n";
-                                    std::cout << "Chunk index: " << chunkIndex
-                                              << " | Max chunks: " << maxChunks << "\n";
-                                    if (continueRequest.range.start % pageSize != 0)
-                                    {
-                                        std::cout << "Contract " << contractIndex
-                                                  << ": UFFDIO_CONTINUE failed due to unaligned address 0x"
-                                                  << std::hex
-                                                  << continueRequest.range.start
-                                                  << std::dec << "\n";
-                                    }
-                                    if (continueRequest.range.len % pageSize != 0)
-                                    {
-                                        std::cout << "Contract " << contractIndex
-                                                  << ": UFFDIO_CONTINUE failed due to unaligned length "
-                                                  << continueRequest.range.len << "\n";
-                                    }
-                                    if (errno != EEXIST)
-                                    {
-                                        std::cout << "Contract " << contractIndex
-                                                  << ": UFFDIO_CONTINUE failed due to unexpected error (cannot ignored)\n";
-                                    }
-                                    else
-                                    {
-                                        std::cout << "Contract " << contractIndex
-                                                  << ": UFFDIO_CONTINUE failed due to EEXIST (page already present), skip continue operation\n";
-                                        markChunkChanged(chunkIndex);
-                                        // EEXIST requires an explicit wake for the faulting thread.
-                                        uffdio_range range;
-                                        range.start = startRange;
-                                        range.len = lenRange;
-                                        if (ioctl(uffd.get(), UFFDIO_WAKE, &range) == -1)
-                                        {
-                                            std::cout << "Contract " << contractIndex << ": UFFDIO_WAKE failed\n";
-                                        }
-                                        break;
-                                    }
-                                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        handler.detach();
-    }
-
-    size_t getTotalMemoryInRam()
-    {
-        size_t totalRam = 0;
-        for (unsigned int i = 0; i < maxChunks; i++)
-        {
-            if (isChunkLoadedInMemoryMap[i])
-            {
-                if (paddedSize % K12_chunkSize != 0 && i == maxChunks - 1)
-                {
-                    totalRam += paddedSize % K12_chunkSize;
-                }
-                else
-                {
-                    totalRam += K12_chunkSize;
-                }
-            }
-        }
-        return totalRam;
-    }
-
-    void reprotectWriteRegion(size_t startOffset = 0, size_t len = 0)
-    {
-        if (!isUffdRegistered)
-        {
-            return;
-        }
-
-        std::lock_guard<std::mutex> lock(faultLock);
-
-        if (len == 0 && startOffset == 0)
-        {
-            len = paddedSize;
-        }
-
-        uffdio_writeprotect wp {};
-
-        wp.range.start = (uint64_t)_state + startOffset;
-        wp.range.len   = len;
-
-        wp.mode = UFFDIO_WRITEPROTECT_MODE_WP;
-
-        if (ioctl(uffd.get(), UFFDIO_WRITEPROTECT, &wp) == -1)
-        {
-            std::cout << "Contract " << contractIndex << ": UFFDIO_WRITEPROTECT failesd\n";
-
-            // Fall back to recomputing every intermediate hash.
-            for (unsigned int i = 0; i < maxChunks; i++)
-            {
-                isChunkChangedMap[i] = true;
-            }
+            std::cerr << "Contract-state memory remains above --max-sc-mem; "
+                      << "compressed state stays in RAM\n";
+            lastWarning = now;
         }
     }
-
-    void reprotectReadRegion(size_t startOffset = 0, size_t len = 0)
-    {
-        if (!isUffdRegistered)
-        {
-            return;
-        }
-
-        std::lock_guard<std::mutex> lock(faultLock);
-
-        if (len == 0 && startOffset == 0)
-        {
-            len = paddedSize;
-        }
-
-        // Drop PTE mappings while retaining the memfd data.
-        madvise(_state + startOffset, len, MADV_DONTNEED);
-    }
-
-    unsigned long long touchAllPages()
-    {
-        unsigned long long sum = 0;
-        for (size_t offset = 0; offset < paddedSize; offset += SYSTEM_PAGE_SIZE)
-        {
-            sum += _state[offset];
-        }
-        return sum;
-    }
-
-    int getHashAndReprotect(unsigned char* output, size_t outputByteLen)
-    {
-        int res = getHash(output, outputByteLen);
-        reprotectWriteRegion();
-        reprotectReadRegion();
-        return res;
-    }
-
 };

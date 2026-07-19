@@ -184,7 +184,7 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
-#if defined(__linux__) && defined(LITE_WASM_SC)
+#if (defined(__linux__) || defined(__APPLE__) || defined(_WIN32)) && defined(LITE_WASM_SC)
 #include "extensions/k12_engine.h"
 #endif
 #include "extensions/wasm/runtime/extension.h"
@@ -9789,14 +9789,8 @@ void processArgs(int argc, const char* argv[]) {
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"))
 #ifdef LITE_SC_ENGINE
         (
-            "sc-evict-mode",
-            "Contract-state engine eviction backend: 'compress' (in-RAM zstd, "
-            "fast spawn; default) or 'disk' (per-contract file, lowest RAM, "
-            "persistent). Testnet dynamic-contract only.",
-            cxxopts::value<std::string>()->default_value("compress"))
-        (
             "max-sc-mem",
-            "Contract-state RAM cap in GB (testnet dynamic-contract); engine evicts cold chunks to stay under it.",
+            "Contract-state RAM target in GB; cold state remains compressed in memory.",
             cxxopts::value<unsigned long long>()->default_value("1"))
 #endif
         ;
@@ -9808,22 +9802,11 @@ void processArgs(int argc, const char* argv[]) {
     }
 
 #ifdef LITE_SC_ENGINE
-    if (result.count("sc-evict-mode"))
-    {
-        const std::string evictionMode =
-            result["sc-evict-mode"].as<std::string>();
-        ContractStateEngine::evictMode = evictionMode == "disk"
-            ? ContractStateEngine::EvictMode::Disk
-            : ContractStateEngine::EvictMode::Compress;
-        logColorToScreen(
-            "INFO",
-            "Contract-state evict mode: " + evictionMode);
-    }
     if (result.count("max-sc-mem"))
     {
-        ContractStateEngine::MAX_RAM_USEAGE =
+        Wasm::Runtime::setContractStateMemoryLimit(
             result["max-sc-mem"].as<unsigned long long>()
-            * 1024ULL * 1024 * 1024;
+            * 1024ULL * 1024 * 1024);
     }
 #endif
 
@@ -10140,6 +10123,14 @@ void watchAndCheckin()
 
 #if defined(__linux__) || defined(__APPLE__)
 void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
+#ifdef LITE_SC_ENGINE
+    if ((sig == SIGSEGV || sig == SIGBUS)
+        && si
+        && Wasm::Runtime::handleManagedStateFault(si->si_addr))
+    {
+        return;
+    }
+#endif
 #ifdef __linux__
     // Handle tracked SwapVM writes before the crash path.
     if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr))
@@ -10198,6 +10189,8 @@ void setupSignalHandlers() {
     sa.sa_sigaction = signalHandler;       // SA_SIGINFO form: handler receives siginfo_t* (si_addr)
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGSEGV);
+    sigaddset(&sa.sa_mask, SIGBUS);
 
     // Common crash signals to catch:
     sigaction(SIGSEGV, &sa, NULL); // Segmentation fault (Invalid memory)

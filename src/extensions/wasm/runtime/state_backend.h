@@ -1,13 +1,14 @@
 #pragma once
 // Routes state allocation, digesting, and eviction through the active backend.
-// The userfaultfd engine is Linux-only.
+// The native state engine is shared by Linux, macOS, and Windows.
 
-// LITE_SC_NO_ENGINE selects the demand-zero fallback on Linux for testing.
-#if defined(__linux__) && defined(LITE_WASM_SC) && !defined(LITE_SC_NO_ENGINE)
+// LITE_SC_NO_ENGINE selects the resident fallback for testing.
+#if (defined(__linux__) || defined(__APPLE__) || defined(_WIN32)) \
+    && defined(LITE_WASM_SC) && !defined(LITE_SC_NO_ENGINE)
 #define LITE_SC_ENGINE 1
 #endif
 
-// Non-engine builds reserve demand-zero state so unused contracts consume little RSS.
+// Non-engine test builds use the ordinary resident allocator.
 #if !defined(LITE_SC_ENGINE) && defined(TESTNET) && defined(LITE_WASM_SC)
 #define LITE_SC_CONTRACT_LEVEL 1
 #endif
@@ -36,14 +37,9 @@ inline bool allocateContractState(unsigned int contractIndex, unsigned long long
         size,
         contractIndex);
 #elif defined(LITE_SC_CONTRACT_LEVEL)
-    // Demand-zero reservation keeps commit charge proportional to written state.
-#ifdef _MSC_VER
-    contractStates[contractIndex] = (unsigned char*)qVirtualAllocLazy(size);
-#else
     contractStates[contractIndex] = (unsigned char*)qVirtualAlloc(
         size,
         /*commitMem=*/true);
-#endif
     return contractStates[contractIndex] != nullptr;
 #else
     return allocPoolWithErrorLog(
@@ -62,27 +58,18 @@ inline void hashContractState(
     if (stateEngineActive(contractIndex))
     {
 #ifdef LITE_SC_ENGINE
-        ContractStateEngine::getEngine(contractIndex)->getHashAndReprotect(
+        ContractStateEngine::getEngine(contractIndex)->getHashAndProtect(
             output,
             32);
 #endif
     }
     else
     {
-#ifdef _MSC_VER
-        // Hash reserved Windows pages as zero without committing them.
-        KangarooTwelvePaged(
-            contractStates[contractIndex],
-            (unsigned int)effectiveSize,
-            output,
-            32);
-#else
         KangarooTwelve(
             contractStates[contractIndex],
             (unsigned int)effectiveSize,
             output,
             32);
-#endif
     }
 }
 
@@ -90,52 +77,32 @@ inline void evictContractState()
 {
 #ifdef LITE_SC_ENGINE
     ContractStateEngine::tryEvictChunks();
-    ContractStateEngine::tryEvictResidentBatch(50000);
 #endif
 }
 
-inline void flushContractState(unsigned int contractIndex)
+inline bool handleManagedStateFault(void* address)
 {
 #ifdef LITE_SC_ENGINE
-    if (auto* engine = ContractStateEngine::getEngine(contractIndex))
-    {
-        engine->flushAllChunksToDisk();
-    }
+    return ContractStateEngine::handleFault(address);
 #else
-    (void)contractIndex;
+    (void)address;
+    return false;
 #endif
 }
 
-inline void touchContractState(unsigned int contractIndex)
+inline void setContractStateMemoryLimit(unsigned long long bytes)
 {
 #ifdef LITE_SC_ENGINE
-    if (auto* engine = ContractStateEngine::getEngine(contractIndex))
-    {
-        engine->touchAllPages();
-    }
+    ContractStateEngine::MAX_RAM_USAGE = (size_t)bytes;
 #else
-    (void)contractIndex;
-#endif
-}
-
-inline void reprotectContractState(unsigned int contractIndex)
-{
-#ifdef LITE_SC_ENGINE
-    if (auto* engine = ContractStateEngine::getEngine(contractIndex))
-    {
-        engine->reprotectWriteRegion();
-        engine->reprotectReadRegion();
-    }
-#else
-    (void)contractIndex;
+    (void)bytes;
 #endif
 }
 
 inline void transferContractStateToWasm(unsigned int contractIndex)
 {
 #if defined(LITE_SC_ENGINE)
-    // The engine retains ownership of its memfd after Wasm takes over the slot.
-    flushContractState(contractIndex);
+    ContractStateEngine::release(contractIndex);
     g_wasmOwnedSlot[contractIndex] = true;
 #elif defined(LITE_SC_CONTRACT_LEVEL)
     g_wasmOwnedSlot[contractIndex] = true;
@@ -147,7 +114,9 @@ inline void transferContractStateToWasm(unsigned int contractIndex)
 // Only the plain pool backend returns state through freePool.
 inline void freeContractState(unsigned int contractIndex)
 {
-#if defined(LITE_SC_ENGINE) || defined(LITE_SC_CONTRACT_LEVEL)
+#if defined(LITE_SC_ENGINE)
+    ContractStateEngine::release(contractIndex);
+#elif defined(LITE_SC_CONTRACT_LEVEL)
     (void)contractIndex;
 #else
     if (contractStates[contractIndex])

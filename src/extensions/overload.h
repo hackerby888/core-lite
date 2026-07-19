@@ -346,7 +346,6 @@ inline void* qVirtualAllocLazy(const unsigned long long size)
     commitMemMap[(unsigned long long)address] = true;
     return address;
 }
-#include "k12_paged.h"
 #else
 inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false) {
     int prot = commitMem ? (PROT_READ | PROT_WRITE) : PROT_NONE;

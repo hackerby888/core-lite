@@ -121,17 +121,16 @@ target_link_libraries(
   Blosc2::blosc2_static
 )
 
-# The contract-state engine test requires Linux userfaultfd and x86 RDRAND.
-if(NOT WIN32 AND NOT APPLE AND NOT IS_ARM)
-    target_sources(qubic_core_tests PRIVATE k12_engine.cpp)
-    target_link_libraries(qubic_core_tests PRIVATE zstd)
-endif()
+# The contract-state engine is native on Linux, macOS, and Windows.
+target_sources(qubic_core_tests PRIVATE k12_engine.cpp)
 
 # Keep Wasm node settings isolated from the default core gtests.
 if(LITE_WASM_SC)
     if(NOT TARGET vmlib)
         if(APPLE)
             set(WAMR_BUILD_PLATFORM "darwin")
+        elseif(WIN32)
+            set(WAMR_BUILD_PLATFORM "windows")
         else()
             set(WAMR_BUILD_PLATFORM "linux")
         endif()

@@ -296,10 +296,9 @@ if(APPLE)
     target_link_libraries(Qubic
             platform_common
             platform_efi
-            jsoncpp_static drogon fmt::fmt
+            jsoncpp_static drogon fmt::fmt Blosc2::blosc2_static
             Threads::Threads
             z
-            zstd
             m
     )
 elseif(WIN32)
@@ -320,7 +319,6 @@ target_link_libraries(Qubic
         Threads::Threads
         dl
         z
-        zstd
         rt
         m
 )
