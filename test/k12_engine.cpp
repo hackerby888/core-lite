@@ -6,6 +6,9 @@
 #include "platform/file_io.h"
 #include "platform/m256.h"
 #include <extensions/k12_engine.h>
+#ifdef _WIN32
+#include "contract_core/contract_exec.h"
+#endif
 #include <gtest/gtest.h>
 
 #include <array>
