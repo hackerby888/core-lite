@@ -1,10 +1,8 @@
 #define NO_UEFI
-#define SINGLE_COMPILE_UNIT
 
 #define PRINT_TEST_INFO 0
 
 #include "gtest/gtest.h"
-#include "contract_testing.h"
 
 #include <chrono>
 #include <random>
@@ -124,7 +122,7 @@ static void updateAndPrintEntityCategoryPopulations()
 struct SpectrumTest : public LoggingTest
 {
     SpectrumInfo beforeAntiDustSpectrumInfo;
-    std::chrono::time_point<std::chrono::high_resolution_clock> beforeAntiDustTimestamp = std::chrono::high_resolution_clock::now();
+    std::chrono::steady_clock::time_point beforeAntiDustTimestamp;
     bool antiDustCornerCase;
     std::mt19937_64 rnd64;
 
