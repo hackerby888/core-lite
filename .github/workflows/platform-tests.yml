@@ -36,6 +36,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: Linux
+            runner: ubuntu-24.04
           - name: macOS
             runner: macos-14
           - name: Windows
@@ -43,6 +45,15 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 cmake nasm \
+            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
+            zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev \
+            liblz4-dev libssl-dev libffi-dev
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
@@ -68,13 +79,19 @@ jobs:
             'set(VCPKG_BUILD_TYPE release)'
           ) | Set-Content -Encoding ascii triplets-overlay/x64-windows-rel.cmake
 
-      - name: Configure macOS tests
-        if: runner.os == 'macOS'
+      - name: Configure POSIX tests
+        if: runner.os != 'Windows'
         run: |
+          CC=clang-18
+          CXX=clang++-18
+          if [ "$RUNNER_OS" = 'macOS' ]; then
+            CC="$(xcrun -f clang)"
+            CXX="$(xcrun -f clang++)"
+          fi
           cmake -S . -B build-platform-tests \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER="$(xcrun -f clang)" \
-            -DCMAKE_CXX_COMPILER="$(xcrun -f clang++)" \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
             -DBUILD_TESTS=ON \
             -DBUILD_BINARY=OFF \
             -DENABLE_AVX512=OFF \
@@ -97,8 +114,8 @@ jobs:
             -DUSE_SANITIZER=OFF -DONLY_LOGGING=ON -DLITE_WASM_SC=ON `
             -DTESTNET=ON -DTESTNET_LITE_RAM=ON
 
-      - name: Build and run macOS tests
-        if: runner.os == 'macOS'
+      - name: Build and run POSIX tests
+        if: runner.os != 'Windows'
         run: |
           cmake --build build-platform-tests --target qubic_core_tests --parallel
           ./build-platform-tests/test/qubic_core_tests --gtest_filter="$GTEST_FILTER"
