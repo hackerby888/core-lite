@@ -5,12 +5,9 @@
 #include "platform/msvc_polyfill.h"
 #include "platform/file_io.h"
 #include "platform/m256.h"
+#define K12_ENGINE_CONTRACT_COUNT 1
 #include <extensions/k12_engine.h>
-#ifdef _WIN32
-// These tests do not execute contracts.
-static void __beginFunctionOrProcedure(const unsigned int) {}
-static void __endFunctionOrProcedure(const unsigned int) {}
-#endif
+#undef K12_ENGINE_CONTRACT_COUNT
 #include <gtest/gtest.h>
 
 #include <array>

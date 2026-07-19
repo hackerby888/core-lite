@@ -1,6 +1,10 @@
 #pragma once
 
+#ifdef K12_ENGINE_CONTRACT_COUNT
+constexpr unsigned int contractCount = K12_ENGINE_CONTRACT_COUNT;
+#else
 #include "contract_core/contract_def.h"
+#endif
 #include <K12/kangaroo_twelve_xkcp.h>
 #include <algorithm>
 #include <atomic>
