@@ -334,31 +334,24 @@ jobs:
       - name: Install qinit deps
         shell: bash
         run: cd qinit && bun install
-      # Pin the fetched wasi-sdk paths so contract builds cannot fall back to host clang.
-      - name: Fetch wasi-sdk (wasm contract compiler)
+      - name: Build qinit CLI
         shell: bash
         run: |
           cd qinit
-          bun -e '
-            const core = await import("./packages/core/src/index.ts");
-            await core.fetchWasiSdk();
-            const paths = core.wasiSdkPaths();
-            if (!paths) {
-              console.error("FATAL: wasi-sdk cache is incomplete");
-              process.exit(1);
-            }
-            console.log("WASM_CLANG=" + paths.clang);
-            console.log("WASI_SYSROOT=" + paths.sysroot);
-          ' > wasienv 2> wasierr || {
-            echo "wasi-sdk fetch/resolve failed:"
-            cat wasierr
-            exit 1
-          }
-          cat wasienv >> "$GITHUB_ENV"
-          cat wasienv
-          WASM_COMPILER="$(sed -n 's/^WASM_CLANG=//p' wasienv)"
-          echo "--- wasi clang ---"
-          "$WASM_COMPILER" --version | head -2
+          echo "qinit commit $(git rev-parse HEAD)"
+          mkdir -p dist
+          if [ "${{ matrix.key }}" = "windows-x64" ]; then
+            bun build packages/cli/src/index.tsx --compile --minify --outfile dist/qinit.exe
+            echo "QINIT_BIN=$GITHUB_WORKSPACE/qinit/dist/qinit.exe" >> "$GITHUB_ENV"
+          else
+            bun run build:bin
+            chmod +x dist/qinit
+            echo "QINIT_BIN=$GITHUB_WORKSPACE/qinit/dist/qinit" >> "$GITHUB_ENV"
+          fi
+      - name: Compiled qinit crypto smoke
+        shell: bash
+        run: |
+          "$QINIT_BIN" smoke
       # Install the keg-only libraries linked by the macOS node.
       - name: Install macOS runtime libs
         if: matrix.key == 'darwin-arm64'
@@ -366,10 +359,9 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact }}
-      - name: qinit test (deploy + read + write)
+      - name: Select node artifact
         shell: bash
         run: |
-          # Keep the Qubic name expected by qinit's process controls.
           if [ "${{ matrix.key }}" = "windows-x64" ]; then
             NODE_BIN="$GITHUB_WORKSPACE/Qubic.exe"
           else
@@ -377,36 +369,52 @@ jobs:
             chmod +x Qubic
             NODE_BIN="$GITHUB_WORKSPACE/Qubic"
           fi
+          echo "NODE_BIN=$NODE_BIN" >> "$GITHUB_ENV"
+      - name: Start release node through compiled qinit
+        shell: bash
+        run: |
+          "$QINIT_BIN" node run \
+            --real \
+            --core "$GITHUB_WORKSPACE/core" \
+            --bin "$NODE_BIN" \
+            --restart \
+            --keep \
+            --wait 150
+      - name: Gate cached wasi-sdk
+        shell: bash
+        run: |
+          "$QINIT_BIN" doctor
+      - name: qinit test (deploy + read + write)
+        shell: bash
+        run: |
           mkdir -p proj/contracts
           cp qinit/fixtures/DigestProbe.h proj/contracts/DigestProbe.h
           cd proj
           # The known-good fixture skips the separate x64-only contractverify gate.
-          bun "$GITHUB_WORKSPACE/qinit/packages/cli/src/index.tsx" test \
-            --bin "$NODE_BIN" \
+          "$QINIT_BIN" test \
+            --real \
+            --native \
             --core "$GITHUB_WORKSPACE/core" \
             --contract contracts/DigestProbe.h \
             --name DigestProbe \
             --skip-verify \
-            --wait 150 \
-            --timeout 90000 \
-            --keep
-          # Compare the full canonical state, not only the decoded Get result.
-          CONTRACT_SLOT=$(jq -r 'keys[0]' qinit.idl.json)
-          echo "deployed slot=$CONTRACT_SLOT"
-          STATE_DIGEST=$(bash "$GITHUB_WORKSPACE/qinit/scripts/poll-node-json.sh" \
-            "http://127.0.0.1:41841/live/v1/dev/contract-digest?slot=$CONTRACT_SLOT" \
-            '.digest // empty' 12 2 || true)
-          if [ "${{ matrix.key }}" = "windows-x64" ]; then
-            taskkill -f -im Qubic.exe || true
-          else
-            pkill -x Qubic || true
-          fi
-          if [ -z "$STATE_DIGEST" ]; then
-            echo "no state digest from node"
-            exit 1
-          fi
+            --timeout 90000
+      - name: Read canonical state digest through compiled qinit
+        shell: bash
+        run: |
+          cd proj
+          STATE_JSON=$("$QINIT_BIN" state DigestProbe --digest --json)
+          echo "$STATE_JSON"
+          STATE_DIGEST=$(printf '%s\n' "$STATE_JSON" | jq -er '.digest')
           echo "$STATE_DIGEST" > "$GITHUB_WORKSPACE/digest-${{ matrix.key }}.txt"
           echo "::notice::${{ matrix.key }} DigestProbe state digest = $STATE_DIGEST"
+      - name: Stop node
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${QINIT_BIN:-}" ] && [ -f "$QINIT_BIN" ]; then
+            "$QINIT_BIN" node stop
+          fi
       - name: Upload state digest
         uses: actions/upload-artifact@v7
         with:
@@ -418,28 +426,16 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          cd qinit
-          echo "WASM_CLANG=${WASM_CLANG:-<unset>}  WASI_SYSROOT=${WASI_SYSROOT:-<unset>}"
-          "${WASM_CLANG:-clang++}" --version | head -2 || true
-          bun -e '
-            const { buildContract } = await import("./packages/build/src/index.ts");
-            const buildResult = await buildContract({
-              contractPath: process.env.GITHUB_WORKSPACE + "/qinit/fixtures/DigestProbe.h",
-              name: "DigestProbe",
-              slot: 28,
-              corePath: process.env.GITHUB_WORKSPACE + "/core",
-              outDir: "/tmp/diag",
-            });
-            console.log(
-              "build.ok =", buildResult.ok,
-              " hash =", buildResult.hash,
-              " so =", buildResult.so,
-            );
-            if (!buildResult.ok) {
-              console.log("=== build stderr ===");
-              console.log(buildResult.stderr || "(none)");
-            }
-          ' || true
+          if [ -n "${QINIT_BIN:-}" ] && [ -f "$QINIT_BIN" ]; then
+            "$QINIT_BIN" build "$GITHUB_WORKSPACE/qinit/fixtures/DigestProbe.h" \
+              --name DigestProbe \
+              --slot 28 \
+              --core "$GITHUB_WORKSPACE/core" \
+              --out "$RUNNER_TEMP/qinit-build-diag" \
+              --native \
+              --skip-verify \
+              --json || true
+          fi
       - name: Node log tail (on failure)
         if: failure()
         shell: bash
