@@ -637,7 +637,18 @@ TEST(WasmContracts, CrossHostStateEquivalence)
 }
 
 #include "wasm_trap_fixture.h"
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#define close _close
+#define dup _dup
+#define dup2 _dup2
+#define fileno _fileno
+#define pipe(fds) _pipe((fds), 8192, _O_BINARY)
+#define read _read
+#else
 #include <unistd.h>
+#endif
 #include <cstdio>
 #include <string>
 
@@ -683,7 +694,7 @@ TEST(WasmContracts, TrapAutoDumpHasMappableOffset)
     dup2(saved, fileno(stdout));
     close(saved);
     char cap[8192];
-    ssize_t n = read(pfd[0], cap, sizeof(cap) - 1);
+    int n = (int)read(pfd[0], cap, sizeof(cap) - 1);
     close(pfd[0]);
     cap[n > 0 ? n : 0] = '\0';
     printf("--- captured WAMR auto-dump ---\n%s\n-------------------------------\n", cap);
