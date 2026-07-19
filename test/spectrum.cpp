@@ -162,7 +162,7 @@ struct SpectrumTest : public LoggingTest
         updateAndPrintEntityCategoryPopulations();
 
         // Start measuring run-time
-        beforeAntiDustTimestamp = std::chrono::high_resolution_clock::now();
+        beforeAntiDustTimestamp = std::chrono::steady_clock::now();
     }
 
     void afterAntiDust()
@@ -170,7 +170,7 @@ struct SpectrumTest : public LoggingTest
         checkAndGetInfo();
 
         // Print anti-dust info
-        auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - beforeAntiDustTimestamp);
+        auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - beforeAntiDustTimestamp);
         std::cout << "Transfer with anti-dust took " << duration_ms << " ms: entities "
             << beforeAntiDustSpectrumInfo.numberOfEntities << " -> " << spectrumInfo.numberOfEntities
             << " (to " << spectrumInfo.numberOfEntities * 100llu / SPECTRUM_CAPACITY
