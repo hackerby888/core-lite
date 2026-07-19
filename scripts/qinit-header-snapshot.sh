@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Build qinit's native and Wasm core-header closure.
+# Build qinit's Wasm core-header closure.
 set -euo pipefail
 
 CORE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUTPUT_DIR="${1:-$CORE_ROOT/dist-snapshot}"
-CLANG="${CLANG:-clang++-18}"
+: "${WASM_CLANG:?WASM_CLANG is required}"
+: "${WASI_SYSROOT:?WASI_SYSROOT is required}"
 TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
@@ -20,42 +21,8 @@ struct CONTRACT_STATE_TYPE : public ContractBase {
 };
 EOF
 
-# Mirror qinit's native build wrapper.
+# Mirror qinit's Wasm build wrapper.
 cat > "$TEMP_DIR/Stub.wrapper.cpp" <<EOF
-#define NO_UEFI
-#include <cstdint>
-#include <cstddef>
-#include <cstring>
-#include <cstdlib>
-#include <string>
-#include <type_traits>
-#include <utility>
-#include <array>
-#include <limits>
-#define WASM_NATIVE_TU_BUILD
-#include "contract_core/pre_qpi_def.h"
-#include "contracts/qpi.h"
-#include "contracts/math_lib.h"
-#include "contract_core/qpi_proposal_voting.h"
-#include "oracle_core/oracle_interfaces_def.h"
-#define CONTRACT_INDEX 28
-#define Stub_CONTRACT_INDEX 28
-#define CONTRACT_STATE_TYPE Stub
-#define CONTRACT_STATE2_TYPE Stub2
-#include "extensions/wasm/sdk/intercontract_calls.h"
-#include "$TEMP_DIR/Stub.h"
-#include "contract_core/qpi_collection_impl.h"
-#include "contract_core/qpi_linked_list_impl.h"
-#define __acquireScratchpad __wasm_native_cb_acquireScratchpad_unused
-#define __releaseScratchpad __wasm_native_cb_releaseScratchpad_unused
-#include "contract_core/qpi_hash_map_impl.h"
-#undef __acquireScratchpad
-#undef __releaseScratchpad
-#include "extensions/wasm/shared/abi_types.h"
-EOF
-
-# Keep the Wasm wrapper independent from native include substitutions.
-cat > "$TEMP_DIR/Stub.wasm.wrapper.cpp" <<EOF
 #define NO_UEFI
 #include <cstdint>
 #include <cstddef>
@@ -81,8 +48,8 @@ cat > "$TEMP_DIR/Stub.wasm.wrapper.cpp" <<EOF
 #include "$TEMP_DIR/Stub.h"
 #include "contract_core/qpi_collection_impl.h"
 #include "contract_core/qpi_linked_list_impl.h"
-#define __acquireScratchpad __wasm_native_cb_acquireScratchpad_unused
-#define __releaseScratchpad __wasm_native_cb_releaseScratchpad_unused
+#define __acquireScratchpad __qinit_cb_acquireScratchpad_unused
+#define __releaseScratchpad __qinit_cb_releaseScratchpad_unused
 #include "contract_core/qpi_hash_map_impl.h"
 #undef __acquireScratchpad
 #undef __releaseScratchpad
@@ -100,53 +67,42 @@ copy_header()
   fi
 
   local relative_path
-  relative_path="$(realpath --relative-to="$CORE_ROOT" "$source_file")"
-  case "$relative_path" in
-    ../*) return 0 ;;
+  case "$source_file" in
+    "$CORE_ROOT"/*) relative_path="${source_file#"$CORE_ROOT"/}" ;;
+    *) return 0 ;;
   esac
 
   mkdir -p "$SNAPSHOT_DIR/$(dirname "$relative_path")"
   cp "$source_file" "$SNAPSHOT_DIR/$relative_path"
 }
 
-# Keep every repository header reached by the native wrapper.
-NATIVE_DEPS="$("$CLANG" -std=c++20 -fPIC -mavx2 \
+# Resolve the Wasm closure with its real target and sysroot.
+PLATFORM_SHIM="$CORE_ROOT/src/extensions/wasm/sdk/platform_intrinsics.h"
+WASM_DEPS="$("$WASM_CLANG" --target=wasm32-wasi -std=c++20 \
+  -fno-exceptions \
+  -fno-rtti \
+  -DLITEDYN_CONTRACT_TU \
+  --sysroot="$WASI_SYSROOT" \
+  -include "$PLATFORM_SHIM" \
   -I"$CORE_ROOT" \
   -I"$CORE_ROOT/src" \
-  -M "$TEMP_DIR/Stub.wrapper.cpp" \
-  | tr ' \\' '\n\n' \
-  | grep "^$CORE_ROOT/" || true)"
-for source_file in $NATIVE_DEPS; do
+  -MM "$TEMP_DIR/Stub.wrapper.cpp" \
+  | tr ' \\' '\n\n')"
+for source_file in $WASM_DEPS; do
   copy_header "$source_file"
 done
 
-# Resolve the Wasm closure with its real target and sysroot.
-PLATFORM_SHIM="$CORE_ROOT/src/extensions/wasm/sdk/platform_intrinsics.h"
-if [ -n "${WASM_CLANG:-}" ]; then
-  WASM_DEPS="$("$WASM_CLANG" --target=wasm32-wasi -std=c++20 \
-    -fno-exceptions \
-    -fno-rtti \
-    ${WASI_SYSROOT:+--sysroot="$WASI_SYSROOT"} \
-    -include "$PLATFORM_SHIM" \
-    -I"$CORE_ROOT" \
-    -I"$CORE_ROOT/src" \
-    -M "$TEMP_DIR/Stub.wasm.wrapper.cpp" \
-    | tr ' \\' '\n\n' \
-    | grep "^$CORE_ROOT/" || true)"
-  for source_file in $WASM_DEPS; do
-    copy_header "$source_file"
-  done
-else
-  echo "WARN: WASM_CLANG unset — Wasm SDK header closure not captured; snapshot incomplete for Wasm" >&2
-fi
-copy_header "$PLATFORM_SHIM"
-
-# Include contract types, the slot map, and inter-contract call macros.
+# Include contract types, the slot map, and all public Wasm headers.
 for source_file in "$CORE_ROOT"/src/contracts/*.h; do
   copy_header "$source_file"
 done
 copy_header "$CORE_ROOT/src/contract_core/contract_def.h"
-copy_header "$CORE_ROOT/src/extensions/wasm/sdk/intercontract_calls.h"
+for source_file in "$CORE_ROOT"/src/extensions/wasm/sdk/*.h; do
+  copy_header "$source_file"
+done
+for source_file in "$CORE_ROOT"/src/extensions/wasm/shared/*.h; do
+  copy_header "$source_file"
+done
 
 mkdir -p "$OUTPUT_DIR"
 tar czf "$OUTPUT_DIR/core-headers.tar.gz" -C "$SNAPSHOT_DIR" .

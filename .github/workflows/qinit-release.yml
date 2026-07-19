@@ -486,13 +486,6 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-      - name: Install toolchain
-        run: |
-          sudo apt update -y
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt install -y clang
       - name: Fetch wasi-sdk-29 (for the wasm header closure)
         run: |
           curl -fsSL -o wasi-sdk.tar.gz \
@@ -501,7 +494,6 @@ jobs:
           tar -xzf wasi-sdk.tar.gz -C wasi-sdk --strip-components=1
       - name: Build header snapshot
         run: |
-          CLANG=clang++-18 \
           WASM_CLANG="$PWD/wasi-sdk/bin/clang++" \
           WASI_SYSROOT="$PWD/wasi-sdk/share/wasi-sysroot" \
             bash scripts/qinit-header-snapshot.sh "$PWD/snapshot-out"
