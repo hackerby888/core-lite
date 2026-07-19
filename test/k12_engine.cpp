@@ -7,7 +7,9 @@
 #include "platform/m256.h"
 #include <extensions/k12_engine.h>
 #ifdef _WIN32
-#include "contract_core/contract_exec.h"
+// These tests do not execute contracts.
+static void __beginFunctionOrProcedure(const unsigned int) {}
+static void __endFunctionOrProcedure(const unsigned int) {}
 #endif
 #include <gtest/gtest.h>
 
