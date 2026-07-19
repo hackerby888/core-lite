@@ -162,6 +162,9 @@ if(LITE_WASM_SC)
         TESTNET_LITE_RAM
     )
     apply_test_compiler_flags(qubic_wasm_tests)
+    if(MSVC)
+        target_compile_definitions(qubic_wasm_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
     target_include_directories(
         qubic_wasm_tests PRIVATE
         ${WAMR_ROOT_DIR}/core/iwasm/include
