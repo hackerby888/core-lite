@@ -59,10 +59,10 @@ jobs:
       - name: Build test runner
         run: |
           cmake --build build-wasm-ci \
-            --target qubic_core_tests \
+            --target qubic_wasm_tests \
             -- -j$(nproc)
 
       - name: Run wasm-contract gtests
         run: |
-          ./build-wasm-ci/test/qubic_core_tests \
+          ./build-wasm-ci/test/qubic_wasm_tests \
             --gtest_filter='WasmContracts.*'

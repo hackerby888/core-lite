@@ -127,15 +127,8 @@ if(NOT WIN32 AND NOT APPLE AND NOT IS_ARM)
     target_link_libraries(qubic_core_tests PRIVATE zstd)
 endif()
 
-# Build the Wasm ABI regression tests against the node's WAMR configuration.
+# Keep Wasm node settings isolated from the default core gtests.
 if(LITE_WASM_SC)
-    target_compile_definitions(qubic_core_tests PRIVATE
-        LITE_WASM_SC
-        TESTNET
-        TESTNET_LITE_RAM
-    )
-    target_sources(qubic_core_tests PRIVATE wasm_contracts.cpp)
-
     if(NOT TARGET vmlib)
         if(APPLE)
             set(WAMR_BUILD_PLATFORM "darwin")
@@ -160,9 +153,27 @@ if(LITE_WASM_SC)
         include(${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
         add_library(vmlib STATIC ${WAMR_RUNTIME_LIB_SOURCE})
     endif()
-    target_include_directories(qubic_core_tests PRIVATE ${WAMR_ROOT_DIR}/core/iwasm/include)
-    target_link_libraries(qubic_core_tests PRIVATE vmlib)
+
+    add_executable(qubic_wasm_tests wasm_contracts.cpp)
+    target_compile_definitions(qubic_wasm_tests PRIVATE
+        LITE_WASM_SC
+        TESTNET
+        TESTNET_LITE_RAM
+    )
+    apply_test_compiler_flags(qubic_wasm_tests)
+    target_include_directories(
+        qubic_wasm_tests PRIVATE
+        ${WAMR_ROOT_DIR}/core/iwasm/include
+    )
+    target_link_libraries(
+        qubic_wasm_tests PRIVATE
+        GTest::gtest_main
+        vmlib
+    )
 endif()
 
 include(GoogleTest)
 gtest_discover_tests(qubic_core_tests)
+if(TARGET qubic_wasm_tests)
+    gtest_discover_tests(qubic_wasm_tests)
+endif()
