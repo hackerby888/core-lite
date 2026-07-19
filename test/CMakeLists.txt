@@ -83,12 +83,15 @@ add_executable(
 )
 
 # Keep logging template sizes identical across every test translation unit.
-target_compile_definitions(qubic_core_tests PRIVATE
-    LOG_BUFFER_PAGE_SIZE=10000000ULL
-    PMAP_LOG_PAGE_SIZE=1000000ULL
-    IMAP_LOG_PAGE_SIZE=300ULL
-    VM_NUM_CACHE_PAGE=1
-)
+set(LOGGING_VM_TEST_CONFIG
+    "${CMAKE_CURRENT_SOURCE_DIR}/logging_vm_test_config.h")
+if(MSVC)
+    target_compile_options(qubic_core_tests PRIVATE
+        "/FI${LOGGING_VM_TEST_CONFIG}")
+else()
+    target_compile_options(qubic_core_tests PRIVATE
+        -include "${LOGGING_VM_TEST_CONFIG}")
+endif()
 
 # Apply test-specific compiler flags from the centralized detection module
 apply_test_compiler_flags(qubic_core_tests)

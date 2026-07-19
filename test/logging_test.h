@@ -15,7 +15,7 @@
 #undef MAX_NUMBER_OF_TICKS_PER_EPOCH
 #define MAX_NUMBER_OF_TICKS_PER_EPOCH 3000
 
-// Test CMake sets logging VM page sizes for every translation unit.
+// Test CMake applies one logging layout to every translation unit.
 
 #include "logging/logging.h"
 
