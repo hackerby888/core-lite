@@ -7,6 +7,9 @@
 #include <cstdlib>
 #include <vector>
 #include "gtest/gtest.h"
+#ifdef _WIN32
+#define WASM_RUNTIME_API_EXTERN
+#endif
 #include "wasm_export.h"
 #include "extensions/wasm/runtime/arena_scope.h"
 #include "wasm_contract_fixture.h"
