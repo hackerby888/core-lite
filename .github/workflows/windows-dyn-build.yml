@@ -4,13 +4,6 @@ name: windows-dyn-build
 
 on:
   workflow_dispatch:
-  push:
-    branches: [feat/dynamic-contracts]
-    paths:
-      - 'src/**'
-      - 'lib/**'
-      - 'CMakeLists.txt'
-      - '.github/workflows/windows-dyn-build.yml'
 
 permissions:
   contents: read
