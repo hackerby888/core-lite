@@ -73,6 +73,7 @@ include(FetchContent)
 set(BUILD_EXAMPLES OFF CACHE BOOL "Disable Blosc2 examples" FORCE)
 set(BUILD_TESTS_BLOSC OFF CACHE BOOL "Disable Blosc2 tests" FORCE)
 set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable Blosc2 benchmarks" FORCE)
+set(PREFER_EXTERNAL_ZLIB ON CACHE BOOL "Use the existing zlib dependency in Blosc2" FORCE)
 FetchContent_Declare(
         blosc2
         GIT_REPOSITORY https://github.com/Blosc/c-blosc2.git
