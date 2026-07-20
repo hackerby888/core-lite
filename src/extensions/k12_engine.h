@@ -761,8 +761,8 @@ private:
             SYSTEM_INFO systemInfo;
             GetSystemInfo(&systemInfo);
             systemPageSize = systemInfo.dwPageSize ? systemInfo.dwPageSize : 4096;
-            requestEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-            responseEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            requestEvent = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            responseEvent = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
             if (!requestEvent || !responseEvent)
             {
                 throw std::runtime_error("CreateEvent failed for contract-state pager");
