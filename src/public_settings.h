@@ -44,7 +44,12 @@
 
 #ifdef TESTNET
 #define TARGET_TICK_DURATION 7000
-#define TRANSACTION_SPARSENESS 1
+  #ifdef LONG_RUN_LOCAL_TESTNET
+  // low-traffic testnet: mainnet-like sparseness bounds tick storage
+  #define TRANSACTION_SPARSENESS 10
+  #else
+  #define TRANSACTION_SPARSENESS 1
+  #endif
 // Number of ticks that are stored in the pending txs pool. This also defines how many ticks in advance a tx can be registered.
   #ifdef TESTNET_LITE_RAM
   #define PENDING_TXS_POOL_NUM_TICKS (32ULL)
@@ -168,7 +173,15 @@ static constexpr long long NEURON_VALUE_LIMIT = 1LL;
 #include "network_messages/common_def.h"
 
 #ifdef TESTNET
-#define TESTNET_EPOCH_DURATION 3000ULL
+  #ifdef LONG_RUN_LOCAL_TESTNET
+  // 60 days at 1s ticks; see doc/long_run_local_testnet.md
+  #ifndef LONG_RUN_EPOCH_TICK_CAPACITY
+  #define LONG_RUN_EPOCH_TICK_CAPACITY 5184000ULL
+  #endif
+  #define TESTNET_EPOCH_DURATION LONG_RUN_EPOCH_TICK_CAPACITY
+  #else
+  #define TESTNET_EPOCH_DURATION 3000ULL
+  #endif
 #define MAX_NUMBER_OF_TICKS_PER_EPOCH (TESTNET_EPOCH_DURATION + 3)
 #else
 #define MAX_NUMBER_OF_TICKS_PER_EPOCH (((((60ULL * 60 * 24 * 7 * 1000) / TICK_DURATION_FOR_ALLOCATION_MS) + NUMBER_OF_COMPUTORS - 1) / NUMBER_OF_COMPUTORS) * NUMBER_OF_COMPUTORS)

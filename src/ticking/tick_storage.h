@@ -1521,6 +1521,10 @@ public:
             m256i digest; // isZero mean not occupied
             unsigned long long offset;
         };
+#ifdef LONG_RUN_LOCAL_TESTNET
+        // shadows outer constant: 1/64 map bounds swap disk, see doc/long_run_local_testnet.md
+        static constexpr unsigned long long tickTransactionOffsetsLengthCurrentEpoch = TickStorage::tickTransactionOffsetsLengthCurrentEpoch / 64;
+#endif
         unsigned long long hashFunc(const m256i& digest)
         {
             return digest.m256i_u32[7] % tickTransactionOffsetsLengthCurrentEpoch;

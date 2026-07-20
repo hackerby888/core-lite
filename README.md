@@ -88,6 +88,32 @@ In `qubic.cpp`
 
 **2.** Build
 
+**Long-Run Local Testnet (unattended, weeks to months)**
+
+A single node running all 676 computors continuously, ticking at a fixed wall-clock rate.
+
+**1.** Uncomment `// #define LONG_RUN_LOCAL_TESTNET` together with `// #define TESTNET` in `qubic.cpp`, or build with CMake:
+
+```bash
+cmake .. -D LONG_RUN_LOCAL_TESTNET=ON   # implies TESTNET
+```
+
+**2.** Run. No `--node-mode` or F12 needed — the node starts in MAIN&MAIN mode and ticks unattended.
+
+What the mode changes compared to plain TESTNET:
+
+- **Tick pacing**: each tick takes a fixed wall-clock duration, default **1 second**. Change at startup with `--tick-duration <ms>` (0 = unpaced, max 30000; higher values would trip the next-tick-data timeout of 5 × `TARGET_TICK_DURATION`).
+- **Epoch switches only on tick-buffer exhaustion or F7**: no time-based epoch rollover. Tick buffers hold `LONG_RUN_EPOCH_TICK_CAPACITY` ticks (default 5,184,000 = 60 days at 1 s ticks; override with `-D LONG_RUN_EPOCH_TICK_CAPACITY=<ticks>`); when they are about to run out the node performs one seamless epoch transition, which resets the tick storage. Pressing **F7** (or the force-switch special command) triggers the same transition manually at any time. Note: without the F10 pause, external log readers have no drain window around a transition.
+- **Unattended**: the node starts as MAIN&MAIN and never waits for F10.
+- **Smaller transaction buffers** (`TRANSACTION_SPARSENESS` 10, like mainnet): a local testnet carries little traffic.
+- **Disk**: with `USE_SWAP` (default) the tick storage pages to disk as the single epoch grows — roughly **50 GB per day** of 1 s ticks raw (vote storage 21 GB/day is incompressible; the rest is mostly zeros, so `--swap-compression` brings the total to ~25 GB/day). Budget disk for your intended run length. Build with `-D NO_ENABLE_QUBIC_LOGGING_EVENT=ON` if you don't need logging events for a months-long run.
+- **No check-in calls** to api.qubic.global.
+
+Keep `USE_SWAP` enabled (default): RAM stays flat across the epoch while tick storage pages to disk.
+
+> **Note**
+> The default (non-LITE) long-run build needs **~32 GB RAM** (startup prints `Total RAM required 27 GB`; observed steady RSS is ~32 GB). On smaller machines combine it with `-D TESTNET_LITE_RAM=ON` (~7 GB, but wire/snapshot-incompatible with non-LITE nodes).
+
 **Local Testnet Multiple Nodes**
 
 Afer single node steps please do:

@@ -166,6 +166,13 @@ static inline bool isTestnetGoBehindTrick = false;
 
 static inline unsigned long long tickDelay = 0;
 
+// Wall-clock ms per tick, 0 = unpaced; see doc/long_run_local_testnet.md
+#ifdef LONG_RUN_LOCAL_TESTNET
+static inline unsigned long long tickDurationMs = 1000;
+#else
+static inline unsigned long long tickDurationMs = 0;
+#endif
+
 //////////// HTTP Server Port \\\\\\\\\\\\
 
 static inline int httpPort = 41841;
