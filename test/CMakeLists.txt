@@ -123,8 +123,11 @@ target_link_libraries(
   Blosc2::blosc2_static
 )
 
-# The contract-state engine is native on Linux, macOS, and Windows.
-target_sources(qubic_core_tests PRIVATE k12_engine.cpp)
+# The contract-state pager is native on Linux, macOS, and Windows.
+target_sources(qubic_core_tests PRIVATE
+  contract_state_pager.cpp
+  k12_digest_cache.cpp
+)
 
 # Keep Wasm node settings isolated from the default core gtests.
 if(LITE_WASM_SC)

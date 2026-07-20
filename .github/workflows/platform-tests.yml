@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 env:
-  CORE_GTEST_FILTER: 'K12EngineTest.*:ContractStateEngineTest.*:TestFourQ.*:TestCore256*:TestCoreK12*'
+  CORE_GTEST_FILTER: 'K12DigestCacheTest.*:ContractStatePagerTest.*:TestFourQ.*:TestCore256*:TestCoreK12*'
   WASM_GTEST_FILTER: 'WasmContracts.*'
 
 jobs:

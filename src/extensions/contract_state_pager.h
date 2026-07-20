@@ -1,11 +1,13 @@
 #pragma once
 
-#ifdef K12_ENGINE_CONTRACT_COUNT
-constexpr unsigned int contractCount = K12_ENGINE_CONTRACT_COUNT;
+#ifdef CONTRACT_STATE_PAGER_CONTRACT_COUNT
+constexpr unsigned int contractCount = CONTRACT_STATE_PAGER_CONTRACT_COUNT;
 #else
 #include "contract_core/contract_def.h"
 #endif
-#include <K12/kangaroo_twelve_xkcp.h>
+
+#include "k12_digest_cache.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -36,206 +38,8 @@ constexpr unsigned int contractCount = K12_ENGINE_CONTRACT_COUNT;
 #include <unistd.h>
 #endif
 
-class K12Engine
-{
-protected:
-    struct Intermediate
-    {
-        unsigned char intermediate[maxCapacityInBytes];
-    };
-
-    // Per-chunk intermediate hashes and dirty flags.
-    std::vector<Intermediate> intermediateMap;
-    std::vector<unsigned char> isChunkChangedMap;
-    unsigned int maxChunks;
-    unsigned char *_state;
-    size_t _stateSize;
-
-    unsigned char *_lastOutput;
-    size_t _lastOutputSize;
-
-    int _KangarooTwelve_Update(
-        XKCP::KangarooTwelve_Instance *ktInstance,
-        const unsigned char *input,
-        size_t inputByteLen,
-        bool useCache)
-    {
-        if (ktInstance->phase != XKCP::ABSORBING)
-            return 1;
-
-        if (ktInstance->blockNumber == 0)
-        {
-            /* First block, absorb in final node */
-            unsigned int len = inputByteLen < (K12_chunkSize - ktInstance->queueAbsorbedLen)
-                ? (unsigned int)inputByteLen
-                : (K12_chunkSize - ktInstance->queueAbsorbedLen);
-            XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, input, len);
-            input += len;
-            inputByteLen -= len;
-            ktInstance->queueAbsorbedLen += len;
-            if ((ktInstance->queueAbsorbedLen == K12_chunkSize) && (inputByteLen != 0))
-            {
-                /* First block complete and more input data available, finalize it */
-                const unsigned char padding = 0x03; /* '110^6': message hop, simple padding */
-                ktInstance->queueAbsorbedLen = 0;
-                ktInstance->blockNumber = 1;
-                XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, &padding, 1);
-                // Zero-pad to the next 64-bit boundary.
-                ktInstance->finalNode.byteIOIndex =
-                    (ktInstance->finalNode.byteIOIndex + 7) & ~7;
-            }
-        }
-        else if (ktInstance->queueAbsorbedLen != 0)
-        {
-            /* There is data in the queue, absorb further in queue until block complete */
-            unsigned int len = inputByteLen < (K12_chunkSize - ktInstance->queueAbsorbedLen)
-                ? (unsigned int)inputByteLen
-                : (K12_chunkSize - ktInstance->queueAbsorbedLen);
-            XKCP::TurboSHAKE_Absorb(&ktInstance->queueNode, input, len);
-            input += len;
-            inputByteLen -= len;
-            ktInstance->queueAbsorbedLen += len;
-            if (ktInstance->queueAbsorbedLen == K12_chunkSize)
-            {
-                int capacityInBytes = 2 * (ktInstance->securityLevel) / 8;
-                unsigned char intermediate[maxCapacityInBytes];
-                // assert(capacityInBytes <= maxCapacityInBytes);
-                ktInstance->queueAbsorbedLen = 0;
-                ++ktInstance->blockNumber;
-                XKCP::TurboSHAKE_AbsorbDomainSeparationByte(&ktInstance->queueNode, K12_suffixLeaf);
-                XKCP::TurboSHAKE_Squeeze(&ktInstance->queueNode, intermediate, capacityInBytes);
-                XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, intermediate, capacityInBytes);
-            }
-        }
-
-        while (inputByteLen > 0)
-        {
-            int capacityInBytes = 2 * (ktInstance->securityLevel) / 8;
-            unsigned int len = inputByteLen < K12_chunkSize
-                ? (unsigned int)inputByteLen
-                : K12_chunkSize;
-            unsigned int chunkIndex = ktInstance->blockNumber;
-
-            if (!isChunkChangedMap[chunkIndex] && useCache)
-            {
-                if (len == K12_chunkSize)
-                {
-                    unsigned char *intermediate = intermediateMap[chunkIndex].intermediate;
-                    XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, intermediate, capacityInBytes);
-                    input += len;
-                    inputByteLen -= len;
-                    ++ktInstance->blockNumber;
-                    continue;
-                }
-            }
-
-            XKCP::TurboSHAKE_Initialize(&ktInstance->queueNode, ktInstance->securityLevel);
-            XKCP::TurboSHAKE_Absorb(&ktInstance->queueNode, input, len);
-            input += len;
-            inputByteLen -= len;
-            if (len == K12_chunkSize)
-            {
-                unsigned char intermediate[maxCapacityInBytes];
-                // assert(capacityInBytes <= maxCapacityInBytes);
-                ++ktInstance->blockNumber;
-                XKCP::TurboSHAKE_AbsorbDomainSeparationByte(&ktInstance->queueNode, K12_suffixLeaf);
-                XKCP::TurboSHAKE_Squeeze(&ktInstance->queueNode, intermediate, capacityInBytes);
-                XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, intermediate, capacityInBytes);
-
-                // Cache the intermediate state.
-                Intermediate &inter = intermediateMap[chunkIndex];
-                std::memcpy(inter.intermediate, intermediate, capacityInBytes);
-                isChunkChangedMap[chunkIndex] = false;
-            }
-            else
-            {
-                ktInstance->queueAbsorbedLen = len;
-            }
-        }
-
-        return 0;
-    }
-
-public:
-    K12Engine(unsigned char *state, size_t stateSize)
-    {
-        _state = state;
-        _stateSize = stateSize;
-        maxChunks = (stateSize + K12_chunkSize - 1) / K12_chunkSize;
-
-        isChunkChangedMap.resize(maxChunks);
-        intermediateMap.resize(maxChunks);
-        for (unsigned int i = 0; i < maxChunks; i++)
-        {
-            isChunkChangedMap[i] = true;
-        }
-        for (unsigned int i = 0; i < maxChunks; i++)
-        {
-            std::memset(intermediateMap[i].intermediate, 0, maxCapacityInBytes);
-        }
-
-        _lastOutput = new unsigned char[1024];
-        _lastOutputSize = 0;
-    }
-
-    ~K12Engine()
-    {
-        delete[] _lastOutput;
-    }
-
-    int getHash(unsigned char* output, size_t outputByteLen, bool useCache = true)
-    {
-        if (_lastOutput && outputByteLen == _lastOutputSize && isAllChunksUnchanged())
-        {
-            // Reuse the complete digest when no chunk changed.
-            std::memcpy(output, _lastOutput, outputByteLen);
-            return 0;
-        }
-
-        XKCP::KangarooTwelve_Instance ktInstance;
-
-        if (outputByteLen == 0)
-            return 1;
-        XKCP::KangarooTwelve_Initialize(&ktInstance, 128, outputByteLen);
-        if (_KangarooTwelve_Update(&ktInstance, _state, _stateSize, useCache) != 0)
-            return 1;
-        int ok = XKCP::KangarooTwelve_Final(&ktInstance, output, nullptr, 0);
-
-        // Cache the complete digest.
-        std::memcpy(_lastOutput, output, outputByteLen);
-        _lastOutputSize = outputByteLen;
-
-        return ok;
-    }
-
-    void markChunkChanged(unsigned int chunkIndex)
-    {
-        if (chunkIndex < maxChunks)
-        {
-            isChunkChangedMap[chunkIndex] = true;
-        }
-    }
-
-    bool isAllChunksUnchanged() const
-    {
-        for (unsigned int i = 0; i < maxChunks; i++)
-        {
-            if (isChunkChangedMap[i])
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    unsigned int getMaxChunks() const
-    {
-        return maxChunks;
-    }
-};
-
 // In-RAM contract-state paging shared by Linux, macOS, and Windows.
-class ContractStateEngine : public K12Engine
+class ContractStatePager : public K12DigestCache
 {
 public:
 #if defined(TESTNET) && defined(LITE_WASM_SC)
@@ -271,18 +75,18 @@ public:
 
         const size_t paddedSize = roundUp(stateSize, sharedBlockSize);
         void* reservation = reserveState(stateSize);
-        ContractStateEngine* engine;
+        ContractStatePager* pager;
         try
         {
-            engine = new ContractStateEngine(state, reservation, stateSize);
+            pager = new ContractStatePager(state, reservation, stateSize);
         }
         catch (...)
         {
             releaseReservation(reservation, paddedSize);
             throw;
         }
-        ContractStateEngine* previous = allEngines[contractIndex].exchange(
-            engine,
+        ContractStatePager* previous = allPagers[contractIndex].exchange(
+            pager,
             std::memory_order_acq_rel);
         delete previous;
 
@@ -296,28 +100,28 @@ public:
             return;
         }
 
-        delete allEngines[contractIndex].exchange(nullptr, std::memory_order_acq_rel);
+        delete allPagers[contractIndex].exchange(nullptr, std::memory_order_acq_rel);
     }
 
-    static ContractStateEngine* getEngine(unsigned int contractIndex)
+    static ContractStatePager* getPager(unsigned int contractIndex)
     {
         if (contractIndex < contractCount)
         {
-            return allEngines[contractIndex].load(std::memory_order_acquire);
+            return allPagers[contractIndex].load(std::memory_order_acquire);
         }
         return nullptr;
     }
 
     static bool handleFault(void* address)
     {
-        ContractStateEngine* engine = findEngine(address);
-        if (!engine)
+        ContractStatePager* pager = findPager(address);
+        if (!pager)
         {
             return false;
         }
 
-        const size_t blockIndex = engine->blockIndex(address);
-        Block& block = engine->blocks[blockIndex];
+        const size_t blockIndex = pager->blockIndex(address);
+        Block& block = pager->blocks[blockIndex];
         BlockState state = block.state.load(std::memory_order_acquire);
 
         while (state == BlockState::Evicting)
@@ -333,9 +137,9 @@ public:
                     BlockState::Dirty,
                     std::memory_order_acq_rel))
             {
-                engine->markBlockChanged(blockIndex);
+                pager->markBlockChanged(blockIndex);
                 block.recent.store(true, std::memory_order_relaxed);
-                if (!engine->protectBlock(blockIndex, true))
+                if (!pager->protectBlock(blockIndex, true))
                 {
                     block.state.store(BlockState::Clean, std::memory_order_release);
                     return false;
@@ -358,26 +162,26 @@ public:
         bool success = true;
         if (state == BlockState::Zero || state == BlockState::Compressed)
         {
-            success = requestRestore(engine, blockIndex);
+            success = requestRestore(pager, blockIndex);
         }
         coldFaultLock.clear(std::memory_order_release);
         return success;
     }
 
-    static size_t tryEvictChunks(size_t requiredSize = 0)
+    static size_t tryEvictBlocks(size_t requiredSize = 0)
     {
         size_t freed = 0;
         size_t attempts = totalBlockCount() * 2;
-        while (getRamUsageByAllEngines() + requiredSize > MAX_RAM_USAGE && attempts--)
+        while (getTotalRamUsage() + requiredSize > MAX_RAM_USAGE && attempts--)
         {
-            ContractStateEngine* engine;
+            ContractStatePager* pager;
             size_t blockIndex;
-            if (!nextClockBlock(engine, blockIndex))
+            if (!nextClockBlock(pager, blockIndex))
             {
                 break;
             }
 
-            Block& block = engine->blocks[blockIndex];
+            Block& block = pager->blocks[blockIndex];
             if (block.state.load(std::memory_order_acquire) != BlockState::Clean)
             {
                 continue;
@@ -386,20 +190,20 @@ public:
             {
                 continue;
             }
-            if (engine->evictBlock(blockIndex))
+            if (pager->evictBlock(blockIndex))
             {
-                freed += engine->blockSize;
+                freed += pager->blockSize;
             }
         }
 
-        if (getRamUsageByAllEngines() + requiredSize > MAX_RAM_USAGE)
+        if (getTotalRamUsage() + requiredSize > MAX_RAM_USAGE)
         {
             warnOverLimit();
         }
         return freed;
     }
 
-    static size_t getRamUsageByAllEngines()
+    static size_t getTotalRamUsage()
     {
         return residentBytes.load(std::memory_order_relaxed)
             + compressedBytes.load(std::memory_order_relaxed);
@@ -439,21 +243,21 @@ public:
     }
 
 private:
-    static inline std::atomic<ContractStateEngine*> allEngines[contractCount]{};
+    static inline std::atomic<ContractStatePager*> allPagers[contractCount]{};
     static inline std::atomic<size_t> residentBytes{0};
     static inline std::atomic<size_t> compressedBytes{0};
     static inline std::atomic_flag coldFaultLock = ATOMIC_FLAG_INIT;
     static inline std::once_flag pagerOnce;
     static inline size_t systemPageSize = 4096;
     static inline size_t sharedBlockSize = K12_chunkSize;
-    static inline size_t clockEngineIndex = 0;
+    static inline size_t clockPagerIndex = 0;
     static inline size_t clockBlockIndex = 0;
 
     struct PagerRequest
     {
-        PagerRequest() : engine(nullptr), blockIndex(0), success(false) {}
+        PagerRequest() : pager(nullptr), blockIndex(0), success(false) {}
 
-        std::atomic<ContractStateEngine*> engine;
+        std::atomic<ContractStatePager*> pager;
         std::atomic<size_t> blockIndex;
         std::atomic<bool> success;
     };
@@ -511,8 +315,8 @@ private:
 #endif
     }
 
-    ContractStateEngine(unsigned char **state, void* reservation, size_t stateSize)
-        : K12Engine((unsigned char*)reservation, stateSize),
+    ContractStatePager(unsigned char **state, void* reservation, size_t stateSize)
+        : K12DigestCache((unsigned char*)reservation, stateSize),
           blockSize(sharedBlockSize),
           paddedSize(roundUp(stateSize, blockSize)),
           blockCount(paddedSize / blockSize),
@@ -522,7 +326,7 @@ private:
         seedZeroStateCache();
     }
 
-    ~ContractStateEngine()
+    ~ContractStatePager()
     {
         for (size_t i = 0; i < blockCount; i++)
         {
@@ -564,17 +368,17 @@ private:
         _lastOutputSize = 0;
     }
 
-    static ContractStateEngine* findEngine(void* address)
+    static ContractStatePager* findPager(void* address)
     {
         const uintptr_t fault = (uintptr_t)address;
         for (size_t i = 0; i < contractCount; i++)
         {
-            ContractStateEngine* engine = allEngines[i].load(std::memory_order_acquire);
-            if (engine
-                && fault >= (uintptr_t)engine->_state
-                && fault < (uintptr_t)engine->_state + engine->paddedSize)
+            ContractStatePager* pager = allPagers[i].load(std::memory_order_acquire);
+            if (pager
+                && fault >= (uintptr_t)pager->_state
+                && fault < (uintptr_t)pager->_state + pager->paddedSize)
             {
-                return engine;
+                return pager;
             }
         }
         return nullptr;
@@ -806,9 +610,9 @@ private:
                 continue;
             }
 #endif
-            ContractStateEngine* engine = pagerRequest.engine.load(std::memory_order_acquire);
+            ContractStatePager* pager = pagerRequest.pager.load(std::memory_order_acquire);
             const size_t blockIndex = pagerRequest.blockIndex.load(std::memory_order_acquire);
-            const bool success = engine && engine->restoreBlock(blockIndex);
+            const bool success = pager && pager->restoreBlock(blockIndex);
             pagerRequest.success.store(success, std::memory_order_release);
 #ifdef _WIN32
             SetEvent(responseEvent);
@@ -818,9 +622,9 @@ private:
         }
     }
 
-    static bool requestRestore(ContractStateEngine* engine, size_t blockIndex)
+    static bool requestRestore(ContractStatePager* pager, size_t blockIndex)
     {
-        pagerRequest.engine.store(engine, std::memory_order_release);
+        pagerRequest.pager.store(pager, std::memory_order_release);
         pagerRequest.blockIndex.store(blockIndex, std::memory_order_release);
         pagerRequest.success.store(false, std::memory_order_release);
 #ifdef _WIN32
@@ -879,26 +683,26 @@ private:
         size_t count = 0;
         for (size_t i = 0; i < contractCount; i++)
         {
-            ContractStateEngine* engine = allEngines[i].load(std::memory_order_acquire);
-            if (engine)
+            ContractStatePager* pager = allPagers[i].load(std::memory_order_acquire);
+            if (pager)
             {
-                count += engine->blockCount;
+                count += pager->blockCount;
             }
         }
         return count;
     }
 
-    static bool nextClockBlock(ContractStateEngine*& engine, size_t& blockIndex)
+    static bool nextClockBlock(ContractStatePager*& pager, size_t& blockIndex)
     {
         for (size_t attempts = 0; attempts <= contractCount; attempts++)
         {
-            engine = allEngines[clockEngineIndex].load(std::memory_order_acquire);
-            if (engine && clockBlockIndex < engine->blockCount)
+            pager = allPagers[clockPagerIndex].load(std::memory_order_acquire);
+            if (pager && clockBlockIndex < pager->blockCount)
             {
                 blockIndex = clockBlockIndex++;
                 return true;
             }
-            clockEngineIndex = (clockEngineIndex + 1) % contractCount;
+            clockPagerIndex = (clockPagerIndex + 1) % contractCount;
             clockBlockIndex = 0;
         }
         return false;

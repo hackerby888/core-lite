@@ -185,7 +185,7 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
 #if (defined(__linux__) || defined(__APPLE__) || defined(_WIN32)) && defined(LITE_WASM_SC)
-#include "extensions/k12_engine.h"
+#include "extensions/contract_state_pager.h"
 #endif
 #include "extensions/wasm/runtime/extension.h"
 #include "extensions/test_invalid_solution.h"
@@ -9787,7 +9787,7 @@ void processArgs(int argc, const char* argv[]) {
         ("k12-state-cache-verify", "Self-check the K12 state-digest cache: each digest also runs the one-shot and stalls loudly on any mismatch. For soak/CI; small per-tick cost. Off by default.")
 #endif
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"))
-#ifdef LITE_SC_ENGINE
+#ifdef LITE_SC_PAGER
         (
             "max-sc-mem",
             "Contract-state RAM target in GB; cold state remains compressed in memory.",
@@ -9801,7 +9801,7 @@ void processArgs(int argc, const char* argv[]) {
         std::cerr << "Warning: unknown option: " << u << "\n";
     }
 
-#ifdef LITE_SC_ENGINE
+#ifdef LITE_SC_PAGER
     if (result.count("max-sc-mem"))
     {
         Wasm::Runtime::setContractStateMemoryLimit(
@@ -10123,7 +10123,7 @@ void watchAndCheckin()
 
 #if defined(__linux__) || defined(__APPLE__)
 void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
-#ifdef LITE_SC_ENGINE
+#ifdef LITE_SC_PAGER
     if ((sig == SIGSEGV || sig == SIGBUS)
         && si
         && Wasm::Runtime::handleManagedStateFault(si->si_addr))

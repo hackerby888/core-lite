@@ -1,13 +1,13 @@
-// Focused parity and lifecycle checks for the in-RAM contract-state engine.
+// Focused lifecycle checks for the in-RAM contract-state pager.
 
 #define NO_UEFI
 
 #include "platform/msvc_polyfill.h"
 #include "platform/file_io.h"
 #include "platform/m256.h"
-#define K12_ENGINE_CONTRACT_COUNT 1
-#include <extensions/k12_engine.h>
-#undef K12_ENGINE_CONTRACT_COUNT
+#define CONTRACT_STATE_PAGER_CONTRACT_COUNT 1
+#include <extensions/contract_state_pager.h>
+#undef CONTRACT_STATE_PAGER_CONTRACT_COUNT
 #include <gtest/gtest.h>
 
 #include <array>
@@ -29,7 +29,7 @@ namespace
 #ifndef _WIN32
 void managedFaultHandler(int signalNumber, siginfo_t* info, void*)
 {
-    if (info && ContractStateEngine::handleFault(info->si_addr))
+    if (info && ContractStatePager::handleFault(info->si_addr))
     {
         return;
     }
@@ -62,22 +62,22 @@ void installManagedFaultHandler()
 struct ManagedState
 {
     unsigned char* data = nullptr;
-    ContractStateEngine* engine = nullptr;
-    size_t previousLimit = ContractStateEngine::MAX_RAM_USAGE;
+    ContractStatePager* pager = nullptr;
+    size_t previousLimit = ContractStatePager::MAX_RAM_USAGE;
 
     explicit ManagedState(size_t size, unsigned int contractIndex = 0)
         : contractIndex(contractIndex)
     {
         installManagedFaultHandler();
-        EXPECT_TRUE(ContractStateEngine::create(&data, size, contractIndex));
-        engine = ContractStateEngine::getEngine(contractIndex);
-        EXPECT_NE(engine, nullptr);
+        EXPECT_TRUE(ContractStatePager::create(&data, size, contractIndex));
+        pager = ContractStatePager::getPager(contractIndex);
+        EXPECT_NE(pager, nullptr);
     }
 
     ~ManagedState()
     {
-        ContractStateEngine::MAX_RAM_USAGE = previousLimit;
-        ContractStateEngine::release(contractIndex);
+        ContractStatePager::MAX_RAM_USAGE = previousLimit;
+        ContractStatePager::release(contractIndex);
     }
 
 private:
@@ -91,53 +91,28 @@ std::array<unsigned char, 32> canonicalHash(const unsigned char* state, size_t s
     return hash;
 }
 
-std::array<unsigned char, 32> engineHash(ManagedState& state)
+std::array<unsigned char, 32> pagerHash(ManagedState& state)
 {
     std::array<unsigned char, 32> hash{};
-    EXPECT_EQ(state.engine->getHashAndProtect(hash.data(), hash.size()), 0);
+    EXPECT_EQ(state.pager->getHashAndProtect(hash.data(), hash.size()), 0);
     return hash;
 }
 
 void trimAllResidentState()
 {
-    ContractStateEngine::MAX_RAM_USAGE = 0;
-    ContractStateEngine::tryEvictChunks();
-    ContractStateEngine::tryEvictChunks();
+    ContractStatePager::MAX_RAM_USAGE = 0;
+    ContractStatePager::tryEvictBlocks();
+    ContractStatePager::tryEvictBlocks();
 }
 
 } // namespace
 
-TEST(K12EngineTest, IncrementalDigestEqualsCanonicalK12)
-{
-    constexpr size_t size = 2 * 1024 * 1024 + 37;
-    std::vector<unsigned char> state(size);
-    K12Engine engine(state.data(), state.size());
-
-    for (size_t i = 0; i < state.size(); i++)
-    {
-        state[i] = (unsigned char)((i * 1315423911ULL) >> 17);
-    }
-
-    std::array<unsigned char, 32> hash{};
-    EXPECT_EQ(engine.getHash(hash.data(), hash.size()), 0);
-    EXPECT_EQ(hash, canonicalHash(state.data(), state.size()));
-
-    for (unsigned int chunk = 1; chunk < engine.getMaxChunks(); chunk += 17)
-    {
-        state[(size_t)chunk * K12_chunkSize] ^= 0x5A;
-        engine.markChunkChanged(chunk);
-    }
-
-    EXPECT_EQ(engine.getHash(hash.data(), hash.size()), 0);
-    EXPECT_EQ(hash, canonicalHash(state.data(), state.size()));
-}
-
-TEST(ContractStateEngineTest, ZeroSparseRandomPartialEvictRestoreAndModify)
+TEST(ContractStatePagerTest, ZeroSparseRandomPartialEvictRestoreAndModify)
 {
     const size_t size = 11 * K12_chunkSize + 37;
     ManagedState state(size);
 
-    EXPECT_EQ(engineHash(state), canonicalHash(state.data, size));
+    EXPECT_EQ(pagerHash(state), canonicalHash(state.data, size));
 
     state.data[3] = 0x7A;
     state.data[5 * K12_chunkSize + 19] = 0xC3;
@@ -149,41 +124,41 @@ TEST(ContractStateEngineTest, ZeroSparseRandomPartialEvictRestoreAndModify)
         state.data[i] = (unsigned char)(random >> 24);
     }
 
-    const auto beforeEviction = engineHash(state);
+    const auto beforeEviction = pagerHash(state);
     EXPECT_EQ(beforeEviction, canonicalHash(state.data, size));
-    const size_t residentBefore = ContractStateEngine::getResidentBytes();
+    const size_t residentBefore = ContractStatePager::getResidentBytes();
 
     trimAllResidentState();
-    EXPECT_LT(ContractStateEngine::getResidentBytes(), residentBefore);
-    EXPECT_GT(ContractStateEngine::getCompressedBytes(), 0u);
-    EXPECT_EQ(engineHash(state), beforeEviction);
+    EXPECT_LT(ContractStatePager::getResidentBytes(), residentBefore);
+    EXPECT_GT(ContractStatePager::getCompressedBytes(), 0u);
+    EXPECT_EQ(pagerHash(state), beforeEviction);
 
     state.data[6 * K12_chunkSize + 5] ^= 0xFF;
-    const auto modified = engineHash(state);
+    const auto modified = pagerHash(state);
     EXPECT_NE(modified, beforeEviction);
     EXPECT_EQ(modified, canonicalHash(state.data, size));
 
     trimAllResidentState();
-    EXPECT_EQ(engineHash(state), modified);
+    EXPECT_EQ(pagerHash(state), modified);
 }
 
-TEST(ContractStateEngineTest, ZeroBlocksNeedNoCompressedStorage)
+TEST(ContractStatePagerTest, ZeroBlocksNeedNoCompressedStorage)
 {
     ManagedState state(6 * K12_chunkSize);
-    EXPECT_EQ(engineHash(state), canonicalHash(state.data, 6 * K12_chunkSize));
+    EXPECT_EQ(pagerHash(state), canonicalHash(state.data, 6 * K12_chunkSize));
 
     trimAllResidentState();
-    EXPECT_EQ(ContractStateEngine::getCompressedBytes(), 0u);
+    EXPECT_EQ(ContractStatePager::getCompressedBytes(), 0u);
 }
 
-TEST(ContractStateEngineTest, ConcurrentColdFaultsAreSerializedWithoutCorruption)
+TEST(ContractStatePagerTest, ConcurrentColdFaultsAreSerializedWithoutCorruption)
 {
     ManagedState state(16 * K12_chunkSize);
     for (size_t block = 0; block < 16; block++)
     {
         state.data[block * K12_chunkSize] = (unsigned char)(block + 1);
     }
-    engineHash(state);
+    pagerHash(state);
     trimAllResidentState();
 
     std::atomic<bool> valuesOk{true};
@@ -210,14 +185,14 @@ TEST(ContractStateEngineTest, ConcurrentColdFaultsAreSerializedWithoutCorruption
     {
         EXPECT_EQ(state.data[block * K12_chunkSize], (unsigned char)(block + 41));
     }
-    EXPECT_EQ(engineHash(state), canonicalHash(state.data, 16 * K12_chunkSize));
+    EXPECT_EQ(pagerHash(state), canonicalHash(state.data, 16 * K12_chunkSize));
 }
 
-TEST(ContractStateEngineTest, EvictionReleasesNativePages)
+TEST(ContractStatePagerTest, EvictionReleasesNativePages)
 {
     ManagedState state(4 * K12_chunkSize);
     std::memset(state.data, 0xA5, 4 * K12_chunkSize);
-    engineHash(state);
+    pagerHash(state);
     trimAllResidentState();
 
 #ifdef _WIN32
@@ -226,13 +201,13 @@ TEST(ContractStateEngineTest, EvictionReleasesNativePages)
     EXPECT_EQ(info.State, (DWORD)MEM_RESERVE);
 #elif defined(__APPLE__)
     const size_t pageSize = (size_t)sysconf(_SC_PAGESIZE);
-    std::vector<char> residency(state.engine->getBlockSize() / pageSize);
-    ASSERT_EQ(mincore(state.data, state.engine->getBlockSize(), residency.data()), 0);
+    std::vector<char> residency(state.pager->getBlockSize() / pageSize);
+    ASSERT_EQ(mincore(state.data, state.pager->getBlockSize(), residency.data()), 0);
     for (char page : residency)
     {
         EXPECT_EQ(page & 1, 0);
     }
 #else
-    EXPECT_EQ(ContractStateEngine::getResidentBytes(), 0u);
+    EXPECT_EQ(ContractStatePager::getResidentBytes(), 0u);
 #endif
 }

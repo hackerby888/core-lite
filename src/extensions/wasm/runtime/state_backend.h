@@ -1,15 +1,15 @@
 #pragma once
 // Routes state allocation, digesting, and eviction through the active backend.
-// The native state engine is shared by Linux, macOS, and Windows.
+// The native state pager is shared by Linux, macOS, and Windows.
 
-// LITE_SC_NO_ENGINE selects the resident fallback for testing.
+// LITE_SC_NO_PAGER selects the resident fallback for testing.
 #if (defined(__linux__) || defined(__APPLE__) || defined(_WIN32)) \
-    && defined(LITE_WASM_SC) && !defined(LITE_SC_NO_ENGINE)
-#define LITE_SC_ENGINE 1
+    && defined(LITE_WASM_SC) && !defined(LITE_SC_NO_PAGER)
+#define LITE_SC_PAGER 1
 #endif
 
-// Non-engine test builds use the ordinary resident allocator.
-#if !defined(LITE_SC_ENGINE) && defined(TESTNET) && defined(LITE_WASM_SC)
+// Non-pager test builds use the ordinary resident allocator.
+#if !defined(LITE_SC_PAGER) && defined(TESTNET) && defined(LITE_WASM_SC)
 #define LITE_SC_CONTRACT_LEVEL 1
 #endif
 
@@ -18,10 +18,10 @@ namespace Wasm::Runtime
 
 inline bool g_wasmOwnedSlot[contractCount] = {};
 
-inline bool stateEngineActive(unsigned int contractIndex)
+inline bool statePagerActive(unsigned int contractIndex)
 {
-#ifdef LITE_SC_ENGINE
-    return ContractStateEngine::getEngine(contractIndex) != nullptr
+#ifdef LITE_SC_PAGER
+    return ContractStatePager::getPager(contractIndex) != nullptr
         && !g_wasmOwnedSlot[contractIndex];
 #else
     (void)contractIndex;
@@ -31,8 +31,8 @@ inline bool stateEngineActive(unsigned int contractIndex)
 
 inline bool allocateContractState(unsigned int contractIndex, unsigned long long size)
 {
-#if defined(LITE_SC_ENGINE)
-    return ContractStateEngine::create(
+#if defined(LITE_SC_PAGER)
+    return ContractStatePager::create(
         &contractStates[contractIndex],
         size,
         contractIndex);
@@ -55,10 +55,10 @@ inline void hashContractState(
     unsigned char* output,
     unsigned long long effectiveSize)
 {
-    if (stateEngineActive(contractIndex))
+    if (statePagerActive(contractIndex))
     {
-#ifdef LITE_SC_ENGINE
-        ContractStateEngine::getEngine(contractIndex)->getHashAndProtect(
+#ifdef LITE_SC_PAGER
+        ContractStatePager::getPager(contractIndex)->getHashAndProtect(
             output,
             32);
 #endif
@@ -75,15 +75,15 @@ inline void hashContractState(
 
 inline void evictContractState()
 {
-#ifdef LITE_SC_ENGINE
-    ContractStateEngine::tryEvictChunks();
+#ifdef LITE_SC_PAGER
+    ContractStatePager::tryEvictBlocks();
 #endif
 }
 
 inline bool handleManagedStateFault(void* address)
 {
-#ifdef LITE_SC_ENGINE
-    return ContractStateEngine::handleFault(address);
+#ifdef LITE_SC_PAGER
+    return ContractStatePager::handleFault(address);
 #else
     (void)address;
     return false;
@@ -92,8 +92,8 @@ inline bool handleManagedStateFault(void* address)
 
 inline void setContractStateMemoryLimit(unsigned long long bytes)
 {
-#ifdef LITE_SC_ENGINE
-    ContractStateEngine::MAX_RAM_USAGE = (size_t)bytes;
+#ifdef LITE_SC_PAGER
+    ContractStatePager::MAX_RAM_USAGE = (size_t)bytes;
 #else
     (void)bytes;
 #endif
@@ -101,8 +101,8 @@ inline void setContractStateMemoryLimit(unsigned long long bytes)
 
 inline void transferContractStateToWasm(unsigned int contractIndex)
 {
-#if defined(LITE_SC_ENGINE)
-    ContractStateEngine::release(contractIndex);
+#if defined(LITE_SC_PAGER)
+    ContractStatePager::release(contractIndex);
     g_wasmOwnedSlot[contractIndex] = true;
 #elif defined(LITE_SC_CONTRACT_LEVEL)
     g_wasmOwnedSlot[contractIndex] = true;
@@ -114,8 +114,8 @@ inline void transferContractStateToWasm(unsigned int contractIndex)
 // Only the plain pool backend returns state through freePool.
 inline void freeContractState(unsigned int contractIndex)
 {
-#if defined(LITE_SC_ENGINE)
-    ContractStateEngine::release(contractIndex);
+#if defined(LITE_SC_PAGER)
+    ContractStatePager::release(contractIndex);
 #elif defined(LITE_SC_CONTRACT_LEVEL)
     (void)contractIndex;
 #else
@@ -128,8 +128,8 @@ inline void freeContractState(unsigned int contractIndex)
 
 inline unsigned long long contractStateRamUsage()
 {
-#ifdef LITE_SC_ENGINE
-    return ContractStateEngine::getRamUsageByAllEngines();
+#ifdef LITE_SC_PAGER
+    return ContractStatePager::getTotalRamUsage();
 #else
     return 0;
 #endif

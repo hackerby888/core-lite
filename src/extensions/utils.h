@@ -16,7 +16,7 @@
 #pragma warning(disable: 4996)
 #endif
 
-// Page size used by the contract-state engine.
+// Page size used by the contract-state pager.
 #ifndef _WIN32
 #define SYSTEM_PAGE_SIZE sysconf(_SC_PAGESIZE)
 #endif
