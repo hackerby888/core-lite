@@ -6,12 +6,13 @@
 name: BuildTests
 
 on:
+  workflow_call:
   push:
-    branches: [ "main", "develop", "feat/dynamic-contracts" ]
+    branches: [ "main", "develop" ]
     paths-ignore:
       - 'doc/**'
   pull_request:
-    branches: [ "main", "develop", "feat/dynamic-contracts" ]
+    branches: [ "main", "develop" ]
     paths-ignore:
       - 'doc/**'
 
@@ -32,7 +33,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
 
     - name: Add MSBuild to PATH
       uses: microsoft/setup-msbuild@v1.0.2

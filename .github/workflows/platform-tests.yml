@@ -2,7 +2,7 @@ name: Platform tests
 
 on:
   push:
-    branches: [main, develop, feat/dynamic-contracts]
+    branches: [main, develop]
     paths:
       - 'src/**'
       - 'lib/**'
@@ -12,7 +12,7 @@ on:
       - 'vcpkg.json'
       - '.github/workflows/platform-tests.yml'
   pull_request:
-    branches: [main, develop, feat/dynamic-contracts]
+    branches: [main, develop]
     paths:
       - 'src/**'
       - 'lib/**'
