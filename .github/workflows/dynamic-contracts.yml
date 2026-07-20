@@ -254,12 +254,29 @@ jobs:
           echo "::notice::${{ matrix.key }} DigestProbe state digest = $STATE_DIGEST"
 
       - name: Stop node
-        if: always()
+        if: always() && matrix.key != 'windows-x64'
         shell: bash
         run: |
           if [ -n "${QINIT_BIN:-}" ] && [ -f "$QINIT_BIN" ]; then
             "$QINIT_BIN" node stop
           fi
+
+      - name: Stop Windows node
+        if: always() && matrix.key == 'windows-x64'
+        shell: pwsh
+        run: |
+          if (-not $env:QINIT_BIN -or -not (Test-Path $env:QINIT_BIN)) {
+            exit 0
+          }
+          & $env:QINIT_BIN node stop
+          if ($LASTEXITCODE -ne 0) {
+            Get-Process -Name Qubic -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep -Milliseconds 500
+          }
+          if (Get-Process -Name Qubic -ErrorAction SilentlyContinue) {
+            throw 'Qubic.exe is still running'
+          }
+          exit 0
 
       - name: Upload state digest
         uses: actions/upload-artifact@v7
