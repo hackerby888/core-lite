@@ -10,9 +10,16 @@ on:
         required: true
         default: "qinit-dev"
   push:
-    # Tags and manual runs publish releases. Branch pushes only build and smoke-test.
+    # Tags and manual runs publish releases. Branch pushes and PRs only build and smoke-test.
     branches: [feat/dynamic-contracts]
     tags: ["qinit-v*"]
+    paths:
+      - 'src/**'
+      - 'lib/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/qinit-release.yml'
+  pull_request:
+    branches: [feat/dynamic-contracts]
     paths:
       - 'src/**'
       - 'lib/**'

@@ -7,11 +7,11 @@ name: BuildTests
 
 on:
   push:
-    branches: [ "main", "develop" ]
+    branches: [ "main", "develop", "feat/dynamic-contracts" ]
     paths-ignore:
       - 'doc/**'
   pull_request:
-    branches: [ "main", "develop" ]
+    branches: [ "main", "develop", "feat/dynamic-contracts" ]
     paths-ignore:
       - 'doc/**'
 

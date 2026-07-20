@@ -7,7 +7,7 @@ name: ContractVerify
 
 on:
   push:
-    branches: [ "main", "develop" ]
+    branches: [ "main", "develop", "feat/dynamic-contracts" ]
     paths:
       - 'src/contracts/*.h'
       - '!src/contracts/math_lib.h'
@@ -16,7 +16,7 @@ on:
       - 'src/oracle_interfaces/*.h'
       - '.github/workflows/contract-verify.yml'
   pull_request:
-    branches: [ "main", "develop" ]
+    branches: [ "main", "develop", "feat/dynamic-contracts" ]
     paths:
       - 'src/contracts/*.h'
       - '!src/contracts/math_lib.h'
