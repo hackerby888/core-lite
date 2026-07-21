@@ -104,33 +104,45 @@ struct WasmFixture
 };
 } // namespace
 
-TEST(WasmContracts, ArenaTopResetsAndNestedRestores)
+TEST(WasmContracts, GuestArenaCursorResetsAndNestedRestores)
 {
     uint32_t depth = 0;
-    uint32_t top = 999;
+    uint32_t guestCursor = 999;
 
     {
-        Wasm::Runtime::ArenaScope outer(depth, &top, 100, 100);
+        Wasm::Runtime::GuestArenaCursorScope outer(
+            depth,
+            &guestCursor,
+            100,
+            100);
         EXPECT_EQ(depth, 1u);
-        EXPECT_EQ(top, 100u);
+        EXPECT_EQ(guestCursor, 100u);
 
-        top = 160;
+        guestCursor = 160;
         {
-            Wasm::Runtime::ArenaScope nested(depth, &top, 100, 200);
+            Wasm::Runtime::GuestArenaCursorScope nested(
+                depth,
+                &guestCursor,
+                100,
+                200);
             EXPECT_EQ(depth, 2u);
-            EXPECT_EQ(top, 200u);
-            top = 224;
+            EXPECT_EQ(guestCursor, 200u);
+            guestCursor = 224;
         }
         EXPECT_EQ(depth, 1u);
-        EXPECT_EQ(top, 160u);
+        EXPECT_EQ(guestCursor, 160u);
     }
     EXPECT_EQ(depth, 0u);
-    EXPECT_EQ(top, 160u);
+    EXPECT_EQ(guestCursor, 160u);
 
     // The next independent call discards the previous call's temporary allocations.
     {
-        Wasm::Runtime::ArenaScope nextOuter(depth, &top, 100, 100);
-        EXPECT_EQ(top, 100u);
+        Wasm::Runtime::GuestArenaCursorScope nextOuter(
+            depth,
+            &guestCursor,
+            100,
+            100);
+        EXPECT_EQ(guestCursor, 100u);
     }
     EXPECT_EQ(depth, 0u);
 }
@@ -179,17 +191,18 @@ TEST(WasmContracts, NestedCallUsesIsolatedFrame)
     using namespace Wasm::Runtime;
 
     const MemoryLayout fixed = fixedMemoryLayout(4096);
-    const uint32_t parentArenaTop = fixed.arenaOffset + 3;
-    const uint32_t parentHostBump = fixed.arenaOffset + 21;
-    const uint32_t expectedInput = (parentHostBump + 7u) & ~7u;
-    const uint32_t arenaEnd = expectedInput + WASM_DISPATCH_FRAME_CAPACITY + 64;
+    const uint32_t parentGuestArenaCursor = fixed.arenaOffset + 3;
+    const uint32_t parentHostArenaCursor = fixed.arenaOffset + 21;
+    const uint32_t expectedInput = (parentHostArenaCursor + 7u) & ~7u;
+    const uint32_t arenaLimit =
+        expectedInput + WASM_DISPATCH_FRAME_CAPACITY + 64;
     MemoryLayout nested = {};
 
     ASSERT_TRUE(nestedMemoryLayout(
         fixed,
-        arenaEnd,
-        parentArenaTop,
-        parentHostBump,
+        arenaLimit,
+        parentGuestArenaCursor,
+        parentHostArenaCursor,
         nested));
     EXPECT_EQ(nested.inputOffset, expectedInput);
     EXPECT_EQ(nested.outputOffset, expectedInput + WASM_INPUT_CAPACITY);
@@ -201,7 +214,7 @@ TEST(WasmContracts, NestedCallUsesIsolatedFrame)
         expectedInput + WASM_DISPATCH_FRAME_CAPACITY);
     EXPECT_GE(nested.inputOffset, fixed.arenaOffset);
 
-    std::vector<unsigned char> memory(arenaEnd + 1, 0);
+    std::vector<unsigned char> memory(arenaLimit + 1, 0);
     memset(memory.data() + fixed.inputOffset, 0x11, WASM_INPUT_CAPACITY);
     memset(memory.data() + fixed.outputOffset, 0x22, WASM_OUTPUT_CAPACITY);
     memset(memory.data() + fixed.localsOffset, 0x33, WASM_LOCALS_CAPACITY);
@@ -215,8 +228,8 @@ TEST(WasmContracts, NestedCallUsesIsolatedFrame)
     EXPECT_FALSE(nestedMemoryLayout(
         fixed,
         nested.arenaOffset - 1,
-        parentArenaTop,
-        parentHostBump,
+        parentGuestArenaCursor,
+        parentHostArenaCursor,
         exhausted));
 }
 

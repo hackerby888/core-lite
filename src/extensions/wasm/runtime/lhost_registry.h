@@ -15,9 +15,8 @@ namespace Wasm::Runtime
 struct CallContext
 {
     const void* ctx;
-    uint32_t arenaBase;
-    uint32_t arenaBump;
-    uint32_t arenaEnd;
+    uint32_t hostArenaCursor;
+    uint32_t arenaLimit;
     void* trace = nullptr;
 };
 
@@ -200,7 +199,8 @@ static uint32_t w_acquireScratch(
     CallContext* callContext = activeCallContext(execEnv);
     const uint32_t alignedSize = (uint32_t)((size + 7) & ~7ull);
 
-    if (!callContext || callContext->arenaBump + alignedSize > callContext->arenaEnd)
+    if (!callContext
+        || callContext->hostArenaCursor + alignedSize > callContext->arenaLimit)
     {
         wasm_runtime_set_exception(
             wasm_runtime_get_module_inst(execEnv),
@@ -208,8 +208,8 @@ static uint32_t w_acquireScratch(
         return 0;
     }
 
-    const uint32_t allocationOffset = callContext->arenaBump;
-    callContext->arenaBump += alignedSize;
+    const uint32_t allocationOffset = callContext->hostArenaCursor;
+    callContext->hostArenaCursor += alignedSize;
 
     if (initializeToZero)
     {

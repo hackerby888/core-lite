@@ -47,7 +47,7 @@ static void unloadSlot(EngineSlot& slot)
         slot.instance = nullptr;
     }
 
-    slot.arenaTop = nullptr;
+    slot.guestArenaCursor = nullptr;
 
     if (slot.module)
     {
@@ -258,21 +258,22 @@ static bool discoverMemoryLayout(
         return false;
     }
 
-    wasm_global_inst_t arenaGlobal = {};
+    wasm_global_inst_t guestArenaGlobal = {};
     if (wasm_runtime_get_export_global_inst(
             moduleSet.instance,
             "arena_top",
-            &arenaGlobal))
+            &guestArenaGlobal))
     {
-        if (arenaGlobal.kind != WASM_I32
-            || !arenaGlobal.is_mutable
-            || !arenaGlobal.global_data)
+        if (guestArenaGlobal.kind != WASM_I32
+            || !guestArenaGlobal.is_mutable
+            || !guestArenaGlobal.global_data)
         {
             logToConsole(L"LITEWASM: arena_top must be a mutable i32 global");
             return false;
         }
 
-        layout.arenaTop = static_cast<uint32_t*>(arenaGlobal.global_data);
+        layout.guestArenaCursor =
+            static_cast<uint32_t*>(guestArenaGlobal.global_data);
     }
 
     wasm_function_inst_t ioSize = wasm_runtime_lookup_function(
@@ -305,7 +306,7 @@ static void adoptModule(
     slot.stateOffset = layout.stateOffset;
     slot.stateSize = layout.stateSize;
     slot.ioBaseOffset = layout.ioBaseOffset;
-    slot.arenaTop = layout.arenaTop;
+    slot.guestArenaCursor = layout.guestArenaCursor;
     moduleSet.release();
 }
 

@@ -66,15 +66,14 @@ struct EnvironmentScope
 
 static CallContext createCallContext(
     const void* context,
-    uint32_t arenaBase,
-    uint32_t arenaEnd)
+    uint32_t arenaStart,
+    uint32_t arenaLimit)
 {
     CallContext callContext;
 
     callContext.ctx = context;
-    callContext.arenaBase = arenaBase;
-    callContext.arenaBump = arenaBase;
-    callContext.arenaEnd = arenaEnd;
+    callContext.hostArenaCursor = arenaStart;
+    callContext.arenaLimit = arenaLimit;
     return callContext;
 }
 
@@ -158,7 +157,7 @@ class DispatchFrameScope
 {
     GuestContextScope nestedGuestRestore;
     CallContext context;
-    ArenaScope arenaFrame;
+    GuestArenaCursorScope guestArenaCursorScope;
     CallContextScope contextBinding;
 
 public:
@@ -169,12 +168,12 @@ public:
         const QPI::QpiContext* qpiContext,
         const MemoryLayout& fixedLayout,
         const MemoryLayout& layout,
-        uint32_t arenaEnd)
+        uint32_t arenaLimit)
         : nestedGuestRestore(slot, slotCallDepth[slotOffset] != 0),
-          context(createCallContext(qpiContext, layout.arenaOffset, arenaEnd)),
-          arenaFrame(
+          context(createCallContext(qpiContext, layout.arenaOffset, arenaLimit)),
+          guestArenaCursorScope(
               slotCallDepth[slotOffset],
-              slot.arenaTop,
+              slot.guestArenaCursor,
               fixedLayout.arenaOffset,
               layout.arenaOffset),
           contextBinding(execEnv, slotOffset, context)
@@ -420,8 +419,8 @@ static void dispatchMigration(
     }
 
     const MemoryLayout layout = resolveMemoryLayout(slot);
-    uint32_t arenaEnd = 0;
-    if (!resolveArenaEnd(layout, arenaEnd))
+    uint32_t arenaLimit = 0;
+    if (!resolveArenaLimit(layout, arenaLimit))
     {
         logColorToScreen(
             "ERROR",
@@ -430,17 +429,19 @@ static void dispatchMigration(
         return;
     }
 
-    const uint32_t migrationArenaBase =
+    const uint32_t migrationArenaStart =
         layout.arenaOffset + ((oldStateSize + 15u) & ~15u);
     CallContext callContext = createCallContext(
         context,
-        migrationArenaBase,
-        arenaEnd);
-    ArenaScope arenaScope(
+        migrationArenaStart,
+        arenaLimit);
+    GuestArenaCursorScope guestArenaCursorScope(
         slotCallDepth[slotOffset],
-        slot.arenaTop,
-        migrationArenaBase,
-        slot.arenaTop ? *slot.arenaTop : migrationArenaBase);
+        slot.guestArenaCursor,
+        migrationArenaStart,
+        slot.guestArenaCursor
+            ? *slot.guestArenaCursor
+            : migrationArenaStart);
 
     bindEnvironment(environment.execEnv, callContext);
 
@@ -529,8 +530,8 @@ static void dispatchCall(
     }
 
     const MemoryLayout fixedLayout = resolveMemoryLayout(slot);
-    uint32_t arenaEnd = 0;
-    if (!resolveArenaEnd(fixedLayout, arenaEnd))
+    uint32_t arenaLimit = 0;
+    if (!resolveArenaLimit(fixedLayout, arenaLimit))
     {
         logColorToScreen(
             "ERROR",
@@ -545,9 +546,9 @@ static void dispatchCall(
     if (nested
         && !nestedMemoryLayout(
             fixedLayout,
-            arenaEnd,
-            slot.arenaTop ? *slot.arenaTop : 0,
-            parentContext ? parentContext->arenaBump : 0,
+            arenaLimit,
+            slot.guestArenaCursor ? *slot.guestArenaCursor : 0,
+            parentContext ? parentContext->hostArenaCursor : 0,
             layout))
     {
         logColorToScreen(
@@ -564,7 +565,7 @@ static void dispatchCall(
         static_cast<const QPI::QpiContext*>(context),
         fixedLayout,
         layout,
-        arenaEnd);
+        arenaLimit);
     DispatchTrace trace;
     beginDispatchTrace(
         slot,

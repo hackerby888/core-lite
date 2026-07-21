@@ -53,7 +53,7 @@ struct EngineSlot
     uint32_t stateSize = 0;
     uint32_t ioBaseOffset = 0;
     uint32_t contextOffset = 0;
-    uint32_t* arenaTop = nullptr;
+    uint32_t* guestArenaCursor = nullptr;
     uint32_t entryCount = 0;
     EntryBinding entryBindings[WASM_MAX_USER_ENTRIES] = {};
     ffi_closure* entryClosures[WASM_MAX_USER_ENTRIES] = {};
@@ -148,18 +148,18 @@ static MemoryLayout resolveMemoryLayout(const EngineSlot& slot)
     return fixedMemoryLayout(slot.ioBaseOffset);
 }
 
-static bool resolveArenaEnd(
+static bool resolveArenaLimit(
     const MemoryLayout& fixedLayout,
-    uint32_t& arenaEnd)
+    uint32_t& arenaLimit)
 {
-    const unsigned long long end =
+    const unsigned long long limit =
         (unsigned long long)fixedLayout.arenaOffset + WASM_ARENA_SIZE;
-    if (end > 0xffffffffull)
+    if (limit > 0xffffffffull)
     {
         return false;
     }
 
-    arenaEnd = (uint32_t)end;
+    arenaLimit = (uint32_t)limit;
     return true;
 }
 
@@ -303,7 +303,7 @@ struct ModuleLayout
     uint32_t stateOffset = 0;
     uint32_t stateSize = 0;
     uint32_t ioBaseOffset = 0;
-    uint32_t* arenaTop = nullptr;
+    uint32_t* guestArenaCursor = nullptr;
 };
 
 struct EntryInfo
