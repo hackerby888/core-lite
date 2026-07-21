@@ -4,6 +4,7 @@
 #ifdef LITE_WASM_SC
 
 #include "extensions/wasm/runtime/trace.h"
+#include "platform/memory_util.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -43,8 +44,7 @@ static LONG WINAPI handleStateWriteException(EXCEPTION_POINTERS* exceptionPointe
         && faultAddress >= t_liteWasmProtLo
         && faultAddress < t_liteWasmProtHi)
     {
-        unsigned char* page = (unsigned char*)((uintptr_t)faultAddress
-            & ~(uintptr_t)(systemPageSize - 1));
+        unsigned char* page = alignPointerDown(faultAddress, systemPageSize);
 
         if (dirtyPageCount < WASM_MAX_DIRTY_PAGES && dirtyPageSnapshots)
         {
@@ -74,8 +74,7 @@ static void handleStateWriteFault(int signalNumber, siginfo_t* info, void* conte
         && faultAddress >= t_liteWasmProtLo
         && faultAddress < t_liteWasmProtHi)
     {
-        unsigned char* page = (unsigned char*)((uintptr_t)faultAddress
-            & ~(uintptr_t)(systemPageSize - 1));
+        unsigned char* page = alignPointerDown(faultAddress, systemPageSize);
 
         if (dirtyPageCount < WASM_MAX_DIRTY_PAGES && dirtyPageSnapshots)
         {
@@ -160,8 +159,7 @@ static inline void beginStateWriteTracking(unsigned char* stateStart, unsigned i
     dirtyPageCount = 0;
     t_liteWasmDirtyTrunc = false;
     t_liteWasmProtLo = stateStart;
-    t_liteWasmProtHi = (unsigned char*)(((uintptr_t)(stateStart + stateSize)
-        + systemPageSize - 1) & ~(uintptr_t)(systemPageSize - 1));
+    t_liteWasmProtHi = alignPointerUp(stateStart + stateSize, systemPageSize);
 
 #ifdef _WIN32
     DWORD oldProtection;
