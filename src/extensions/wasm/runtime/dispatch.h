@@ -72,7 +72,8 @@ static CallContext createCallContext(
     CallContext callContext;
 
     callContext.ctx = context;
-    callContext.hostArenaCursor = arenaStart;
+    callContext.arenaStart = arenaStart;
+    callContext.arenaTop = arenaStart;
     callContext.arenaLimit = arenaLimit;
     return callContext;
 }
@@ -157,7 +158,7 @@ class DispatchFrameScope
 {
     GuestContextScope nestedGuestRestore;
     CallContext context;
-    GuestArenaCursorScope guestArenaCursorScope;
+    DispatchDepthScope dispatchDepth;
     CallContextScope contextBinding;
 
 public:
@@ -166,17 +167,12 @@ public:
         wasm_exec_env_t execEnv,
         int slotOffset,
         const QPI::QpiContext* qpiContext,
-        const MemoryLayout& fixedLayout,
         const MemoryLayout& layout,
         uint32_t arenaLimit,
         bool nested)
         : nestedGuestRestore(slot, nested),
           context(createCallContext(qpiContext, layout.arenaOffset, arenaLimit)),
-          guestArenaCursorScope(
-              slotCallDepth[slotOffset],
-              slot.guestArenaCursor,
-              fixedLayout.arenaOffset,
-              layout.arenaOffset),
+          dispatchDepth(slotCallDepth[slotOffset]),
           contextBinding(execEnv, slotOffset, context)
     {
     }
@@ -436,13 +432,7 @@ static void dispatchMigration(
         context,
         migrationArenaStart,
         arenaLimit);
-    GuestArenaCursorScope guestArenaCursorScope(
-        slotCallDepth[slotOffset],
-        slot.guestArenaCursor,
-        migrationArenaStart,
-        slot.guestArenaCursor
-            ? *slot.guestArenaCursor
-            : migrationArenaStart);
+    DispatchDepthScope dispatchDepth(slotCallDepth[slotOffset]);
 
     bindEnvironment(environment.execEnv, callContext);
 
@@ -548,8 +538,7 @@ static void dispatchCall(
         && !nestedMemoryLayout(
             fixedLayout,
             arenaLimit,
-            slot.guestArenaCursor ? *slot.guestArenaCursor : 0,
-            parentContext ? parentContext->hostArenaCursor : 0,
+            parentContext ? parentContext->arenaTop : 0,
             layout))
     {
         logColorToScreen(
@@ -564,7 +553,6 @@ static void dispatchCall(
         environment.execEnv,
         slotOffset,
         static_cast<const QPI::QpiContext*>(context),
-        fixedLayout,
         layout,
         arenaLimit,
         nested);

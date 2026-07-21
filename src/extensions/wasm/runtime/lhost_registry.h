@@ -15,7 +15,8 @@ namespace Wasm::Runtime
 struct CallContext
 {
     const void* ctx;
-    uint32_t hostArenaCursor;
+    uint32_t arenaStart;
+    uint32_t arenaTop;
     uint32_t arenaLimit;
     void* trace = nullptr;
 };
@@ -197,10 +198,10 @@ static uint32_t w_acquireScratch(
     uint32_t initializeToZero)
 {
     CallContext* callContext = activeCallContext(execEnv);
-    const uint32_t alignedSize = (uint32_t)((size + 7) & ~7ull);
 
     if (!callContext
-        || callContext->hostArenaCursor + alignedSize > callContext->arenaLimit)
+        || size > 0xfffffff8ull
+        || callContext->arenaTop > callContext->arenaLimit)
     {
         wasm_runtime_set_exception(
             wasm_runtime_get_module_inst(execEnv),
@@ -208,8 +209,17 @@ static uint32_t w_acquireScratch(
         return 0;
     }
 
-    const uint32_t allocationOffset = callContext->hostArenaCursor;
-    callContext->hostArenaCursor += alignedSize;
+    const uint32_t alignedSize = (uint32_t)((size + 7) & ~7ull);
+    if (alignedSize > callContext->arenaLimit - callContext->arenaTop)
+    {
+        wasm_runtime_set_exception(
+            wasm_runtime_get_module_inst(execEnv),
+            "lhost: scratch arena exhausted");
+        return 0;
+    }
+
+    const uint32_t allocationOffset = callContext->arenaTop;
+    callContext->arenaTop += alignedSize;
 
     if (initializeToZero)
     {
@@ -221,8 +231,13 @@ static uint32_t w_acquireScratch(
 
 static void w_releaseScratch(wasm_exec_env_t execEnv, uint32_t offset)
 {
-    (void)execEnv;
-    (void)offset;
+    CallContext* callContext = activeCallContext(execEnv);
+    if (callContext
+        && offset >= callContext->arenaStart
+        && offset <= callContext->arenaTop)
+    {
+        callContext->arenaTop = offset;
+    }
 }
 
 static void w_logBytes(

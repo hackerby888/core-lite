@@ -34,19 +34,13 @@ static inline MemoryLayout fixedMemoryLayout(uint32_t ioBaseOffset)
 static inline bool nestedMemoryLayout(
     const MemoryLayout& fixedLayout,
     uint32_t arenaLimit,
-    uint32_t guestArenaCursor,
-    uint32_t hostArenaCursor,
+    uint32_t parentArenaTop,
     MemoryLayout& layout)
 {
     unsigned long long frameBase = fixedLayout.arenaOffset;
-    // Guest code and lhost.acquireScratch advance separate cursors in the same arena.
-    if (guestArenaCursor > frameBase)
+    if (parentArenaTop > frameBase)
     {
-        frameBase = guestArenaCursor;
-    }
-    if (hostArenaCursor > frameBase)
-    {
-        frameBase = hostArenaCursor;
+        frameBase = parentArenaTop;
     }
 
     frameBase = (frameBase + 7ull) & ~7ull;
@@ -68,45 +62,23 @@ static inline void zeroEntryLocals(void* locals)
     std::memset(locals, 0, WASM_LOCALS_CAPACITY);
 }
 
-// Reset compiler temporaries for independent calls.
-// Nested calls restore their parent arena.
-struct GuestArenaCursorScope
+struct DispatchDepthScope
 {
-    uint32_t& depth;
-    uint32_t* guestCursor;
-    uint32_t  savedGuestCursor = 0;
-    bool      nested;
+    uint32_t* depth = nullptr;
 
-    GuestArenaCursorScope(
-        uint32_t& slotDepth,
-        uint32_t* guestArenaCursor,
-        uint32_t outerArenaStart,
-        uint32_t callArenaStart)
-        : depth(slotDepth)
+    explicit DispatchDepthScope(uint32_t& slotDepth)
     {
-        guestCursor = guestArenaCursor;
-        nested = depth != 0;
-        ++depth;
-
-        if (guestCursor)
-        {
-            savedGuestCursor = *guestCursor;
-            *guestCursor = nested ? callArenaStart : outerArenaStart;
-        }
+        depth = &slotDepth;
+        ++*depth;
     }
 
-    ~GuestArenaCursorScope()
+    ~DispatchDepthScope()
     {
-        if (guestCursor && nested)
-        {
-            *guestCursor = savedGuestCursor;
-        }
-
-        --depth;
+        --*depth;
     }
 
-    GuestArenaCursorScope(const GuestArenaCursorScope&) = delete;
-    GuestArenaCursorScope& operator=(const GuestArenaCursorScope&) = delete;
+    DispatchDepthScope(const DispatchDepthScope&) = delete;
+    DispatchDepthScope& operator=(const DispatchDepthScope&) = delete;
 };
 
 } // namespace Wasm::Runtime

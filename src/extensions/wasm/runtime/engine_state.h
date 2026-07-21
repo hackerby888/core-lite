@@ -53,7 +53,6 @@ struct EngineSlot
     uint32_t stateSize = 0;
     uint32_t ioBaseOffset = 0;
     uint32_t contextOffset = 0;
-    uint32_t* guestArenaCursor = nullptr;
     uint32_t entryCount = 0;
     EntryBinding entryBindings[WASM_MAX_USER_ENTRIES] = {};
     ffi_closure* entryClosures[WASM_MAX_USER_ENTRIES] = {};
@@ -303,7 +302,6 @@ struct ModuleLayout
     uint32_t stateOffset = 0;
     uint32_t stateSize = 0;
     uint32_t ioBaseOffset = 0;
-    uint32_t* guestArenaCursor = nullptr;
 };
 
 struct EntryInfo

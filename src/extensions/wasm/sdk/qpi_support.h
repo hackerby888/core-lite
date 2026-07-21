@@ -196,35 +196,34 @@ bool isArraySortedWithoutDuplicates(
 
 // Function-local storage
 
-static constexpr unsigned int WASM_LOCALS_CAPACITY = 2u << 20;
 static constexpr unsigned int WASM_LOCALS_DEPTH = 256;
 
 namespace
 {
-unsigned char localsStorage[WASM_LOCALS_CAPACITY];
-unsigned long localsTop = 0;
-unsigned long localsMarks[WASM_LOCALS_DEPTH];
+void* localsMarks[WASM_LOCALS_DEPTH];
 unsigned int localsDepth = 0;
 } // namespace
 
 void* QPI::QpiContextFunctionCall::__qpiAllocLocals(unsigned int sizeOfLocals) const
 {
-    const unsigned long offset = localsTop;
-    if (localsDepth < WASM_LOCALS_DEPTH)
+    if (localsDepth >= WASM_LOCALS_DEPTH)
     {
-        localsMarks[localsDepth++] = offset;
+        return nullptr;
     }
 
-    localsTop = (offset + sizeOfLocals + 7) & ~7ul;
-    __builtin_memset(&localsStorage[offset], 0, sizeOfLocals);
-    return (void*)&localsStorage[offset];
+    void* locals = __acquireScratchpad(sizeOfLocals, true);
+    if (locals)
+    {
+        localsMarks[localsDepth++] = locals;
+    }
+    return locals;
 }
 
 void QPI::QpiContextFunctionCall::__qpiFreeLocals() const
 {
     if (localsDepth > 0)
     {
-        localsTop = localsMarks[--localsDepth];
+        __releaseScratchpad(localsMarks[--localsDepth]);
     }
 }
 
