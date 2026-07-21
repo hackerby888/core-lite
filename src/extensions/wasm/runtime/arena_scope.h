@@ -82,10 +82,12 @@ struct GuestArenaCursorScope
         uint32_t* guestArenaCursor,
         uint32_t outerArenaStart,
         uint32_t callArenaStart)
-        : depth(slotDepth),
-          guestCursor(guestArenaCursor),
-          nested(depth++ != 0)
+        : depth(slotDepth)
     {
+        guestCursor = guestArenaCursor;
+        nested = depth != 0;
+        ++depth;
+
         if (guestCursor)
         {
             savedGuestCursor = *guestCursor;

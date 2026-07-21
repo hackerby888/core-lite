@@ -95,11 +95,11 @@ struct CallContextScope
         wasm_exec_env_t environment,
         int slotOffset,
         CallContext& callContext)
-        : execEnv(environment),
-          activeContext(slotCallContexts[slotOffset]),
-          savedContext(activeContext),
-          savedUserData(wasm_runtime_get_user_data(environment))
+        : activeContext(slotCallContexts[slotOffset])
     {
+        execEnv = environment;
+        savedContext = activeContext;
+        savedUserData = wasm_runtime_get_user_data(execEnv);
         activeContext = &callContext;
         wasm_runtime_set_user_data(execEnv, &callContext);
     }
@@ -168,8 +168,9 @@ public:
         const QPI::QpiContext* qpiContext,
         const MemoryLayout& fixedLayout,
         const MemoryLayout& layout,
-        uint32_t arenaLimit)
-        : nestedGuestRestore(slot, slotCallDepth[slotOffset] != 0),
+        uint32_t arenaLimit,
+        bool nested)
+        : nestedGuestRestore(slot, nested),
           context(createCallContext(qpiContext, layout.arenaOffset, arenaLimit)),
           guestArenaCursorScope(
               slotCallDepth[slotOffset],
@@ -565,7 +566,8 @@ static void dispatchCall(
         static_cast<const QPI::QpiContext*>(context),
         fixedLayout,
         layout,
-        arenaLimit);
+        arenaLimit,
+        nested);
     DispatchTrace trace;
     beginDispatchTrace(
         slot,
