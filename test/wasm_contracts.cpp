@@ -11,7 +11,10 @@
 #define WASM_RUNTIME_API_EXTERN
 #endif
 #include "wasm_export.h"
+constexpr unsigned short WASM_RESERVED_SLOT_BASE = 28;
+constexpr unsigned short WASM_RESERVED_SLOT_COUNT = 4;
 #include "extensions/wasm/runtime/arena_scope.h"
+#include "extensions/wasm/runtime/contract_slots.h"
 #include "wasm_contract_fixture.h"
 
 namespace
@@ -130,6 +133,45 @@ TEST(WasmContracts, ArenaTopResetsAndNestedRestores)
         EXPECT_EQ(top, 100u);
     }
     EXPECT_EQ(depth, 0u);
+}
+
+TEST(WasmContracts, UploadBeginPreservesTheActiveSession)
+{
+    using namespace Wasm::Runtime;
+
+    moduleUpload = ModuleUpload{};
+    std::memset(moduleUploadBuffer, 0, sizeof(moduleUploadBuffer));
+    std::memset(receivedChunkBits, 0, sizeof(receivedChunkBits));
+    unsigned char firstHash[32];
+    unsigned char otherHash[32];
+    std::memset(firstHash, 0x11, sizeof(firstHash));
+    std::memset(otherHash, 0x22, sizeof(otherHash));
+
+    ASSERT_TRUE(tryBeginModuleUpload(11, 2016, 2, firstHash));
+    moduleUploadBuffer[0] = 0xab;
+    moduleUploadBuffer[1008] = 0xcd;
+    receivedChunkBits[0] = 1;
+    moduleUpload.receivedCount = 1;
+
+    EXPECT_TRUE(tryBeginModuleUpload(11, 1008, 1, otherHash));
+    EXPECT_EQ(moduleUpload.sessionId, 11u);
+    EXPECT_EQ(moduleUpload.totalSize, 2016u);
+    EXPECT_EQ(moduleUpload.chunkCount, 2u);
+    EXPECT_EQ(moduleUpload.receivedCount, 1u);
+    EXPECT_EQ(std::memcmp(moduleUpload.finalHash, firstHash, sizeof(firstHash)), 0);
+    EXPECT_EQ(receivedChunkBits[0], 1u);
+    EXPECT_EQ(moduleUploadBuffer[0], 0xab);
+    EXPECT_EQ(moduleUploadBuffer[1008], 0xcd);
+
+    EXPECT_FALSE(tryBeginModuleUpload(22, 1008, 1, otherHash));
+    EXPECT_EQ(moduleUpload.sessionId, 11u);
+    EXPECT_EQ(moduleUpload.totalSize, 2016u);
+    EXPECT_EQ(moduleUpload.chunkCount, 2u);
+    EXPECT_EQ(moduleUpload.receivedCount, 1u);
+    EXPECT_EQ(std::memcmp(moduleUpload.finalHash, firstHash, sizeof(firstHash)), 0);
+    EXPECT_EQ(receivedChunkBits[0], 1u);
+    EXPECT_EQ(moduleUploadBuffer[0], 0xab);
+    EXPECT_EQ(moduleUploadBuffer[1008], 0xcd);
 }
 
 TEST(WasmContracts, NestedCallUsesIsolatedFrame)

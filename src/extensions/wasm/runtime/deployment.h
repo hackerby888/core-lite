@@ -16,19 +16,26 @@ namespace Wasm::Runtime
     unsigned int chunkCount,
     const unsigned char* finalHash)
 {
-    if (totalSize > WASM_MAX_MODULE_SIZE)
+    if (!moduleUpload.active && totalSize > WASM_MAX_MODULE_SIZE)
     {
         return;
     }
 
-    moduleUpload.active = true;
-    moduleUpload.sessionId = sessionId;
-    moduleUpload.totalSize = totalSize;
-    moduleUpload.chunkCount = chunkCount;
-    moduleUpload.receivedCount = 0;
-    copyMem(moduleUpload.finalHash, finalHash, 32);
-    setMem(receivedChunkBits, sizeof(receivedChunkBits), 0);
-    logToConsole(L"LITEDYN: UploadBegin received");
+    const bool retry = moduleUpload.active;
+    if (!tryBeginModuleUpload(sessionId, totalSize, chunkCount, finalHash))
+    {
+        logColorToScreen(
+            "WARN",
+            "LITEDYN: UploadBegin rejected; session "
+                + std::to_string(moduleUpload.sessionId)
+                + " is active");
+        return;
+    }
+
+    logToConsole(
+        retry
+            ? L"LITEDYN: UploadBegin retry accepted"
+            : L"LITEDYN: UploadBegin received");
 }
 
 [[maybe_unused]] static void receiveModuleChunk(

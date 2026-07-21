@@ -3,6 +3,7 @@
 // Reserved contract slots and in-progress module upload state.
 #ifdef LITE_WASM_SC
 
+#include <cstring>
 #include <string>
 
 #ifndef WASM_MAX_MODULE_SIZE
@@ -40,6 +41,27 @@ struct ModuleUpload
 static ModuleUpload moduleUpload;
 static unsigned char moduleUploadBuffer[WASM_MAX_MODULE_SIZE];
 static unsigned char receivedChunkBits[(WASM_MAX_MODULE_SIZE / 1008u) / 8u + 1u];
+
+static inline bool tryBeginModuleUpload(
+    unsigned long long sessionId,
+    unsigned int totalSize,
+    unsigned int chunkCount,
+    const unsigned char* finalHash)
+{
+    if (moduleUpload.active)
+    {
+        return moduleUpload.sessionId == sessionId;
+    }
+
+    moduleUpload.active = true;
+    moduleUpload.sessionId = sessionId;
+    moduleUpload.totalSize = totalSize;
+    moduleUpload.chunkCount = chunkCount;
+    moduleUpload.receivedCount = 0;
+    std::memcpy(moduleUpload.finalHash, finalHash, sizeof(moduleUpload.finalHash));
+    std::memset(receivedChunkBits, 0, sizeof(receivedChunkBits));
+    return true;
+}
 
 static inline unsigned int reservedSlotBase()
 {
