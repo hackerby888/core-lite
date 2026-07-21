@@ -228,6 +228,24 @@ jobs:
         shell: bash
         run: '"$QINIT_BIN" doctor'
 
+      - name: QPI compiler/runtime parity
+        shell: bash
+        working-directory: qinit
+        env:
+          QINIT_CORE: ${{ github.workspace }}/core
+          QINIT_QPI_DIGEST_FILE: ${{ github.workspace }}/qpi-${{ matrix.key }}.txt
+        run: bun run scripts/ci-qpi-dual-engine.ts
+
+      - name: Restart clean node after QPI parity
+        shell: bash
+        run: |
+          "$QINIT_BIN" node run \
+            --real \
+            --core "$GITHUB_WORKSPACE/core" \
+            --bin "$NODE_BIN" \
+            --restart \
+            --wait 150
+
       - name: qinit test (deploy + read + write)
         shell: bash
         run: |
@@ -250,8 +268,10 @@ jobs:
           STATE_JSON=$("$QINIT_BIN" state DigestProbe --digest --json)
           echo "$STATE_JSON"
           STATE_DIGEST=$(printf '%s\n' "$STATE_JSON" | jq -er '.digest')
-          echo "$STATE_DIGEST" > "$GITHUB_WORKSPACE/digest-${{ matrix.key }}.txt"
+          QPI_DIGESTS=$(cat "$GITHUB_WORKSPACE/qpi-${{ matrix.key }}.txt")
+          printf '%s %s\n' "$STATE_DIGEST" "$QPI_DIGESTS" > "$GITHUB_WORKSPACE/digest-${{ matrix.key }}.txt"
           echo "::notice::${{ matrix.key }} DigestProbe state digest = $STATE_DIGEST"
+          echo "::notice::${{ matrix.key }} QPI driver/callee state digests = $QPI_DIGESTS"
 
       - name: Stop node
         if: always() && matrix.key != 'windows-x64'
@@ -350,7 +370,7 @@ jobs:
       - name: State digests must match across platforms
         run: |
           cd digests
-          echo "=== per-platform DigestProbe state digest ==="
+          echo "=== per-platform DigestProbe and QPI state digests ==="
           for digest_file in digest-*.txt; do
             echo "$digest_file -> $(cat "$digest_file")"
           done
@@ -361,11 +381,11 @@ jobs:
           fi
           UNIQUE_DIGEST_COUNT=$(cat digest-*.txt | sort -u | wc -l)
           if [ "$UNIQUE_DIGEST_COUNT" -ne 1 ]; then
-            echo "::error::DIVERGENCE — contract state digest differs across platforms"
+            echo "::error::DIVERGENCE — contract state digests differ across platforms"
             exit 1
           fi
           FIRST_DIGEST=$(sort -u digest-*.txt)
-          echo "OK: all $DIGEST_COUNT platforms agree on the DigestProbe state digest -> $FIRST_DIGEST"
+          echo "OK: all $DIGEST_COUNT platforms agree on the DigestProbe and QPI state digests -> $FIRST_DIGEST"
 
   headers:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/qinit-v')
