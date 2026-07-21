@@ -1,4 +1,5 @@
 #pragma once
+#ifndef LITE_WASM_TU_BUILD
 
 #if defined(__linux__) || defined(__APPLE__)
 #include "platform/msvc_polyfill.h"
@@ -237,3 +238,4 @@ static void __releaseScratchpad(void* ptr)
 {
     commonBuffers.releaseBuffer(ptr);
 }
+#endif // LITE_WASM_TU_BUILD
