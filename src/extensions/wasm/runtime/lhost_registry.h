@@ -43,10 +43,7 @@ static inline void traceHostCall(
 {
     if (callContext && callContext->trace)
     {
-        recordHostCall(
-            (TraceEntry*)callContext->trace,
-            name,
-            detail);
+        recordHostCall((TraceEntry*)callContext->trace, name, detail);
     }
 }
 
@@ -153,15 +150,11 @@ struct QpiImport<Member>
 
         if constexpr (std::is_void_v<R>)
         {
-            (hostServices.*Member)(
-                callContext->ctx,
-                convertArgument<A>(execEnv, arguments)...);
+            (hostServices.*Member)(callContext->ctx, convertArgument<A>(execEnv, arguments)...);
         }
         else
         {
-            return (AbiType<R>)(hostServices.*Member)(
-                callContext->ctx,
-                convertArgument<A>(execEnv, arguments)...);
+            return (AbiType<R>)(hostServices.*Member)(callContext->ctx, convertArgument<A>(execEnv, arguments)...);
         }
     }
 
@@ -178,13 +171,11 @@ struct InfrastructureImport<Member>
     {
         if constexpr (std::is_void_v<R>)
         {
-            (hostServices.*Member)(
-                convertArgument<A>(execEnv, arguments)...);
+            (hostServices.*Member)(convertArgument<A>(execEnv, arguments)...);
         }
         else
         {
-            return (AbiType<R>)(hostServices.*Member)(
-                convertArgument<A>(execEnv, arguments)...);
+            return (AbiType<R>)(hostServices.*Member)(convertArgument<A>(execEnv, arguments)...);
         }
     }
 
@@ -199,22 +190,16 @@ static uint32_t w_acquireScratch(
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    if (!callContext
-        || size > 0xfffffff8ull
-        || callContext->arenaTop > callContext->arenaLimit)
+    if (!callContext || size > 0xfffffff8ull || callContext->arenaTop > callContext->arenaLimit)
     {
-        wasm_runtime_set_exception(
-            wasm_runtime_get_module_inst(execEnv),
-            "lhost: scratch arena exhausted");
+        wasm_runtime_set_exception(wasm_runtime_get_module_inst(execEnv), "lhost: scratch arena exhausted");
         return 0;
     }
 
     const uint32_t alignedSize = (uint32_t)((size + 7) & ~7ull);
     if (alignedSize > callContext->arenaLimit - callContext->arenaTop)
     {
-        wasm_runtime_set_exception(
-            wasm_runtime_get_module_inst(execEnv),
-            "lhost: scratch arena exhausted");
+        wasm_runtime_set_exception(wasm_runtime_get_module_inst(execEnv), "lhost: scratch arena exhausted");
         return 0;
     }
 
@@ -232,9 +217,7 @@ static uint32_t w_acquireScratch(
 static void w_releaseScratch(wasm_exec_env_t execEnv, uint32_t offset)
 {
     CallContext* callContext = activeCallContext(execEnv);
-    if (callContext
-        && offset >= callContext->arenaStart
-        && offset <= callContext->arenaTop)
+    if (callContext && offset >= callContext->arenaStart && offset <= callContext->arenaTop)
     {
         callContext->arenaTop = offset;
     }
@@ -252,11 +235,7 @@ static void w_logBytes(
 
     if (callContext && callContext->trace)
     {
-        recordLog(
-            (TraceEntry*)callContext->trace,
-            (unsigned char)type,
-            message,
-            size);
+        recordLog((TraceEntry*)callContext->trace, (unsigned char)type, message, size);
     }
 
     hostServices.logBytes(contractIndex, (unsigned char)type, message, size);
@@ -267,10 +246,7 @@ static int64_t w_transfer(wasm_exec_env_t execEnv, uint32_t destinationOffset, i
     CallContext* callContext = activeCallContext(execEnv);
     void* destination = nativeAddress(execEnv, destinationOffset);
 
-    traceHostCall(
-        callContext,
-        "transfer",
-        hex(destination, 8) + ".. " + std::to_string(amount));
+    traceHostCall(callContext, "transfer", hex(destination, 8) + ".. " + std::to_string(amount));
     return hostServices.transfer(callContext->ctx, destination, amount);
 }
 
@@ -283,16 +259,8 @@ static int64_t w_transferTyped(
     CallContext* callContext = activeCallContext(execEnv);
     void* destination = nativeAddress(execEnv, destinationOffset);
 
-    traceHostCall(
-        callContext,
-        "transferTyped",
-        hex(destination, 8) + ".. " + std::to_string(amount)
-            + " t=" + std::to_string(transferType));
-    return hostServices.transferTyped(
-        callContext->ctx,
-        destination,
-        amount,
-        (unsigned char)transferType);
+    traceHostCall(callContext, "transferTyped", hex(destination, 8) + ".. " + std::to_string(amount) + " t=" + std::to_string(transferType));
+    return hostServices.transferTyped(callContext->ctx, destination, amount, (unsigned char)transferType);
 }
 
 static void w_abort(wasm_exec_env_t execEnv, uint32_t errorCode)
@@ -307,10 +275,7 @@ static int64_t w_burn(wasm_exec_env_t execEnv, int64_t amount, uint32_t contract
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(
-        callContext,
-        "burn",
-        std::to_string(amount) + " for " + std::to_string(contractIndex));
+    traceHostCall(callContext, "burn", std::to_string(amount) + " for " + std::to_string(contractIndex));
     return hostServices.burn(callContext->ctx, amount, contractIndex);
 }
 
@@ -324,17 +289,8 @@ static int64_t w_issueAsset(
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(
-        callContext,
-        "issueAsset",
-        "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
-    return hostServices.issueAsset(
-        callContext->ctx,
-        name,
-        nativeAddress(execEnv, issuerOffset),
-        (signed char)decimals,
-        shares,
-        unit);
+    traceHostCall(callContext, "issueAsset", "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
+    return hostServices.issueAsset(callContext->ctx, name, nativeAddress(execEnv, issuerOffset), (signed char)decimals, shares, unit);
 }
 
 static int64_t w_transferShares(
@@ -348,18 +304,8 @@ static int64_t w_transferShares(
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(
-        callContext,
-        "transferShares",
-        "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
-    return hostServices.transferShareOwnershipAndPossession(
-        callContext->ctx,
-        name,
-        nativeAddress(execEnv, issuerOffset),
-        nativeAddress(execEnv, ownerOffset),
-        nativeAddress(execEnv, possessorOffset),
-        shares,
-        nativeAddress(execEnv, newOwnerOffset));
+    traceHostCall(callContext, "transferShares", "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
+    return hostServices.transferShareOwnershipAndPossession(callContext->ctx, name, nativeAddress(execEnv, issuerOffset), nativeAddress(execEnv, ownerOffset), nativeAddress(execEnv, possessorOffset), shares, nativeAddress(execEnv, newOwnerOffset));
 }
 
 static int64_t w_acquireShares(
@@ -375,20 +321,8 @@ static int64_t w_acquireShares(
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(
-        callContext,
-        "acquireShares",
-        "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
-    return hostServices.acquireShares(
-        callContext->ctx,
-        name,
-        nativeAddress(execEnv, issuerOffset),
-        nativeAddress(execEnv, ownerOffset),
-        nativeAddress(execEnv, possessorOffset),
-        shares,
-        (unsigned short)sourceOwnershipManagement,
-        (unsigned short)sourcePossessionManagement,
-        fee);
+    traceHostCall(callContext, "acquireShares", "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
+    return hostServices.acquireShares(callContext->ctx, name, nativeAddress(execEnv, issuerOffset), nativeAddress(execEnv, ownerOffset), nativeAddress(execEnv, possessorOffset), shares, (unsigned short)sourceOwnershipManagement, (unsigned short)sourcePossessionManagement, fee);
 }
 
 static int64_t w_releaseShares(
@@ -404,20 +338,8 @@ static int64_t w_releaseShares(
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(
-        callContext,
-        "releaseShares",
-        "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
-    return hostServices.releaseShares(
-        callContext->ctx,
-        name,
-        nativeAddress(execEnv, issuerOffset),
-        nativeAddress(execEnv, ownerOffset),
-        nativeAddress(execEnv, possessorOffset),
-        shares,
-        (unsigned short)destinationOwnershipManagement,
-        (unsigned short)destinationPossessionManagement,
-        fee);
+    traceHostCall(callContext, "releaseShares", "name=" + std::to_string(name) + " shares=" + std::to_string(shares));
+    return hostServices.releaseShares(callContext->ctx, name, nativeAddress(execEnv, issuerOffset), nativeAddress(execEnv, ownerOffset), nativeAddress(execEnv, possessorOffset), shares, (unsigned short)destinationOwnershipManagement, (unsigned short)destinationPossessionManagement, fee);
 }
 
 static uint32_t w_assetEnumerate(
@@ -432,14 +354,7 @@ static uint32_t w_assetEnumerate(
     CallContext* callContext = activeCallContext(execEnv);
 
     traceHostCall(callContext, "assetEnumerate", "kind=" + std::to_string(kind));
-    return hostServices.assetEnumerate(
-        callContext->ctx,
-        kind,
-        nativeAddress(execEnv, issuanceOffset),
-        nativeAddress(execEnv, ownershipOffset),
-        nativeAddress(execEnv, possessionOffset),
-        nativeAddress(execEnv, outputOffset),
-        capacity);
+    return hostServices.assetEnumerate(callContext->ctx, kind, nativeAddress(execEnv, issuanceOffset), nativeAddress(execEnv, ownershipOffset), nativeAddress(execEnv, possessionOffset), nativeAddress(execEnv, outputOffset), capacity);
 }
 
 static uint32_t w_dayOfWeek(
@@ -449,11 +364,7 @@ static uint32_t w_dayOfWeek(
     uint32_t day)
 {
     CallContext* callContext = activeCallContext(execEnv);
-    return hostServices.dayOfWeek(
-        callContext->ctx,
-        (unsigned char)year,
-        (unsigned char)month,
-        (unsigned char)day);
+    return hostServices.dayOfWeek(callContext->ctx, (unsigned char)year, (unsigned char)month, (unsigned char)day);
 }
 
 static uint32_t w_signatureValidity(
@@ -463,11 +374,7 @@ static uint32_t w_signatureValidity(
     uint32_t signatureOffset)
 {
     CallContext* callContext = activeCallContext(execEnv);
-    return hostServices.signatureValidity(
-        callContext->ctx,
-        nativeAddress(execEnv, entityOffset),
-        nativeAddress(execEnv, digestOffset),
-        nativeAddress(execEnv, signatureOffset));
+    return hostServices.signatureValidity(callContext->ctx, nativeAddress(execEnv, entityOffset), nativeAddress(execEnv, digestOffset), nativeAddress(execEnv, signatureOffset));
 }
 
 static int64_t w_bidInIPO(
@@ -487,11 +394,7 @@ static void w_ipoBidId(
     uint32_t outputOffset)
 {
     CallContext* callContext = activeCallContext(execEnv);
-    hostServices.ipoBidId(
-        callContext->ctx,
-        contractIndex,
-        bidIndex,
-        nativeAddress(execEnv, outputOffset));
+    hostServices.ipoBidId(callContext->ctx, contractIndex, bidIndex, nativeAddress(execEnv, outputOffset));
 }
 
 static int64_t w_ipoBidPrice(
@@ -511,20 +414,13 @@ static void w_computeMiningFunction(
     uint32_t outputOffset)
 {
     CallContext* callContext = activeCallContext(execEnv);
-    hostServices.computeMiningFunction(
-        callContext->ctx,
-        nativeAddress(execEnv, seedOffset),
-        nativeAddress(execEnv, publicKeyOffset),
-        nativeAddress(execEnv, nonceOffset),
-        nativeAddress(execEnv, outputOffset));
+    hostServices.computeMiningFunction(callContext->ctx, nativeAddress(execEnv, seedOffset), nativeAddress(execEnv, publicKeyOffset), nativeAddress(execEnv, nonceOffset), nativeAddress(execEnv, outputOffset));
 }
 
 static void w_initMiningSeed(wasm_exec_env_t execEnv, uint32_t seedOffset)
 {
     CallContext* callContext = activeCallContext(execEnv);
-    hostServices.initMiningSeed(
-        callContext->ctx,
-        nativeAddress(execEnv, seedOffset));
+    hostServices.initMiningSeed(callContext->ctx, nativeAddress(execEnv, seedOffset));
 }
 
 static uint32_t w_getOracleQueryStatus(wasm_exec_env_t execEnv, int64_t queryId)
@@ -550,18 +446,8 @@ static int64_t w_queryOracle(
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(
-        callContext,
-        "queryOracle",
-        "iface=" + std::to_string(interfaceIndex));
-    return hostServices.queryOracle(
-        callContext->ctx,
-        interfaceIndex,
-        nativeAddress(execEnv, queryOffset),
-        querySize,
-        notificationProcedureId,
-        timeoutMilliseconds,
-        fee);
+    traceHostCall(callContext, "queryOracle", "iface=" + std::to_string(interfaceIndex));
+    return hostServices.queryOracle(callContext->ctx, interfaceIndex, nativeAddress(execEnv, queryOffset), querySize, notificationProcedureId, timeoutMilliseconds, fee);
 }
 
 static int32_t w_subscribeOracle(
@@ -576,19 +462,8 @@ static int32_t w_subscribeOracle(
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(
-        callContext,
-        "subscribeOracle",
-        "iface=" + std::to_string(interfaceIndex));
-    return hostServices.subscribeOracle(
-        callContext->ctx,
-        interfaceIndex,
-        nativeAddress(execEnv, queryOffset),
-        querySize,
-        notificationProcedureId,
-        periodMilliseconds,
-        notifyWithPreviousReply,
-        fee);
+    traceHostCall(callContext, "subscribeOracle", "iface=" + std::to_string(interfaceIndex));
+    return hostServices.subscribeOracle(callContext->ctx, interfaceIndex, nativeAddress(execEnv, queryOffset), querySize, notificationProcedureId, periodMilliseconds, notifyWithPreviousReply, fee);
 }
 
 static uint32_t w_getOracleQuery(
@@ -598,11 +473,7 @@ static uint32_t w_getOracleQuery(
     uint32_t size)
 {
     CallContext* callContext = activeCallContext(execEnv);
-    return hostServices.getOracleQuery(
-        callContext->ctx,
-        queryId,
-        nativeAddress(execEnv, outputOffset),
-        size);
+    return hostServices.getOracleQuery(callContext->ctx, queryId, nativeAddress(execEnv, outputOffset), size);
 }
 
 static uint32_t w_getOracleReply(
@@ -612,11 +483,7 @@ static uint32_t w_getOracleReply(
     uint32_t size)
 {
     CallContext* callContext = activeCallContext(execEnv);
-    return hostServices.getOracleReply(
-        callContext->ctx,
-        queryId,
-        nativeAddress(execEnv, outputOffset),
-        size);
+    return hostServices.getOracleReply(callContext->ctx, queryId, nativeAddress(execEnv, outputOffset), size);
 }
 
 static uint32_t w_distributeDividends(wasm_exec_env_t execEnv, int64_t amountPerShare)
@@ -638,18 +505,8 @@ static int32_t w_liteCallFunction(
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(
-        callContext,
-        "callFunction",
-        "-> " + std::to_string(contractIndex) + "/" + std::to_string(inputType));
-    return hostServices.liteCallFunction(
-        callContext->ctx,
-        contractIndex,
-        (unsigned short)inputType,
-        nativeAddress(execEnv, inputOffset),
-        inputSize,
-        nativeAddress(execEnv, outputOffset),
-        outputSize);
+    traceHostCall(callContext, "callFunction", "-> " + std::to_string(contractIndex) + "/" + std::to_string(inputType));
+    return hostServices.liteCallFunction(callContext->ctx, contractIndex, (unsigned short)inputType, nativeAddress(execEnv, inputOffset), inputSize, nativeAddress(execEnv, outputOffset), outputSize);
 }
 
 static int32_t w_liteInvokeProcedure(
@@ -664,20 +521,8 @@ static int32_t w_liteInvokeProcedure(
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(
-        callContext,
-        "invokeProcedure",
-        "-> " + std::to_string(contractIndex) + "/" + std::to_string(inputType)
-            + " reward " + std::to_string(invocationReward));
-    return hostServices.liteInvokeProcedure(
-        callContext->ctx,
-        contractIndex,
-        (unsigned short)inputType,
-        nativeAddress(execEnv, inputOffset),
-        inputSize,
-        nativeAddress(execEnv, outputOffset),
-        outputSize,
-        invocationReward);
+    traceHostCall(callContext, "invokeProcedure", "-> " + std::to_string(contractIndex) + "/" + std::to_string(inputType) + " reward " + std::to_string(invocationReward));
+    return hostServices.liteInvokeProcedure(callContext->ctx, contractIndex, (unsigned short)inputType, nativeAddress(execEnv, inputOffset), inputSize, nativeAddress(execEnv, outputOffset), outputSize, invocationReward);
 }
 
 static int32_t w_liteSetShareholderProposal(
@@ -688,15 +533,8 @@ static int32_t w_liteSetShareholderProposal(
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(
-        callContext,
-        "setShareholderProposal",
-        "-> " + std::to_string(contractIndex));
-    return hostServices.setShareholderProposal(
-        callContext->ctx,
-        contractIndex,
-        nativeAddress(execEnv, proposalOffset),
-        invocationReward);
+    traceHostCall(callContext, "setShareholderProposal", "-> " + std::to_string(contractIndex));
+    return hostServices.setShareholderProposal(callContext->ctx, contractIndex, nativeAddress(execEnv, proposalOffset), invocationReward);
 }
 
 static int32_t w_liteSetShareholderVotes(
@@ -708,16 +546,8 @@ static int32_t w_liteSetShareholderVotes(
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(
-        callContext,
-        "setShareholderVotes",
-        "-> " + std::to_string(contractIndex));
-    return hostServices.setShareholderVotes(
-        callContext->ctx,
-        contractIndex,
-        nativeAddress(execEnv, voteOffset),
-        voteSize,
-        invocationReward);
+    traceHostCall(callContext, "setShareholderVotes", "-> " + std::to_string(contractIndex));
+    return hostServices.setShareholderVotes(callContext->ctx, contractIndex, nativeAddress(execEnv, voteOffset), voteSize, invocationReward);
 }
 
 // Every declared signature is checked against the type-derived WAMR signature.
@@ -772,13 +602,10 @@ static NativeSymbol nativeSymbols[] =
 {
     WASM_LHOST_ABI_ROWS(LHOST_ROW_GQ, LHOST_ROW_GI, LHOST_ROW_HQ, LHOST_ROW_HI)
 };
-static const uint32_t nativeSymbolCount =
-    (uint32_t)(sizeof(nativeSymbols) / sizeof(nativeSymbols[0]));
+static const uint32_t nativeSymbolCount = (uint32_t)(sizeof(nativeSymbols) / sizeof(nativeSymbols[0]));
 
 // The extra vtable slot is abiVersion.
-static_assert(
-    sizeof(HostServices) == sizeof(void*) * (nativeSymbolCount + 1),
-    "wasm import table (nativeSymbols) out of sync with the host vtable (HostServices)");
+static_assert(sizeof(HostServices) == sizeof(void*) * (nativeSymbolCount + 1), "wasm import table (nativeSymbols) out of sync with the host vtable (HostServices)");
 
 } // namespace Wasm::Runtime
 

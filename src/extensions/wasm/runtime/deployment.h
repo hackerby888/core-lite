@@ -24,18 +24,11 @@ namespace Wasm::Runtime
     const bool retry = moduleUpload.active;
     if (!tryBeginModuleUpload(sessionId, totalSize, chunkCount, finalHash))
     {
-        logColorToScreen(
-            "WARN",
-            "LITEDYN: UploadBegin rejected; session "
-                + std::to_string(moduleUpload.sessionId)
-                + " is active");
+        logColorToScreen("WARN", "LITEDYN: UploadBegin rejected; session " + std::to_string(moduleUpload.sessionId) + " is active");
         return;
     }
 
-    logToConsole(
-        retry
-            ? L"LITEDYN: UploadBegin retry accepted"
-            : L"LITEDYN: UploadBegin received");
+    logToConsole(retry ? L"LITEDYN: UploadBegin retry accepted" : L"LITEDYN: UploadBegin received");
 }
 
 [[maybe_unused]] static void receiveModuleChunk(
@@ -73,8 +66,7 @@ namespace Wasm::Runtime
 
 static bool moduleUploadComplete()
 {
-    if (!moduleUpload.active
-        || moduleUpload.receivedCount != moduleUpload.chunkCount)
+    if (!moduleUpload.active || moduleUpload.receivedCount != moduleUpload.chunkCount)
     {
         return false;
     }
@@ -118,12 +110,7 @@ static void runPendingMigration(unsigned int contractIndex);
 
     if (abiVersion != WASM_ABI_VERSION)
     {
-        logColorToScreen(
-            "ERROR",
-            "LITEDYN: unsupported Wasm ABI version "
-                + std::to_string(abiVersion)
-                + "; expected "
-                + std::to_string(WASM_ABI_VERSION));
+        logColorToScreen("ERROR", "LITEDYN: unsupported Wasm ABI version " + std::to_string(abiVersion) + "; expected " + std::to_string(WASM_ABI_VERSION));
         return;
     }
 
@@ -142,11 +129,7 @@ static void runPendingMigration(unsigned int contractIndex);
 
     bool loadOk = false;
     const unsigned char* artifact = moduleUploadBuffer;
-    const bool hasWasmMagic = moduleUpload.totalSize >= 4
-        && artifact[0] == 0x00
-        && artifact[1] == 0x61
-        && artifact[2] == 0x73
-        && artifact[3] == 0x6d;
+    const bool hasWasmMagic = moduleUpload.totalSize >= 4 && artifact[0] == 0x00 && artifact[1] == 0x61 && artifact[2] == 0x73 && artifact[3] == 0x6d;
 
     if (hasWasmMagic)
     {
@@ -200,11 +183,7 @@ static void runPendingMigration(unsigned int contractIndex);
             return;
         }
 
-        beginModuleUpload(
-            readU64(input, DeploymentProtocol::SessionIdOffset),
-            readU32(input, DeploymentProtocol::UploadTotalSizeOffset),
-            readU32(input, DeploymentProtocol::UploadChunkCountOffset),
-            input + DeploymentProtocol::UploadHashOffset);
+        beginModuleUpload(readU64(input, DeploymentProtocol::SessionIdOffset), readU32(input, DeploymentProtocol::UploadTotalSizeOffset), readU32(input, DeploymentProtocol::UploadChunkCountOffset), input + DeploymentProtocol::UploadHashOffset);
     }
     else if (inputType == WASM_DEPLOYMENT_UPLOAD_CHUNK_INPUT_TYPE)
     {
@@ -219,11 +198,7 @@ static void runPendingMigration(unsigned int contractIndex);
             return;
         }
 
-        receiveModuleChunk(
-            readU64(input, DeploymentProtocol::SessionIdOffset),
-            readU32(input, DeploymentProtocol::ChunkSequenceOffset),
-            input + DeploymentProtocol::ChunkDataOffset,
-            dataLength);
+        receiveModuleChunk(readU64(input, DeploymentProtocol::SessionIdOffset), readU32(input, DeploymentProtocol::ChunkSequenceOffset), input + DeploymentProtocol::ChunkDataOffset, dataLength);
     }
     else if (inputType == WASM_DEPLOYMENT_DEPLOY_INPUT_TYPE)
     {
@@ -238,13 +213,7 @@ static void runPendingMigration(unsigned int contractIndex);
             name = (const char*)(input + DeploymentProtocol::DeployNameOffset);
         }
 
-        deployModule(
-            readU64(input, DeploymentProtocol::SessionIdOffset),
-            readU32(input, DeploymentProtocol::DeploySlotOffset),
-            input + DeploymentProtocol::DeployHashOffset,
-            readU32(input, DeploymentProtocol::DeployAbiVersionOffset),
-            readU32(input, DeploymentProtocol::DeployStateLayoutVersionOffset),
-            name);
+        deployModule(readU64(input, DeploymentProtocol::SessionIdOffset), readU32(input, DeploymentProtocol::DeploySlotOffset), input + DeploymentProtocol::DeployHashOffset, readU32(input, DeploymentProtocol::DeployAbiVersionOffset), readU32(input, DeploymentProtocol::DeployStateLayoutVersionOffset), name);
     }
 }
 

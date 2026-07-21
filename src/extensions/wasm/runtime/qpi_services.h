@@ -38,10 +38,7 @@ static unsigned int enumerateAssets(
 
     if (kind == 1)
     {
-        QPI::AssetPossessionIterator iterator(
-            *(const QPI::Asset*)issuance,
-            *(const QPI::AssetOwnershipSelect*)ownership,
-            *(const QPI::AssetPossessionSelect*)possession);
+        QPI::AssetPossessionIterator iterator(*(const QPI::Asset*)issuance, *(const QPI::AssetOwnershipSelect*)ownership, *(const QPI::AssetPossessionSelect*)possession);
 
         while (!iterator.reachedEnd() && count < capacity)
         {
@@ -60,9 +57,7 @@ static unsigned int enumerateAssets(
     }
     else
     {
-        QPI::AssetOwnershipIterator iterator(
-            *(const QPI::Asset*)issuance,
-            *(const QPI::AssetOwnershipSelect*)ownership);
+        QPI::AssetOwnershipIterator iterator(*(const QPI::Asset*)issuance, *(const QPI::AssetOwnershipSelect*)ownership);
 
         while (!iterator.reachedEnd() && count < capacity)
         {
@@ -98,23 +93,16 @@ static int callContractFunction(
 
     auto* caller = (QPI::QpiContextFunctionCall*)callerContext;
     QPI::InterContractCallError error = QPI::NoCallError;
-    const QPI::QpiContextFunctionCall* calleeContext =
-        caller->__qpiConstructContextOtherContractFunctionCall(contractIndex, error);
+    const QPI::QpiContextFunctionCall* calleeContext = caller->__qpiConstructContextOtherContractFunctionCall(contractIndex, error);
     if (!calleeContext)
     {
         return (int)error;
     }
 
     void* state = caller->__qpiAcquireStateForReading(contractIndex);
-    void* locals = caller->__qpiAllocLocals(
-        contractUserFunctionLocalsSizes[contractIndex][inputType]);
+    void* locals = caller->__qpiAllocLocals(contractUserFunctionLocalsSizes[contractIndex][inputType]);
 
-    contractUserFunctions[contractIndex][inputType](
-        *calleeContext,
-        state,
-        (void*)input,
-        output,
-        locals);
+    contractUserFunctions[contractIndex][inputType](*calleeContext, state, (void*)input, output, locals);
 
     caller->__qpiFreeLocals();
     caller->__qpiReleaseStateForReading(contractIndex);
@@ -139,23 +127,16 @@ static int invokeContractProcedure(
 
     auto* caller = (QPI::QpiContextProcedureCall*)callerContext;
     QPI::InterContractCallError error = QPI::NoCallError;
-    const QPI::QpiContextProcedureCall* calleeContext =
-        caller->__qpiConstructProcedureCallContext(contractIndex, invocationReward, error, false);
+    const QPI::QpiContextProcedureCall* calleeContext = caller->__qpiConstructProcedureCallContext(contractIndex, invocationReward, error, false);
     if (!calleeContext)
     {
         return (int)error;
     }
 
     void* state = caller->__qpiAcquireStateForWriting(contractIndex);
-    void* locals = caller->__qpiAllocLocals(
-        contractUserProcedureLocalsSizes[contractIndex][inputType]);
+    void* locals = caller->__qpiAllocLocals(contractUserProcedureLocalsSizes[contractIndex][inputType]);
 
-    contractUserProcedures[contractIndex][inputType](
-        *calleeContext,
-        state,
-        (void*)input,
-        output,
-        locals);
+    contractUserProcedures[contractIndex][inputType](*calleeContext, state, (void*)input, output, locals);
 
     caller->__qpiFreeLocals();
     caller->__qpiReleaseStateForWriting(contractIndex);
@@ -169,10 +150,7 @@ static unsigned short setShareholderProposal(
     const void* proposal,
     long long invocationReward)
 {
-    return ((QPI::QpiContextProcedureCall*)context)->setShareholderProposal(
-        (unsigned short)contractIndex,
-        *(const QPI::Array<QPI::uint8, 1024>*)proposal,
-        invocationReward);
+    return ((QPI::QpiContextProcedureCall*)context)->setShareholderProposal((unsigned short)contractIndex, *(const QPI::Array<QPI::uint8, 1024>*)proposal, invocationReward);
 }
 
 static unsigned char setShareholderVotes(
@@ -182,10 +160,7 @@ static unsigned char setShareholderVotes(
     unsigned int,
     long long invocationReward)
 {
-    return (unsigned char)((QPI::QpiContextProcedureCall*)context)->setShareholderVotes(
-        (unsigned short)contractIndex,
-        *(const QPI::ProposalMultiVoteDataV1*)voteData,
-        invocationReward);
+    return (unsigned char)((QPI::QpiContextProcedureCall*)context)->setShareholderVotes((unsigned short)contractIndex, *(const QPI::ProposalMultiVoteDataV1*)voteData, invocationReward);
 }
 
 static QPI::QpiContextFunctionCall* functionContext(const void* context)
@@ -248,9 +223,7 @@ static long long transfer(
     const void* destination,
     long long amount)
 {
-    return procedureContext(context)->transfer(
-        *(const m256i*)destination,
-        amount);
+    return procedureContext(context)->transfer(*(const m256i*)destination, amount);
 }
 
 static long long transferTyped(
@@ -259,10 +232,7 @@ static long long transferTyped(
     long long amount,
     unsigned char transferType)
 {
-    return procedureContext(context)->__transfer(
-        *(const m256i*)destination,
-        amount,
-        transferType);
+    return procedureContext(context)->__transfer(*(const m256i*)destination, amount, transferType);
 }
 
 static void abortCall(const void* context, unsigned int errorCode)
@@ -298,9 +268,7 @@ static unsigned char getEntity(
     const void* id,
     void* entity)
 {
-    return (unsigned char)functionContext(context)->getEntity(
-        *(const m256i*)id,
-        *(QPI::Entity*)entity);
+    return (unsigned char)functionContext(context)->getEntity(*(const m256i*)id, *(QPI::Entity*)entity);
 }
 
 static long long queryFeeReserve(
@@ -322,8 +290,7 @@ static void previousId(const void* context, const void* id, void* output)
 
 static unsigned char isContractId(const void* context, const void* id)
 {
-    return (unsigned char)functionContext(context)->isContractId(
-        *(const m256i*)id);
+    return (unsigned char)functionContext(context)->isContractId(*(const m256i*)id);
 }
 
 static void arbitrator(const void* context, void* output)
@@ -399,9 +366,7 @@ static unsigned char isAssetIssued(
     const void* issuer,
     unsigned long long name)
 {
-    return (unsigned char)functionContext(context)->isAssetIssued(
-        *(const m256i*)issuer,
-        name);
+    return (unsigned char)functionContext(context)->isAssetIssued(*(const m256i*)issuer, name);
 }
 
 static long long issueAsset(
@@ -412,12 +377,7 @@ static long long issueAsset(
     long long shares,
     unsigned long long unit)
 {
-    return procedureContext(context)->issueAsset(
-        name,
-        *(const QPI::id*)issuer,
-        decimals,
-        shares,
-        unit);
+    return procedureContext(context)->issueAsset(name, *(const QPI::id*)issuer, decimals, shares, unit);
 }
 
 static long long numberOfShares(
@@ -426,10 +386,7 @@ static long long numberOfShares(
     const void* ownership,
     const void* possession)
 {
-    return functionContext(context)->numberOfShares(
-        *(const QPI::Asset*)asset,
-        *(const QPI::AssetOwnershipSelect*)ownership,
-        *(const QPI::AssetPossessionSelect*)possession);
+    return functionContext(context)->numberOfShares(*(const QPI::Asset*)asset, *(const QPI::AssetOwnershipSelect*)ownership, *(const QPI::AssetPossessionSelect*)possession);
 }
 
 static long long numberOfPossessedShares(
@@ -441,13 +398,7 @@ static long long numberOfPossessedShares(
     unsigned short ownershipManagement,
     unsigned short possessionManagement)
 {
-    return functionContext(context)->numberOfPossessedShares(
-        name,
-        *(const m256i*)issuer,
-        *(const m256i*)owner,
-        *(const m256i*)possessor,
-        ownershipManagement,
-        possessionManagement);
+    return functionContext(context)->numberOfPossessedShares(name, *(const m256i*)issuer, *(const m256i*)owner, *(const m256i*)possessor, ownershipManagement, possessionManagement);
 }
 
 static long long transferShareOwnershipAndPossession(
@@ -459,13 +410,7 @@ static long long transferShareOwnershipAndPossession(
     long long shares,
     const void* newOwner)
 {
-    return procedureContext(context)->transferShareOwnershipAndPossession(
-        name,
-        *(const m256i*)issuer,
-        *(const m256i*)owner,
-        *(const m256i*)possessor,
-        shares,
-        *(const m256i*)newOwner);
+    return procedureContext(context)->transferShareOwnershipAndPossession(name, *(const m256i*)issuer, *(const m256i*)owner, *(const m256i*)possessor, shares, *(const m256i*)newOwner);
 }
 
 static long long acquireShares(
@@ -479,14 +424,7 @@ static long long acquireShares(
     unsigned short sourcePossessionManagement,
     long long fee)
 {
-    return procedureContext(context)->acquireShares(
-        QPI::Asset{ *(const m256i*)issuer, name },
-        *(const m256i*)owner,
-        *(const m256i*)possessor,
-        shares,
-        sourceOwnershipManagement,
-        sourcePossessionManagement,
-        fee);
+    return procedureContext(context)->acquireShares(QPI::Asset{ *(const m256i*)issuer, name }, *(const m256i*)owner, *(const m256i*)possessor, shares, sourceOwnershipManagement, sourcePossessionManagement, fee);
 }
 
 static long long releaseShares(
@@ -500,14 +438,7 @@ static long long releaseShares(
     unsigned short destinationPossessionManagement,
     long long fee)
 {
-    return procedureContext(context)->releaseShares(
-        QPI::Asset{ *(const m256i*)issuer, name },
-        *(const m256i*)owner,
-        *(const m256i*)possessor,
-        shares,
-        destinationOwnershipManagement,
-        destinationPossessionManagement,
-        fee);
+    return procedureContext(context)->releaseShares(QPI::Asset{ *(const m256i*)issuer, name }, *(const m256i*)owner, *(const m256i*)possessor, shares, destinationOwnershipManagement, destinationPossessionManagement, fee);
 }
 
 static unsigned char dayOfWeek(
@@ -525,10 +456,7 @@ static unsigned char signatureValidity(
     const void* digest,
     const void* signature)
 {
-    return (unsigned char)functionContext(context)->signatureValidity(
-        *(const m256i*)entity,
-        *(const m256i*)digest,
-        *(const QPI::Array<QPI::sint8, 64>*)signature);
+    return (unsigned char)functionContext(context)->signatureValidity(*(const m256i*)entity, *(const m256i*)digest, *(const QPI::Array<QPI::sint8, 64>*)signature);
 }
 
 static long long bidInIPO(
@@ -537,10 +465,7 @@ static long long bidInIPO(
     long long price,
     unsigned int quantity)
 {
-    return procedureContext(context)->bidInIPO(
-        contractIndex,
-        price,
-        quantity);
+    return procedureContext(context)->bidInIPO(contractIndex, price, quantity);
 }
 
 static void ipoBidId(
@@ -549,9 +474,7 @@ static void ipoBidId(
     unsigned int bidIndex,
     void* output)
 {
-    *(m256i*)output = functionContext(context)->ipoBidId(
-        contractIndex,
-        bidIndex);
+    *(m256i*)output = functionContext(context)->ipoBidId(contractIndex, bidIndex);
 }
 
 static long long ipoBidPrice(
@@ -569,10 +492,7 @@ static void computeMiningFunction(
     const void* nonce,
     void* output)
 {
-    *(m256i*)output = functionContext(context)->computeMiningFunction(
-        *(const m256i*)seed,
-        *(const m256i*)publicKey,
-        *(const m256i*)nonce);
+    *(m256i*)output = functionContext(context)->computeMiningFunction(*(const m256i*)seed, *(const m256i*)publicKey, *(const m256i*)nonce);
 }
 
 static void initMiningSeed(const void* context, const void* seed)
@@ -591,16 +511,14 @@ static unsigned char unsubscribeOracle(
     const void* context,
     int subscriptionId)
 {
-    return (unsigned char)procedureContext(context)->unsubscribeOracle(
-        subscriptionId);
+    return (unsigned char)procedureContext(context)->unsubscribeOracle(subscriptionId);
 }
 
 static unsigned char distributeDividends(
     const void* context,
     long long amountPerShare)
 {
-    return (unsigned char)procedureContext(context)->distributeDividends(
-        amountPerShare);
+    return (unsigned char)procedureContext(context)->distributeDividends(amountPerShare);
 }
 
 } // namespace Wasm::Runtime

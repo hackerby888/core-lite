@@ -255,13 +255,7 @@ void QPI::AssetOwnershipIterator::begin(
 {
     _issuance = issuance;
     _ownership = ownership;
-    _issuanceIdx = lh_assetEnumerate(
-        0,
-        &_issuance,
-        &_ownership,
-        &_ownership,
-        assetEntries,
-        WASM_ASSET_ENTRY_CAPACITY);
+    _issuanceIdx = lh_assetEnumerate(0, &_issuance, &_ownership, &_ownership, assetEntries, WASM_ASSET_ENTRY_CAPACITY);
     _ownershipIdx = 0;
 }
 
@@ -312,13 +306,7 @@ void QPI::AssetPossessionIterator::begin(
     _issuance = issuance;
     _ownership = ownership;
     _possession = possession;
-    _issuanceIdx = lh_assetEnumerate(
-        1,
-        &_issuance,
-        &_ownership,
-        &_possession,
-        assetEntries,
-        WASM_ASSET_ENTRY_CAPACITY);
+    _issuanceIdx = lh_assetEnumerate(1, &_issuance, &_ownership, &_possession, assetEntries, WASM_ASSET_ENTRY_CAPACITY);
     _ownershipIdx = 0;
 }
 

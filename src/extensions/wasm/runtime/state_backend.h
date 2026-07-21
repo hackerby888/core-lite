@@ -21,8 +21,7 @@ inline bool g_wasmOwnedSlot[contractCount] = {};
 inline bool statePagerActive(unsigned int contractIndex)
 {
 #ifdef LITE_SC_PAGER
-    return ContractStatePager::getPager(contractIndex) != nullptr
-        && !g_wasmOwnedSlot[contractIndex];
+    return ContractStatePager::getPager(contractIndex) != nullptr && !g_wasmOwnedSlot[contractIndex];
 #else
     (void)contractIndex;
     return false;
@@ -32,21 +31,12 @@ inline bool statePagerActive(unsigned int contractIndex)
 inline bool allocateContractState(unsigned int contractIndex, unsigned long long size)
 {
 #if defined(LITE_SC_PAGER)
-    return ContractStatePager::create(
-        &contractStates[contractIndex],
-        size,
-        contractIndex);
+    return ContractStatePager::create(&contractStates[contractIndex], size, contractIndex);
 #elif defined(LITE_SC_CONTRACT_LEVEL)
-    contractStates[contractIndex] = (unsigned char*)qVirtualAlloc(
-        size,
-        /*commitMem=*/true);
+    contractStates[contractIndex] = (unsigned char*)qVirtualAlloc(size, /*commitMem=*/true);
     return contractStates[contractIndex] != nullptr;
 #else
-    return allocPoolWithErrorLog(
-        L"contractStates",
-        size,
-        (void**)&contractStates[contractIndex],
-        __LINE__);
+    return allocPoolWithErrorLog(L"contractStates", size, (void**)&contractStates[contractIndex], __LINE__);
 #endif
 }
 
@@ -58,18 +48,12 @@ inline void hashContractState(
     if (statePagerActive(contractIndex))
     {
 #ifdef LITE_SC_PAGER
-        ContractStatePager::getPager(contractIndex)->getHashAndProtect(
-            output,
-            32);
+        ContractStatePager::getPager(contractIndex)->getHashAndProtect(output, 32);
 #endif
     }
     else
     {
-        KangarooTwelve(
-            contractStates[contractIndex],
-            (unsigned int)effectiveSize,
-            output,
-            32);
+        KangarooTwelve(contractStates[contractIndex], (unsigned int)effectiveSize, output, 32);
     }
 }
 

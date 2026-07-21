@@ -24,9 +24,7 @@ void logColorToScreen(std::string type, std::string msg);
 namespace Wasm::Runtime
 {
 
-static constexpr unsigned long long WASM_IO_CAPACITY =
-    (unsigned long long)WASM_DISPATCH_FRAME_CAPACITY
-    + WASM_ARENA_SIZE;
+static constexpr unsigned long long WASM_IO_CAPACITY = (unsigned long long)WASM_DISPATCH_FRAME_CAPACITY + WASM_ARENA_SIZE;
 
 static bool engineReady = false;
 static ffi_cif dispatchCallInterface;
@@ -151,8 +149,7 @@ static bool resolveArenaLimit(
     const MemoryLayout& fixedLayout,
     uint32_t& arenaLimit)
 {
-    const unsigned long long limit =
-        (unsigned long long)fixedLayout.arenaOffset + WASM_ARENA_SIZE;
+    const unsigned long long limit = (unsigned long long)fixedLayout.arenaOffset + WASM_ARENA_SIZE;
     if (limit > 0xffffffffull)
     {
         return false;
@@ -187,14 +184,9 @@ static bool resolveIoSizes(
             return false;
     }
 
-    if (sizes.input > WASM_INPUT_CAPACITY
-        || sizes.output > WASM_OUTPUT_CAPACITY)
+    if (sizes.input > WASM_INPUT_CAPACITY || sizes.output > WASM_OUTPUT_CAPACITY)
     {
-        logColorToScreen(
-            "ERROR",
-            "LITEWASM dispatch in/out exceeds io region idx=" + std::to_string(contractIndex)
-                + " in=" + std::to_string(sizes.input)
-                + " out=" + std::to_string(sizes.output));
+        logColorToScreen("ERROR", "LITEWASM dispatch in/out exceeds io region idx=" + std::to_string(contractIndex) + " in=" + std::to_string(sizes.input) + " out=" + std::to_string(sizes.output));
         return false;
     }
 

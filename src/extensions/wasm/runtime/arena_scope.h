@@ -9,8 +9,7 @@ namespace Wasm::Runtime
 static constexpr uint32_t WASM_INPUT_CAPACITY = 64u * 1024u;
 static constexpr uint32_t WASM_OUTPUT_CAPACITY = 64u * 1024u;
 static constexpr uint32_t WASM_LOCALS_CAPACITY = 32u * 1024u;
-static constexpr uint32_t WASM_DISPATCH_FRAME_CAPACITY =
-    WASM_INPUT_CAPACITY + WASM_OUTPUT_CAPACITY + WASM_LOCALS_CAPACITY;
+static constexpr uint32_t WASM_DISPATCH_FRAME_CAPACITY = WASM_INPUT_CAPACITY + WASM_OUTPUT_CAPACITY + WASM_LOCALS_CAPACITY;
 
 struct MemoryLayout
 {

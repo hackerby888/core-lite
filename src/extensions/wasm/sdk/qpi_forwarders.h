@@ -188,12 +188,7 @@ long long QPI::QpiContextProcedureCall::issueAsset(
     long long numberOfShares,
     unsigned long long unitOfMeasurement) const
 {
-    return lh_issueAsset(
-        assetName,
-        &issuer,
-        (unsigned int)(unsigned char)decimals,
-        numberOfShares,
-        unitOfMeasurement);
+    return lh_issueAsset(assetName, &issuer, (unsigned int)(unsigned char)decimals, numberOfShares, unitOfMeasurement);
 }
 
 long long QPI::QpiContextFunctionCall::numberOfShares(
@@ -212,13 +207,7 @@ long long QPI::QpiContextFunctionCall::numberOfPossessedShares(
     unsigned short ownershipManagingContractIndex,
     unsigned short possessionManagingContractIndex) const
 {
-    return lh_numberOfPossessedShares(
-        assetName,
-        &issuer,
-        &owner,
-        &possessor,
-        ownershipManagingContractIndex,
-        possessionManagingContractIndex);
+    return lh_numberOfPossessedShares(assetName, &issuer, &owner, &possessor, ownershipManagingContractIndex, possessionManagingContractIndex);
 }
 
 long long QPI::QpiContextProcedureCall::transferShareOwnershipAndPossession(
@@ -229,13 +218,7 @@ long long QPI::QpiContextProcedureCall::transferShareOwnershipAndPossession(
     long long numberOfShares,
     const m256i& newOwnerAndPossessor) const
 {
-    return lh_transferShares(
-        assetName,
-        &issuer,
-        &owner,
-        &possessor,
-        numberOfShares,
-        &newOwnerAndPossessor);
+    return lh_transferShares(assetName, &issuer, &owner, &possessor, numberOfShares, &newOwnerAndPossessor);
 }
 
 long long QPI::QpiContextProcedureCall::acquireShares(
@@ -247,15 +230,7 @@ long long QPI::QpiContextProcedureCall::acquireShares(
     unsigned short sourcePossessionManagingContractIndex,
     long long offeredFee) const
 {
-    return lh_acquireShares(
-        asset.assetName,
-        &asset.issuer,
-        &owner,
-        &possessor,
-        numberOfShares,
-        sourceOwnershipManagingContractIndex,
-        sourcePossessionManagingContractIndex,
-        offeredFee);
+    return lh_acquireShares(asset.assetName, &asset.issuer, &owner, &possessor, numberOfShares, sourceOwnershipManagingContractIndex, sourcePossessionManagingContractIndex, offeredFee);
 }
 
 long long QPI::QpiContextProcedureCall::releaseShares(
@@ -267,15 +242,7 @@ long long QPI::QpiContextProcedureCall::releaseShares(
     unsigned short destinationPossessionManagingContractIndex,
     long long offeredFee) const
 {
-    return lh_releaseShares(
-        asset.assetName,
-        &asset.issuer,
-        &owner,
-        &possessor,
-        numberOfShares,
-        destinationOwnershipManagingContractIndex,
-        destinationPossessionManagingContractIndex,
-        offeredFee);
+    return lh_releaseShares(asset.assetName, &asset.issuer, &owner, &possessor, numberOfShares, destinationOwnershipManagingContractIndex, destinationPossessionManagingContractIndex, offeredFee);
 }
 
 unsigned char QPI::QpiContextFunctionCall::dayOfWeek(
@@ -359,13 +326,7 @@ QPI::sint64 QPI::QpiContextProcedureCall::__qpiQueryOracle(
     unsigned int notificationProcedureId,
     unsigned int timeoutMilliseconds) const
 {
-    return lh_queryOracle(
-        OracleInterface::oracleInterfaceIndex,
-        &query,
-        (unsigned int)sizeof(typename OracleInterface::OracleQuery),
-        notificationProcedureId,
-        timeoutMilliseconds,
-        OracleInterface::getQueryFee(query));
+    return lh_queryOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), notificationProcedureId, timeoutMilliseconds, OracleInterface::getQueryFee(query));
 }
 
 template <typename OracleInterface, typename ContractStateType, typename LocalsType>
@@ -381,16 +342,7 @@ QPI::sint32 QPI::QpiContextProcedureCall::__qpiSubscribeOracle(
     unsigned int notificationPeriodInMilliseconds,
     bool notifyWithPreviousReply) const
 {
-    return lh_subscribeOracle(
-        OracleInterface::oracleInterfaceIndex,
-        &query,
-        (unsigned int)sizeof(typename OracleInterface::OracleQuery),
-        notificationProcedureId,
-        notificationPeriodInMilliseconds,
-        notifyWithPreviousReply ? 1u : 0u,
-        OracleInterface::getSubscriptionFee(
-            query,
-            notificationPeriodInMilliseconds));
+    return lh_subscribeOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), notificationProcedureId, notificationPeriodInMilliseconds, notifyWithPreviousReply ? 1u : 0u, OracleInterface::getSubscriptionFee(query, notificationPeriodInMilliseconds));
 }
 
 template <typename OracleInterface>
@@ -398,10 +350,7 @@ bool QPI::QpiContextFunctionCall::getOracleQuery(
     QPI::sint64 queryId,
     typename OracleInterface::OracleQuery& query) const
 {
-    return lh_getOracleQuery(
-        queryId,
-        &query,
-        (unsigned int)sizeof(typename OracleInterface::OracleQuery)) != 0;
+    return lh_getOracleQuery(queryId, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery)) != 0;
 }
 
 template <typename OracleInterface>
@@ -409,10 +358,7 @@ bool QPI::QpiContextFunctionCall::getOracleReply(
     QPI::sint64 queryId,
     typename OracleInterface::OracleReply& reply) const
 {
-    return lh_getOracleReply(
-        queryId,
-        &reply,
-        (unsigned int)sizeof(typename OracleInterface::OracleReply)) != 0;
+    return lh_getOracleReply(queryId, &reply, (unsigned int)sizeof(typename OracleInterface::OracleReply)) != 0;
 }
 
 bool QPI::QpiContextProcedureCall::distributeDividends(
@@ -426,10 +372,7 @@ QPI::uint16 QPI::QpiContextProcedureCall::setShareholderProposal(
     const QPI::Array<QPI::uint8, 1024>& proposalDataBuffer,
     QPI::sint64 invocationReward) const
 {
-    return (QPI::uint16)lh_liteSetShareholderProposal(
-        contractIndex,
-        &proposalDataBuffer,
-        invocationReward);
+    return (QPI::uint16)lh_liteSetShareholderProposal(contractIndex, &proposalDataBuffer, invocationReward);
 }
 
 bool QPI::QpiContextProcedureCall::setShareholderVotes(
@@ -437,11 +380,7 @@ bool QPI::QpiContextProcedureCall::setShareholderVotes(
     const QPI::ProposalMultiVoteDataV1& voteData,
     QPI::sint64 invocationReward) const
 {
-    return lh_liteSetShareholderVotes(
-        contractIndex,
-        &voteData,
-        sizeof(voteData),
-        invocationReward) != 0;
+    return lh_liteSetShareholderVotes(contractIndex, &voteData, sizeof(voteData), invocationReward) != 0;
 }
 
 

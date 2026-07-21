@@ -7,8 +7,7 @@ namespace Wasm::Runtime
 
 static inline unsigned int oracleContractIndex(const void* context)
 {
-    return ((const QPI::QpiContextProcedureCall*)context)
-        ->__qpiCurrentContractIndex();
+    return ((const QPI::QpiContextProcedureCall*)context)->__qpiCurrentContractIndex();
 }
 
 static long long queryOracle(
@@ -40,9 +39,7 @@ static long long queryOracle(
     const long long fee = OI::getOracleQueryFeeFunc[interfaceIndex](query);
     const int contractSpectrumIndex = ::spectrumIndex(contractId);
 
-    if (fee < MIN_ORACLE_QUERY_FEE
-        || contractSpectrumIndex < 0
-        || !decreaseEnergy(contractSpectrumIndex, fee))
+    if (fee < MIN_ORACLE_QUERY_FEE || contractSpectrumIndex < 0 || !decreaseEnergy(contractSpectrumIndex, fee))
     {
         return -1;
     }
@@ -51,13 +48,7 @@ static long long queryOracle(
 
     logger.logQuTransfer(quTransfer);
 
-    const long long queryId = oracleEngine.startContractQuery(
-        (uint16_t)contractIndex,
-        interfaceIndex,
-        query,
-        (uint16_t)querySize,
-        timeoutMilliseconds,
-        notificationProcedureId);
+    const long long queryId = oracleEngine.startContractQuery((uint16_t)contractIndex, interfaceIndex, query, (uint16_t)querySize, timeoutMilliseconds, notificationProcedureId);
     if (queryId < 0 && fee > 0)
     {
         oracleEngine.refundFees(contractId, fee);
@@ -86,9 +77,7 @@ static unsigned int getOracleQuery(
     void* output,
     unsigned int size)
 {
-    return oracleEngine.getOracleQuery(queryId, output, (uint16_t)size)
-        ? 1u
-        : 0u;
+    return oracleEngine.getOracleQuery(queryId, output, (uint16_t)size) ? 1u : 0u;
 }
 
 static unsigned int getOracleReply(
@@ -97,9 +86,7 @@ static unsigned int getOracleReply(
     void* output,
     unsigned int size)
 {
-    return oracleEngine.getOracleReply(queryId, output, (uint16_t)size)
-        ? 1u
-        : 0u;
+    return oracleEngine.getOracleReply(queryId, output, (uint16_t)size) ? 1u : 0u;
 }
 
 } // namespace Wasm::Runtime

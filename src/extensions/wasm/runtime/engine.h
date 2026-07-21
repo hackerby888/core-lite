@@ -63,19 +63,14 @@ namespace Wasm::Runtime
     registerSystemProcedures(slot, contractIndex);
 
     slot.loaded = true;
-    logColorToScreen(
-        "INFO",
-        "LITEWASM: slot loaded ("
-            + std::to_string(slot.entryCount)
-            + " user entries)");
+    logColorToScreen("INFO", "LITEWASM: slot loaded (" + std::to_string(slot.entryCount) + " user entries)");
     return true;
 }
 
 static inline bool hasPendingMigration(unsigned int contractIndex)
 {
     const int slotOffset = engineSlotOffset(contractIndex);
-    return slotOffset >= 0
-        && engineSlots[slotOffset].pendingOldState != nullptr;
+    return slotOffset >= 0 && engineSlots[slotOffset].pendingOldState != nullptr;
 }
 
 [[maybe_unused]] static void runPendingMigration(unsigned int contractIndex)
@@ -93,9 +88,7 @@ static inline bool hasPendingMigration(unsigned int contractIndex)
     free(slot.pendingOldState);
     slot.pendingOldState = nullptr;
     slot.pendingOldStateSize = 0;
-    logColorToScreen(
-        "INFO",
-        "LITEWASM: migrate complete idx=" + std::to_string(contractIndex));
+    logColorToScreen("INFO", "LITEWASM: migrate complete idx=" + std::to_string(contractIndex));
 }
 
 [[maybe_unused]] static bool initializeEngine()
@@ -110,12 +103,7 @@ static inline bool hasPendingMigration(unsigned int contractIndex)
         dispatchCallArguments[argumentIndex] = &ffi_type_pointer;
     }
 
-    if (ffi_prep_cif(
-            &dispatchCallInterface,
-            FFI_DEFAULT_ABI,
-            5,
-            &ffi_type_void,
-            dispatchCallArguments) != FFI_OK)
+    if (ffi_prep_cif(&dispatchCallInterface, FFI_DEFAULT_ABI, 5, &ffi_type_void, dispatchCallArguments) != FFI_OK)
     {
         logToConsole(L"LITEWASM: libffi cif prep failed");
         return false;
@@ -126,12 +114,7 @@ static inline bool hasPendingMigration(unsigned int contractIndex)
         migrationCallArguments[argumentIndex] = &ffi_type_pointer;
     }
 
-    if (ffi_prep_cif(
-            &migrationCallInterface,
-            FFI_DEFAULT_ABI,
-            4,
-            &ffi_type_void,
-            migrationCallArguments) != FFI_OK)
+    if (ffi_prep_cif(&migrationCallInterface, FFI_DEFAULT_ABI, 4, &ffi_type_void, migrationCallArguments) != FFI_OK)
     {
         logToConsole(L"LITEWASM: migrate cif prep failed");
         return false;

@@ -45,88 +45,40 @@ static void dispatchSystemProcedure(
     switch (systemProcedureId)
     {
         case WASM_SYSTEM_PROCEDURE_INITIALIZE:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__initialize,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__initialize, input, output, locals);
             break;
         case WASM_SYSTEM_PROCEDURE_BEGIN_EPOCH:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__beginEpoch,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__beginEpoch, input, output, locals);
             break;
         case WASM_SYSTEM_PROCEDURE_END_EPOCH:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__endEpoch,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__endEpoch, input, output, locals);
             break;
         case WASM_SYSTEM_PROCEDURE_BEGIN_TICK:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__beginTick,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__beginTick, input, output, locals);
             break;
         case WASM_SYSTEM_PROCEDURE_END_TICK:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__endTick,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__endTick, input, output, locals);
             break;
         case WASM_SYSTEM_PROCEDURE_PRE_RELEASE_SHARES:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__preReleaseShares,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__preReleaseShares, input, output, locals);
             break;
         case WASM_SYSTEM_PROCEDURE_PRE_ACQUIRE_SHARES:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__preAcquireShares,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__preAcquireShares, input, output, locals);
             break;
         case WASM_SYSTEM_PROCEDURE_POST_RELEASE_SHARES:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__postReleaseShares,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__postReleaseShares, input, output, locals);
             break;
         case WASM_SYSTEM_PROCEDURE_POST_ACQUIRE_SHARES:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__postAcquireShares,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__postAcquireShares, input, output, locals);
             break;
         case WASM_SYSTEM_PROCEDURE_POST_INCOMING_TRANSFER:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__postIncomingTransfer,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__postIncomingTransfer, input, output, locals);
             break;
         case WASM_SYSTEM_PROCEDURE_SET_SHAREHOLDER_PROPOSAL:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__setShareholderProposal,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__setShareholderProposal, input, output, locals);
             break;
         case WASM_SYSTEM_PROCEDURE_SET_SHAREHOLDER_VOTES:
-            callSystemProcedure(
-                (SystemProcedure)(void*)CONTRACT_STATE_TYPE::__setShareholderVotes,
-                input,
-                output,
-                locals);
+            callSystemProcedure((SystemProcedure)(void*)CONTRACT_STATE_TYPE::__setShareholderVotes, input, output, locals);
             break;
         default:
             break;
@@ -147,8 +99,7 @@ static void dispatchUserFunction(
     void* output,
     void* locals)
 {
-    const ModuleEntry* entry =
-        findUserEntry(inputType, DispatchKind::UserFunction);
+    const ModuleEntry* entry = findUserEntry(inputType, DispatchKind::UserFunction);
     if (!entry)
     {
         return;
@@ -166,8 +117,7 @@ static void dispatchUserProcedure(
     void* output,
     void* locals)
 {
-    const ModuleEntry* entry =
-        findUserEntry(inputType, DispatchKind::UserProcedure);
+    const ModuleEntry* entry = findUserEntry(inputType, DispatchKind::UserProcedure);
     if (!entry)
     {
         return;

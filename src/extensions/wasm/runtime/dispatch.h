@@ -129,9 +129,7 @@ struct GuestContextScope
             return;
         }
 
-        const void* guestContext = wasm_runtime_addr_app_to_native(
-            slot.instance,
-            slot.contextOffset);
+        const void* guestContext = wasm_runtime_addr_app_to_native(slot.instance, slot.contextOffset);
         if (guestContext)
         {
             copyMem(savedContext, guestContext, sizeof(savedContext));
@@ -143,10 +141,7 @@ struct GuestContextScope
     {
         if (restore)
         {
-            copyMem(
-                wasm_runtime_addr_app_to_native(slot.instance, slot.contextOffset),
-                savedContext,
-                sizeof(savedContext));
+            copyMem(wasm_runtime_addr_app_to_native(slot.instance, slot.contextOffset), savedContext, sizeof(savedContext));
         }
     }
 
@@ -192,26 +187,16 @@ static void prepareMemory(
 {
     if (context && slot.contextOffset)
     {
-        copyMem(
-            wasm_runtime_addr_app_to_native(slot.instance, slot.contextOffset),
-            context,
-            sizeof(QPI::QpiContext));
+        copyMem(wasm_runtime_addr_app_to_native(slot.instance, slot.contextOffset), context, sizeof(QPI::QpiContext));
     }
 
     if (sizes.input)
     {
-        copyMem(
-            wasm_runtime_addr_app_to_native(slot.instance, layout.inputOffset),
-            input,
-            sizes.input);
+        copyMem(wasm_runtime_addr_app_to_native(slot.instance, layout.inputOffset), input, sizes.input);
     }
 
-    setMem(
-        wasm_runtime_addr_app_to_native(slot.instance, layout.outputOffset),
-        sizes.output ? sizes.output : 1,
-        0);
-    zeroEntryLocals(
-        wasm_runtime_addr_app_to_native(slot.instance, layout.localsOffset));
+    setMem(wasm_runtime_addr_app_to_native(slot.instance, layout.outputOffset), sizes.output ? sizes.output : 1, 0);
+    zeroEntryLocals(wasm_runtime_addr_app_to_native(slot.instance, layout.localsOffset));
 }
 
 static void finalizeMemory(
@@ -224,15 +209,10 @@ static void finalizeMemory(
 {
     if (sizes.output)
     {
-        copyMem(
-            output,
-            wasm_runtime_addr_app_to_native(slot.instance, layout.outputOffset),
-            sizes.output);
+        copyMem(output, wasm_runtime_addr_app_to_native(slot.instance, layout.outputOffset), sizes.output);
     }
 
-    contractStates[contractIndex] = (unsigned char*)wasm_runtime_addr_app_to_native(
-        slot.instance,
-        slot.stateOffset);
+    contractStates[contractIndex] = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset);
 
     if (kind != DispatchKind::UserFunction)
     {
@@ -277,8 +257,7 @@ static void beginDispatchTrace(
 
     if (sizes.input && input)
     {
-        const unsigned int capturedSize =
-            sizes.input < WASM_TRACE_CAPTURE_SIZE ? sizes.input : WASM_TRACE_CAPTURE_SIZE;
+        const unsigned int capturedSize = sizes.input < WASM_TRACE_CAPTURE_SIZE ? sizes.input : WASM_TRACE_CAPTURE_SIZE;
         copyMem(trace.entry.inputHead, input, capturedSize);
     }
 
@@ -290,9 +269,7 @@ static void beginDispatchTrace(
     }
 
     callContext.trace = &trace.entry;
-    trace.state = (unsigned char*)wasm_runtime_addr_app_to_native(
-        slot.instance,
-        slot.stateOffset);
+    trace.state = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset);
     trace.startedAt = std::chrono::steady_clock::now();
 }
 
@@ -310,18 +287,12 @@ static void finishDispatchTrace(
 
     trace.entry.ok = slot.lastTrap.empty();
     trace.entry.trap = slot.lastTrap;
-    trace.entry.executionNanoseconds =
-        (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - trace.startedAt).count();
+    trace.entry.executionNanoseconds = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - trace.startedAt).count();
 
     if (sizes.output)
     {
-        const unsigned int capturedSize =
-            sizes.output < WASM_TRACE_CAPTURE_SIZE ? sizes.output : WASM_TRACE_CAPTURE_SIZE;
-        copyMem(
-            trace.entry.outputHead,
-            wasm_runtime_addr_app_to_native(slot.instance, layout.outputOffset),
-            capturedSize);
+        const unsigned int capturedSize = sizes.output < WASM_TRACE_CAPTURE_SIZE ? sizes.output : WASM_TRACE_CAPTURE_SIZE;
+        copyMem(trace.entry.outputHead, wasm_runtime_addr_app_to_native(slot.instance, layout.outputOffset), capturedSize);
     }
 
     callContext.trace = nullptr;
@@ -362,14 +333,10 @@ static void handleDispatchResult(
     }
 
     const char* exception = wasm_runtime_get_exception(slot.instance);
-    slot.lastTrap = std::string("it=") + std::to_string(inputType)
-        + " kind=" + std::to_string((unsigned int)kind)
-        + (exception ? std::string(" — ") + exception : std::string(" — trap"));
+    slot.lastTrap = std::string("it=") + std::to_string(inputType) + " kind=" + std::to_string((unsigned int)kind) + (exception ? std::string(" — ") + exception : std::string(" — trap"));
 
     // WAMR prints the original Wasm offsets before unwinding so Qinit can map them through DWARF.
-    logColorToScreen(
-        "ERROR",
-        "LITEWASM dispatch trap idx=" + std::to_string(contractIndex) + " " + slot.lastTrap);
+    logColorToScreen("ERROR", "LITEWASM dispatch trap idx=" + std::to_string(contractIndex) + " " + slot.lastTrap);
     wasm_runtime_clear_exception(slot.instance);
 }
 
@@ -385,11 +352,8 @@ static void handleMigrationResult(
     }
 
     const char* exception = wasm_runtime_get_exception(slot.instance);
-    slot.lastTrap = std::string("MIGRATE")
-        + (exception ? std::string(" — ") + exception : std::string(" — trap"));
-    logColorToScreen(
-        "ERROR",
-        "LITEWASM migrate trap idx=" + std::to_string(contractIndex) + " " + slot.lastTrap);
+    slot.lastTrap = std::string("MIGRATE") + (exception ? std::string(" — ") + exception : std::string(" — trap"));
+    logColorToScreen("ERROR", "LITEWASM migrate trap idx=" + std::to_string(contractIndex) + " " + slot.lastTrap);
     wasm_runtime_clear_exception(slot.instance);
 }
 
@@ -403,9 +367,7 @@ static void dispatchMigration(
     const uint32_t oldStateSize = slot.migrationOldStateSize;
     if (oldStateSize > WASM_ARENA_SIZE)
     {
-        logColorToScreen(
-            "ERROR",
-            "LITEWASM migrate old-state exceeds arena idx=" + std::to_string(contractIndex));
+        logColorToScreen("ERROR", "LITEWASM migrate old-state exceeds arena idx=" + std::to_string(contractIndex));
         return;
     }
 
@@ -419,61 +381,33 @@ static void dispatchMigration(
     uint32_t arenaLimit = 0;
     if (!resolveArenaLimit(layout, arenaLimit))
     {
-        logColorToScreen(
-            "ERROR",
-            "LITEWASM migrate arena exceeds Wasm32 memory idx="
-                + std::to_string(contractIndex));
+        logColorToScreen("ERROR", "LITEWASM migrate arena exceeds Wasm32 memory idx=" + std::to_string(contractIndex));
         return;
     }
 
-    const uint32_t migrationArenaStart =
-        layout.arenaOffset + ((oldStateSize + 15u) & ~15u);
-    CallContext callContext = createCallContext(
-        context,
-        migrationArenaStart,
-        arenaLimit);
+    const uint32_t migrationArenaStart = layout.arenaOffset + ((oldStateSize + 15u) & ~15u);
+    CallContext callContext = createCallContext(context, migrationArenaStart, arenaLimit);
     DispatchDepthScope dispatchDepth(slotCallDepth[slotOffset]);
 
     bindEnvironment(environment.execEnv, callContext);
 
     if (context && slot.contextOffset)
     {
-        copyMem(
-            wasm_runtime_addr_app_to_native(slot.instance, slot.contextOffset),
-            context,
-            sizeof(QPI::QpiContext));
+        copyMem(wasm_runtime_addr_app_to_native(slot.instance, slot.contextOffset), context, sizeof(QPI::QpiContext));
     }
 
     if (oldStateSize)
     {
-        copyMem(
-            wasm_runtime_addr_app_to_native(slot.instance, layout.arenaOffset),
-            oldState,
-            oldStateSize);
+        copyMem(wasm_runtime_addr_app_to_native(slot.instance, layout.arenaOffset), oldState, oldStateSize);
     }
 
-    setMem(
-        wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset),
-        slot.stateSize,
-        0);
-    setMem(
-        wasm_runtime_addr_app_to_native(slot.instance, layout.localsOffset),
-        WASM_LOCALS_CAPACITY,
-        0);
+    setMem(wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset), slot.stateSize, 0);
+    setMem(wasm_runtime_addr_app_to_native(slot.instance, layout.localsOffset), WASM_LOCALS_CAPACITY, 0);
 
-    const bool succeeded = invokeDispatch(
-        slot,
-        environment.execEnv,
-        DispatchKind::Migration,
-        0,
-        layout.arenaOffset,
-        0,
-        layout.localsOffset);
+    const bool succeeded = invokeDispatch(slot, environment.execEnv, DispatchKind::Migration, 0, layout.arenaOffset, 0, layout.localsOffset);
     handleMigrationResult(slot, contractIndex, succeeded);
 
-    contractStates[contractIndex] = (unsigned char*)wasm_runtime_addr_app_to_native(
-        slot.instance,
-        slot.stateOffset);
+    contractStates[contractIndex] = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset);
     hostServices.markDirty(contractIndex);
 }
 
@@ -524,63 +458,26 @@ static void dispatchCall(
     uint32_t arenaLimit = 0;
     if (!resolveArenaLimit(fixedLayout, arenaLimit))
     {
-        logColorToScreen(
-            "ERROR",
-            "LITEWASM dispatch arena exceeds Wasm32 memory idx="
-                + std::to_string(contractIndex));
+        logColorToScreen("ERROR", "LITEWASM dispatch arena exceeds Wasm32 memory idx=" + std::to_string(contractIndex));
         return;
     }
 
     const bool nested = slotCallDepth[slotOffset] != 0;
     CallContext* parentContext = slotCallContexts[slotOffset];
     MemoryLayout layout = fixedLayout;
-    if (nested
-        && !nestedMemoryLayout(
-            fixedLayout,
-            arenaLimit,
-            parentContext ? parentContext->arenaTop : 0,
-            layout))
+    if (nested && !nestedMemoryLayout(fixedLayout, arenaLimit, parentContext ? parentContext->arenaTop : 0, layout))
     {
-        logColorToScreen(
-            "ERROR",
-            "LITEWASM nested dispatch frame exceeds arena idx="
-                + std::to_string(contractIndex));
+        logColorToScreen("ERROR", "LITEWASM nested dispatch frame exceeds arena idx=" + std::to_string(contractIndex));
         return;
     }
 
-    DispatchFrameScope frame(
-        slot,
-        environment.execEnv,
-        slotOffset,
-        static_cast<const QPI::QpiContext*>(context),
-        layout,
-        arenaLimit,
-        nested);
+    DispatchFrameScope frame(slot, environment.execEnv, slotOffset, static_cast<const QPI::QpiContext*>(context), layout, arenaLimit, nested);
     DispatchTrace trace;
-    beginDispatchTrace(
-        slot,
-        contractIndex,
-        inputType,
-        kind,
-        context,
-        input,
-        sizes,
-        frame.callContext(),
-        trace);
+    beginDispatchTrace(slot, contractIndex, inputType, kind, context, input, sizes, frame.callContext(), trace);
     prepareMemory(slot, layout, context, input, sizes);
 
-    StateWriteScope pageProtection(
-        trace.tracksWrites,
-        trace.state,
-        slot.stateSize);
-    const bool succeeded = invokeDispatch(
-        slot,
-        environment.execEnv,
-        kind,
-        inputType,
-        layout.inputOffset,
-        layout.outputOffset,
-        layout.localsOffset);
+    StateWriteScope pageProtection(trace.tracksWrites, trace.state, slot.stateSize);
+    const bool succeeded = invokeDispatch(slot, environment.execEnv, kind, inputType, layout.inputOffset, layout.outputOffset, layout.localsOffset);
     handleDispatchResult(slot, contractIndex, inputType, kind, succeeded);
     pageProtection.finish(trace.entry);
 
@@ -591,29 +488,13 @@ static void dispatchCall(
 static void dispatchClosure(ffi_cif*, void*, void** arguments, void* userData)
 {
     EntryBinding* binding = (EntryBinding*)userData;
-    dispatchCall(
-        binding->contractIndex,
-        binding->inputType,
-        binding->kind,
-        *(const void**)arguments[0],
-        *(void**)arguments[1],
-        *(void**)arguments[2],
-        *(void**)arguments[3],
-        *(void**)arguments[4]);
+    dispatchCall(binding->contractIndex, binding->inputType, binding->kind, *(const void**)arguments[0], *(void**)arguments[1], *(void**)arguments[2], *(void**)arguments[3], *(void**)arguments[4]);
 }
 
 static void migrationClosure(ffi_cif*, void*, void** arguments, void* userData)
 {
     EntryBinding* binding = (EntryBinding*)userData;
-    dispatchCall(
-        binding->contractIndex,
-        0,
-        DispatchKind::Migration,
-        *(const void**)arguments[0],
-        *(void**)arguments[1],
-        *(void**)arguments[2],
-        nullptr,
-        *(void**)arguments[3]);
+    dispatchCall(binding->contractIndex, 0, DispatchKind::Migration, *(const void**)arguments[0], *(void**)arguments[1], *(void**)arguments[2], nullptr, *(void**)arguments[3]);
 }
 
 } // namespace Wasm::Runtime
