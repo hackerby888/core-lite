@@ -10,10 +10,10 @@ on:
         required: true
         default: "qinit-dev"
   push:
-    branches: [feat/dynamic-contracts]
+    branches: ["**"]
     tags: ["qinit-v*"]
   pull_request:
-    branches: [feat/dynamic-contracts]
+    branches: ["**"]
 
 permissions:
   contents: read
