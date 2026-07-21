@@ -154,6 +154,39 @@ struct GuestContextScope
     GuestContextScope& operator=(const GuestContextScope&) = delete;
 };
 
+class DispatchFrameScope
+{
+    GuestContextScope nestedGuestRestore;
+    CallContext context;
+    ArenaScope arenaFrame;
+    CallContextScope contextBinding;
+
+public:
+    DispatchFrameScope(
+        const EngineSlot& slot,
+        wasm_exec_env_t execEnv,
+        int slotOffset,
+        const QPI::QpiContext* qpiContext,
+        const MemoryLayout& fixedLayout,
+        const MemoryLayout& layout,
+        uint32_t arenaEnd)
+        : nestedGuestRestore(slot, slotCallDepth[slotOffset] != 0),
+          context(createCallContext(qpiContext, layout.arenaOffset, arenaEnd)),
+          arenaFrame(
+              slotCallDepth[slotOffset],
+              slot.arenaTop,
+              fixedLayout.arenaOffset,
+              layout.arenaOffset),
+          contextBinding(execEnv, slotOffset, context)
+    {
+    }
+
+    CallContext& callContext()
+    {
+        return context;
+    }
+};
+
 static void prepareMemory(
     const EngineSlot& slot,
     const MemoryLayout& layout,
@@ -524,21 +557,14 @@ static void dispatchCall(
         return;
     }
 
-    GuestContextScope guestContextScope(slot, nested);
-    CallContext callContext = createCallContext(
-        context,
-        layout.arenaOffset,
-        arenaEnd);
-    ArenaScope arenaScope(
-        slotCallDepth[slotOffset],
-        slot.arenaTop,
-        fixedLayout.arenaOffset,
-        layout.arenaOffset);
-
-    CallContextScope callContextScope(
+    DispatchFrameScope frame(
+        slot,
         environment.execEnv,
         slotOffset,
-        callContext);
+        static_cast<const QPI::QpiContext*>(context),
+        fixedLayout,
+        layout,
+        arenaEnd);
     DispatchTrace trace;
     beginDispatchTrace(
         slot,
@@ -548,7 +574,7 @@ static void dispatchCall(
         context,
         input,
         sizes,
-        callContext,
+        frame.callContext(),
         trace);
     prepareMemory(slot, layout, context, input, sizes);
 
@@ -568,7 +594,7 @@ static void dispatchCall(
     pageProtection.finish(trace.entry);
 
     finalizeMemory(slot, layout, contractIndex, kind, output, sizes);
-    finishDispatchTrace(slot, layout, sizes, callContext, trace);
+    finishDispatchTrace(slot, layout, sizes, frame.callContext(), trace);
 }
 
 static void dispatchClosure(ffi_cif*, void*, void** arguments, void* userData)
