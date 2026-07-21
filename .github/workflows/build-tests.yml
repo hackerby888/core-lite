@@ -7,14 +7,6 @@ name: BuildTests
 
 on:
   workflow_call:
-  push:
-    branches: [ "main", "develop" ]
-    paths-ignore:
-      - 'doc/**'
-  pull_request:
-    branches: [ "main", "develop" ]
-    paths-ignore:
-      - 'doc/**'
 
 env:
   # Path to the solution file relative to the root of the project.

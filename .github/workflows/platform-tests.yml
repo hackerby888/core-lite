@@ -1,26 +1,6 @@
 name: Platform tests
 
 on:
-  push:
-    branches: [main, develop]
-    paths:
-      - 'src/**'
-      - 'lib/**'
-      - 'test/**'
-      - 'cmake/**'
-      - 'CMakeLists.txt'
-      - 'vcpkg.json'
-      - '.github/workflows/platform-tests.yml'
-  pull_request:
-    branches: [main, develop]
-    paths:
-      - 'src/**'
-      - 'lib/**'
-      - 'test/**'
-      - 'cmake/**'
-      - 'CMakeLists.txt'
-      - 'vcpkg.json'
-      - '.github/workflows/platform-tests.yml'
   workflow_dispatch:
   workflow_call:
 

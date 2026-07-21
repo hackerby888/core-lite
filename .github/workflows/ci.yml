@@ -2,9 +2,8 @@ name: CI
 on:
   workflow_call:
   push:
-    branches: ["**", "!feat/dynamic-contracts"]
+    branches: ["**"]
   pull_request:
-    branches: ["**", "!feat/dynamic-contracts"]
 jobs:
   build-linux:
     uses: ./.github/workflows/linux-build.yml
@@ -20,3 +19,15 @@ jobs:
     uses: ./.github/workflows/windows-build.yml
     with:
       configuration: Release
+
+  windows-test-build:
+    uses: ./.github/workflows/build-tests.yml
+
+  contract-verification:
+    uses: ./.github/workflows/contract-verify.yml
+
+  platform-tests:
+    uses: ./.github/workflows/platform-tests.yml
+
+  dynamic-contract-tests:
+    uses: ./.github/workflows/dynamic-contracts.yml

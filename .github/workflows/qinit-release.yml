@@ -1,0 +1,106 @@
+name: qinit release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release tag"
+        required: true
+        default: "qinit-dev"
+  push:
+    tags: ["qinit-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  headers:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch wasi-sdk-29
+        run: |
+          curl -fsSL -o wasi-sdk.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-29/wasi-sdk-29.0-x86_64-linux.tar.gz
+          mkdir -p wasi-sdk
+          tar -xzf wasi-sdk.tar.gz -C wasi-sdk --strip-components=1
+      - name: Build header snapshot
+        run: |
+          WASM_CLANG="$PWD/wasi-sdk/bin/clang++" \
+          WASI_SYSROOT="$PWD/wasi-sdk/share/wasi-sysroot" \
+            bash scripts/qinit-header-snapshot.sh "$PWD/snapshot-out"
+          cp snapshot-out/core-headers.tar.gz ./core-headers.tar.gz
+          cp snapshot-out/core-headers.sha256 ./core-headers.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: headers
+          path: "core-headers.*"
+          if-no-files-found: error
+
+  publish:
+    needs:
+      - ci
+      - headers
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: 'release-node-*'
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: headers
+          path: dist
+      - name: Generate manifest
+        working-directory: dist
+        run: |
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/$TAG"
+          LINUX_X64_SHA=$(cat Qubic-linux-x64.sha256)
+          LINUX_ARM64_SHA=$(cat Qubic-linux-arm64.sha256)
+          DARWIN_ARM64_SHA=$(cat Qubic-darwin-arm64.sha256)
+          WINDOWS_X64_SHA=$(cat Qubic-windows-x64.tar.gz.sha256)
+          HEADERS_SHA=$(cat core-headers.sha256)
+          cat > qinit-manifest.json <<EOF
+          {
+            "version": "$TAG",
+            "node": { "url": "$BASE_URL/Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
+            "nodes": {
+              "linux-x64": { "url": "$BASE_URL/Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
+              "linux-arm64": { "url": "$BASE_URL/Qubic-linux-arm64", "sha256": "$LINUX_ARM64_SHA" },
+              "darwin-arm64": { "url": "$BASE_URL/Qubic-darwin-arm64", "sha256": "$DARWIN_ARM64_SHA" },
+              "windows-x64": { "url": "$BASE_URL/Qubic-windows-x64.tar.gz", "sha256": "$WINDOWS_X64_SHA" }
+            },
+            "headers": { "url": "$BASE_URL/core-headers.tar.gz", "sha256": "$HEADERS_SHA" }
+          }
+          EOF
+          cat qinit-manifest.json
+      - name: Publish release
+        working-directory: dist
+        run: |
+          gh release create "$TAG" \
+            Qubic-linux-x64 \
+            Qubic-linux-arm64 \
+            Qubic-darwin-arm64 \
+            Qubic-windows-x64.tar.gz \
+            core-headers.tar.gz \
+            qinit-manifest.json \
+            --title "$TAG" \
+            --notes "qinit turnkey: prebuilt dynamic-contract nodes (linux-x64 + linux-arm64 + darwin-arm64 + windows-x64) + core-header snapshot" \
+            || gh release upload "$TAG" \
+              Qubic-linux-x64 \
+              Qubic-linux-arm64 \
+              Qubic-darwin-arm64 \
+              Qubic-windows-x64.tar.gz \
+              core-headers.tar.gz \
+              qinit-manifest.json \
+              --clobber
