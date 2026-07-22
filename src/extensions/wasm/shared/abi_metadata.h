@@ -1,7 +1,7 @@
 #pragma once
 
 // Canonical rows shared by WAMR registration and SDK metadata generation.
-#define WASM_ABI_VERSION 3u
+#define WASM_ABI_VERSION 4u
 
 // G/H selects generated or handwritten adapters; Q/I selects QPI-bound or infrastructure calls.
 
@@ -71,8 +71,8 @@
     HQ("initMiningSeed",                      initMiningSeed,      w_initMiningSeed,             "(i)")      \
     HQ("getOracleQueryStatus",                getOracleQueryStatus, w_getOracleQueryStatus,      "(I)i")     \
     HQ("unsubscribeOracle",                   unsubscribeOracle,   w_unsubscribeOracle,          "(i)i")     \
-    HQ("queryOracle",                         queryOracle,         w_queryOracle,                "(iiiiiI)I") \
-    HQ("subscribeOracle",                     subscribeOracle,     w_subscribeOracle,            "(iiiiiiI)i") \
+    HQ("queryOracle",                         queryOracle,         w_queryOracle,                "(iiiiiiI)I") \
+    HQ("subscribeOracle",                     subscribeOracle,     w_subscribeOracle,            "(iiiiiiiiI)i") \
     HQ("getOracleQuery",                      getOracleQuery,      w_getOracleQuery,             "(Iii)i")   \
     HQ("getOracleReply",                      getOracleReply,      w_getOracleReply,             "(Iii)i")   \
     HQ("distributeDividends",                 distributeDividends, w_distributeDividends,        "(I)i")     \

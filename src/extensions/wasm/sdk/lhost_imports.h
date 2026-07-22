@@ -80,8 +80,8 @@ LH_IMPORT(computeMiningFunction) void lh_computeMiningFunction(const void* minin
 LH_IMPORT(initMiningSeed) void lh_initMiningSeed(const void* miningSeed32);
 LH_IMPORT(getOracleQueryStatus) unsigned int lh_getOracleQueryStatus(long long queryId);
 LH_IMPORT(unsubscribeOracle) unsigned int lh_unsubscribeOracle(int oracleSubscriptionId);
-LH_IMPORT(queryOracle) long long lh_queryOracle(unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int notificationProcId, unsigned int timeoutMillisec, long long fee);
-LH_IMPORT(subscribeOracle) int lh_subscribeOracle(unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int notificationProcId, unsigned int periodMillisec, unsigned int notifyPrev, long long fee);
+LH_IMPORT(queryOracle) long long lh_queryOracle(unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int replySize, unsigned int notificationProcId, unsigned int timeoutMillisec, long long fee);
+LH_IMPORT(subscribeOracle) int lh_subscribeOracle(unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int replySize, unsigned int timestampOffset, unsigned int notificationProcId, unsigned int periodMillisec, unsigned int notifyPrev, long long fee);
 LH_IMPORT(getOracleQuery) unsigned int lh_getOracleQuery(long long queryId, void* out, unsigned int size);
 LH_IMPORT(getOracleReply) unsigned int lh_getOracleReply(long long queryId, void* out, unsigned int size);
 LH_IMPORT(distributeDividends) unsigned int lh_distributeDividends(long long amountPerShare);

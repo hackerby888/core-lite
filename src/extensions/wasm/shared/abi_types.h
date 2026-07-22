@@ -161,6 +161,7 @@ struct HostServices
         unsigned int interfaceIndex,
         const void* query,
         unsigned int querySize,
+        unsigned int replySize,
         unsigned int notificationProcId,
         unsigned int timeoutMillisec,
         long long fee);
@@ -169,6 +170,8 @@ struct HostServices
         unsigned int interfaceIndex,
         const void* query,
         unsigned int querySize,
+        unsigned int replySize,
+        unsigned int timestampOffset,
         unsigned int notificationProcId,
         unsigned int periodMillisec,
         unsigned int notifyPrev,

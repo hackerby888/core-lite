@@ -326,7 +326,7 @@ QPI::sint64 QPI::QpiContextProcedureCall::__qpiQueryOracle(
     unsigned int notificationProcedureId,
     unsigned int timeoutMilliseconds) const
 {
-    return lh_queryOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), notificationProcedureId, timeoutMilliseconds, OracleInterface::getQueryFee(query));
+    return lh_queryOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), (unsigned int)sizeof(typename OracleInterface::OracleReply), notificationProcedureId, timeoutMilliseconds, OracleInterface::getQueryFee(query));
 }
 
 template <typename OracleInterface, typename ContractStateType, typename LocalsType>
@@ -342,7 +342,8 @@ QPI::sint32 QPI::QpiContextProcedureCall::__qpiSubscribeOracle(
     unsigned int notificationPeriodInMilliseconds,
     bool notifyWithPreviousReply) const
 {
-    return lh_subscribeOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), notificationProcedureId, notificationPeriodInMilliseconds, notifyWithPreviousReply ? 1u : 0u, OracleInterface::getSubscriptionFee(query, notificationPeriodInMilliseconds));
+    static_assert(sizeof(query.timestamp) == sizeof(QPI::DateAndTime));
+    return lh_subscribeOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), (unsigned int)sizeof(typename OracleInterface::OracleReply), (unsigned int)__builtin_offsetof(OracleInterface::OracleQuery, timestamp), notificationProcedureId, notificationPeriodInMilliseconds, notifyWithPreviousReply ? 1u : 0u, OracleInterface::getSubscriptionFee(query, notificationPeriodInMilliseconds));
 }
 
 template <typename OracleInterface>

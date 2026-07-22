@@ -440,6 +440,7 @@ static int64_t w_queryOracle(
     uint32_t interfaceIndex,
     uint32_t queryOffset,
     uint32_t querySize,
+    uint32_t replySize,
     uint32_t notificationProcedureId,
     uint32_t timeoutMilliseconds,
     int64_t fee)
@@ -447,7 +448,7 @@ static int64_t w_queryOracle(
     CallContext* callContext = activeCallContext(execEnv);
 
     traceHostCall(callContext, "queryOracle", "iface=" + std::to_string(interfaceIndex));
-    return hostServices.queryOracle(callContext->ctx, interfaceIndex, nativeAddress(execEnv, queryOffset), querySize, notificationProcedureId, timeoutMilliseconds, fee);
+    return hostServices.queryOracle(callContext->ctx, interfaceIndex, nativeAddress(execEnv, queryOffset), querySize, replySize, notificationProcedureId, timeoutMilliseconds, fee);
 }
 
 static int32_t w_subscribeOracle(
@@ -455,6 +456,8 @@ static int32_t w_subscribeOracle(
     uint32_t interfaceIndex,
     uint32_t queryOffset,
     uint32_t querySize,
+    uint32_t replySize,
+    uint32_t timestampOffset,
     uint32_t notificationProcedureId,
     uint32_t periodMilliseconds,
     uint32_t notifyWithPreviousReply,
@@ -463,7 +466,7 @@ static int32_t w_subscribeOracle(
     CallContext* callContext = activeCallContext(execEnv);
 
     traceHostCall(callContext, "subscribeOracle", "iface=" + std::to_string(interfaceIndex));
-    return hostServices.subscribeOracle(callContext->ctx, interfaceIndex, nativeAddress(execEnv, queryOffset), querySize, notificationProcedureId, periodMilliseconds, notifyWithPreviousReply, fee);
+    return hostServices.subscribeOracle(callContext->ctx, interfaceIndex, nativeAddress(execEnv, queryOffset), querySize, replySize, timestampOffset, notificationProcedureId, periodMilliseconds, notifyWithPreviousReply, fee);
 }
 
 static uint32_t w_getOracleQuery(
