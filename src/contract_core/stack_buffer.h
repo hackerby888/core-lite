@@ -98,8 +98,7 @@ struct StackBuffer
         char* allocatedBuffer = _buffer + _allocatedSize;
 
         // Store the previous size in the padded block footer.
-        SizeType* sizeBeforeAlloc = reinterpret_cast<SizeType*>(
-            _buffer + newSize - sizeof(SizeType));
+        SizeType* sizeBeforeAlloc = reinterpret_cast<SizeType*>(_buffer + newSize - sizeof(SizeType));
         *sizeBeforeAlloc = _allocatedSize;
         if (specialBlock)
             *sizeBeforeAlloc |= specialBlockFlag;

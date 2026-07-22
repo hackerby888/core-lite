@@ -55,9 +55,7 @@ static bool allocPoolWithErrorLog(
     size_t padded_size = (size + 64 - 1) & ~(64 - 1);
     if (useVirtualMem) {
 #ifdef _MSC_VER
-		*buffer = lazyCommit
-		    ? qVirtualAllocLazy(size)
-		    : qVirtualAlloc(size, commitMem);
+		*buffer = lazyCommit ? qVirtualAllocLazy(size) : qVirtualAlloc(size, commitMem);
 #else
 		(void)lazyCommit;
 		*buffer = qVirtualAlloc(size, commitMem);

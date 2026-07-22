@@ -14,13 +14,9 @@ int main(int argc, char** argv)
         return 1;
     }
     const DWORD processId = (DWORD)atoi(argv[1]);
-    const SIZE_T minimumBytes =
-        (argc > 2 ? (SIZE_T)atoll(argv[2]) : 50) * 1024 * 1024;
+    const SIZE_T minimumBytes = (argc > 2 ? (SIZE_T)atoll(argv[2]) : 50) * 1024 * 1024;
 
-    HANDLE process = OpenProcess(
-        PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-        FALSE,
-        processId);
+    HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
     if (!process)
     {
         printf("OpenProcess failed: %lu\n", GetLastError());
@@ -31,9 +27,7 @@ int main(int argc, char** argv)
     GetSystemInfo(&systemInfo);
     const SIZE_T pageSize = systemInfo.dwPageSize;
     const SIZE_T batchSize = 65536;
-    PSAPI_WORKING_SET_EX_INFORMATION* workingSet =
-        (PSAPI_WORKING_SET_EX_INFORMATION*)malloc(
-            batchSize * sizeof(*workingSet));
+    PSAPI_WORKING_SET_EX_INFORMATION* workingSet = (PSAPI_WORKING_SET_EX_INFORMATION*)malloc(batchSize * sizeof(*workingSet));
 
     unsigned char* address = 0;
     MEMORY_BASIC_INFORMATION memoryInfo;
@@ -55,22 +49,15 @@ int main(int argc, char** argv)
     DWORD groupType = 0;
     for (;;)
     {
-        const SIZE_T queried = VirtualQueryEx(
-            process,
-            address,
-            &memoryInfo,
-            sizeof(memoryInfo));
+        const SIZE_T queried = VirtualQueryEx(process, address, &memoryInfo, sizeof(memoryInfo));
         const int done = queried == 0;
         if (!done && memoryInfo.State == MEM_FREE)
         {
-            address = (unsigned char*)memoryInfo.BaseAddress
-                + memoryInfo.RegionSize;
+            address = (unsigned char*)memoryInfo.BaseAddress + memoryInfo.RegionSize;
             continue;
         }
 
-        if (done
-            || (unsigned char*)memoryInfo.AllocationBase
-                != currentAllocationBase)
+        if (done || (unsigned char*)memoryInfo.AllocationBase != currentAllocationBase)
         {
             if (currentAllocationBase && groupSize >= minimumBytes)
             {
@@ -87,8 +74,7 @@ int main(int argc, char** argv)
             {
                 break;
             }
-            currentAllocationBase =
-                (unsigned char*)memoryInfo.AllocationBase;
+            currentAllocationBase = (unsigned char*)memoryInfo.AllocationBase;
             groupSize = 0;
             groupCommit = 0;
             groupResident = 0;
@@ -102,20 +88,15 @@ int main(int argc, char** argv)
             groupCommit += memoryInfo.RegionSize;
             totalCommit += memoryInfo.RegionSize;
             SIZE_T pages = memoryInfo.RegionSize / pageSize;
-            unsigned char* pageAddress =
-                (unsigned char*)memoryInfo.BaseAddress;
+            unsigned char* pageAddress = (unsigned char*)memoryInfo.BaseAddress;
             while (pages)
             {
                 const SIZE_T count = pages > batchSize ? batchSize : pages;
                 for (SIZE_T i = 0; i < count; i++)
                 {
-                    workingSet[i].VirtualAddress =
-                        pageAddress + i * pageSize;
+                    workingSet[i].VirtualAddress = pageAddress + i * pageSize;
                 }
-                if (QueryWorkingSetEx(
-                        process,
-                        workingSet,
-                        (DWORD)(count * sizeof(*workingSet))))
+                if (QueryWorkingSetEx(process, workingSet, (DWORD)(count * sizeof(*workingSet))))
                 {
                     for (SIZE_T i = 0; i < count; i++)
                     {
@@ -130,12 +111,8 @@ int main(int argc, char** argv)
                 pages -= count;
             }
         }
-        address = (unsigned char*)memoryInfo.BaseAddress
-            + memoryInfo.RegionSize;
+        address = (unsigned char*)memoryInfo.BaseAddress + memoryInfo.RegionSize;
     }
-    printf(
-        "TOTAL commit=%llu MB resident=%llu MB\n",
-        totalCommit >> 20,
-        totalResident >> 20);
+    printf("TOTAL commit=%llu MB resident=%llu MB\n", totalCommit >> 20, totalResident >> 20);
     return 0;
 }

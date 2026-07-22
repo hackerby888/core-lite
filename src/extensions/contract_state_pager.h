@@ -85,9 +85,7 @@ public:
             releaseReservation(reservation, paddedSize);
             throw;
         }
-        ContractStatePager* previous = allPagers[contractIndex].exchange(
-            pager,
-            std::memory_order_acq_rel);
+        ContractStatePager* previous = allPagers[contractIndex].exchange(pager, std::memory_order_acq_rel);
         delete previous;
 
         return true;
@@ -132,10 +130,7 @@ public:
         if (state == BlockState::Clean)
         {
             BlockState expected = BlockState::Clean;
-            if (block.state.compare_exchange_strong(
-                    expected,
-                    BlockState::Dirty,
-                    std::memory_order_acq_rel))
+            if (block.state.compare_exchange_strong(expected, BlockState::Dirty, std::memory_order_acq_rel))
             {
                 pager->markBlockChanged(blockIndex);
                 block.recent.store(true, std::memory_order_relaxed);
@@ -204,8 +199,7 @@ public:
 
     static size_t getTotalRamUsage()
     {
-        return residentBytes.load(std::memory_order_relaxed)
-            + compressedBytes.load(std::memory_order_relaxed);
+        return residentBytes.load(std::memory_order_relaxed) + compressedBytes.load(std::memory_order_relaxed);
     }
 
     static size_t getResidentBytes()
@@ -229,13 +223,9 @@ public:
         for (size_t i = 0; i < blockCount; i++)
         {
             BlockState expected = BlockState::Dirty;
-            if (blocks[i].state.load(std::memory_order_acquire) == BlockState::Dirty
-                && protectBlock(i, false))
+            if (blocks[i].state.load(std::memory_order_acquire) == BlockState::Dirty && protectBlock(i, false))
             {
-                blocks[i].state.compare_exchange_strong(
-                    expected,
-                    BlockState::Clean,
-                    std::memory_order_acq_rel);
+                blocks[i].state.compare_exchange_strong(expected, BlockState::Clean, std::memory_order_acq_rel);
             }
         }
         return result;
@@ -290,13 +280,7 @@ private:
             throw std::runtime_error("VirtualAlloc(MEM_RESERVE) failed for contract state");
         }
 #else
-        void* state = mmap(
-            nullptr,
-            padded,
-            PROT_NONE,
-            MAP_PRIVATE | MAP_ANON,
-            -1,
-            0);
+        void* state = mmap(nullptr, padded, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (state == MAP_FAILED)
         {
             throw std::runtime_error("mmap failed for contract state");
@@ -330,9 +314,7 @@ private:
         for (size_t i = 0; i < blockCount; i++)
         {
             const BlockState state = blocks[i].state.load(std::memory_order_relaxed);
-            if (state == BlockState::Clean
-                || state == BlockState::Dirty
-                || state == BlockState::Evicting)
+            if (state == BlockState::Clean || state == BlockState::Dirty || state == BlockState::Evicting)
             {
                 residentBytes.fetch_sub(blockSize, std::memory_order_relaxed);
             }
@@ -354,10 +336,7 @@ private:
         XKCP::TurboSHAKE_Initialize(&queue, securityLevel);
         XKCP::TurboSHAKE_Absorb(&queue, zeroChunk, K12_chunkSize);
         XKCP::TurboSHAKE_AbsorbDomainSeparationByte(&queue, K12_suffixLeaf);
-        XKCP::TurboSHAKE_Squeeze(
-            &queue,
-            zeroIntermediate.intermediate,
-            capacityInBytes);
+        XKCP::TurboSHAKE_Squeeze(&queue, zeroIntermediate.intermediate, capacityInBytes);
 
         for (unsigned int i = 0; i < maxChunks; i++)
         {
@@ -373,9 +352,7 @@ private:
         for (size_t i = 0; i < contractCount; i++)
         {
             ContractStatePager* pager = allPagers[i].load(std::memory_order_acquire);
-            if (pager
-                && fault >= (uintptr_t)pager->_state
-                && fault < (uintptr_t)pager->_state + pager->paddedSize)
+            if (pager && fault >= (uintptr_t)pager->_state && fault < (uintptr_t)pager->_state + pager->paddedSize)
             {
                 return pager;
             }
@@ -408,16 +385,9 @@ private:
         unsigned char* address = blockAddress(blockIndex);
 #ifdef _WIN32
         DWORD oldProtection;
-        return VirtualProtect(
-            address,
-            blockSize,
-            writable ? PAGE_READWRITE : PAGE_READONLY,
-            &oldProtection) != 0;
+        return VirtualProtect(address, blockSize, writable ? PAGE_READWRITE : PAGE_READONLY, &oldProtection) != 0;
 #else
-        return mprotect(
-            address,
-            blockSize,
-            writable ? (PROT_READ | PROT_WRITE) : PROT_READ) == 0;
+        return mprotect(address, blockSize, writable ? (PROT_READ | PROT_WRITE) : PROT_READ) == 0;
 #endif
     }
 
@@ -425,10 +395,7 @@ private:
     {
         Block& block = blocks[blockIndex];
         BlockState expected = BlockState::Clean;
-        if (!block.state.compare_exchange_strong(
-                expected,
-                BlockState::Evicting,
-                std::memory_order_acq_rel))
+        if (!block.state.compare_exchange_strong(expected, BlockState::Evicting, std::memory_order_acq_rel))
         {
             return false;
         }
@@ -443,14 +410,7 @@ private:
         if (!zero)
         {
             compressed.resize(blockSize + BLOSC2_MAX_OVERHEAD);
-            const int compressedSize = blosc2_compress(
-                1,
-                BLOSC_NOSHUFFLE,
-                1,
-                address,
-                (int32_t)blockSize,
-                compressed.data(),
-                (int32_t)compressed.size());
+            const int compressedSize = blosc2_compress(1, BLOSC_NOSHUFFLE, 1, address, (int32_t)blockSize, compressed.data(), (int32_t)compressed.size());
             if (compressedSize <= 0)
             {
                 block.state.store(BlockState::Clean, std::memory_order_release);
@@ -468,9 +428,7 @@ private:
         block.compressed = std::move(compressed);
         residentBytes.fetch_sub(blockSize, std::memory_order_relaxed);
         compressedBytes.fetch_add(block.compressed.size(), std::memory_order_relaxed);
-        block.state.store(
-            zero ? BlockState::Zero : BlockState::Compressed,
-            std::memory_order_release);
+        block.state.store(zero ? BlockState::Zero : BlockState::Compressed, std::memory_order_release);
         return true;
     }
 
@@ -479,13 +437,7 @@ private:
 #ifdef _WIN32
         return VirtualFree(address, sharedBlockSize, MEM_DECOMMIT) != 0;
 #else
-        void* replacement = mmap(
-            address,
-            sharedBlockSize,
-            PROT_NONE,
-            MAP_PRIVATE | MAP_ANON | MAP_FIXED,
-            -1,
-            0);
+        void* replacement = mmap(address, sharedBlockSize, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
         return replacement == address;
 #endif
     }
@@ -507,11 +459,7 @@ private:
 
         if (previous == BlockState::Compressed)
         {
-            const int decompressedSize = blosc2_decompress(
-                block.compressed.data(),
-                (int32_t)block.compressed.size(),
-                address,
-                (int32_t)blockSize);
+            const int decompressedSize = blosc2_decompress(block.compressed.data(), (int32_t)block.compressed.size(), address, (int32_t)blockSize);
             if (decompressedSize != (int)blockSize)
             {
                 releasePhysicalBlock(address);
@@ -540,19 +488,9 @@ private:
     static bool commitBlock(unsigned char* address)
     {
 #ifdef _WIN32
-        return VirtualAlloc(
-            address,
-            sharedBlockSize,
-            MEM_COMMIT,
-            PAGE_READWRITE) == address;
+        return VirtualAlloc(address, sharedBlockSize, MEM_COMMIT, PAGE_READWRITE) == address;
 #else
-        return mmap(
-            address,
-            sharedBlockSize,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANON | MAP_FIXED,
-            -1,
-            0) == address;
+        return mmap(address, sharedBlockSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == address;
 #endif
     }
 
@@ -627,8 +565,7 @@ private:
         pagerRequest.blockIndex.store(blockIndex, std::memory_order_release);
         pagerRequest.success.store(false, std::memory_order_release);
 #ifdef _WIN32
-        if (!SetEvent(requestEvent)
-            || WaitForSingleObject(responseEvent, INFINITE) != WAIT_OBJECT_0)
+        if (!SetEvent(requestEvent) || WaitForSingleObject(responseEvent, INFINITE) != WAIT_OBJECT_0)
         {
             return false;
         }
@@ -671,9 +608,7 @@ private:
             return EXCEPTION_CONTINUE_SEARCH;
         }
         void* address = (void*)exception->ExceptionRecord->ExceptionInformation[1];
-        return handleFault(address)
-            ? EXCEPTION_CONTINUE_EXECUTION
-            : EXCEPTION_CONTINUE_SEARCH;
+        return handleFault(address) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
     }
 #endif
 
@@ -711,11 +646,9 @@ private:
     {
         static auto lastWarning = std::chrono::steady_clock::time_point::min();
         const auto now = std::chrono::steady_clock::now();
-        if (lastWarning == std::chrono::steady_clock::time_point::min()
-            || now - lastWarning >= std::chrono::minutes(1))
+        if (lastWarning == std::chrono::steady_clock::time_point::min() || now - lastWarning >= std::chrono::minutes(1))
         {
-            std::cerr << "Contract-state memory remains above --max-sc-mem; "
-                      << "compressed state stays in RAM\n";
+            std::cerr << "Contract-state memory remains above --max-sc-mem; " << "compressed state stays in RAM\n";
             lastWarning = now;
         }
     }

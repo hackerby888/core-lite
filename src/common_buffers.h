@@ -69,20 +69,9 @@ public:
 
         // Commit the development reorg arena on demand while keeping its capacity.
 #if defined(TESTNET) && defined(LITE_WASM_SC)
-        const bool allocationSucceeded = allocPoolWithErrorLog(
-            L"commonBuffers",
-            ptrSize + lockSize + bufSize,
-            (void**)&buffer,
-            __LINE__,
-            true,
-            true,
-            /*lazyCommit=*/true);
+        const bool allocationSucceeded = allocPoolWithErrorLog(L"commonBuffers", ptrSize + lockSize + bufSize, (void**)&buffer, __LINE__, true, true, /*lazyCommit=*/true);
 #else
-        const bool allocationSucceeded = allocPoolWithErrorLog(
-            L"commonBuffers",
-            ptrSize + lockSize + bufSize,
-            (void**)&buffer,
-            __LINE__);
+        const bool allocationSucceeded = allocPoolWithErrorLog(L"commonBuffers", ptrSize + lockSize + bufSize, (void**)&buffer, __LINE__);
 #endif
         if (!allocationSucceeded)
         {

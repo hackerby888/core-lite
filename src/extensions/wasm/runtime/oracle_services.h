@@ -46,12 +46,7 @@ static void callOracleNotification(
     }
 
     QPI::NoData output;
-    notification.procedure(
-        *(const QPI::QpiContextProcedureCall*)context,
-        contractStates[notification.contractIndex],
-        input,
-        &output,
-        nullptr);
+    notification.procedure(*(const QPI::QpiContextProcedureCall*)context, contractStates[notification.contractIndex], input, &output, nullptr);
 }
 
 static long long queryOracle(
@@ -74,8 +69,7 @@ static long long queryOracle(
         return -1;
     }
 
-    if (querySize != OI::oracleInterfaces[interfaceIndex].querySize
-        || replySize != OI::oracleInterfaces[interfaceIndex].replySize)
+    if (querySize != OI::oracleInterfaces[interfaceIndex].querySize || replySize != OI::oracleInterfaces[interfaceIndex].replySize)
     {
         return -1;
     }
@@ -148,14 +142,7 @@ static int subscribeOracle(
         const QuTransfer quTransfer = { contractId, m256i::zero(), fee };
         logger.logQuTransfer(quTransfer);
 
-        const int subscriptionId = oracleEngine.startContractSubscription(
-            (uint16_t)contractIndex,
-            interfaceIndex,
-            query,
-            (uint16_t)querySize,
-            periodMilliseconds,
-            notificationProcedureId,
-            (uint16_t)timestampOffset);
+        const int subscriptionId = oracleEngine.startContractSubscription((uint16_t)contractIndex, interfaceIndex, query, (uint16_t)querySize, periodMilliseconds, notificationProcedureId, (uint16_t)timestampOffset);
         if (subscriptionId >= 0)
         {
             if (notifyPrevious)
@@ -166,14 +153,7 @@ static int subscribeOracle(
                     alignas(8) unsigned char reply[MAX_ORACLE_REPLY_SIZE] = {};
                     if (oracleEngine.getOracleReply(subscription->lastRevealedQueryId, reply, (uint16_t)replySize))
                     {
-                        callOracleNotification(
-                            context,
-                            *notification,
-                            subscription->lastRevealedQueryId,
-                            subscriptionId,
-                            ORACLE_QUERY_STATUS_SUCCESS,
-                            reply,
-                            replySize);
+                        callOracleNotification(context, *notification, subscription->lastRevealedQueryId, subscriptionId, ORACLE_QUERY_STATUS_SUCCESS, reply, replySize);
                     }
                 }
             }

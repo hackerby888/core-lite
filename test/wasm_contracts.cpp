@@ -57,12 +57,7 @@ struct WasmFixture
         {
             return false;
         }
-        inst = wasm_runtime_instantiate(
-            mod,
-            64 * 1024,
-            1024 * 1024,
-            err,
-            sizeof err);
+        inst = wasm_runtime_instantiate(mod, 64 * 1024, 1024 * 1024, err, sizeof err);
         if (!inst)
         {
             return false;
@@ -167,23 +162,14 @@ TEST(WasmContracts, NestedCallUsesIsolatedFrame)
     const MemoryLayout fixed = fixedMemoryLayout(4096);
     const uint32_t parentArenaTop = fixed.arenaOffset + 21;
     const uint32_t expectedInput = (parentArenaTop + 7u) & ~7u;
-    const uint32_t arenaLimit =
-        expectedInput + WASM_DISPATCH_FRAME_CAPACITY + 64;
+    const uint32_t arenaLimit = expectedInput + WASM_DISPATCH_FRAME_CAPACITY + 64;
     MemoryLayout nested = {};
 
-    ASSERT_TRUE(nestedMemoryLayout(
-        fixed,
-        arenaLimit,
-        parentArenaTop,
-        nested));
+    ASSERT_TRUE(nestedMemoryLayout(fixed, arenaLimit, parentArenaTop, nested));
     EXPECT_EQ(nested.inputOffset, expectedInput);
     EXPECT_EQ(nested.outputOffset, expectedInput + WASM_INPUT_CAPACITY);
-    EXPECT_EQ(
-        nested.localsOffset,
-        expectedInput + WASM_INPUT_CAPACITY + WASM_OUTPUT_CAPACITY);
-    EXPECT_EQ(
-        nested.arenaOffset,
-        expectedInput + WASM_DISPATCH_FRAME_CAPACITY);
+    EXPECT_EQ(nested.localsOffset, expectedInput + WASM_INPUT_CAPACITY + WASM_OUTPUT_CAPACITY);
+    EXPECT_EQ(nested.arenaOffset, expectedInput + WASM_DISPATCH_FRAME_CAPACITY);
     EXPECT_GE(nested.inputOffset, fixed.arenaOffset);
 
     std::vector<unsigned char> memory(arenaLimit + 1, 0);
@@ -197,18 +183,12 @@ TEST(WasmContracts, NestedCallUsesIsolatedFrame)
     EXPECT_EQ(memory[fixed.localsOffset], 0x33);
 
     MemoryLayout exhausted = {};
-    EXPECT_FALSE(nestedMemoryLayout(
-        fixed,
-        nested.arenaOffset - 1,
-        parentArenaTop,
-        exhausted));
+    EXPECT_FALSE(nestedMemoryLayout(fixed, nested.arenaOffset - 1, parentArenaTop, exhausted));
 }
 
 TEST(WasmContracts, EntryLocalsAreFullyZeroed)
 {
-    std::vector<unsigned char> locals(
-        Wasm::Runtime::WASM_LOCALS_CAPACITY,
-        0xa5);
+    std::vector<unsigned char> locals(Wasm::Runtime::WASM_LOCALS_CAPACITY, 0xa5);
 
     Wasm::Runtime::zeroEntryLocals(locals.data());
 
@@ -296,9 +276,7 @@ TEST(WasmContracts, SystemProceduresMaskAndDispatch)
     };
 
     uint32_t a[5] = { 0 };
-    EXPECT_EQ(
-        w.call("reg_sysproc_mask", a, 0),
-        (1u << SP_INITIALIZE) | (1u << SP_POST_INCOMING_TRANSFER));
+    EXPECT_EQ(w.call("reg_sysproc_mask", a, 0), (1u << SP_INITIALIZE) | (1u << SP_POST_INCOMING_TRANSFER));
     a[0] = SP_POST_INCOMING_TRANSFER;
     EXPECT_EQ(w.call("sysproc_in_size", a, 1), 8u);
     a[0] = SP_INITIALIZE;
@@ -373,13 +351,9 @@ uint32_t hs_acquireScratch(
     uint64_t size,
     uint32_t initializeToZero)
 {
-    wasm_module_inst_t inst =
-        wasm_runtime_get_module_inst(executionEnvironment);
+    wasm_module_inst_t inst = wasm_runtime_get_module_inst(executionEnvironment);
     void* native = nullptr;
-    const uint32_t offset = (uint32_t)wasm_runtime_module_malloc(
-        inst,
-        (uint32_t)size,
-        &native);
+    const uint32_t offset = (uint32_t)wasm_runtime_module_malloc(inst, (uint32_t)size, &native);
     if (offset && initializeToZero && native)
     {
         memset(native, 0, (size_t)size);
@@ -393,9 +367,7 @@ void hs_releaseScratch(
 {
     if (offset)
     {
-        wasm_runtime_module_free(
-            wasm_runtime_get_module_inst(executionEnvironment),
-            offset);
+        wasm_runtime_module_free(wasm_runtime_get_module_inst(executionEnvironment), offset);
     }
 }
 
@@ -466,12 +438,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
     char err[256];
     wasm_module_t mod = wasm_runtime_load(buf.data(), (uint32_t)flen, err, sizeof err);
     ASSERT_NE(mod, nullptr) << err;
-    wasm_module_inst_t inst = wasm_runtime_instantiate(
-        mod,
-        256 * 1024,
-        4 * 1024 * 1024,
-        err,
-        sizeof err);
+    wasm_module_inst_t inst = wasm_runtime_instantiate(mod, 256 * 1024, 4 * 1024 * 1024, err, sizeof err);
     ASSERT_NE(inst, nullptr) << err;
     wasm_exec_env_t env = wasm_runtime_create_exec_env(inst, 256 * 1024);
     ASSERT_NE(env, nullptr);
@@ -479,8 +446,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
     const char* expectedSlotValue = getenv("QINIT_EXPECTED_SLOT");
     ASSERT_NE(expectedSlotValue, nullptr) << "set QINIT_EXPECTED_SLOT for raw WAMR parity";
     const uint32_t expectedSlot = (uint32_t)strtoul(expectedSlotValue, nullptr, 10);
-    wasm_function_inst_t contractIndex =
-        wasm_runtime_lookup_function(inst, "contract_index");
+    wasm_function_inst_t contractIndex = wasm_runtime_lookup_function(inst, "contract_index");
     ASSERT_NE(contractIndex, nullptr) << "missing required contract_index export";
     ASSERT_EQ(wasm_func_get_param_count(contractIndex, inst), 0u);
     ASSERT_EQ(wasm_func_get_result_count(contractIndex, inst), 1u);
@@ -502,12 +468,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
     {
         wasm_function_inst_t f = wasm_runtime_lookup_function(inst, fn);
         EXPECT_NE(f, nullptr) << fn;
-        const bool ok = f
-            && wasm_runtime_call_wasm(
-                env,
-                f,
-                argumentCount,
-                arguments);
+        const bool ok = f && wasm_runtime_call_wasm(env, f, argumentCount, arguments);
         if (expectSuccess)
         {
             EXPECT_TRUE(ok)
@@ -549,11 +510,8 @@ TEST(WasmContracts, CrossHostStateEquivalence)
         a[0] = i;
         a[1] = io;
         call("reg_info", a, 2);
-        const EntryInfo* entry =
-            (const EntryInfo*)wasm_runtime_addr_app_to_native(inst, io);
-        if (entry
-            && entry->kind == KIND_PROCEDURE
-            && entry->inputType == 1)
+        const EntryInfo* entry = (const EntryInfo*)wasm_runtime_addr_app_to_native(inst, io);
+        if (entry && entry->kind == KIND_PROCEDURE && entry->inputType == 1)
         {
             outputSize = entry->outSize;
             break;
@@ -576,14 +534,8 @@ TEST(WasmContracts, CrossHostStateEquivalence)
         while (position < scriptText.size())
         {
             const size_t separator = scriptText.find(';', position);
-            const std::string operation = scriptText.substr(
-                position,
-                separator == std::string::npos
-                    ? std::string::npos
-                    : separator - position);
-            position = separator == std::string::npos
-                ? scriptText.size()
-                : separator + 1;
+            const std::string operation = scriptText.substr(position, separator == std::string::npos ? std::string::npos : separator - position);
+            position = separator == std::string::npos ? scriptText.size() : separator + 1;
             if (operation.empty())
             {
                 continue;
@@ -591,11 +543,8 @@ TEST(WasmContracts, CrossHostStateEquivalence)
 
             const size_t colon = operation.find(':');
             const int inputType = atoi(operation.substr(0, colon).c_str());
-            const std::string inputHex = colon == std::string::npos
-                ? std::string()
-                : operation.substr(colon + 1);
-            unsigned char* nativeInput =
-                (unsigned char*)wasm_runtime_addr_app_to_native(inst, IN);
+            const std::string inputHex = colon == std::string::npos ? std::string() : operation.substr(colon + 1);
+            unsigned char* nativeInput = (unsigned char*)wasm_runtime_addr_app_to_native(inst, IN);
             memset(nativeInput, 0, 64);
             for (size_t i = 0; i + 1 < inputHex.size() && i / 2 < 64; i += 2)
             {
@@ -603,8 +552,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
                 const int lowNibble = hexNibble(inputHex[i + 1]);
                 if (highNibble >= 0 && lowNibble >= 0)
                 {
-                    nativeInput[i / 2] =
-                        (unsigned char)((highNibble << 4) | lowNibble);
+                    nativeInput[i / 2] = (unsigned char)((highNibble << 4) | lowNibble);
                 }
             }
             a[0] = KIND_PROCEDURE;
@@ -618,8 +566,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
                 printf("CROSSHOST_OP=%u:trap\n", operationIndex++);
                 break;
             }
-            const unsigned char* nativeOutput =
-                (const unsigned char*)wasm_runtime_addr_app_to_native(inst, OUT);
+            const unsigned char* nativeOutput = (const unsigned char*)wasm_runtime_addr_app_to_native(inst, OUT);
             std::string outHex;
             outHex.reserve(outputSize * 2);
             char byteHex[3];
@@ -628,10 +575,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
                 sprintf(byteHex, "%02x", nativeOutput[i]);
                 outHex += byteHex;
             }
-            printf(
-                "CROSSHOST_OP=%u:ok:%s\n",
-                operationIndex++,
-                outHex.c_str());
+            printf("CROSSHOST_OP=%u:ok:%s\n", operationIndex++, outHex.c_str());
         }
     }
     else
@@ -647,8 +591,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
         }
     }
 
-    const unsigned char* state =
-        (const unsigned char*)wasm_runtime_addr_app_to_native(inst, st);
+    const unsigned char* state = (const unsigned char*)wasm_runtime_addr_app_to_native(inst, st);
     std::string stateHex;
     stateHex.reserve(ss * 2);
     char byteHex[3];
@@ -696,12 +639,7 @@ TEST(WasmContracts, TrapAutoDumpHasMappableOffset)
     char err[192];
     wasm_module_t mod = wasm_runtime_load(buf, g_wasmTrapFixtureLen, err, sizeof err);
     ASSERT_NE(mod, nullptr) << err;
-    wasm_module_inst_t inst = wasm_runtime_instantiate(
-        mod,
-        64 * 1024,
-        1024 * 1024,
-        err,
-        sizeof err);
+    wasm_module_inst_t inst = wasm_runtime_instantiate(mod, 64 * 1024, 1024 * 1024, err, sizeof err);
     ASSERT_NE(inst, nullptr) << err;
     wasm_exec_env_t env = wasm_runtime_create_exec_env(inst, 64 * 1024);
     ASSERT_NE(env, nullptr);

@@ -36,9 +36,7 @@ protected:
         if (ktInstance->blockNumber == 0)
         {
             /* First block, absorb in final node */
-            unsigned int len = inputByteLen < (K12_chunkSize - ktInstance->queueAbsorbedLen)
-                ? (unsigned int)inputByteLen
-                : (K12_chunkSize - ktInstance->queueAbsorbedLen);
+            unsigned int len = inputByteLen < (K12_chunkSize - ktInstance->queueAbsorbedLen) ? (unsigned int)inputByteLen : (K12_chunkSize - ktInstance->queueAbsorbedLen);
             XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, input, len);
             input += len;
             inputByteLen -= len;
@@ -51,16 +49,13 @@ protected:
                 ktInstance->blockNumber = 1;
                 XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, &padding, 1);
                 // Zero-pad to the next 64-bit boundary.
-                ktInstance->finalNode.byteIOIndex =
-                    (ktInstance->finalNode.byteIOIndex + 7) & ~7;
+                ktInstance->finalNode.byteIOIndex = (ktInstance->finalNode.byteIOIndex + 7) & ~7;
             }
         }
         else if (ktInstance->queueAbsorbedLen != 0)
         {
             /* There is data in the queue, absorb further in queue until block complete */
-            unsigned int len = inputByteLen < (K12_chunkSize - ktInstance->queueAbsorbedLen)
-                ? (unsigned int)inputByteLen
-                : (K12_chunkSize - ktInstance->queueAbsorbedLen);
+            unsigned int len = inputByteLen < (K12_chunkSize - ktInstance->queueAbsorbedLen) ? (unsigned int)inputByteLen : (K12_chunkSize - ktInstance->queueAbsorbedLen);
             XKCP::TurboSHAKE_Absorb(&ktInstance->queueNode, input, len);
             input += len;
             inputByteLen -= len;
@@ -81,9 +76,7 @@ protected:
         while (inputByteLen > 0)
         {
             int capacityInBytes = 2 * (ktInstance->securityLevel) / 8;
-            unsigned int len = inputByteLen < K12_chunkSize
-                ? (unsigned int)inputByteLen
-                : K12_chunkSize;
+            unsigned int len = inputByteLen < K12_chunkSize ? (unsigned int)inputByteLen : K12_chunkSize;
             unsigned int chunkIndex = ktInstance->blockNumber;
 
             if (!isChunkChangedMap[chunkIndex] && useCache)

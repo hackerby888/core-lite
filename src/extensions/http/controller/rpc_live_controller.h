@@ -542,11 +542,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
             char hashHex[65];
             for (int byteIndex = 0; byteIndex < 32; byteIndex++)
             {
-                snprintf(
-                    hashHex + byteIndex * 2,
-                    3,
-                    "%02x",
-                    slot.codeHash[byteIndex]);
+                snprintf(hashHex + byteIndex * 2, 3, "%02x", slot.codeHash[byteIndex]);
             }
             contractJson["codeHash"] = std::string(hashHex, 64);
 
@@ -560,20 +556,16 @@ class RpcLiveController : public HttpController<RpcLiveController>
                     {
                         Json::Value entry;
                         entry["inputType"] = inputType;
-                        entry["inputSize"] =
-                            contractUserFunctionInputSizes[slotIndex][inputType];
-                        entry["outputSize"] =
-                            contractUserFunctionOutputSizes[slotIndex][inputType];
+                        entry["inputSize"] = contractUserFunctionInputSizes[slotIndex][inputType];
+                        entry["outputSize"] = contractUserFunctionOutputSizes[slotIndex][inputType];
                         functionsJson.append(entry);
                     }
                     if (contractUserProcedures[slotIndex][inputType])
                     {
                         Json::Value entry;
                         entry["inputType"] = inputType;
-                        entry["inputSize"] =
-                            contractUserProcedureInputSizes[slotIndex][inputType];
-                        entry["outputSize"] =
-                            contractUserProcedureOutputSizes[slotIndex][inputType];
+                        entry["inputSize"] = contractUserProcedureInputSizes[slotIndex][inputType];
+                        entry["outputSize"] = contractUserProcedureOutputSizes[slotIndex][inputType];
                         proceduresJson.append(entry);
                     }
                 }
@@ -591,9 +583,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
     }
 
     // Store node-local source used for inter-contract type resolution.
-    inline void devPutContractSource(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void devPutContractSource(const HttpRequestPtr &req,
+                                     std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
         const int slotIndex = std::atoi(req->getParameter("slot").c_str());
@@ -608,24 +599,18 @@ class RpcLiveController : public HttpController<RpcLiveController>
         Wasm::Runtime::contractSlots[localIndex].sourceH = std::string(req->getBody());
         json["ok"] = true;
         json["slot"] = slotIndex;
-        json["len"] =
-            (Json::UInt)Wasm::Runtime::contractSlots[localIndex].sourceH.size();
+        json["len"] = (Json::UInt)Wasm::Runtime::contractSlots[localIndex].sourceH.size();
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
     // Return progress for the active dynamic-contract upload.
-    inline void dynUpload(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void dynUpload(const HttpRequestPtr &req,
+                          std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
         const Wasm::Runtime::ModuleUpload &upload = Wasm::Runtime::moduleUpload;
         char sessionId[32];
-        snprintf(
-            sessionId,
-            sizeof(sessionId),
-            "%llu",
-            (unsigned long long)upload.sessionId);
+        snprintf(sessionId, sizeof(sessionId), "%llu", (unsigned long long)upload.sessionId);
         json["active"] = upload.active;
         // JSON cannot represent every 64-bit session ID exactly.
         json["sessionId"] = std::string(sessionId);
@@ -638,11 +623,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
         char hashHex[65];
         for (int byteIndex = 0; byteIndex < 32; byteIndex++)
         {
-            snprintf(
-                hashHex + byteIndex * 2,
-                3,
-                "%02x",
-                upload.finalHash[byteIndex]);
+            snprintf(hashHex + byteIndex * 2, 3, "%02x", upload.finalHash[byteIndex]);
         }
         json["finalHash"] = std::string(hashHex, 64);
 
@@ -672,16 +653,14 @@ class RpcLiveController : public HttpController<RpcLiveController>
     }
 
     // Return the current log ID and a small recent sample.
-    inline void logStats(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void logStats(const HttpRequestPtr &req,
+                         std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
         const unsigned long long currentLogId = qLogger::logId;
         json["logId"] = (Json::UInt64)currentLogId;
         Json::Value recentEntries(Json::arrayValue);
-        const unsigned long long firstLogId =
-            currentLogId > 16 ? currentLogId - 16 : 0;
+        const unsigned long long firstLogId = currentLogId > 16 ? currentLogId - 16 : 0;
         for (unsigned long long logId = firstLogId; logId < currentLogId; logId++)
         {
             auto logEntry = qLogger::tmpLogBuffer.find(logId);
@@ -715,9 +694,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
     }
 
     // Return recent Wasm call traces after the requested sequence.
-    inline void debugTrace(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void debugTrace(const HttpRequestPtr &req,
+                           std::function<void(const HttpResponsePtr &)> &&cb)
     {
         unsigned long long since = 0;
         unsigned int limit = 64;
@@ -768,12 +746,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
             entry["invocator"] = Wasm::Runtime::hex(&trace.invocator, 32);
             entry["invocationReward"] = (Json::Int64)trace.invocationReward;
 
-            entry["inHex"] = trace.input.empty()
-                ? ""
-                : Wasm::Runtime::hex(trace.input.data(), (unsigned int)trace.input.size());
-            entry["outHex"] = trace.output.empty()
-                ? ""
-                : Wasm::Runtime::hex(trace.output.data(), (unsigned int)trace.output.size());
+            entry["inHex"] = trace.input.empty() ? "" : Wasm::Runtime::hex(trace.input.data(), (unsigned int)trace.input.size());
+            entry["outHex"] = trace.output.empty() ? "" : Wasm::Runtime::hex(trace.output.data(), (unsigned int)trace.output.size());
 
             Json::Value stateDiff(Json::arrayValue);
             for (const auto &run : trace.stateDiff)
@@ -815,10 +789,10 @@ class RpcLiveController : public HttpController<RpcLiveController>
         json["entries"] = entries;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
+
     // Toggle Wasm trace capture.
-    inline void devDebug(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void devDebug(const HttpRequestPtr &req,
+                         std::function<void(const HttpResponsePtr &)> &&cb)
     {
         auto on = req->getParameter("on");
         if (!on.empty())
@@ -831,9 +805,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
     }
 
     // Drop all captured traces.
-    inline void devDebugClear(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void devDebugClear(const HttpRequestPtr &req,
+                              std::function<void(const HttpResponsePtr &)> &&cb)
     {
         (void)req;
         Wasm::Runtime::clearTrace();
@@ -843,36 +816,24 @@ class RpcLiveController : public HttpController<RpcLiveController>
     }
 
     // Return a bounded best-effort snapshot of contract state bytes.
-    inline void devStateRead(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void devStateRead(const HttpRequestPtr &req,
+                             std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
         const int slotIndex = std::atoi(req->getParameter("slot").c_str());
-        unsigned long long offset =
-            strtoull(req->getParameter("off").c_str(), nullptr, 10);
-        unsigned long long length =
-            strtoull(req->getParameter("len").c_str(), nullptr, 10);
+        unsigned long long offset = strtoull(req->getParameter("off").c_str(), nullptr, 10);
+        unsigned long long length = strtoull(req->getParameter("len").c_str(), nullptr, 10);
         const int localIndex = slotIndex - (int)WASM_RESERVED_SLOT_BASE;
         bool validSlot;
         unsigned long long stateSize;
         if (slotIndex >= (int)WASM_RESERVED_SLOT_BASE)
         {
-            validSlot = localIndex >= 0
-                && localIndex < (int)WASM_RESERVED_SLOT_COUNT
-                && Wasm::Runtime::isContractLoaded(slotIndex)
-                && contractStates[slotIndex];
-            stateSize = validSlot
-                ? Wasm::Runtime::effectiveStateSize(
-                    slotIndex,
-                    contractDescriptions[slotIndex].stateSize)
-                : 0;
+            validSlot = localIndex >= 0 && localIndex < (int)WASM_RESERVED_SLOT_COUNT && Wasm::Runtime::isContractLoaded(slotIndex) && contractStates[slotIndex];
+            stateSize = validSlot ? Wasm::Runtime::effectiveStateSize(slotIndex, contractDescriptions[slotIndex].stateSize) : 0;
         }
         else
         {
-            validSlot = slotIndex >= 1
-                && slotIndex < (int)contractCount
-                && contractStates[slotIndex];
+            validSlot = slotIndex >= 1 && slotIndex < (int)contractCount && contractStates[slotIndex];
             stateSize = validSlot ? contractDescriptions[slotIndex].stateSize : 0;
         }
         if (!validSlot)
@@ -912,9 +873,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
     }
 
     // Return the canonical K12 digest of a contract's effective state.
-    inline void devContractDigest(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void devContractDigest(const HttpRequestPtr &req,
+                                  std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
         const int slotIndex = std::atoi(req->getParameter("slot").c_str());
@@ -923,21 +883,12 @@ class RpcLiveController : public HttpController<RpcLiveController>
         unsigned long long stateSize;
         if (slotIndex >= (int)WASM_RESERVED_SLOT_BASE)
         {
-            validSlot = localIndex >= 0
-                && localIndex < (int)WASM_RESERVED_SLOT_COUNT
-                && Wasm::Runtime::isContractLoaded(slotIndex)
-                && contractStates[slotIndex];
-            stateSize = validSlot
-                ? Wasm::Runtime::effectiveStateSize(
-                    slotIndex,
-                    contractDescriptions[slotIndex].stateSize)
-                : 0;
+            validSlot = localIndex >= 0 && localIndex < (int)WASM_RESERVED_SLOT_COUNT && Wasm::Runtime::isContractLoaded(slotIndex) && contractStates[slotIndex];
+            stateSize = validSlot ? Wasm::Runtime::effectiveStateSize(slotIndex, contractDescriptions[slotIndex].stateSize) : 0;
         }
         else
         {
-            validSlot = slotIndex >= 1
-                && slotIndex < (int)contractCount
-                && contractStates[slotIndex];
+            validSlot = slotIndex >= 1 && slotIndex < (int)contractCount && contractStates[slotIndex];
             stateSize = validSlot ? contractDescriptions[slotIndex].stateSize : 0;
         }
         if (!validSlot)
@@ -948,11 +899,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
         }
 
         unsigned char digest[32];
-        KangarooTwelve(
-            contractStates[slotIndex],
-            (unsigned int)stateSize,
-            digest,
-            32);
+        KangarooTwelve(contractStates[slotIndex], (unsigned int)stateSize, digest, 32);
         static const char *hexDigits = "0123456789abcdef";
         std::string hex;
         hex.reserve(64);
@@ -975,8 +922,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
                          const std::string &transactionId)
     {
         Json::Value result;
-        const unsigned int tick =
-            (unsigned int)strtoul(tickString.c_str(), nullptr, 10);
+        const unsigned int tick = (unsigned int)strtoul(tickString.c_str(), nullptr, 10);
         result["tick"] = tick;
         result["currentTick"] = system.tick;
         result["txId"] = transactionId;
@@ -990,26 +936,22 @@ class RpcLiveController : public HttpController<RpcLiveController>
             }
         }
         m256i targetDigest;
-        getPublicKeyFromIdentity(
-            reinterpret_cast<const unsigned char *>(uppercaseId.c_str()),
-            targetDigest.m256i_u8);
+        getPublicKeyFromIdentity(reinterpret_cast<const unsigned char *>(uppercaseId.c_str()), targetDigest.m256i_u8);
 
         // Search the current or retained previous epoch.
         bool inRange = false;
         int tickIndex = 0;
-        if (tick >= txStatusData.confirmedTxCurrentEpochBeginTick
-            && tick < txStatusData.confirmedTxCurrentEpochBeginTick
-                + MAX_NUMBER_OF_TICKS_PER_EPOCH)
+        if (tick >= txStatusData.confirmedTxCurrentEpochBeginTick &&
+            tick < txStatusData.confirmedTxCurrentEpochBeginTick + MAX_NUMBER_OF_TICKS_PER_EPOCH)
         {
             tickIndex = tick - txStatusData.confirmedTxCurrentEpochBeginTick;
             inRange = true;
         }
-        else if (txStatusData.confirmedTxPreviousEpochBeginTick != 0
-                 && tick >= txStatusData.confirmedTxPreviousEpochBeginTick
-                 && tick < txStatusData.confirmedTxCurrentEpochBeginTick)
+        else if (txStatusData.confirmedTxPreviousEpochBeginTick != 0 &&
+                 tick >= txStatusData.confirmedTxPreviousEpochBeginTick &&
+                 tick < txStatusData.confirmedTxCurrentEpochBeginTick)
         {
-            tickIndex = tick - txStatusData.confirmedTxPreviousEpochBeginTick
-                + MAX_NUMBER_OF_TICKS_PER_EPOCH;
+            tickIndex = tick - txStatusData.confirmedTxPreviousEpochBeginTick + MAX_NUMBER_OF_TICKS_PER_EPOCH;
             inRange = true;
         }
 
@@ -1018,10 +960,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
         if (inRange)
         {
             ACQUIRE(confirmedTxLock);
-            const unsigned int firstIndex =
-                txStatusData.tickTxIndexStart[tickIndex];
-            const unsigned int transactionCount =
-                txStatusData.tickTxCounter[tickIndex];
+            const unsigned int firstIndex = txStatusData.tickTxIndexStart[tickIndex];
+            const unsigned int transactionCount = txStatusData.tickTxCounter[tickIndex];
             for (unsigned int i = 0; i < transactionCount; i++)
             {
                 const ConfirmedTx &transaction = confirmedTx[firstIndex + i];
@@ -1043,9 +983,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
 
 #if defined(TESTNET)
     // Return a pre-funded testnet seed.
-    inline void devFundedSeed(
-        const HttpRequestPtr &,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void devFundedSeed(const HttpRequestPtr &,
+                              std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
         if (std::size(broadcastedComputorSeeds) > 0)
@@ -1056,9 +995,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
     }
 
     // Return the requested number of pre-funded testnet seeds.
-    inline void devFundedSeeds(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void devFundedSeeds(const HttpRequestPtr &req,
+                               std::function<void(const HttpResponsePtr &)> &&cb)
     {
         const unsigned int total = (unsigned int)std::size(broadcastedComputorSeeds);
         unsigned int limit = 32;
@@ -1108,8 +1046,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
         while (system.tick < target)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - startTime);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime);
             if (elapsed.count() > (long long)timeoutMs)
             {
                 break;
@@ -1120,9 +1057,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
     }
 
     // Return the current testnet epoch window.
-    inline void devEpochInfo(
-        const HttpRequestPtr &,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void devEpochInfo(const HttpRequestPtr &,
+                             std::function<void(const HttpResponsePtr &)> &&cb)
     {
         const unsigned int lastTick = liteDevEpochLastTick();
         Json::Value json;
@@ -1130,17 +1066,14 @@ class RpcLiveController : public HttpController<RpcLiveController>
         json["tick"] = system.tick;
         json["initialTick"] = system.initialTick;
         json["epochLastTick"] = lastTick;
-        json["ticksLeft"] = system.tick <= lastTick
-            ? lastTick - system.tick
-            : 0u;
+        json["ticksLeft"] = system.tick <= lastTick ? lastTick - system.tick : 0u;
         json["duration"] = (unsigned int)TESTNET_EPOCH_DURATION;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
     // Advance without crossing the current epoch boundary.
-    inline void devAdvanceTick(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void devAdvanceTick(const HttpRequestPtr &req,
+                               std::function<void(const HttpResponsePtr &)> &&cb)
     {
         unsigned int requestedTicks = 1;
         try
@@ -1180,9 +1113,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
     }
 
     // Advance to a safe gap before the current epoch boundary.
-    inline void devAdvanceToLast(
-        const HttpRequestPtr &req,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void devAdvanceToLast(const HttpRequestPtr &req,
+                                 std::function<void(const HttpResponsePtr &)> &&cb)
     {
         unsigned int gap = 3;
         try
@@ -1199,9 +1131,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
 
         const unsigned int startTick = system.tick;
         const unsigned int lastTick = liteDevEpochLastTick();
-        const unsigned int targetTick = lastTick > gap
-            ? lastTick - gap
-            : lastTick;
+        const unsigned int targetTick = lastTick > gap ? lastTick - gap : lastTick;
         const unsigned int reachedTick = liteDevFastForwardTo(targetTick, 12000);
 
         Json::Value json;
@@ -1214,9 +1144,8 @@ class RpcLiveController : public HttpController<RpcLiveController>
     }
 
     // Advance through the node's normal epoch transition.
-    inline void devAdvanceEpoch(
-        const HttpRequestPtr &,
-        std::function<void(const HttpResponsePtr &)> &&cb)
+    inline void devAdvanceEpoch(const HttpRequestPtr &,
+                                std::function<void(const HttpResponsePtr &)> &&cb)
     {
         const unsigned int startEpoch = (unsigned int)system.epoch;
         const unsigned int startTick = system.tick;
@@ -1229,8 +1158,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
             // Keep the transition moving through its clean-memory wait.
             epochTransitionCleanMemoryFlag = 1;
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - startTime);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime);
             if (elapsed.count() > 25000)
             {
                 break;

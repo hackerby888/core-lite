@@ -56,11 +56,7 @@ static inline void preciseSleepMicros(long long microseconds)
         return;
     }
 
-    static thread_local HANDLE timer = CreateWaitableTimerExW(
-        nullptr,
-        nullptr,
-        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-        TIMER_ALL_ACCESS);
+    static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     if (timer)
     {
         LARGE_INTEGER dueTime;
@@ -304,8 +300,7 @@ static LONG WINAPI lazyCommitVeh(EXCEPTION_POINTERS* exception)
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    const uintptr_t faultAddress =
-        (uintptr_t)exception->ExceptionRecord->ExceptionInformation[1];
+    const uintptr_t faultAddress = (uintptr_t)exception->ExceptionRecord->ExceptionInformation[1];
     if (!inLazyCommitRegion(faultAddress))
     {
         return EXCEPTION_CONTINUE_SEARCH;
@@ -1294,20 +1289,14 @@ struct Overload {
             while ((unsigned int)totalSentBytes < fragment.FragmentLength)
             {
                 const auto currentTime = std::chrono::high_resolution_clock::now();
-                const unsigned long long stalledTimeNs =
-                    (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        currentTime - lastProgress).count();
+                const unsigned long long stalledTimeNs = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(currentTime - lastProgress).count();
                 if (stalledTimeNs > NO_PROGRESS_TIMEOUT_NS)
                 {
                     request.token->CompletionToken.Status = EFI_TIMEOUT;
                     break;
                 }
 
-                const auto sentBytes = send(
-                    request.socket,
-                    (const char*)fragment.FragmentBuffer + totalSentBytes,
-                    fragment.FragmentLength - totalSentBytes,
-                    MSG_DONTWAIT | MSG_NOSIGNAL);
+                const auto sentBytes = send(request.socket, (const char*)fragment.FragmentBuffer + totalSentBytes, fragment.FragmentLength - totalSentBytes, MSG_DONTWAIT | MSG_NOSIGNAL);
 
                 if (sentBytes > 0)
                 {
@@ -1366,11 +1355,7 @@ struct Overload {
             // Read only the free portion of a partially filled peer buffer.
             const auto& fragment = request.token->Packet.RxData->FragmentTable[0];
             const unsigned int maxReceiveSize = (unsigned int)fragment.FragmentLength;
-            const auto receivedBytes = recv(
-                request.socket,
-                (char*)fragment.FragmentBuffer,
-                maxReceiveSize,
-                MSG_DONTWAIT);
+            const auto receivedBytes = recv(request.socket, (char*)fragment.FragmentBuffer, maxReceiveSize, MSG_DONTWAIT);
 
             if (receivedBytes > 0)
             {

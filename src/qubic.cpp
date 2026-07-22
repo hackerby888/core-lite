@@ -600,11 +600,7 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
         if (contractStateChangeFlags[digestIndex >> 6] & (1ULL << (digestIndex & 63)))
         {
 #ifdef LITE_WASM_SC
-            const unsigned long long size = digestIndex < contractCount
-                ? Wasm::Runtime::effectiveStateSize(
-                    digestIndex,
-                    contractDescriptions[digestIndex].stateSize)
-                : 0;
+            const unsigned long long size = digestIndex < contractCount ? Wasm::Runtime::effectiveStateSize(digestIndex, contractDescriptions[digestIndex].stateSize) : 0;
 #else
             const unsigned long long size = digestIndex < contractCount ? contractDescriptions[digestIndex].stateSize : 0;
 #endif
@@ -623,10 +619,7 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
 
                 const unsigned long long startTime = __rdtsc();
 #if defined(LITE_WASM_SC)
-                Wasm::Runtime::hashContractState(
-                    digestIndex,
-                    contractStateDigests[digestIndex].m256i_u8,
-                    size);
+                Wasm::Runtime::hashContractState(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
 #else
                 if (!bypassCache && K12StateDigestCache::gK12StateDigestCacheEnabled && K12StateDigestCache::isCached(digestIndex))
                     K12StateDigestCache::computeDigest(digestIndex, &contractStateDigests[digestIndex]);
@@ -3068,10 +3061,7 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
 #ifdef LITE_WASM_SC
             if (transaction->destinationPublicKey == m256i(99999ULL, 0, 0, 0))
             {
-                Wasm::Runtime::dispatchDeploymentTransaction(
-                    transaction->inputType,
-                    (const unsigned char*)transaction->inputPtr(),
-                    transaction->inputSize);
+                Wasm::Runtime::dispatchDeploymentTransaction(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
             }
             else
 #endif
@@ -7389,9 +7379,7 @@ static bool saveContractStateFiles(CHAR16* directory)
         CONTRACT_FILE_NAME[sizeof(CONTRACT_FILE_NAME) / sizeof(CONTRACT_FILE_NAME[0]) - 6] = contractIndex % 10 + L'0';
         contractStateLock[contractIndex].acquireRead();
 #ifdef LITE_WASM_SC
-        const unsigned long long saveSize = Wasm::Runtime::effectiveStateSize(
-            contractIndex,
-            contractDescriptions[contractIndex].stateSize);
+        const unsigned long long saveSize = Wasm::Runtime::effectiveStateSize(contractIndex, contractDescriptions[contractIndex].stateSize);
 #else
         const unsigned long long saveSize = contractDescriptions[contractIndex].stateSize;
 #endif
@@ -7542,25 +7530,11 @@ static bool initialize()
         }
 
         // Commit the large score pools on demand.
-        if (!allocPoolWithErrorLog(
-                L"score",
-                sizeof(*score),
-                (void**)&score,
-                __LINE__,
-                true,
-                true,
-                /*lazyCommit=*/true))
+        if (!allocPoolWithErrorLog(L"score", sizeof(*score), (void**)&score, __LINE__, true, true, /*lazyCommit=*/true))
         {
             return false;
         }
-        if (!allocPoolWithErrorLog(
-                L"score",
-                sizeof(*score_qpi),
-                (void**)&score_qpi,
-                __LINE__,
-                true,
-                true,
-                /*lazyCommit=*/true))
+        if (!allocPoolWithErrorLog(L"score", sizeof(*score_qpi), (void**)&score_qpi, __LINE__, true, true, /*lazyCommit=*/true))
         {
             return false;
         }
@@ -7678,8 +7652,7 @@ static bool initialize()
             }
 
             // Public deterministic signer used by Qinit and other local testnet tooling.
-            static constexpr unsigned char qinitDevSeed[] =
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            static constexpr unsigned char qinitDevSeed[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             m256i qinitDevPrivateKey;
             m256i qinitDevPublicKey;
             m256i qinitDevSubseed;
@@ -9017,14 +8990,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             {
                 // Commit low-RAM development network buffers on demand.
 #if defined(TESTNET) && defined(LITE_WASM_SC)
-                if (!allocPoolWithErrorLog(
-                        L"processor[i]",
-                        BUFFER_SIZE,
-                        &processors[numberOfProcessors].buffer,
-                        __LINE__,
-                        true,
-                        true,
-                        /*lazyCommit=*/true))
+                if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__, true, true, /*lazyCommit=*/true))
 #else
                 if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))
 #endif
@@ -9844,10 +9810,7 @@ void processArgs(int argc, const char* argv[]) {
 #endif
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"))
 #ifdef LITE_SC_PAGER
-        (
-            "max-sc-mem",
-            "Contract-state RAM target in GB; cold state remains compressed in memory.",
-            cxxopts::value<unsigned long long>()->default_value("1"))
+        ("max-sc-mem", "Contract-state RAM target in GB; cold state remains compressed in memory.", cxxopts::value<unsigned long long>()->default_value("1"))
 #endif
         ;
     auto result = options.parse(argc, argv);
@@ -9860,9 +9823,7 @@ void processArgs(int argc, const char* argv[]) {
 #ifdef LITE_SC_PAGER
     if (result.count("max-sc-mem"))
     {
-        Wasm::Runtime::setContractStateMemoryLimit(
-            result["max-sc-mem"].as<unsigned long long>()
-            * 1024ULL * 1024 * 1024);
+        Wasm::Runtime::setContractStateMemoryLimit(result["max-sc-mem"].as<unsigned long long>() * 1024ULL * 1024 * 1024);
     }
 #endif
 

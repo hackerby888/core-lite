@@ -8,9 +8,7 @@ int main(int argc, char** argv)
 {
     if (argc < 4)
     {
-        fprintf(
-            stderr,
-            "usage: joblaunch <commitLimitMB> <logfile> <exe> [args...]\n");
+        fprintf(stderr, "usage: joblaunch <commitLimitMB> <logfile> <exe> [args...]\n");
         return 2;
     }
     const unsigned long long limitMB = _strtoui64(argv[1], NULL, 10);
@@ -27,16 +25,9 @@ int main(int argc, char** argv)
     ZeroMemory(&limitInfo, sizeof(limitInfo));
     limitInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY;
     limitInfo.JobMemoryLimit = (SIZE_T)(limitMB * 1024ULL * 1024ULL);
-    if (!SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            &limitInfo,
-            sizeof(limitInfo)))
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limitInfo, sizeof(limitInfo)))
     {
-        fprintf(
-            stderr,
-            "SetInformationJobObject failed %lu\n",
-            GetLastError());
+        fprintf(stderr, "SetInformationJobObject failed %lu\n", GetLastError());
         return 1;
     }
 
@@ -104,10 +95,7 @@ int main(int argc, char** argv)
         return 1;
     }
     ResumeThread(processInfo.hThread);
-    printf(
-        "JOBLAUNCH pid=%lu limitMB=%llu\n",
-        processInfo.dwProcessId,
-        limitMB);
+    printf("JOBLAUNCH pid=%lu limitMB=%llu\n", processInfo.dwProcessId, limitMB);
     fflush(stdout);
     WaitForSingleObject(processInfo.hProcess, INFINITE);
     DWORD exitCode = 0;
