@@ -274,7 +274,7 @@ struct LazyCommitRegion
     uintptr_t base;
     uintptr_t end;
 };
-inline LazyCommitRegion g_lazyCommitRegions[128];
+inline LazyCommitRegion g_lazyCommitRegions[4096 * 2];
 inline volatile long g_lazyCommitRegionCount = 0;
 inline volatile long g_lazyCommitVehInstalled = 0;
 inline unsigned long g_lazyCommitPageSize = 4096;
