@@ -153,7 +153,6 @@ public:
             return true;
         }
 
-        // ponytail: cold faults are serialized; add a request queue if profiling needs it.
         while (coldFaultLock.test_and_set(std::memory_order_acquire))
         {
         }
