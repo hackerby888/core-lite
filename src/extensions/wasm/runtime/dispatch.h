@@ -257,8 +257,8 @@ static void beginDispatchTrace(
 
     if (sizes.input && input)
     {
-        const unsigned int capturedSize = sizes.input < WASM_TRACE_CAPTURE_SIZE ? sizes.input : WASM_TRACE_CAPTURE_SIZE;
-        copyMem(trace.entry.inputHead, input, capturedSize);
+        const auto* bytes = static_cast<const unsigned char*>(input);
+        trace.entry.input.assign(bytes, bytes + sizes.input);
     }
 
     if (kind == DispatchKind::UserProcedure)
@@ -291,8 +291,12 @@ static void finishDispatchTrace(
 
     if (sizes.output)
     {
-        const unsigned int capturedSize = sizes.output < WASM_TRACE_CAPTURE_SIZE ? sizes.output : WASM_TRACE_CAPTURE_SIZE;
-        copyMem(trace.entry.outputHead, wasm_runtime_addr_app_to_native(slot.instance, layout.outputOffset), capturedSize);
+        const void* outputPtr = wasm_runtime_addr_app_to_native(slot.instance, layout.outputOffset);
+        if (outputPtr)
+        {
+            const auto* bytes = static_cast<const unsigned char*>(outputPtr);
+            trace.entry.output.assign(bytes, bytes + sizes.output);
+        }
     }
 
     callContext.trace = nullptr;

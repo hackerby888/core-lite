@@ -768,14 +768,12 @@ class RpcLiveController : public HttpController<RpcLiveController>
             entry["invocator"] = Wasm::Runtime::hex(&trace.invocator, 32);
             entry["invocationReward"] = (Json::Int64)trace.invocationReward;
 
-            const unsigned int inputHeadSize = trace.inputSize < WASM_TRACE_CAPTURE_SIZE
-                ? trace.inputSize
-                : WASM_TRACE_CAPTURE_SIZE;
-            const unsigned int outputHeadSize = trace.outputSize < WASM_TRACE_CAPTURE_SIZE
-                ? trace.outputSize
-                : WASM_TRACE_CAPTURE_SIZE;
-            entry["inHex"] = Wasm::Runtime::hex(trace.inputHead, inputHeadSize);
-            entry["outHex"] = Wasm::Runtime::hex(trace.outputHead, outputHeadSize);
+            entry["inHex"] = trace.input.empty()
+                ? ""
+                : Wasm::Runtime::hex(trace.input.data(), (unsigned int)trace.input.size());
+            entry["outHex"] = trace.output.empty()
+                ? ""
+                : Wasm::Runtime::hex(trace.output.data(), (unsigned int)trace.output.size());
 
             Json::Value stateDiff(Json::arrayValue);
             for (const auto &run : trace.stateDiff)

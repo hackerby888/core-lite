@@ -59,8 +59,8 @@ struct TraceEntry
     unsigned int outputSize = 0;
     unsigned int stateSize = 0;
     bool stateTruncated = false;
-    unsigned char inputHead[WASM_TRACE_CAPTURE_SIZE] = {};
-    unsigned char outputHead[WASM_TRACE_CAPTURE_SIZE] = {};
+    std::vector<unsigned char> input;
+    std::vector<unsigned char> output;
     unsigned long long executionNanoseconds = 0;
     std::string trap;
     std::vector<StateRegionTrace> stateDiff;
