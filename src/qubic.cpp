@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <map>
 #include <vector>
 #include <thread>
@@ -29,6 +30,9 @@
 //   TESTNET_LITE_RAM    - testnet only; shrink fixed buffers (wire-incompatible
 //                         with non-LITE peers, incompatible snapshots, more
 //                         tick-storage disk I/O)
+//   LONG_RUN_LOCAL_TESTNET - testnet only; single unattended 676-computor node,
+//                         paced ticks, epoch switch only on capacity/F7.
+//                         See doc/long_run_local_testnet.md
 //   USE_SWAP            - page tick storage to disk (recommended for mainnet)
 //
 // Uncomment to enable.
@@ -37,6 +41,7 @@
 // #define TESTNET
 // #define TESTNET_PREFILL_QUS
 // #define TESTNET_LITE_RAM
+// #define LONG_RUN_LOCAL_TESTNET
 #define USE_SWAP
 
 // ============================================================================
@@ -47,6 +52,10 @@
 
 #if defined(TESTNET_LITE_RAM) && !defined(TESTNET)
 #error "TESTNET_LITE_RAM only applies when TESTNET is defined"
+#endif
+
+#if defined(LONG_RUN_LOCAL_TESTNET) && !defined(TESTNET)
+#error "LONG_RUN_LOCAL_TESTNET only applies when TESTNET is defined"
 #endif
 
 #if defined(TESTNET) && defined(TESTNET_LITE_RAM)
@@ -233,7 +242,12 @@ std::vector<IPv4Address> knownPublicPeersDynamic;
 static int autoFlushStuckSeconds = 60;
 
 static std::vector<int> mainAuxStatusChangeStack;
+#ifdef LONG_RUN_LOCAL_TESTNET
+// 3 survives endEpoch bit swap; see doc/long_run_local_testnet.md
+static volatile unsigned char mainAuxStatus = 3;
+#else
 static volatile unsigned char mainAuxStatus = 0;
+#endif
 static volatile unsigned char isVirtualMachine = 0; // indicate that it is running on VM, to avoid running some functions for BM  (for testing and developing purposes)
 static volatile bool forceRefreshPeerList = false;
 static volatile bool forceNextTick = false;
@@ -391,10 +405,10 @@ static bool saveSystem(CHAR16* directory = NULL);
 static bool loadContractStateFiles(CHAR16* directory = NULL, bool forceLoadFromFile = false);
 static bool loadContractExecFeeFiles(CHAR16* directory = NULL, bool loadAccumulatedTime = false);
 
-#if ENABLED_LOGGING
+#if ENABLED_LOGGING && !defined(LONG_RUN_LOCAL_TESTNET)
 #define PAUSE_BEFORE_CLEAR_MEMORY 1 // Requiring operators to press F10 to clear memory (before switching epoch)
 #else
-#define PAUSE_BEFORE_CLEAR_MEMORY 0
+#define PAUSE_BEFORE_CLEAR_MEMORY 0 // long-run: see doc/long_run_local_testnet.md
 #endif
 
 BroadcastFutureTickData broadcastedFutureTickData;
@@ -562,7 +576,10 @@ static inline bool isUsingSwap()
 
 static bool isLastTickInEpoch() {
     const int dayIndex = ::dayIndex(etalonTick.year, etalonTick.month, etalonTick.day);
-#ifdef TESTNET
+#ifdef LONG_RUN_LOCAL_TESTNET
+    // epoch switch only on buffer exhaustion or manual F7
+    return forceSwitchEpoch || system.tick - system.initialTick >= TESTNET_EPOCH_DURATION;
+#elif defined(TESTNET)
     return system.tick - system.initialTick >= TESTNET_EPOCH_DURATION;
 #else
     return (dayIndex == 738570 + system.epoch * 7 && etalonTick.hour >= 12)
@@ -3358,6 +3375,28 @@ static void processTick(unsigned long long processorNumber)
     if (tickDelay > 0) {
         bs->Stall(tickDelay * 1'000);
     }
+#ifdef LONG_RUN_LOCAL_TESTNET
+    // Pace ticks to a wall-clock period; see doc/long_run_local_testnet.md
+    if (tickDurationMs > 0) {
+        static unsigned long long nextTickPaceTsc = 0; // tick processor thread only
+        const unsigned long long periodTscTicks = tickDurationMs * frequency / 1000;
+        unsigned long long now = __rdtsc();
+        if (now < nextTickPaceTsc) {
+            // chunked sleep: never block shutdown/persist for a whole period
+            const unsigned long long sliceUs = 100'000;
+            while (now < nextTickPaceTsc && !shutDownNode && !requestPersistingNodeState)
+            {
+                const unsigned long long remainingUs = (nextTickPaceTsc - now) * 1'000'000 / frequency;
+                bs->Stall(remainingUs < sliceUs ? remainingUs : sliceUs);
+                now = __rdtsc();
+            }
+            nextTickPaceTsc += periodTscTicks;
+        }
+        else {
+            nextTickPaceTsc = now + periodTscTicks;
+        }
+    }
+#endif
 #endif
 
     if (system.tick > system.initialTick)
@@ -6635,7 +6674,10 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                             if (tickDataSuits)
                             {
                                 const int dayIndex = ::dayIndex(etalonTick.year, etalonTick.month, etalonTick.day);
-#ifdef TESTNET
+#ifdef LONG_RUN_LOCAL_TESTNET
+                                // epoch switch only on buffer exhaustion or manual F7
+                                if (forceSwitchEpoch || system.tick - system.initialTick >= TESTNET_EPOCH_DURATION)
+#elif defined(TESTNET)
                                 if (system.tick - system.initialTick >= TESTNET_EPOCH_DURATION)
 #else
                                 if ((dayIndex == 738570 + system.epoch * 7 && etalonTick.hour >= 12)
@@ -7563,6 +7605,17 @@ static bool initialize()
         {
             const IPv4Address& peer_ip = *reinterpret_cast<const IPv4Address*>(oracleMachineIPs[i]);
             copyMem(&omIPv4Address[numberOfOMPeers++], &peer_ip, sizeof(IPv4Address));
+        }
+    }
+
+    if (NUMBER_OF_OC_MACHINE_CONNECTIONS > 0)
+    {
+        logToConsole(L"Populating OC machine node ...");
+        numberOfOcPeers = 0;
+        for (unsigned int i = 0; i < NUMBER_OF_OC_MACHINE_CONNECTIONS; i++)
+        {
+            const IPv4Address& peer_ip = *reinterpret_cast<const IPv4Address*>(ocMachineIPs[i]);
+            copyMem(&ocIPv4Address[numberOfOcPeers++], &peer_ip, sizeof(IPv4Address));
         }
     }
 
@@ -9014,8 +9067,8 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 
                 for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
                 {
-                    // handle new connections. For Oracle Machine, not need the ExchangePublicPeers
-                    if (peerConnectionNewlyEstablished(i) && !peers[i].isOracleMachineNode())
+                    // handle new connections. For Oracle Machine and OC machine, not need the ExchangePublicPeers
+                    if (peerConnectionNewlyEstablished(i) && !peers[i].isOracleMachineNode() && !peers[i].isOcMachineNode())
                     {
                         // new connection established:
                         // prepare and send ExchangePublicPeers message
@@ -9093,7 +9146,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                             && peers[i].isConnectingAccepting
                             && ((__rdtsc() - peers[i].connectionStartTime) / frequency > ORACLE_MACHINE_CONNECTION_TIMEOUT_SECS))
                         {
-                            closePeer(&peers[i], ORACLE_MACHINE_GRACEFULL_CLOSE_RETIRES);
+                            closePeer(&peers[i], ORACLE_MACHINE_GRACEFUL_CLOSE_RETRIES);
                         }
 
                         // inactivity timeout between 1 and 2 minutes (depending on peer index to reduce risk of
@@ -9104,7 +9157,27 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                             peers[i].lastOMActivityTime > 0 &&
                             ((__rdtsc() - peers[i].lastOMActivityTime) / frequency > OM_INACTIVITY_TIMEOUT_SECS))
                         {
-                            closePeer(&peers[i], ORACLE_MACHINE_GRACEFULL_CLOSE_RETIRES);
+                            closePeer(&peers[i], ORACLE_MACHINE_GRACEFUL_CLOSE_RETRIES);
+                        }
+                    }
+                    else if (peers[i].isOcMachineNode())
+                    {
+                        // Mirror the OM connection lifecycle handling for OC machine peers.
+                        if (OC_MACHINE_CONNECTION_TIMEOUT_SECS > 0
+                            && peers[i].connectionStartTime > 0
+                            && peers[i].isConnectingAccepting
+                            && ((__rdtsc() - peers[i].connectionStartTime) / frequency > OC_MACHINE_CONNECTION_TIMEOUT_SECS))
+                        {
+                            closePeer(&peers[i], OC_MACHINE_GRACEFUL_CLOSE_RETRIES);
+                        }
+
+                        const unsigned long long OC_INACTIVITY_TIMEOUT_SECS = 120 - (i % 5) * 15;
+                        if (peers[i].isConnectedAccepted &&
+                            !peers[i].isClosing &&
+                            peers[i].lastOcActivityTime > 0 &&
+                            ((__rdtsc() - peers[i].lastOcActivityTime) / frequency > OC_INACTIVITY_TIMEOUT_SECS))
+                        {
+                            closePeer(&peers[i], OC_MACHINE_GRACEFUL_CLOSE_RETRIES);
                         }
                     }
                     else
@@ -9143,8 +9216,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                         // Don't cull handshaked (productive) peers — only rotate unproductive ones.
                         if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing && !peers[i].exchangedPublicPeers)
                         {
-                            // Skip FullNode and OM nodes
-                            if (!peers[i].isFullNode() && !peers[i].isOMNode)
+                            if (!peers[i].isFullNode()
+                                && !peers[i].isOracleMachineNode()
+                                && !peers[i].isOcMachineNode())
                             {
                                 suitablePeerIndices[numberOfSuitablePeers++] = i;
                             }
@@ -9285,6 +9359,10 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                         else if (responseQueueElements[responseQueueElementTail].peer == (Peer*)1)
                         {
                             pushToOracleMachineNodes(responseHeader);
+                        }
+                        else if (responseQueueElements[responseQueueElementTail].peer == (Peer*)2)
+                        {
+                            pushToOcMachineNodes(responseHeader);
                         }
                         else
                         {
@@ -9630,6 +9708,10 @@ void processArgs(int argc, const char* argv[]) {
         ("g,testnet-gbt", "Enable testnet go behind trick in aux node", cxxopts::value<bool>())
         ("r,rebuild-tx-hashmap", "Enable rebuild tx hashmap when start from snapshot", cxxopts::value<bool>())
         ("d,ticking-delay", "Delay ticking process by milliseconds", cxxopts::value<int>())
+#ifdef LONG_RUN_LOCAL_TESTNET
+        // no default_value: cxxopts defaults don't register in count()
+        ("tick-duration", "Target wall-clock duration of one tick in milliseconds (0 = unpaced, default 1000, max 30000).", cxxopts::value<int>())
+#endif
         ("sm,node-mode", "Set start mode (1=MAIN, 2=AUX, 3=MAIN&AUX)", cxxopts::value<int>())
         ("seeds", "Set seeds (IDs) to run on this node (only apply for main node)", cxxopts::value<std::string>())
         ("rp,reader-passcode", "Passcode to access log reader", cxxopts::value<std::string>())
@@ -9812,6 +9894,18 @@ void processArgs(int argc, const char* argv[]) {
         logColorToScreen("INFO", "Ticking delay set to " + std::to_string(tickDelay) + " ms");
     }
 
+#ifdef LONG_RUN_LOCAL_TESTNET
+    if (result.count("tick-duration")) {
+        int duration = result["tick-duration"].as<int>();
+        if (duration < 0 || duration > 30000) {
+            logColorToScreen("ERROR", "Invalid tick duration: " + std::to_string(duration) + " (allowed: 0-30000 ms)");
+            exit(1);
+        }
+        tickDurationMs = duration;
+    }
+    logColorToScreen("INFO", "Tick duration set to " + std::to_string(tickDurationMs) + " ms" + (tickDurationMs == 0 ? " (unpaced)" : ""));
+#endif
+
     if (result.count("http-port")) {
         int port = result["http-port"].as<int>();
         if (port <= 0 || port > 65535) {
@@ -9845,6 +9939,13 @@ void processArgs(int argc, const char* argv[]) {
         mainAuxStatus = mode;
         std::string modeString = (isMainMode() ? "MAIN" : "aux") + std::string("&") + ((mainAuxStatus & 2) ? "MAIN" : "aux") + std::string(" mode enabled.");
         logColorToScreen("INFO", modeString);
+#ifdef LONG_RUN_LOCAL_TESTNET
+        if (mode != 3)
+        {
+            // see doc/long_run_local_testnet.md
+            logColorToScreen("WARN", "LONG_RUN_LOCAL_TESTNET: --node-mode " + std::to_string(mode) + " will flip at epoch transitions; only 3 (MAIN&MAIN) keeps an unattended node ticking. Omit --node-mode to use the default (3).");
+        }
+#endif
     }
 
     if (result.count("static-peers"))

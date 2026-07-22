@@ -38,6 +38,10 @@ static const unsigned char oracleMachineIPs[][4] = {
     {127, 0, 0, 1}, // REMOVE THIS ENTRY AND REPLACE IT WITH YOUR OWN IP ADDRESSES
 };
 
+static const unsigned char ocMachineIPs[][4] = {
+    {0, 0, 0, 0},
+};
+
 #define ENABLE_QUBIC_LOGGING_EVENT 1 // turn on logging events
 
 #ifdef NO_ENABLE_QUBIC_LOGGING_EVENT

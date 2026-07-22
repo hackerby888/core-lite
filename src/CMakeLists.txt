@@ -155,6 +155,14 @@ if(TESTNET_LITE_RAM)
     target_compile_definitions(Qubic PRIVATE TESTNET_LITE_RAM)
 endif()
 
+if(LONG_RUN_LOCAL_TESTNET)
+    # Long-run mode is a testnet variant; it implies TESTNET.
+    target_compile_definitions(Qubic PRIVATE TESTNET LONG_RUN_LOCAL_TESTNET)
+    if(DEFINED LONG_RUN_EPOCH_TICK_CAPACITY)
+        target_compile_definitions(Qubic PRIVATE LONG_RUN_EPOCH_TICK_CAPACITY=${LONG_RUN_EPOCH_TICK_CAPACITY}ULL)
+    endif()
+endif()
+
 # Set specific properties for assembly files to avoid C++ flags being applied
 set_source_files_properties(platform/custom_stack.nasm PROPERTIES
     COMPILE_FLAGS ""
