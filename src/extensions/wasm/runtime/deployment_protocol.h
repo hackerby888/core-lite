@@ -1,9 +1,11 @@
 #pragma once
 
-// Deployment transaction values, wire offsets, and little-endian readers.
+// Deployment transaction values and wire layouts.
 #ifdef LITE_WASM_SC
 
-// These input types and offsets are part of the @qinit/proto deployment wire format.
+#include "platform/m256.h"
+
+// These input types are part of the @qinit/proto deployment wire format.
 #define WASM_DEPLOYMENT_UPLOAD_BEGIN_INPUT_TYPE 240
 #define WASM_DEPLOYMENT_UPLOAD_CHUNK_INPUT_TYPE 241
 #define WASM_DEPLOYMENT_DEPLOY_INPUT_TYPE 242
@@ -13,52 +15,49 @@ namespace Wasm::Runtime
 
 namespace DeploymentProtocol
 {
-constexpr unsigned int SessionIdOffset = 0;
-constexpr unsigned int UploadTotalSizeOffset = 8;
-constexpr unsigned int UploadChunkCountOffset = 12;
-constexpr unsigned int UploadHashOffset = 16;
-constexpr unsigned int UploadBeginSize = 48;
-constexpr unsigned int ChunkSequenceOffset = 8;
-constexpr unsigned int ChunkLengthOffset = 12;
-constexpr unsigned int ChunkDataOffset = 14;
-constexpr unsigned int ChunkHeaderSize = 14;
-constexpr unsigned int DeploySlotOffset = 8;
-constexpr unsigned int DeployHashOffset = 12;
-constexpr unsigned int DeployAbiVersionOffset = 44;
-constexpr unsigned int DeployStateLayoutVersionOffset = 48;
-constexpr unsigned int DeployNameOffset = 52;
-constexpr unsigned int DeployBaseSize = 52;
-constexpr unsigned int DeployNamedSize = 84;
-}
 
-static unsigned long long readU64(const unsigned char* input, unsigned int offset)
+static const m256i DeploymentAddress(99999ULL, 0, 0, 0);
+
+#pragma pack(push, 1)
+
+struct UploadBeginMessage
 {
-    unsigned long long value = 0;
+    uint64_t sessionId;
+    uint32_t totalSize;
+    uint32_t chunkCount;
+    unsigned char finalHash[32];
+};
 
-    for (int byteIndex = 0; byteIndex < 8; byteIndex++)
-    {
-        value |= (unsigned long long)input[offset + byteIndex] << (8 * byteIndex);
-    }
-
-    return value;
-}
-
-static unsigned int readU32(const unsigned char* input, unsigned int offset)
+struct UploadChunkHeader
 {
-    unsigned int value = 0;
+    uint64_t sessionId;
+    uint32_t sequence;
+    uint16_t dataLength;
+};
 
-    for (int byteIndex = 0; byteIndex < 4; byteIndex++)
-    {
-        value |= (unsigned int)input[offset + byteIndex] << (8 * byteIndex);
-    }
-
-    return value;
-}
-
-static unsigned int readU16(const unsigned char* input, unsigned int offset)
+struct DeployHeader
 {
-    return (unsigned int)input[offset] | ((unsigned int)input[offset + 1] << 8);
-}
+    uint64_t sessionId;
+    uint32_t targetSlot;
+    unsigned char finalHash[32];
+    uint32_t abiVersion;
+    uint32_t stateLayoutVersion;
+};
+
+struct DeployMessage
+{
+    DeployHeader header;
+    char name[32];
+};
+
+#pragma pack(pop)
+
+static_assert(sizeof(UploadBeginMessage) == 48, "UploadBeginMessage layout drifted");
+static_assert(sizeof(UploadChunkHeader) == 14, "UploadChunkHeader layout drifted");
+static_assert(sizeof(DeployHeader) == 52, "DeployHeader layout drifted");
+static_assert(sizeof(DeployMessage) == 84, "DeployMessage layout drifted");
+
+} // namespace DeploymentProtocol
 
 } // namespace Wasm::Runtime
 

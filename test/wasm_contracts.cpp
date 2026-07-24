@@ -1,6 +1,7 @@
 // Exercise the Wasm registration, dispatch, and state ABI through WAMR.
 #ifdef LITE_WASM_SC
 
+#include <cstddef>
 #include <cstring>
 #include <cstdint>
 #include <cstdio>
@@ -15,6 +16,7 @@ constexpr unsigned short WASM_RESERVED_SLOT_BASE = 28;
 constexpr unsigned short WASM_RESERVED_SLOT_COUNT = 4;
 #include "extensions/wasm/runtime/arena_scope.h"
 #include "extensions/wasm/runtime/contract_slots.h"
+#include "extensions/wasm/runtime/deployment_protocol.h"
 #include "wasm_contract_fixture.h"
 
 namespace
@@ -114,6 +116,32 @@ TEST(WasmContracts, DispatchDepthRestores)
         EXPECT_EQ(depth, 1u);
     }
     EXPECT_EQ(depth, 0u);
+}
+
+TEST(WasmContracts, DeploymentProtocolLayout)
+{
+    using namespace Wasm::Runtime::DeploymentProtocol;
+
+    EXPECT_EQ(DeploymentAddress.u64._0, 99999u);
+    EXPECT_EQ(DeploymentAddress.u64._1, 0u);
+    EXPECT_EQ(DeploymentAddress.u64._2, 0u);
+    EXPECT_EQ(DeploymentAddress.u64._3, 0u);
+
+    EXPECT_EQ(offsetof(UploadBeginMessage, sessionId), 0u);
+    EXPECT_EQ(offsetof(UploadBeginMessage, totalSize), 8u);
+    EXPECT_EQ(offsetof(UploadBeginMessage, chunkCount), 12u);
+    EXPECT_EQ(offsetof(UploadBeginMessage, finalHash), 16u);
+
+    EXPECT_EQ(offsetof(UploadChunkHeader, sessionId), 0u);
+    EXPECT_EQ(offsetof(UploadChunkHeader, sequence), 8u);
+    EXPECT_EQ(offsetof(UploadChunkHeader, dataLength), 12u);
+
+    EXPECT_EQ(offsetof(DeployHeader, sessionId), 0u);
+    EXPECT_EQ(offsetof(DeployHeader, targetSlot), 8u);
+    EXPECT_EQ(offsetof(DeployHeader, finalHash), 12u);
+    EXPECT_EQ(offsetof(DeployHeader, abiVersion), 44u);
+    EXPECT_EQ(offsetof(DeployHeader, stateLayoutVersion), 48u);
+    EXPECT_EQ(offsetof(DeployMessage, name), 52u);
 }
 
 TEST(WasmContracts, UploadBeginPreservesTheActiveSession)

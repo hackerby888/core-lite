@@ -3059,7 +3059,7 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
             }
 
 #ifdef LITE_WASM_SC
-            if (transaction->destinationPublicKey == m256i(99999ULL, 0, 0, 0))
+            if (transaction->destinationPublicKey == Wasm::Runtime::DeploymentProtocol::DeploymentAddress)
             {
                 Wasm::Runtime::dispatchDeploymentTransaction(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
             }

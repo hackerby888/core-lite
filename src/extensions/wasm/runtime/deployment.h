@@ -178,42 +178,61 @@ static void runPendingMigration(unsigned int contractIndex);
 {
     if (inputType == WASM_DEPLOYMENT_UPLOAD_BEGIN_INPUT_TYPE)
     {
-        if (size < DeploymentProtocol::UploadBeginSize)
+        DeploymentProtocol::UploadBeginMessage message;
+        if (size < sizeof(message))
         {
             return;
         }
 
-        beginModuleUpload(readU64(input, DeploymentProtocol::SessionIdOffset), readU32(input, DeploymentProtocol::UploadTotalSizeOffset), readU32(input, DeploymentProtocol::UploadChunkCountOffset), input + DeploymentProtocol::UploadHashOffset);
+        copyMem(&message, input, sizeof(message));
+        beginModuleUpload(
+            message.sessionId,
+            message.totalSize,
+            message.chunkCount,
+            message.finalHash);
     }
     else if (inputType == WASM_DEPLOYMENT_UPLOAD_CHUNK_INPUT_TYPE)
     {
-        if (size < DeploymentProtocol::ChunkHeaderSize)
+        DeploymentProtocol::UploadChunkHeader message;
+        if (size < sizeof(message))
         {
             return;
         }
 
-        const unsigned int dataLength = readU16(input, DeploymentProtocol::ChunkLengthOffset);
-        if (DeploymentProtocol::ChunkDataOffset + dataLength > size)
+        copyMem(&message, input, sizeof(message));
+        if (sizeof(message) + message.dataLength > size)
         {
             return;
         }
 
-        receiveModuleChunk(readU64(input, DeploymentProtocol::SessionIdOffset), readU32(input, DeploymentProtocol::ChunkSequenceOffset), input + DeploymentProtocol::ChunkDataOffset, dataLength);
+        receiveModuleChunk(
+            message.sessionId,
+            message.sequence,
+            input + sizeof(message),
+            message.dataLength);
     }
     else if (inputType == WASM_DEPLOYMENT_DEPLOY_INPUT_TYPE)
     {
-        if (size < DeploymentProtocol::DeployBaseSize)
+        DeploymentProtocol::DeployHeader message;
+        if (size < sizeof(message))
         {
             return;
         }
 
+        copyMem(&message, input, sizeof(message));
         const char* name = nullptr;
-        if (size >= DeploymentProtocol::DeployNamedSize)
+        if (size >= sizeof(DeploymentProtocol::DeployMessage))
         {
-            name = (const char*)(input + DeploymentProtocol::DeployNameOffset);
+            name = reinterpret_cast<const char*>(input + sizeof(message));
         }
 
-        deployModule(readU64(input, DeploymentProtocol::SessionIdOffset), readU32(input, DeploymentProtocol::DeploySlotOffset), input + DeploymentProtocol::DeployHashOffset, readU32(input, DeploymentProtocol::DeployAbiVersionOffset), readU32(input, DeploymentProtocol::DeployStateLayoutVersionOffset), name);
+        deployModule(
+            message.sessionId,
+            message.targetSlot,
+            message.finalHash,
+            message.abiVersion,
+            message.stateLayoutVersion,
+            name);
     }
 }
 
@@ -274,7 +293,6 @@ static bool hasPendingActivation(unsigned int /*tick*/)
 [[maybe_unused]] static void initializeDeployment()
 {
     logToConsole(L"LITEWASM: runtime deployment enabled for testnet lite RAM");
-    logToConsole(L"LITEWASM: deploy address id(99999,0,0,0)");
 
     for (unsigned int slotOffset = 0; slotOffset < WASM_RESERVED_SLOT_COUNT; slotOffset++)
     {
