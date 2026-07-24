@@ -7651,15 +7651,6 @@ static bool initialize()
                 ASSERT(energy(::spectrumIndex(publicKey)) == (10'000'000'000 + currentAmount));
             }
 
-            // Public deterministic signer used by Qinit and other local testnet tooling.
-            static constexpr unsigned char qinitDevSeed[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-            m256i qinitDevPrivateKey;
-            m256i qinitDevPublicKey;
-            m256i qinitDevSubseed;
-            getSubseed(qinitDevSeed, qinitDevSubseed.m256i_u8);
-            getPrivateKey(qinitDevSubseed.m256i_u8, qinitDevPrivateKey.m256i_u8);
-            getPublicKey(qinitDevPrivateKey.m256i_u8, qinitDevPublicKey.m256i_u8);
-            increaseEnergy(qinitDevPublicKey, 10'000'000'000, false);
 #endif
 
 #if defined(TESTNET)
