@@ -1424,6 +1424,11 @@ static const unsigned char oracleMachineIPs[][4] = {
      {0, 0, 0, 0}, // no oracle machine: zero address is never dialed (address.u32 != 0 guard)
 };
 
+// OC machine nodes must whitelist this core node.
+static const unsigned char ocMachineIPs[][4] = {
+     {0, 0, 0, 0}, // no OC machine: zero address is never dialed (address.u32 != 0 guard)
+};
+
 #define ENABLE_QUBIC_LOGGING_EVENT 1 // turn on logging events
 
 #ifdef NO_ENABLE_QUBIC_LOGGING_EVENT
