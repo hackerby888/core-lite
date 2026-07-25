@@ -19,7 +19,13 @@
 #include <thread>
 #include <atomic>
 #if defined(__linux__)
+#include <cerrno>
 #include <cstdlib>   // posix_memalign, free
+#include <cstring>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -226,6 +232,87 @@ TEST(ForkRollbackControl, PromoteCommandCarriesTargetTick)
 
     EXPECT_EQ(command.action, tickForkControl::ChildAction::Promote);
     EXPECT_EQ(command.targetTick, targetTick);
+}
+
+TEST(ForkRollbackControl, PromoteClosesOnlyInheritedRpcUnixSockets)
+{
+    EXPECT_EXIT(
+    {
+        const std::string rpcPath =
+            "/tmp/qubic-rpc-promote-" + std::to_string(getpid()) + ".sock";
+        unlink(rpcPath.c_str());
+
+        const int listenerFd = socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un rpcAddress{};
+        rpcAddress.sun_family = AF_UNIX;
+        std::strncpy(rpcAddress.sun_path, rpcPath.c_str(), sizeof(rpcAddress.sun_path) - 1);
+        if (listenerFd < 0
+            || bind(listenerFd, (sockaddr*)&rpcAddress, sizeof(rpcAddress)) != 0
+            || listen(listenerFd, 1) != 0)
+        {
+            unlink(rpcPath.c_str());
+            _exit(1);
+        }
+
+        const int clientFd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (clientFd < 0
+            || connect(clientFd, (sockaddr*)&rpcAddress, sizeof(rpcAddress)) != 0)
+        {
+            unlink(rpcPath.c_str());
+            _exit(1);
+        }
+
+        const int acceptedFd = accept(listenerFd, nullptr, nullptr);
+        int unrelatedUnixFds[2];
+        int pipeFds[2];
+        if (acceptedFd < 0
+            || socketpair(AF_UNIX, SOCK_STREAM, 0, unrelatedUnixFds) != 0
+            || pipe(pipeFds) != 0)
+        {
+            unlink(rpcPath.c_str());
+            _exit(1);
+        }
+
+        const int inetFd = socket(AF_INET, SOCK_STREAM, 0);
+        if (inetFd < 0)
+        {
+            unlink(rpcPath.c_str());
+            _exit(1);
+        }
+
+        const unsigned int closedCount =
+            tickForkControl::closeInheritedRpcUnixSocketsForPromote(
+                listenerFd,
+                rpcPath.c_str());
+        unlink(rpcPath.c_str());
+
+        errno = 0;
+        const bool listenerClosed =
+            fcntl(listenerFd, F_GETFD) == -1 && errno == EBADF;
+        errno = 0;
+        const bool acceptedConnectionClosed =
+            fcntl(acceptedFd, F_GETFD) == -1 && errno == EBADF;
+        const bool clientOpen = fcntl(clientFd, F_GETFD) != -1;
+        const bool unrelatedUnixOpen =
+            fcntl(unrelatedUnixFds[0], F_GETFD) != -1
+            && fcntl(unrelatedUnixFds[1], F_GETFD) != -1;
+        const bool inetOpen = fcntl(inetFd, F_GETFD) != -1;
+        const bool pipeOpen =
+            fcntl(pipeFds[0], F_GETFD) != -1
+            && fcntl(pipeFds[1], F_GETFD) != -1;
+
+        _exit(closedCount == 2
+                  && listenerClosed
+                  && acceptedConnectionClosed
+                  && clientOpen
+                  && unrelatedUnixOpen
+                  && inetOpen
+                  && pipeOpen
+              ? 0
+              : 2);
+    },
+    ::testing::ExitedWithCode(0),
+    "");
 }
 
 // 8. registerPool + tryMarkDirty: in-range address marks its slot dirty; out-of-range is ignored.

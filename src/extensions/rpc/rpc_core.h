@@ -12,6 +12,9 @@
 #include <thread>
 #include <atomic>
 #include <shared_mutex>
+#include <chrono>
+#include <cerrno>
+#include <cstdio>
 #include <new>
 #include <cstdint>
 #include <cstring>
@@ -271,20 +274,99 @@ inline void rpcUnixHandleConn(int c)
 
 inline void rpcUnixServe(std::string path)
 {
-    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (srv < 0) return;
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
-    unlink(path.c_str());
-    if (bind(srv, (sockaddr*)&addr, sizeof(addr)) != 0) { close(srv); return; }
-    listen(srv, 64);
-    gRpcUnixListenFd.store(srv, std::memory_order_release);
+
+    std::string lastFailedOperation;
+    int lastError = 0;
+    auto logFailure = [&](const char* operation, int error)
+    {
+        if (lastFailedOperation == operation && lastError == error)
+        {
+            return;
+        }
+        fprintf(stderr,
+                "[RPC] unix %s failed for %s: errno=%d (%s); retrying\n",
+                operation,
+                path.c_str(),
+                error,
+                strerror(error));
+        fflush(stderr);
+        lastFailedOperation = operation;
+        lastError = error;
+    };
+    auto logRecovery = [&]()
+    {
+        if (lastFailedOperation.empty())
+        {
+            return;
+        }
+        fprintf(stderr, "[RPC] unix listener recovered for %s\n", path.c_str());
+        fflush(stderr);
+        lastFailedOperation.clear();
+        lastError = 0;
+    };
+
     for (;;)
     {
-        int c = accept(srv, nullptr, nullptr);
-        if (c < 0) continue;
-        std::thread(rpcUnixHandleConn, c).detach();
+        int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (srv < 0)
+        {
+            const int error = errno;
+            logFailure("socket", error);
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        if (unlink(path.c_str()) != 0 && errno != ENOENT)
+        {
+            const int error = errno;
+            close(srv);
+            logFailure("unlink", error);
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        if (bind(srv, (sockaddr*)&addr, sizeof(addr)) != 0)
+        {
+            const int error = errno;
+            close(srv);
+            logFailure("bind", error);
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        if (listen(srv, 64) != 0)
+        {
+            const int error = errno;
+            close(srv);
+            unlink(path.c_str());
+            logFailure("listen", error);
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        gRpcUnixListenFd.store(srv, std::memory_order_release);
+        logRecovery();
+        for (;;)
+        {
+            int connection = accept(srv, nullptr, nullptr);
+            if (connection >= 0)
+            {
+                logRecovery();
+                std::thread(rpcUnixHandleConn, connection).detach();
+                continue;
+            }
+
+            const int error = errno;
+            if (error == EINTR)
+            {
+                continue;
+            }
+            logFailure("accept", error);
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
     }
 }
 

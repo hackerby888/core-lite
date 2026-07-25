@@ -8733,6 +8733,13 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     tickFork::setWinState(tickFork::WindowState::Idle);
     close(tickFork::gPipe[0]);
     tickFork::gPipe[0] = -1;
+#if !defined(NO_RPC)
+    gRpcUnixRunning = false;
+    const std::string rpcPath = rpcUnixPath(httpPort);
+    tickForkControl::closeInheritedRpcUnixSocketsForPromote(
+        gRpcUnixListenFd.exchange(-1),
+        rpcPath.c_str());
+#endif
 
     // ── Stage 2: disk shadow + swap pin recovery ──
     // Inherited structures may be mid-operation in a non-surviving parent thread.
@@ -8772,13 +8779,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     // ── Stage 6: RPC rebind ──
 #if defined(__linux__) && !defined(NO_RPC)
     new (&gRpcDispatchLock) SmartSharedMutex("gRpcDispatchLock");
-    if (gRpcUnixListenFd >= 0)
-    {
-        close(gRpcUnixListenFd);
-        gRpcUnixListenFd = -1;
-    }
-    gRpcUnixRunning = false;
-    rpcUnixStart(rpcUnixPath(httpPort));
+    rpcUnixStart(rpcPath);
     watchAndCheckin();
 #endif
     if (gForkBench)

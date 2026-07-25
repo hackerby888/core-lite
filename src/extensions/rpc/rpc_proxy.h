@@ -6,6 +6,8 @@
 #if defined(__linux__) && !defined(NO_RPC)
 
 #include <drogon/drogon.h>
+#include <atomic>
+#include <cerrno>
 #include <string>
 #include <thread>
 #include <memory>
@@ -73,16 +75,47 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
             }
 #endif
             int s = socket(AF_UNIX, SOCK_STREAM, 0);
-            sockaddr_un addr{};
-            addr.sun_family = AF_UNIX;
-            std::strncpy(addr.sun_path, unixPath.c_str(), sizeof(addr.sun_path) - 1);
-            if (s < 0 || connect(s, (sockaddr*)&addr, sizeof(addr)) != 0)
+            const char* failedOperation = nullptr;
+            int connectionError = 0;
+            if (s < 0)
             {
-                if (s >= 0) close(s);
+                failedOperation = "socket";
+                connectionError = errno;
+            }
+            else
+            {
+                sockaddr_un addr{};
+                addr.sun_family = AF_UNIX;
+                std::strncpy(addr.sun_path, unixPath.c_str(), sizeof(addr.sun_path) - 1);
+                if (connect(s, (sockaddr*)&addr, sizeof(addr)) != 0)
+                {
+                    failedOperation = "connect";
+                    connectionError = errno;
+                }
+            }
+
+            static std::atomic<bool> nodeUnavailable{ false };
+            if (failedOperation)
+            {
+                if (s >= 0)
+                {
+                    close(s);
+                }
+                if (!nodeUnavailable.exchange(true))
+                {
+                    LOG_ERROR << "RPC sidecar: node " << failedOperation
+                              << " failed for " << unixPath
+                              << ": errno=" << connectionError
+                              << " (" << strerror(connectionError) << ")";
+                }
                 auto r = HttpResponse::newHttpResponse();
                 r->setStatusCode(k503ServiceUnavailable);
                 r->setBody("node RPC unavailable (mid-promote?)");
                 return r;
+            }
+            if (nodeUnavailable.exchange(false))
+            {
+                LOG_INFO << "RPC sidecar: node RPC connection recovered for " << unixPath;
             }
 
             Json::Value m;
