@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: hackerby888/qinit
-          ref: feat/windows-standalone-node
+          ref: main
           path: qinit
 
       - uses: oven-sh/setup-bun@v2
