@@ -232,6 +232,8 @@ jobs:
             --real \
             --native \
             --core "$GITHUB_WORKSPACE/core" \
+            --bin "$NODE_BIN" \
+            --keep \
             --contract contracts/DigestProbe.h \
             --name DigestProbe \
             --skip-verify \
