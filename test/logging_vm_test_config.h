@@ -1,8 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <string>
 
-// Load normal or ONLY_LOGGING settings before applying the test layout.
 #include "private_settings.h"
 
 #undef LOG_BUFFER_PAGE_SIZE

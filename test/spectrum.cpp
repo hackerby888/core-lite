@@ -1,8 +1,10 @@
 #define NO_UEFI
+#define SINGLE_COMPILE_UNIT
 
 #define PRINT_TEST_INFO 0
 
 #include "gtest/gtest.h"
+#include "contract_testing.h"
 
 #include <chrono>
 #include <random>
@@ -122,7 +124,7 @@ static void updateAndPrintEntityCategoryPopulations()
 struct SpectrumTest : public LoggingTest
 {
     SpectrumInfo beforeAntiDustSpectrumInfo;
-    std::chrono::steady_clock::time_point beforeAntiDustTimestamp;
+    std::chrono::time_point<std::chrono::high_resolution_clock> beforeAntiDustTimestamp = std::chrono::high_resolution_clock::now();
     bool antiDustCornerCase;
     std::mt19937_64 rnd64;
 
@@ -162,7 +164,7 @@ struct SpectrumTest : public LoggingTest
         updateAndPrintEntityCategoryPopulations();
 
         // Start measuring run-time
-        beforeAntiDustTimestamp = std::chrono::steady_clock::now();
+        beforeAntiDustTimestamp = std::chrono::high_resolution_clock::now();
     }
 
     void afterAntiDust()
@@ -170,7 +172,7 @@ struct SpectrumTest : public LoggingTest
         checkAndGetInfo();
 
         // Print anti-dust info
-        auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - beforeAntiDustTimestamp);
+        auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - beforeAntiDustTimestamp);
         std::cout << "Transfer with anti-dust took " << duration_ms << " ms: entities "
             << beforeAntiDustSpectrumInfo.numberOfEntities << " -> " << spectrumInfo.numberOfEntities
             << " (to " << spectrumInfo.numberOfEntities * 100llu / SPECTRUM_CAPACITY

@@ -1055,8 +1055,9 @@ TEST(ContractQraffle, DepositInTokenRaffle)
     auto result = qraffle.depositInTokenRaffle(poorUser, 0, QRAFFLE_TRANSFER_SHARE_FEE - 1);
     EXPECT_EQ(result.returnCode, QRAFFLE_INSUFFICIENT_FUND);
 
-    // Test unregistered user: #898 dropped the DAO-membership requirement, so the deposit
-    // now proceeds to the share transfer and fails there (the user holds no tokens).
+    // DAO membership is no longer required to deposit in a token raffle (#898): an unregistered
+    // user is no longer rejected up-front. poorUser holds no shares, so the deposit now fails at
+    // the share transfer instead of being rejected for being unregistered.
     increaseEnergy(poorUser, QRAFFLE_TRANSFER_SHARE_FEE);
     result = qraffle.depositInTokenRaffle(poorUser, 0, QRAFFLE_TRANSFER_SHARE_FEE);
     EXPECT_EQ(result.returnCode, QRAFFLE_FAILED_TO_DEPOSIT);

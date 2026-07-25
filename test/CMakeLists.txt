@@ -80,40 +80,43 @@ add_executable(
 		read_write_lock.cpp
 		setjump.cpp
 		oracle_engine.cpp
+		windows_lazy_memory.cpp
 )
 
-# Keep logging template sizes identical across every test translation unit.
+add_executable(
+  qubic_state_tests
+    contract_state_pager.cpp
+    k12_digest_cache.cpp
+    state_memory.cpp
+)
+
 set(LOGGING_VM_TEST_CONFIG
     "${CMAKE_CURRENT_SOURCE_DIR}/logging_vm_test_config.h")
+set(SPECTRUM_GLOBAL_CONFIG
+    "${PROJECT_ROOT_DIR}/src/platform/global_var.h")
 if(MSVC)
     target_compile_options(qubic_core_tests PRIVATE
         "/FI${LOGGING_VM_TEST_CONFIG}")
+    set_property(SOURCE spectrum.cpp APPEND PROPERTY COMPILE_OPTIONS
+        "/FI${SPECTRUM_GLOBAL_CONFIG}")
 else()
     target_compile_options(qubic_core_tests PRIVATE
         -include "${LOGGING_VM_TEST_CONFIG}")
+    set_property(SOURCE spectrum.cpp APPEND PROPERTY COMPILE_OPTIONS
+        -include "${SPECTRUM_GLOBAL_CONFIG}")
 endif()
 
-# Apply test-specific compiler flags from the centralized detection module
-apply_test_compiler_flags(qubic_core_tests)
-
-# Add additional test-specific flags if needed
-if(IS_MSVC)
-  target_compile_options(qubic_core_tests PRIVATE /DNOMINMAX /Zc:wchar_t- /WX-)
-elseif((IS_CLANG OR IS_GCC) AND IS_ARM)
-  # ARM receives x86 intrinsics through SIMDe.
-  target_compile_options(qubic_core_tests PRIVATE -fshort-wchar -w)
-elseif(IS_CLANG OR IS_GCC)
-  target_compile_options(
-          qubic_core_tests
-          PRIVATE
-          -mrdrnd -Wno-error
-          -mbmi
-          -mlzcnt
-          -fshort-wchar
-          -w
-  )
-endif()
-
+foreach(TEST_TARGET IN ITEMS qubic_core_tests qubic_state_tests)
+    apply_test_compiler_flags(${TEST_TARGET})
+    if(IS_MSVC)
+        target_compile_options(${TEST_TARGET} PRIVATE /DNOMINMAX /Zc:wchar_t- /WX-)
+    elseif((IS_CLANG OR IS_GCC) AND IS_ARM)
+        target_compile_options(${TEST_TARGET} PRIVATE -fshort-wchar -w)
+    elseif(IS_CLANG OR IS_GCC)
+        target_compile_options(${TEST_TARGET} PRIVATE
+            -mrdrnd -Wno-error -mbmi -mlzcnt -fshort-wchar -w)
+    endif()
+endforeach()
 
 target_link_libraries(
   qubic_core_tests PRIVATE
@@ -123,10 +126,12 @@ target_link_libraries(
   Blosc2::blosc2_static
 )
 
-# The contract-state pager is native on Linux, macOS, and Windows.
-target_sources(qubic_core_tests PRIVATE
-  contract_state_pager.cpp
-  k12_digest_cache.cpp
+target_link_libraries(
+  qubic_state_tests PRIVATE
+  GTest::gtest_main
+  platform_common
+  platform_os
+  Blosc2::blosc2_static
 )
 
 # Keep Wasm node settings isolated from the default core gtests.
@@ -181,6 +186,7 @@ endif()
 
 include(GoogleTest)
 gtest_discover_tests(qubic_core_tests)
+gtest_discover_tests(qubic_state_tests)
 if(TARGET qubic_wasm_tests)
     gtest_discover_tests(qubic_wasm_tests)
 endif()

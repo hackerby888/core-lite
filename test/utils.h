@@ -5,8 +5,6 @@
 #include <iomanip>
 #include <fstream>
 #include <filesystem>
-#include <algorithm>
-#include <cctype>
 
 namespace test_utils
 {
@@ -67,8 +65,7 @@ static std::vector<std::vector<std::string>> readCSV(const std::string& filename
         while (std::getline(ss, item, ','))
         {
             // Remove any spaces in the string
-            item.erase(std::remove_if(item.begin(), item.end(),
-                [](unsigned char c){ return std::isspace(c); }), item.end());
+            item.erase(remove_if(item.begin(), item.end(), isspace), item.end());
 
             parsedLine.push_back(item);
         }
