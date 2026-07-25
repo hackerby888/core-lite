@@ -41,6 +41,13 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerSetup)
 include(HomebrewDependencies)
 
+if(IS_WINDOWS)
+    add_compile_definitions(
+        _WIN32_WINNT=0x0A00
+        WINVER=0x0A00
+    )
+endif()
+
 # Make keg-only dependencies visible to ordinary find_package calls.
 qubic_add_homebrew_prefixes(
     zlib

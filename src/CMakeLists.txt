@@ -288,11 +288,18 @@ elseif(IS_CLANG OR IS_GCC)
     )
 elseif(IS_MSVC)
     # Match Qubic.sln's CHAR16 representation and suppress Windows min/max macros.
+    set_property(TARGET Qubic PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     target_compile_options(Qubic PRIVATE
        /D_CONSOLE
        /DNOMINMAX
        /Zc:wchar_t-
        $<$<CONFIG:Release>:/DNDEBUG>
+    )
+    target_link_options(Qubic PRIVATE
+        $<$<CONFIG:Release>:/SUBSYSTEM:CONSOLE,10.00>
+        $<$<CONFIG:Release>:/DEBUG:NONE>
+        $<$<CONFIG:Release>:/OPT:REF>
+        $<$<CONFIG:Release>:/OPT:ICF>
     )
 endif()
 
