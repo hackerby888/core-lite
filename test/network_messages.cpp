@@ -2,6 +2,14 @@
 
 #define NETWORK_MESSAGES_WITHOUT_CORE_DEPENDENCIES
 #include "../src/network_messages/all.h"
+#include "../src/oc_core/core_oc_network_messages.h"
+
+
+TEST(TestCoreOcNetworkMessages, TypeAndLayout) {
+    EXPECT_EQ(192, OcMachineInvocation::type());
+    EXPECT_EQ(66U, sizeof(SignerEntry));
+    EXPECT_EQ(16U, sizeof(OcMachineInvocation));
+}
 
 
 TEST(TestCoreRequestResponseHeader, TestSize) {

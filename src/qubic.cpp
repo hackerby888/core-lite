@@ -19,9 +19,7 @@
 #include "extensions/utils.h"
 #include "platform/msvc_polyfill.h"
 #elif defined(__APPLE__)
-// macOS: same POSIX set, minus <byteswap.h> (concurrency.h uses __builtin_bswap) and minus the
-// libbacktrace backend (boost::stacktrace picks its macOS default). _Unwind_Backtrace is available
-// without _GNU_SOURCE on macOS, so tell boost not to require it.
+// macOS uses the POSIX path without byteswap or libbacktrace.
 #define BOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED
 #include <boost/stacktrace.hpp>
 #include <cstring>
@@ -44,6 +42,9 @@
 //   TESTNET_LITE_RAM    - testnet only; shrink fixed buffers (wire-incompatible
 //                         with non-LITE peers, incompatible snapshots, more
 //                         tick-storage disk I/O)
+//   LONG_RUN_LOCAL_TESTNET - testnet only; single unattended 676-computor node,
+//                         paced ticks, epoch switch only on capacity/F7.
+//                         See doc/long_run_local_testnet.md
 //   USE_SWAP            - page tick storage to disk (recommended for mainnet)
 //
 // Uncomment to enable.
@@ -52,7 +53,8 @@
 // #define TESTNET
 // #define TESTNET_PREFILL_QUS
 // #define TESTNET_LITE_RAM
-// #define LITE_WASM_SC   // testnet-only (contract_def.h); node build enables via -DLITE_WASM_SC
+// #define LITE_WASM_SC   // Enable testnet Wasm contracts through CMake.
+// #define LONG_RUN_LOCAL_TESTNET
 #define USE_SWAP
 
 // ============================================================================
@@ -63,6 +65,10 @@
 
 #if defined(TESTNET_LITE_RAM) && !defined(TESTNET)
 #error "TESTNET_LITE_RAM only applies when TESTNET is defined"
+#endif
+
+#if defined(LONG_RUN_LOCAL_TESTNET) && !defined(TESTNET)
+#error "LONG_RUN_LOCAL_TESTNET only applies when TESTNET is defined"
 #endif
 
 #if defined(TESTNET) && defined(TESTNET_LITE_RAM)
@@ -186,8 +192,8 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
-#if defined(__linux__) && defined(LITE_WASM_SC)
-#include "extensions/k12_engine.h"
+#if (defined(__linux__) || defined(__APPLE__) || defined(_WIN32)) && defined(LITE_WASM_SC)
+#include "extensions/contract_state_pager.h"
 #endif
 #include "extensions/wasm/runtime/extension.h"
 #include "extensions/test_invalid_solution.h"
@@ -250,7 +256,12 @@ std::vector<IPv4Address> knownPublicPeersDynamic;
 static int autoFlushStuckSeconds = 60;
 
 static std::vector<int> mainAuxStatusChangeStack;
+#ifdef LONG_RUN_LOCAL_TESTNET
+// 3 survives endEpoch bit swap; see doc/long_run_local_testnet.md
+static volatile unsigned char mainAuxStatus = 3;
+#else
 static volatile unsigned char mainAuxStatus = 0;
+#endif
 static volatile unsigned char isVirtualMachine = 0; // indicate that it is running on VM, to avoid running some functions for BM  (for testing and developing purposes)
 static volatile bool forceRefreshPeerList = false;
 static volatile bool forceNextTick = false;
@@ -400,10 +411,10 @@ static bool saveSystem(CHAR16* directory = NULL);
 static bool loadContractStateFiles(CHAR16* directory = NULL, bool forceLoadFromFile = false);
 static bool loadContractExecFeeFiles(CHAR16* directory = NULL, bool loadAccumulatedTime = false);
 
-#if ENABLED_LOGGING
+#if ENABLED_LOGGING && !defined(LONG_RUN_LOCAL_TESTNET)
 #define PAUSE_BEFORE_CLEAR_MEMORY 1 // Requiring operators to press F10 to clear memory (before switching epoch)
 #else
-#define PAUSE_BEFORE_CLEAR_MEMORY 0
+#define PAUSE_BEFORE_CLEAR_MEMORY 0 // long-run: see doc/long_run_local_testnet.md
 #endif
 
 BroadcastFutureTickData broadcastedFutureTickData;
@@ -562,7 +573,10 @@ static inline bool isUsingSwap()
 
 static bool isLastTickInEpoch() {
     const int dayIndex = ::dayIndex(etalonTick.year, etalonTick.month, etalonTick.day);
-#ifdef TESTNET
+#ifdef LONG_RUN_LOCAL_TESTNET
+    // epoch switch only on buffer exhaustion or manual F7
+    return forceSwitchEpoch || system.tick - system.initialTick >= TESTNET_EPOCH_DURATION;
+#elif defined(TESTNET)
     return system.tick - system.initialTick >= TESTNET_EPOCH_DURATION;
 #else
     return (dayIndex == 738570 + system.epoch * 7 && etalonTick.hour >= 12)
@@ -586,7 +600,6 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
         if (contractStateChangeFlags[digestIndex >> 6] & (1ULL << (digestIndex & 63)))
         {
 #ifdef LITE_WASM_SC
-            // wasm slots hash only the contract's real state (not the 1GB slot reserve); no-op for others.
             const unsigned long long size = digestIndex < contractCount ? Wasm::Runtime::effectiveStateSize(digestIndex, contractDescriptions[digestIndex].stateSize) : 0;
 #else
             const unsigned long long size = digestIndex < contractCount ? contractDescriptions[digestIndex].stateSize : 0;
@@ -604,7 +617,6 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
                 // This is currently avoided by calling getComputerDigest() from tick processor only (and in non-concurrent init)
                 contractStateLock[digestIndex].acquireRead();
 
-                // wasm slots: contractStates[idx] aliases the resident state, hashed at `size` (its real span).
                 const unsigned long long startTime = __rdtsc();
 #if defined(LITE_WASM_SC)
                 Wasm::Runtime::hashContractState(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
@@ -3047,9 +3059,8 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
             }
 
 #ifdef LITE_WASM_SC
-            if (transaction->destinationPublicKey == m256i(99999ULL, 0, 0, 0))
+            if (transaction->destinationPublicKey == Wasm::Runtime::DeploymentProtocol::DeploymentAddress)
             {
-                // Wasm deployment transactions use a dedicated address, not the core zero address.
                 Wasm::Runtime::dispatchDeploymentTransaction(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
             }
             else
@@ -3390,6 +3401,28 @@ static void processTick(unsigned long long processorNumber)
     if (tickDelay > 0) {
         bs->Stall(tickDelay * 1'000);
     }
+#ifdef LONG_RUN_LOCAL_TESTNET
+    // Pace ticks to a wall-clock period; see doc/long_run_local_testnet.md
+    if (tickDurationMs > 0) {
+        static unsigned long long nextTickPaceTsc = 0; // tick processor thread only
+        const unsigned long long periodTscTicks = tickDurationMs * frequency / 1000;
+        unsigned long long now = __rdtsc();
+        if (now < nextTickPaceTsc) {
+            // chunked sleep: never block shutdown/persist for a whole period
+            const unsigned long long sliceUs = 100'000;
+            while (now < nextTickPaceTsc && !shutDownNode && !requestPersistingNodeState)
+            {
+                const unsigned long long remainingUs = (nextTickPaceTsc - now) * 1'000'000 / frequency;
+                bs->Stall(remainingUs < sliceUs ? remainingUs : sliceUs);
+                now = __rdtsc();
+            }
+            nextTickPaceTsc += periodTscTicks;
+        }
+        else {
+            nextTickPaceTsc = now + periodTscTicks;
+        }
+    }
+#endif
 #endif
 
     if (system.tick > system.initialTick)
@@ -3455,7 +3488,7 @@ static void processTick(unsigned long long processorNumber)
     }
 
 #ifdef LITE_WASM_SC
-    // Construct armed dynamic-contract slots under SC_INITIALIZE_TX framing (design B').
+    // Activate armed contracts under SC_INITIALIZE_TX framing.
     if (Wasm::Runtime::hasPendingActivation(system.tick))
     {
         logger.registerNewTx(system.tick, logger.SC_INITIALIZE_TX);
@@ -4561,12 +4594,7 @@ static void endEpoch()
             oracleEngine.getRevenuePoints(oracleRevPoints);
             copyMemory(gEpochRevenueData.oracleScore, oracleRevPoints.computorRevPoints);
         }
-        // The 8-computor SC-dev committee (TESTNET + LITE_WASM_SC) serves qinit/contract devs, for
-        // whom consensus economics are irrelevant. The V2 / multi-dimension formulas assume a full-size
-        // committee and a full-length epoch: their sliding window divides by totalTicks (= system.tick -
-        // system.initialTick), which a forced or immediate dev epoch advance makes 0 -> divide-by-zero crash.
-        // Skip the formulas in that mode (revenue is split evenly below); standard testnet + mainnet are
-        // unaffected (the formulas still run and pay out as before).
+        // Development epochs can have no revenue window, so skip windowed formulas.
 #if !(defined(TESTNET) && defined(LITE_WASM_SC))
         computeRevenueV2(gEpochRevenueData);
 
@@ -4589,8 +4617,7 @@ static void endEpoch()
         {
             // Compute initial computor revenue, reducing arbitrator revenue
 #if defined(TESTNET) && defined(LITE_WASM_SC)
-            // SC-dev committee: revenue formulas skipped above; split issuance evenly so the epoch transition
-            // still pays computors + balances the arbitrator without exercising the windowed math.
+            // Split development issuance evenly when windowed formulas are disabled.
             long long revenue = issuancePerComputor;
 #elif USE_REVENUE_MULTI_DIMENSION
             long long revenue = gMultiDimRevenue.revenue[computorIndex];
@@ -6930,7 +6957,10 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                             if (tickDataSuits)
                             {
                                 const int dayIndex = ::dayIndex(etalonTick.year, etalonTick.month, etalonTick.day);
-#ifdef TESTNET
+#ifdef LONG_RUN_LOCAL_TESTNET
+                                // epoch switch only on buffer exhaustion or manual F7
+                                if (forceSwitchEpoch || system.tick - system.initialTick >= TESTNET_EPOCH_DURATION)
+#elif defined(TESTNET)
                                 if (system.tick - system.initialTick >= TESTNET_EPOCH_DURATION)
 #else
                                 if ((dayIndex == 738570 + system.epoch * 7 && etalonTick.hour >= 12)
@@ -7149,7 +7179,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
             }
         }
 #ifdef LITE_WASM_SC
-        Wasm::Runtime::evictContractState(); // LRU-evict cold contract-state chunks down to the RAM cap (no-op under cap / engine off)
+        Wasm::Runtime::evictContractState();
 #endif
         tickerLoopNumerator += __rdtsc() - curTimeTick;
         tickerLoopDenominator++;
@@ -7349,7 +7379,6 @@ static bool saveContractStateFiles(CHAR16* directory)
         CONTRACT_FILE_NAME[sizeof(CONTRACT_FILE_NAME) / sizeof(CONTRACT_FILE_NAME[0]) - 6] = contractIndex % 10 + L'0';
         contractStateLock[contractIndex].acquireRead();
 #ifdef LITE_WASM_SC
-        // wasm slots alias a resident state smaller than the 1GB reserve; save its real span (avoid OOB read).
         const unsigned long long saveSize = Wasm::Runtime::effectiveStateSize(contractIndex, contractDescriptions[contractIndex].stateSize);
 #else
         const unsigned long long saveSize = contractDescriptions[contractIndex].stateSize;
@@ -7500,8 +7529,7 @@ static bool initialize()
             }
         }
 
-        // demand-zero (useVirtualMem): the score struct holds a ~1GB random2 pool that SC-dev low-RAM
-        // never fills (see ScoreFunction::initMiningData). Lazy commit -> RSS tracks actual use.
+        // Commit the large score pools on demand.
         if (!allocPoolWithErrorLog(L"score", sizeof(*score), (void**)&score, __LINE__, true, true, /*lazyCommit=*/true))
         {
             return false;
@@ -7511,8 +7539,7 @@ static bool initialize()
             return false;
         }
 #if !(defined(TESTNET) && defined(LITE_WASM_SC))
-        // eager-zero on mainnet/normal testnet (full mining); only the testnet dynamic-contract node
-        // skips it and lets the mmap zero-fill lazily (no 2GB commit).
+        // Full mining builds still initialize the pools eagerly.
         setMem(score, sizeof(*score), 0);
         setMem(score_qpi, sizeof(*score_qpi), 0);
 #endif
@@ -7623,6 +7650,7 @@ static bool initialize()
 
                 ASSERT(energy(::spectrumIndex(publicKey)) == (10'000'000'000 + currentAmount));
             }
+
 #endif
 
 #if defined(TESTNET)
@@ -7883,6 +7911,17 @@ static bool initialize()
         }
     }
 
+    if (NUMBER_OF_OC_MACHINE_CONNECTIONS > 0)
+    {
+        logToConsole(L"Populating OC machine node ...");
+        numberOfOcPeers = 0;
+        for (unsigned int i = 0; i < NUMBER_OF_OC_MACHINE_CONNECTIONS; i++)
+        {
+            const IPv4Address& peer_ip = *reinterpret_cast<const IPv4Address*>(ocMachineIPs[i]);
+            copyMem(&ocIPv4Address[numberOfOcPeers++], &peer_ip, sizeof(IPv4Address));
+        }
+    }
+
     logToConsole(L"Init TCP...");
     if (!initTcp4(PORT))
         return false;
@@ -7906,7 +7945,7 @@ static bool initialize()
     emptyTickResolver.tick = 0;
     emptyTickResolver.lastTryClock = 0;
 
-    // Wasm state uses userfaultfd or its demand-zero fallback; never protect it twice.
+    // Wasm state has its own protection and paging lifecycle.
 #if !defined(LITE_WASM_SC)
     K12StateDigestCache::init();
 #endif
@@ -7948,7 +7987,7 @@ static void deinitialize()
         if (contractStates[contractIndex])
         {
 #ifdef LITE_WASM_SC
-            Wasm::Runtime::freeContractState(contractIndex); // engine/demand-zero builds: OS reclaims memfd/mmap at exit (no freePool -> no darwin abort)
+            Wasm::Runtime::freeContractState(contractIndex);
 #else
             freePool(contractStates[contractIndex]);
 #endif
@@ -7963,7 +8002,7 @@ static void deinitialize()
 
     if (score)
     {
-        freePoolOrVirtual(score); // score is demand-zero (qVirtualAlloc) on the low-RAM build -> not freePool-able
+        freePoolOrVirtual(score);
     }
     if (minerSolutionFlags)
     {
@@ -7992,7 +8031,7 @@ static void deinitialize()
     {
         if (processors[processorIndex].buffer)
         {
-            freePoolOrVirtual(processors[processorIndex].buffer); // demand-zero (qVirtualAlloc)
+            freePoolOrVirtual(processors[processorIndex].buffer);
         }
     }
 
@@ -8000,7 +8039,7 @@ static void deinitialize()
     {
         if (peers[i].receiveBuffer)
         {
-            freePoolOrVirtual(peers[i].receiveBuffer); // peer buffers are demand-zero (qVirtualAlloc)
+            freePoolOrVirtual(peers[i].receiveBuffer);
         }
         if (peers[i].transmitData.FragmentTable[0].FragmentBuffer)
         {
@@ -8951,8 +8990,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             mpServicesProtocol->GetProcessorInfo(mpServicesProtocol, i, &processorInformation);
             if (processorInformation.StatusFlag == (PROCESSOR_ENABLED_BIT | PROCESSOR_HEALTH_STATUS_BIT))
             {
-                // testnet dynamic-contract: demand-zero the per-processor network buffer (low local traffic
-                // never fills 32MB); mainnet/normal keep eager commit. Capacity unchanged either way.
+                // Commit low-RAM development network buffers on demand.
 #if defined(TESTNET) && defined(LITE_WASM_SC)
                 if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__, true, true, /*lazyCommit=*/true))
 #else
@@ -9130,8 +9168,8 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 
                 for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
                 {
-                    // handle new connections. For Oracle Machine, not need the ExchangePublicPeers
-                    if (peerConnectionNewlyEstablished(i) && !peers[i].isOracleMachineNode())
+                    // handle new connections. For Oracle Machine and OC machine, not need the ExchangePublicPeers
+                    if (peerConnectionNewlyEstablished(i) && !peers[i].isOracleMachineNode() && !peers[i].isOcMachineNode())
                     {
                         // new connection established:
                         // prepare and send ExchangePublicPeers message
@@ -9209,7 +9247,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                             && peers[i].isConnectingAccepting
                             && ((__rdtsc() - peers[i].connectionStartTime) / frequency > ORACLE_MACHINE_CONNECTION_TIMEOUT_SECS))
                         {
-                            closePeer(&peers[i], ORACLE_MACHINE_GRACEFULL_CLOSE_RETIRES);
+                            closePeer(&peers[i], ORACLE_MACHINE_GRACEFUL_CLOSE_RETRIES);
                         }
 
                         // inactivity timeout between 1 and 2 minutes (depending on peer index to reduce risk of
@@ -9220,7 +9258,27 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                             peers[i].lastOMActivityTime > 0 &&
                             ((__rdtsc() - peers[i].lastOMActivityTime) / frequency > OM_INACTIVITY_TIMEOUT_SECS))
                         {
-                            closePeer(&peers[i], ORACLE_MACHINE_GRACEFULL_CLOSE_RETIRES);
+                            closePeer(&peers[i], ORACLE_MACHINE_GRACEFUL_CLOSE_RETRIES);
+                        }
+                    }
+                    else if (peers[i].isOcMachineNode())
+                    {
+                        // Mirror the OM connection lifecycle handling for OC machine peers.
+                        if (OC_MACHINE_CONNECTION_TIMEOUT_SECS > 0
+                            && peers[i].connectionStartTime > 0
+                            && peers[i].isConnectingAccepting
+                            && ((__rdtsc() - peers[i].connectionStartTime) / frequency > OC_MACHINE_CONNECTION_TIMEOUT_SECS))
+                        {
+                            closePeer(&peers[i], OC_MACHINE_GRACEFUL_CLOSE_RETRIES);
+                        }
+
+                        const unsigned long long OC_INACTIVITY_TIMEOUT_SECS = 120 - (i % 5) * 15;
+                        if (peers[i].isConnectedAccepted &&
+                            !peers[i].isClosing &&
+                            peers[i].lastOcActivityTime > 0 &&
+                            ((__rdtsc() - peers[i].lastOcActivityTime) / frequency > OC_INACTIVITY_TIMEOUT_SECS))
+                        {
+                            closePeer(&peers[i], OC_MACHINE_GRACEFUL_CLOSE_RETRIES);
                         }
                     }
                     else
@@ -9258,8 +9316,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     {
                         if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing)
                         {
-                            // Skip FullNode and OM nodes
-                            if (!peers[i].isFullNode() && !peers[i].isOMNode)
+                            if (!peers[i].isFullNode()
+                                && !peers[i].isOracleMachineNode()
+                                && !peers[i].isOcMachineNode())
                             {
                                 suitablePeerIndices[numberOfSuitablePeers++] = i;
                             }
@@ -9399,6 +9458,10 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                         else if (responseQueueElements[responseQueueElementTail].peer == (Peer*)1)
                         {
                             pushToOracleMachineNodes(responseHeader);
+                        }
+                        else if (responseQueueElements[responseQueueElementTail].peer == (Peer*)2)
+                        {
+                            pushToOcMachineNodes(responseHeader);
                         }
                         else
                         {
@@ -9750,6 +9813,10 @@ void processArgs(int argc, const char* argv[]) {
         ("g,testnet-gbt", "Enable testnet go behind trick in aux node", cxxopts::value<bool>())
         ("r,rebuild-tx-hashmap", "Enable rebuild tx hashmap when start from snapshot", cxxopts::value<bool>())
         ("d,ticking-delay", "Delay ticking process by milliseconds", cxxopts::value<int>())
+#ifdef LONG_RUN_LOCAL_TESTNET
+        // no default_value: cxxopts defaults don't register in count()
+        ("tick-duration", "Target wall-clock duration of one tick in milliseconds (0 = unpaced, default 1000, max 30000).", cxxopts::value<int>())
+#endif
         ("sm, node-mode", "Set start mode to Main&aux,....", cxxopts::value<int>())
         ("seeds", "Set seeds (IDs) to run on this node (only apply for main node)", cxxopts::value<std::string>())
         ("rp, reader-passcode", "Passcode to access log reader", cxxopts::value<std::string>())
@@ -9769,9 +9836,8 @@ void processArgs(int argc, const char* argv[]) {
         ("k12-state-cache-verify", "Self-check the K12 state-digest cache: each digest also runs the one-shot and stalls loudly on any mismatch. For soak/CI; small per-tick cost. Off by default.")
 #endif
         ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"))
-#ifdef LITE_SC_ENGINE
-        ("sc-evict-mode", "Contract-state engine eviction backend: 'compress' (in-RAM zstd, fast spawn; default) or 'disk' (per-contract file, lowest RAM, persistent). Testnet dynamic-contract only.", cxxopts::value<std::string>()->default_value("compress"))
-        ("max-sc-mem", "Contract-state RAM cap in GB (testnet dynamic-contract); engine evicts cold chunks to stay under it.", cxxopts::value<unsigned long long>()->default_value("1"))
+#ifdef LITE_SC_PAGER
+        ("max-sc-mem", "Contract-state RAM target in GB; cold state remains compressed in memory.", cxxopts::value<unsigned long long>()->default_value("1"))
 #endif
         ;
     auto result = options.parse(argc, argv);
@@ -9781,14 +9847,10 @@ void processArgs(int argc, const char* argv[]) {
         std::cerr << "Warning: unknown option: " << u << "\n";
     }
 
-#ifdef LITE_SC_ENGINE
-    if (result.count("sc-evict-mode")) {
-        std::string m = result["sc-evict-mode"].as<std::string>();
-        ContractStateEngine::evictMode = (m == "disk") ? ContractStateEngine::EvictMode::Disk : ContractStateEngine::EvictMode::Compress;
-        logColorToScreen("INFO", "Contract-state evict mode: " + m);
-    }
-    if (result.count("max-sc-mem")) {
-        ContractStateEngine::MAX_RAM_USEAGE = result["max-sc-mem"].as<unsigned long long>() * 1024ULL * 1024 * 1024;
+#ifdef LITE_SC_PAGER
+    if (result.count("max-sc-mem"))
+    {
+        Wasm::Runtime::setContractStateMemoryLimit(result["max-sc-mem"].as<unsigned long long>() * 1024ULL * 1024 * 1024);
     }
 #endif
 
@@ -9880,6 +9942,18 @@ void processArgs(int argc, const char* argv[]) {
         logColorToScreen("INFO", "Ticking delay set to " + std::to_string(tickDelay) + " ms");
     }
 
+#ifdef LONG_RUN_LOCAL_TESTNET
+    if (result.count("tick-duration")) {
+        int duration = result["tick-duration"].as<int>();
+        if (duration < 0 || duration > 30000) {
+            logColorToScreen("ERROR", "Invalid tick duration: " + std::to_string(duration) + " (allowed: 0-30000 ms)");
+            exit(1);
+        }
+        tickDurationMs = duration;
+    }
+    logColorToScreen("INFO", "Tick duration set to " + std::to_string(tickDurationMs) + " ms" + (tickDurationMs == 0 ? " (unpaced)" : ""));
+#endif
+
     if (result.count("http-port")) {
         int port = result["http-port"].as<int>();
         if (port <= 0 || port > 65535) {
@@ -9913,6 +9987,13 @@ void processArgs(int argc, const char* argv[]) {
         mainAuxStatus = mode;
         std::string modeString = (isMainMode() ? "MAIN" : "aux") + std::string("&") + ((mainAuxStatus & 2) ? "MAIN" : "aux") + std::string(" mode enabled.");
         logColorToScreen("INFO", modeString);
+#ifdef LONG_RUN_LOCAL_TESTNET
+        if (mode != 3)
+        {
+            // see doc/long_run_local_testnet.md
+            logColorToScreen("WARN", "LONG_RUN_LOCAL_TESTNET: --node-mode " + std::to_string(mode) + " will flip at epoch transitions; only 3 (MAIN&MAIN) keeps an unattended node ticking. Omit --node-mode to use the default (3).");
+        }
+#endif
     }
 
     if (result.count("static-peers"))
@@ -10044,7 +10125,7 @@ void processArgs(int argc, const char* argv[]) {
     }
 }
 
-#if !defined(NO_RPC)   // all OS ports (linux/macOS/windows): drogon is cross-platform
+#if !defined(NO_RPC)
 void watchAndCheckin()
 {
     // start watch thread
@@ -10105,16 +10186,26 @@ void watchAndCheckin()
 
 #if defined(__linux__) || defined(__APPLE__)
 void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
+#ifdef LITE_SC_PAGER
+    if ((sig == SIGSEGV || sig == SIGBUS)
+        && si
+        && Wasm::Runtime::handleManagedStateFault(si->si_addr))
+    {
+        return;
+    }
+#endif
 #ifdef __linux__
-    // swap-dirty-track fast path: a write to an armed read-only SwapVM cache page faults here. Mark the
-    // slot dirty, restore write access, and resume the store. Any other fault hits the crash path below.
+    // Handle tracked SwapVM writes before the crash path.
     if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr))
+    {
         return;
+    }
 #if !defined(LITE_WASM_SC)
-    // A write to an armed read-only contract-state chunk faults here: mark the chunk dirty (needs si_addr),
-    // restore write access, resume the store. Only changed chunks are re-hashed on the next digest.
+    // Handle tracked contract-state writes before the crash path.
     if (sig == SIGSEGV && si && K12StateDigestCache::tryMarkDirty(si->si_addr))
+    {
         return;
+    }
 #endif
 #else
     (void)si;
@@ -10161,6 +10252,8 @@ void setupSignalHandlers() {
     sa.sa_sigaction = signalHandler;       // SA_SIGINFO form: handler receives siginfo_t* (si_addr)
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGSEGV);
+    sigaddset(&sa.sa_mask, SIGBUS);
 
     // Common crash signals to catch:
     sigaction(SIGSEGV, &sa, NULL); // Segmentation fault (Invalid memory)
@@ -10180,9 +10273,11 @@ int main(int argc, const char* argv[]) {
     logColorToScreen("INFO", "================== ~~~~~~~~~~~~~~~ ==================\n");
 
     Overload::initializeUefi();
-#if !defined(NO_RPC)   // all OS ports (linux/macOS/windows): drogon is cross-platform
+#if !defined(NO_RPC)
     QubicHttpServer::start(httpPort);
+#ifndef LONG_RUN_LOCAL_TESTNET // a self-contained local testnet never phones home to api.qubic.global
     watchAndCheckin();
+#endif
 #endif
     auto status = (int)efi_main(ih, st);
     std::raise(SIGTERM);

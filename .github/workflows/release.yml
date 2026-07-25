@@ -1,7 +1,7 @@
 name: Release
 on:
   push:
-    # qinit-v* tags are handled by qinit-release.yml (testnet+dynamic node); keep them out of this mainnet release.
+    # qinit-release.yml handles dynamic-contract release tags.
     tags:
       - "*"
       - "!qinit-v*"

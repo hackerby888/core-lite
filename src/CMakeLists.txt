@@ -7,7 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Force static libraries" FORCE)
 if(NOT WIN32)
-    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a") # Only look for static archives (unix); Windows uses .lib/.dll
+    # Unix builds link static archives; Windows uses its native suffixes.
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
 endif()
 
 # Enable FetchContent module
@@ -18,8 +19,7 @@ include(ExternalProject)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/lib/)
 
-# macOS: brew installs deps (boost/zstd/lz4/lzo/openssl) under the Homebrew prefix, which clang does
-# NOT search by default. Add them so the build finds the headers/libs. (IS_MACOS => Linux unchanged.)
+# Make Homebrew headers and libraries visible to macOS builds.
 if(IS_MACOS)
     if(EXISTS /opt/homebrew)            # Apple Silicon
         set(BREW_PREFIX /opt/homebrew)
@@ -31,13 +31,11 @@ if(IS_MACOS)
 endif()
 
 if(IS_ARM)
-    # custom_stack.nasm is x86-64 asm + deadcode on the OS port (setjmp is used instead). Skip it on
-    # arm and link a never-called stub symbol. Also expose the x86 <cpuid.h> shim for arm.
+    # ARM uses system stack recovery and a shim for x86 CPUID includes.
     include_directories(${CMAKE_SOURCE_DIR}/lib/platform_common/arm_shims)
     set(CUSTOM_STACK_OBJ ${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack_arm_stub.cpp)
 elseif(WIN32)
-    # custom_stack.nasm is x86-64 ELF asm + deadcode on the OS port (setjmp is used). MSVC has no nasm and
-    # -f elf64 is Linux-only; link the same never-called no-op stub (name says arm, but it's generic).
+    # Windows uses system stack recovery instead of the Linux NASM object.
     set(CUSTOM_STACK_OBJ ${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack_arm_stub.cpp)
 else()
     set(ASM_FILE "${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack.nasm")
@@ -90,8 +88,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fmt)
 
-# libbacktrace is the boost::stacktrace backend on Linux. macOS uses boost's execinfo backend and Windows
-# uses the windbg/dbghelp backend, so skip the autotools (./configure + make) libbacktrace build on both.
+# libbacktrace is only needed by the Linux Boost stacktrace backend.
 if(NOT APPLE AND NOT WIN32)
 set(LIBBACKTRACE_PREFIX ${CMAKE_BINARY_DIR}/libbacktrace)
 set(LIBBACKTRACE_BINARY_DIR ${LIBBACKTRACE_PREFIX}/src/libbacktrace_project-build)
@@ -151,7 +148,7 @@ if(NOT WIN32)
     add_custom_target(explorer_assets_gen DEPENDS ${EXPLORER_ASSETS_OUT})
     add_dependencies(Qubic explorer_assets_gen)
 else()
-    # Windows: no bash — regen.cmake produces the identical header via `cmake -P`.
+    # Generate the same explorer header without requiring bash on Windows.
     set(EXPLORER_ASSETS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extensions/http/static/explorer)
     set(EXPLORER_ASSETS_OUT ${CMAKE_CURRENT_SOURCE_DIR}/extensions/http/controller/explorer_assets.generated.h)
     add_custom_command(
@@ -200,7 +197,7 @@ if(TESTNET_LITE_RAM)
     target_compile_definitions(Qubic PRIVATE TESTNET_LITE_RAM)
 endif()
 
-# Wasm smart contracts embed WAMR and libffi. The root CMakeLists enforces the testnet-lite-RAM prerequisites.
+# The root configuration enforces the Wasm testnet prerequisites.
 if(LITE_WASM_SC)
     target_compile_definitions(Qubic PRIVATE LITE_WASM_SC)
     enable_language(C)
@@ -232,9 +229,7 @@ if(LITE_WASM_SC)
     include(${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
     add_library(vmlib STATIC ${WAMR_RUNTIME_LIB_SOURCE})
     if(WIN32)
-        # WAMR's invokeNative_em64.asm is MASM syntax (the MSVC variant). ASM_NASM (enabled for blosc2's
-        # project()) otherwise claims the .asm extension and assembles it as nasm -fwin32 -> MSB3721. Pin
-        # WAMR's .asm sources to ml64 (MASM) here, in vmlib's own directory scope.
+        # WAMR's Windows assembly uses MASM syntax.
         foreach(_wsrc ${WAMR_RUNTIME_LIB_SOURCE})
             if(_wsrc MATCHES "\\.asm$")
                 set_source_files_properties(${_wsrc} PROPERTIES LANGUAGE ASM_MASM)
@@ -256,6 +251,14 @@ if(ADDON_TX_STATUS_REQUEST)
     target_compile_definitions(Qubic PRIVATE ADDON_TX_STATUS_REQUEST=1)
 endif()
 
+if(LONG_RUN_LOCAL_TESTNET)
+    # Long-run mode is a testnet variant; it implies TESTNET.
+    target_compile_definitions(Qubic PRIVATE TESTNET LONG_RUN_LOCAL_TESTNET)
+    if(DEFINED LONG_RUN_EPOCH_TICK_CAPACITY)
+        target_compile_definitions(Qubic PRIVATE LONG_RUN_EPOCH_TICK_CAPACITY=${LONG_RUN_EPOCH_TICK_CAPACITY}ULL)
+    endif()
+endif()
+
 # Set specific properties for assembly files to avoid C++ flags being applied
 set_source_files_properties(platform/custom_stack.nasm PROPERTIES
     COMPILE_FLAGS ""
@@ -264,7 +267,7 @@ set_source_files_properties(platform/custom_stack.nasm PROPERTIES
 
 # Add additional compiler-specific flags for the main application
 if((IS_CLANG OR IS_GCC) AND IS_ARM)
-    # arm: -mrdrnd/-mbmi/-mlzcnt are x86-only (provided via SIMDe + qintrin shims); -fsigned-char needed.
+    # ARM receives x86 intrinsics through SIMDe.
     target_compile_options(Qubic PRIVATE
         -D_CONSOLE
         $<$<CONFIG:Release>:-DNDEBUG>
@@ -273,7 +276,7 @@ if((IS_CLANG OR IS_GCC) AND IS_ARM)
         -w
     )
 elseif(IS_CLANG OR IS_GCC)
-    # Clang/GCC x86 flags (GCC requires the -m feature flag to emit rdrand/bmi/lzcnt intrinsics)
+    # GCC and Clang need explicit x86 instruction flags.
     target_compile_options(Qubic PRIVATE
         -D_CONSOLE
         $<$<CONFIG:Release>:-DNDEBUG>
@@ -284,10 +287,7 @@ elseif(IS_CLANG OR IS_GCC)
         -w
     )
 elseif(IS_MSVC)
-    # MSVC-specific flags. /Zc:wchar_t- = wchar_t is unsigned short (= CHAR16), same as the mainnet
-    # Qubic.sln — L"..." literals are CHAR16* everywhere. Deps are unaffected (their APIs are
-    # std::string-based; <filesystem>'s wchar_t internals are extern "C", so no mangling to clash).
-    # NOMINMAX: <windows.h> (overload.h) min/max macros break the std::min/std::max call sites.
+    # Match Qubic.sln's CHAR16 representation and suppress Windows min/max macros.
     target_compile_options(Qubic PRIVATE
        /D_CONSOLE
        /DNOMINMAX
@@ -304,21 +304,19 @@ if(APPLE)
     target_link_libraries(Qubic
             platform_common
             platform_efi
-            jsoncpp_static drogon fmt::fmt
+            jsoncpp_static drogon fmt::fmt Blosc2::blosc2_static
             Threads::Threads
             z
-            zstd
             m
     )
 elseif(WIN32)
-# MSVC: no GNU-ld -Bstatic/-Bdynamic, no unix dl/rt/z/zstd/m, no libbacktrace (windbg backend). The
-# FetchContent targets are the same; zstd is bundled inside blosc2. vmlib + ffi are linked in the wasm block.
-target_link_libraries(Qubic
+    # Windows uses native linker conventions and the WinDbg stacktrace backend.
+    target_link_libraries(Qubic
         platform_common
         platform_efi
         jsoncpp_static drogon fmt::fmt Blosc2::blosc2_static
         Threads::Threads
-)
+    )
 else()
 target_link_libraries(Qubic
         platform_common
@@ -329,7 +327,6 @@ target_link_libraries(Qubic
         Threads::Threads
         dl
         z
-        zstd
         rt
         m
 )

@@ -1,8 +1,4 @@
-# Publishes qinit turnkey assets (prebuilt node per-platform + header snapshot + sha-pinned manifest).
-# Run on the fork (hackerby888/core-lite), NEVER qubic upstream. Assets use ${{ github.repository }}.
-# ONLY_LOGGING=OFF embeds committed src/private_settings.h — ensure it's a PUBLIC testnet fixture.
-# linux-arm64 builds on a native arm runner (ubuntu-24.04-arm), without qemu.
-name: qinit-release
+name: qinit release
 
 on:
   workflow_dispatch:
@@ -12,509 +8,99 @@ on:
         required: true
         default: "qinit-dev"
   push:
-    # qinit-v* tag => full pipeline incl publish. A push to the dev branch (code paths only) => build +
-    # 3-platform deploy smoke ONLY (headers/publish are tag/dispatch-gated below), so the smoke guards the
-    # branch without cutting a release. workflow_dispatch is the unfiltered release / escape hatch.
-    branches: [feat/dynamic-contracts]
     tags: ["qinit-v*"]
-    paths:
-      - 'src/**'
-      - 'lib/**'
-      - 'CMakeLists.txt'
-      - '.github/workflows/qinit-release.yml'
 
 permissions:
-  contents: write   # create releases + upload assets
+  contents: read
 
 jobs:
-  resolve:
-    runs-on: ubuntu-22.04
-    outputs:
-      tag: ${{ steps.t.outputs.tag }}
-    steps:
-      - id: t
-        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
-
-  # Prebuilt node, one per platform. arm64 on a native arm runner (fast, real hardware).
-  node:
-    needs: resolve
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { runner: ubuntu-22.04,     key: linux-x64,   cc: clang-18, cxx: clang++-18 }
-          - { runner: ubuntu-24.04-arm, key: linux-arm64, cc: clang-18, cxx: clang++-18 }
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install toolchain (x64 — llvm.sh)
-        if: matrix.key == 'linux-x64'
-        run: |
-          sudo apt update -y
-          wget https://apt.llvm.org/llvm.sh; chmod +x llvm.sh; sudo ./llvm.sh 18
-          sudo apt install -y clang cmake nasm \
-            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
-            zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev liblz4-dev libssl-dev libffi-dev
-
-      - name: Install toolchain (arm64 — apt clang-18)
-        if: matrix.key == 'linux-arm64'
-        run: |
-          sudo apt update -y
-          sudo apt install -y clang-18 cmake nasm \
-            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
-            zlib1g-dev libzstd-dev g++ libfmt-dev liblzo2-dev liblz4-dev libssl-dev libffi-dev
-
-      # Same config every platform; IS_ARM auto-detects aarch64 -> SIMDe + -fsigned-char;
-      # IS_MACOS handles the Darwin link/backtrace differences.
-      - name: Build node
-        run: |
-          J=$(getconf _NPROCESSORS_ONLN)
-          cmake -S . -B build-node \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
-            -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF \
-            -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
-            -DLITE_WASM_SC=ON -DCMAKE_NO_USE_SWAP=ON \
-            -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
-          cmake --build build-node -- -j"$J" Qubic
-          cp build-node/src/Qubic "Qubic-${{ matrix.key }}"
-          shasum -a 256 "Qubic-${{ matrix.key }}" | awk '{print $1}' > "Qubic-${{ matrix.key }}.sha256"
-          file "Qubic-${{ matrix.key }}"
-
-      - name: Upload node artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: node-${{ matrix.key }}
-          path: |
-            Qubic-${{ matrix.key }}
-            Qubic-${{ matrix.key }}.sha256
-          if-no-files-found: error
-
-  # macOS-native (Apple Silicon, Mach-O). Its Qubic-darwin-arm64 artifact is folded into the published
-  # manifest below. Non-gating so a macOS runner hiccup never blocks the Linux release.
-  node-macos:
-    needs: resolve
-    runs-on: macos-14
-    # Non-blocking: a macOS runner hiccup (brew flake) reports success to `needs` so it never
-    # blocks the linux release; publish then degrades gracefully (no darwin in the manifest).
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install toolchain (brew)
-        run: brew install cmake nasm jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi || true
-      - name: Build node
-        run: |
-          set -o pipefail
-          J=$(getconf _NPROCESSORS_ONLN)
-          # Use Apple's clang (Xcode) so headers + libc++ runtime are consistent — brew llvm@18's libc++
-          # uses a newer exception ABI (ne180100) the system libc++ at link doesn't have. Apple clang
-          # supports C++20; SIMDe + -fsigned-char (IS_ARM) handle the SIMD/char-signedness.
-          CC=$(xcrun -f clang); CXX=$(xcrun -f clang++)
-          {
-            cmake -S . -B build-node -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-              -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
-              -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF \
-              -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON \
-              -DLITE_WASM_SC=ON -DCMAKE_NO_USE_SWAP=ON -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
-            cmake --build build-node -- -j"$J" Qubic
-          } 2>&1 | tee "$GITHUB_WORKSPACE/macos-build.log"
-          cp build-node/src/Qubic Qubic-darwin-arm64
-          shasum -a 256 Qubic-darwin-arm64 | awk '{print $1}' > Qubic-darwin-arm64.sha256
-          file Qubic-darwin-arm64
-      # On failure only, publish the build log tail to a public debug release.
-      - name: Publish macOS build log (debug)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          tail -c 250000 "$GITHUB_WORKSPACE/macos-build.log" > macos-build.tail.log || true
-          gh release create qinit-macos-debug macos-build.tail.log -t "macOS build debug" -n "node-macos build+test log (tail)" \
-          || gh release upload qinit-macos-debug macos-build.tail.log --clobber
-      - uses: actions/upload-artifact@v7
-        with:
-          name: node-darwin-arm64
-          path: |
-            Qubic-darwin-arm64
-            Qubic-darwin-arm64.sha256
-          if-no-files-found: error
-
-  # Windows (MSVC) node — the 4th digest-equivalence leg (WINDOWS_PORT.md Phase 3b). Same cmake recipe
-  # as windows-dyn-build.yml (keep in sync). Advisory like macOS (continue-on-error): a Windows runner
-  # hiccup never blocks the linux release; the digest-check degrades to the legs that uploaded.
-  node-windows:
-    needs: resolve
-    runs-on: windows-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-      # vcpkg binary cache (files) persisted via actions/cache, key ROTATED per run so the freshly built
-      # archives are always re-saved; restore-keys pulls the latest matching archives and vcpkg reuses the
-      # ABIs that still match. The old static hashFiles('vcpkg.json') key was immutable -> never refreshed ->
-      # vcpkg restored 0 packages -> rebuilt all deps each run. (x-gha provider was removed upstream.)
-      - name: Cache vcpkg binaries
-        uses: actions/cache@v6
-        with:
-          path: ~/AppData/Local/vcpkg/archives
-          key: vcpkg-x64-win-rel-${{ github.run_id }}
-          restore-keys: vcpkg-x64-win-rel-
-      - name: Release-only vcpkg triplet
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force triplets-overlay | Out-Null
-          @(
-            'set(VCPKG_TARGET_ARCHITECTURE x64)',
-            'set(VCPKG_CRT_LINKAGE dynamic)',
-            'set(VCPKG_LIBRARY_LINKAGE dynamic)',
-            'set(VCPKG_BUILD_TYPE release)'
-          ) | Set-Content -Encoding ascii triplets-overlay/x64-windows-rel.cmake
-      - name: Configure (MSVC, dynamic + wasm)
-        shell: pwsh
-        run: |
-          $vcpkg = "$env:VCPKG_INSTALLATION_ROOT"
-          # No -G: CMake auto-picks the newest installed VS generator (a pinned major fails when the runner bumps VS).
-          cmake -S . -B build-win -A x64 `
-            -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_OVERLAY_TRIPLETS="$PWD/triplets-overlay" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows-rel `
-            -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF `
-            -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON `
-            -DLITE_WASM_SC=ON -DCMAKE_NO_USE_SWAP=ON `
-            -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
-      - name: Build Qubic
-        run: cmake --build build-win --config Release --target Qubic --parallel 4
-      - name: Upload node artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: node-windows-x64
-          # the whole dir: vcpkg applocal puts the runtime DLLs (ffi-8/openssl/...) next to Qubic.exe
-          path: build-win/src/Release/
-          if-no-files-found: error
-      # Release bundle: unlike linux/macOS (a bare binary), the Windows node needs its applocal DLLs beside
-      # Qubic.exe to launch, so it ships as a tar.gz of the whole Release dir. qinit's fetchNodeBin extracts
-      # it (extractTarGz) instead of writing a single file. tar.gz (not zip) so the same gzip path works on
-      # every host. (Tar entries are flat — Qubic.exe + *.dll at the archive root.)
-      - name: Package node bundle (exe + applocal DLLs) for release
-        shell: pwsh
-        run: |
-          tar -czf Qubic-windows-x64.tar.gz -C build-win/src/Release .
-          (Get-FileHash -Algorithm SHA256 Qubic-windows-x64.tar.gz).Hash.ToLower() |
-            Set-Content -NoNewline -Encoding ascii Qubic-windows-x64.tar.gz.sha256
-      - name: Upload windows release bundle
-        uses: actions/upload-artifact@v7
-        with:
-          name: node-windows-release
-          path: |
-            Qubic-windows-x64.tar.gz
-            Qubic-windows-x64.tar.gz.sha256
-          if-no-files-found: error
-
-  # Crypto KATs protect published binaries but are unrelated to the Qinit deploy smoke. Run them
-  # only for releases, in parallel with the node builds, and gate publishing below.
-  release-crypto-kats:
-    name: release crypto KATs (${{ matrix.key }})
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: resolve
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { runner: ubuntu-22.04,     key: linux-x64,    cc: clang-18, cxx: clang++-18, advisory: false }
-          - { runner: ubuntu-24.04-arm, key: linux-arm64,  cc: clang-18, cxx: clang++-18, advisory: false }
-          - { runner: macos-14,         key: darwin-arm64, cc: clang,    cxx: clang++,    advisory: true }
-    runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.advisory }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install toolchain (Linux x64)
-        if: matrix.key == 'linux-x64'
-        run: |
-          sudo apt update -y
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt install -y clang cmake nasm \
-            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
-            zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev liblz4-dev libssl-dev libffi-dev
-
-      - name: Install toolchain (Linux ARM64)
-        if: matrix.key == 'linux-arm64'
-        run: |
-          sudo apt update -y
-          sudo apt install -y clang-18 cmake nasm \
-            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
-            zlib1g-dev libzstd-dev g++ libfmt-dev liblzo2-dev liblz4-dev libssl-dev libffi-dev
-
-      - name: Install toolchain (macOS)
-        if: matrix.key == 'darwin-arm64'
-        run: brew install cmake nasm jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi || true
-
-      - name: Build and run crypto KATs
-        shell: bash
-        run: |
-          J=$(getconf _NPROCESSORS_ONLN)
-          CC=${{ matrix.cc }}
-          CXX=${{ matrix.cxx }}
-
-          if [ "${{ matrix.key }}" = "darwin-arm64" ]; then
-            CC=$(xcrun -f clang)
-            CXX=$(xcrun -f clang++)
-          fi
-
-          cmake -S . -B build-crypto-kats \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
-            -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF -DONLY_LOGGING=ON \
-            -DLITE_WASM_SC=ON -DTESTNET=ON -DTESTNET_LITE_RAM=ON
-          cmake --build build-crypto-kats -- -j"$J" qubic_core_tests
-          ./build-crypto-kats/test/qubic_core_tests \
-            --gtest_filter='TestFourQ.*:TestCore256*:TestCoreK12*'
-
-  # Per-platform deploy smoke: boot the freshly-built node and run `qinit test` against it — a REAL
-  # on-chain deploy + read + write (DigestProbe: Get -> Inc -> Get) through the wasm engine, not a tick-only
-  # check. A crash / deploy-fail / test-fail turns the job red, so a node change that breaks the
-  # deploy-exec pipeline is caught. GATES publish (publish needs smoke + digest-check), so a node that can't
-  # tick + deploy/run a contract never ships -- on EVERY platform, windows-x64 included. (Windows used to
-  # stall on the free runner: the 676-computor quorum couldn't converge over its ~190x-slower loopback, so it
-  # crawled at ~50s/tick and the deploy timed out. The dynamic-contract testnet now runs an 8-computor
-  # committee, so quorum converges instantly regardless of loopback speed and windows ticks ~1s/tick like the
-  # rest -- see WINDOWS_CI_TICK_STALL.md.) (macOS RAM trims keep that node ~1.9 GB so it fits the macos-14 runner.)
-  smoke:
-    needs: [node, node-macos, node-windows]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { runner: ubuntu-22.04,     key: linux-x64,    artifact: node-linux-x64 }
-          - { runner: ubuntu-24.04-arm, key: linux-arm64,  artifact: node-linux-arm64 }
-          - { runner: macos-14,         key: darwin-arm64, artifact: node-darwin-arm64 }
-          - { runner: windows-latest,   key: windows-x64,  artifact: node-windows-x64 }
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    steps:
-      - name: Checkout core-lite (--core, wasm contract headers)
-        uses: actions/checkout@v7
-        with: { path: core }
-      - name: Checkout qinit (the test runner)
-        uses: actions/checkout@v7
-        with: { repository: hackerby888/qinit, ref: main, path: qinit }
-      - uses: oven-sh/setup-bun@v2
-      - name: Install qinit deps
-        shell: bash
-        run: cd qinit && bun install
-      # The wasm contract compiler (wasi-sdk) is normally fetched by `qinit up`; a cold CI runner has no
-      # cache, so the contract build would fall back to plain clang++ and fail. Fetch the per-host sdk,
-      # then PIN WASM_CLANG/WASI_SYSROOT so the build never silently falls back; verify the clang runs.
-      - name: Fetch wasi-sdk (wasm contract compiler)
-        shell: bash
-        run: |
-          cd qinit
-          bun -e '
-            const c = await import("./packages/core/src/index.ts");
-            await c.fetchWasiSdk();
-            const p = c.wasiSdkPaths();
-            if (!p) { console.error("FATAL: wasi-sdk incomplete (no clang++/wasi-sysroot under the cache after fetch)"); process.exit(1); }
-            console.log("WASM_CLANG=" + p.clang);
-            console.log("WASI_SYSROOT=" + p.sysroot);
-          ' > wasienv 2> wasierr || { echo "wasi-sdk fetch/resolve failed:"; cat wasierr; exit 1; }
-          cat wasienv >> "$GITHUB_ENV"; cat wasienv
-          CLANG="$(sed -n 's/^WASM_CLANG=//p' wasienv)"
-          echo "--- wasi clang ---"; "$CLANG" --version | head -2
-      # The darwin node links keg-only brew dylibs (jsoncpp/fmt/ffi/…); a fresh runner lacks them.
-      - name: Install macOS runtime libs
-        if: matrix.key == 'darwin-arm64'
-        run: brew install jq jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi || true
-      - uses: actions/download-artifact@v8
-        with:
-          name: ${{ matrix.artifact }}
-      - name: qinit test (deploy + read + write)
-        shell: bash   # Git Bash on the windows runner — same script for all four legs
-        run: |
-          # Run the node as plain "Qubic" so qinit's node-ops (pkill/pgrep, taskkill/tasklist on
-          # Windows — image name Qubic.exe) manage its lifecycle. The windows artifact is a directory
-          # (Qubic.exe + its vcpkg-applocal DLLs), already correctly named.
-          if [ "${{ matrix.key }}" = "windows-x64" ]; then
-            BIN="$GITHUB_WORKSPACE/Qubic.exe"
-          else
-            cp "Qubic-${{ matrix.key }}" Qubic && chmod +x Qubic
-            BIN="$GITHUB_WORKSPACE/Qubic"
-          fi
-          mkdir -p proj/contracts
-          cp qinit/fixtures/DigestProbe.h proj/contracts/DigestProbe.h
-          cd proj
-          # --skip-verify: the contractverify qpi-lint gate is x64-only + auto-downloaded; it crashes on
-          # the runner (exit!=0, no parsed errors) and fails the build spuriously. The node deploy/exec
-          # smoke doesn't lint qpi rules (qinit's own corpus job does); the fixture is known-good.
-          bun "$GITHUB_WORKSPACE/qinit/packages/cli/src/index.tsx" test \
-            --bin "$BIN" \
-            --core "$GITHUB_WORKSPACE/core" \
-            --contract contracts/DigestProbe.h --name DigestProbe --skip-verify \
-            --wait 150 --timeout 90000 --keep
-          # node kept alive (--keep): read the deployed contract's canonical state digest (K12 of the full
-          # effective state). It must be byte-identical across platforms — a cross-arch consensus check a
-          # value read (Get==1, canonicalized by RPC) can't make. The digest-check job compares the legs.
-          SLOT=$(jq -r 'keys[0]' qinit.idl.json)
-          echo "deployed slot=$SLOT"
-          # Robust digest read via qinit's shared poller (retries under -e -o pipefail; || true so a
-          # timeout falls through to the clear "no state digest" message below instead of aborting).
-          D=$(bash "$GITHUB_WORKSPACE/qinit/scripts/poll-node-json.sh" "http://127.0.0.1:41841/live/v1/dev/contract-digest?slot=$SLOT" '.digest // empty' 12 2 || true)
-          if [ "${{ matrix.key }}" = "windows-x64" ]; then taskkill -f -im Qubic.exe || true; else pkill -x Qubic || true; fi
-          [ -n "$D" ] || { echo "no state digest from node"; exit 1; }
-          echo "$D" > "$GITHUB_WORKSPACE/digest-${{ matrix.key }}.txt"
-          echo "::notice::${{ matrix.key }} DigestProbe state digest = $D"
-      - name: Upload state digest
-        uses: actions/upload-artifact@v7
-        with:
-          name: digest-${{ matrix.key }}
-          path: digest-${{ matrix.key }}.txt
-          if-no-files-found: error
-      # qinit test swallows the contract-build stderr (it only surfaces "compile failed"); rebuild the
-      # contract directly to print the real clang/wasm error when a leg goes red.
-      - name: Diagnose contract build (on failure)
-        if: failure()
-        shell: bash
-        run: |
-          cd qinit
-          echo "WASM_CLANG=${WASM_CLANG:-<unset>}  WASI_SYSROOT=${WASI_SYSROOT:-<unset>}"
-          "${WASM_CLANG:-clang++}" --version | head -2 || true
-          bun -e '
-            const { buildContract } = await import("./packages/build/src/index.ts");
-            const b = await buildContract({ contractPath: process.env.GITHUB_WORKSPACE + "/qinit/fixtures/DigestProbe.h", name: "DigestProbe", slot: 28, corePath: process.env.GITHUB_WORKSPACE + "/core", outDir: "/tmp/diag" });
-            console.log("build.ok =", b.ok, " hash =", b.hash, " so =", b.so);
-            if (!b.ok) { console.log("=== build stderr ==="); console.log(b.stderr || "(none)"); }
-          ' || true
-      - name: Node log tail (on failure)
-        if: failure()
-        shell: bash
-        run: tail -400 "$HOME/.cache/qinit/run/node.log" 2>/dev/null || true
-      # Full node.log as an artifact: the tail above can't show the tick-rate progression from boot, which is
-      # what's needed to diagnose the windows-latest slow-tick / deploy-timeout (a throughput issue, distinct
-      # from the now-fixed commit charge — the node boots + ticks but crawls at tens of s/tick on the CI VM).
-      - name: Upload full node log (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: nodelog-${{ matrix.key }}
-          path: ~/.cache/qinit/run/node.log
-          if-no-files-found: ignore
-
-  # Cross-platform consensus check: the deployed contract's state digest must be byte-identical on every
-  # platform (same wasm exec => same state bytes => same K12). Catches an arch/OS layout/endianness
-  # divergence a value read (Get==1) would miss. needs: smoke => runs only when all legs uploaded a digest.
-  digest-check:
-    needs: smoke
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: 'digest-*'
-          path: digests
-          merge-multiple: true
-      - name: State digests must match across platforms
-        run: |
-          cd digests
-          echo "=== per-platform DigestProbe state digest ==="
-          for f in digest-*.txt; do echo "$f -> $(cat "$f")"; done
-          n=$(ls digest-*.txt | wc -l)
-          [ "$n" -ge 2 ] || { echo "need >=2 platform digests, got $n"; exit 1; }
-          u=$(cat digest-*.txt | sort -u | wc -l)
-          [ "$u" -eq 1 ] || { echo "::error::DIVERGENCE — contract state digest differs across platforms"; exit 1; }
-          echo "OK: all $n platforms agree on the DigestProbe state digest -> $(cat digest-*.txt | head -1)"
+  ci:
+    uses: ./.github/workflows/ci.yml
 
   headers:
-    # release-only: a branch push runs build + smoke, not headers/publish
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: resolve
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-      - name: Install toolchain
-        run: |
-          sudo apt update -y
-          wget https://apt.llvm.org/llvm.sh; chmod +x llvm.sh; sudo ./llvm.sh 18
-          sudo apt install -y clang
-      - name: Fetch wasi-sdk-29 (for the wasm header closure)
+      - name: Fetch wasi-sdk-29
         run: |
           curl -fsSL -o wasi-sdk.tar.gz \
             https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-29/wasi-sdk-29.0-x86_64-linux.tar.gz
-          mkdir -p wasi-sdk && tar -xzf wasi-sdk.tar.gz -C wasi-sdk --strip-components=1
+          mkdir -p wasi-sdk
+          tar -xzf wasi-sdk.tar.gz -C wasi-sdk --strip-components=1
       - name: Build header snapshot
         run: |
-          CLANG=clang++-18 \
           WASM_CLANG="$PWD/wasi-sdk/bin/clang++" \
           WASI_SYSROOT="$PWD/wasi-sdk/share/wasi-sysroot" \
             bash scripts/qinit-header-snapshot.sh "$PWD/snapshot-out"
           cp snapshot-out/core-headers.tar.gz ./core-headers.tar.gz
           cp snapshot-out/core-headers.sha256 ./core-headers.sha256
       - uses: actions/upload-artifact@v7
-        with: { name: headers, path: "core-headers.*", if-no-files-found: error }
+        with:
+          name: headers
+          path: "core-headers.*"
+          if-no-files-found: error
 
   publish:
-    # release-only: never publish on a branch push (build + smoke only)
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    # gate the release on the deploy smoke + cross-platform digest-equivalence: never publish a node that
-    # can't deploy/run a contract, or whose exec diverges across platforms. (A macOS infra flake then blocks
-    # the release until re-dispatch — acceptable: correctness > convenience for a published node.)
-    needs: [resolve, node, node-macos, node-windows, release-crypto-kats, headers, smoke, digest-check]
+    needs:
+      - ci
+      - headers
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}   # gh needs this without a checkout
-      TAG: ${{ needs.resolve.outputs.tag }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/download-artifact@v8
-        with: { path: dist, pattern: "node-*", merge-multiple: true }
+        with:
+          path: dist
+          pattern: 'release-node-*'
+          merge-multiple: true
       - uses: actions/download-artifact@v8
-        with: { name: headers, path: dist }
+        with:
+          name: headers
+          path: dist
       - name: Generate manifest
         working-directory: dist
         run: |
-          BASE="https://github.com/${{ github.repository }}/releases/download/$TAG"
-          x64sha=$(cat Qubic-linux-x64.sha256); armsha=$(cat Qubic-linux-arm64.sha256)
-          hsha=$(cat core-headers.sha256)
-          # darwin-arm64 is best-effort (node-macos is continue-on-error): include it only if the
-          # artifact made it here, so a skipped/flaked macOS build still yields a valid manifest.
-          DARWIN_ENTRY=""
-          if [ -f Qubic-darwin-arm64.sha256 ]; then
-            dsha=$(cat Qubic-darwin-arm64.sha256)
-            DARWIN_ENTRY=",
-              \"darwin-arm64\": { \"url\": \"$BASE/Qubic-darwin-arm64\", \"sha256\": \"$dsha\" }"
-          fi
-          # windows-x64 is best-effort too (node-windows is continue-on-error). It's a tar.gz bundle
-          # (exe + applocal DLLs); qinit's fetchNodeBin extracts archive node assets.
-          WINDOWS_ENTRY=""
-          if [ -f Qubic-windows-x64.tar.gz.sha256 ]; then
-            wsha=$(cat Qubic-windows-x64.tar.gz.sha256)
-            WINDOWS_ENTRY=",
-              \"windows-x64\": { \"url\": \"$BASE/Qubic-windows-x64.tar.gz\", \"sha256\": \"$wsha\" }"
-          fi
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/$TAG"
+          LINUX_X64_SHA=$(cat Qubic-linux-x64.sha256)
+          LINUX_ARM64_SHA=$(cat Qubic-linux-arm64.sha256)
+          DARWIN_ARM64_SHA=$(cat Qubic-darwin-arm64.sha256)
+          WINDOWS_X64_SHA=$(cat Qubic-windows-x64.tar.gz.sha256)
+          HEADERS_SHA=$(cat core-headers.sha256)
           cat > qinit-manifest.json <<EOF
           {
             "version": "$TAG",
-            "node":    { "url": "$BASE/Qubic-linux-x64", "sha256": "$x64sha" },
+            "node": { "url": "$BASE_URL/Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
             "nodes": {
-              "linux-x64":   { "url": "$BASE/Qubic-linux-x64",   "sha256": "$x64sha" },
-              "linux-arm64": { "url": "$BASE/Qubic-linux-arm64", "sha256": "$armsha" }$DARWIN_ENTRY$WINDOWS_ENTRY
+              "linux-x64": { "url": "$BASE_URL/Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
+              "linux-arm64": { "url": "$BASE_URL/Qubic-linux-arm64", "sha256": "$LINUX_ARM64_SHA" },
+              "darwin-arm64": { "url": "$BASE_URL/Qubic-darwin-arm64", "sha256": "$DARWIN_ARM64_SHA" },
+              "windows-x64": { "url": "$BASE_URL/Qubic-windows-x64.tar.gz", "sha256": "$WINDOWS_X64_SHA" }
             },
-            "headers": { "url": "$BASE/core-headers.tar.gz", "sha256": "$hsha" }
+            "headers": { "url": "$BASE_URL/core-headers.tar.gz", "sha256": "$HEADERS_SHA" }
           }
           EOF
           cat qinit-manifest.json
       - name: Publish release
         working-directory: dist
         run: |
-          FILES="Qubic-linux-x64 Qubic-linux-arm64 core-headers.tar.gz qinit-manifest.json"
-          PLATFORMS="linux-x64 + linux-arm64"
-          if [ -f Qubic-darwin-arm64 ]; then
-            FILES="$FILES Qubic-darwin-arm64"
-            PLATFORMS="$PLATFORMS + darwin-arm64"
-          fi
-          if [ -f Qubic-windows-x64.tar.gz ]; then
-            FILES="$FILES Qubic-windows-x64.tar.gz"
-            PLATFORMS="$PLATFORMS + windows-x64"
-          fi
-          gh release create "$TAG" $FILES \
-            --title "$TAG" --notes "qinit turnkey: prebuilt dynamic-contract node ($PLATFORMS) + core-header snapshot" \
-          || gh release upload "$TAG" $FILES --clobber
+          gh release create "$TAG" \
+            Qubic-linux-x64 \
+            Qubic-linux-arm64 \
+            Qubic-darwin-arm64 \
+            Qubic-windows-x64.tar.gz \
+            core-headers.tar.gz \
+            qinit-manifest.json \
+            --title "$TAG" \
+            --notes "qinit turnkey: prebuilt dynamic-contract nodes (linux-x64 + linux-arm64 + darwin-arm64 + windows-x64) + core-header snapshot" \
+            || gh release upload "$TAG" \
+              Qubic-linux-x64 \
+              Qubic-linux-arm64 \
+              Qubic-darwin-arm64 \
+              Qubic-windows-x64.tar.gz \
+              core-headers.tar.gz \
+              qinit-manifest.json \
+              --clobber

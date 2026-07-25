@@ -4,6 +4,7 @@
 #ifdef LITE_WASM_SC
 
 #include "extensions/wasm/runtime/trace.h"
+#include "platform/memory_util.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -37,21 +38,14 @@ static LONG WINAPI handleStateWriteException(EXCEPTION_POINTERS* exceptionPointe
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    unsigned char* faultAddress =
-        (unsigned char*)exceptionPointers->ExceptionRecord->ExceptionInformation[1];
-    if (stateWriteTrackingActive
-        && faultAddress >= t_liteWasmProtLo
-        && faultAddress < t_liteWasmProtHi)
+    unsigned char* faultAddress = (unsigned char*)exceptionPointers->ExceptionRecord->ExceptionInformation[1];
+    if (stateWriteTrackingActive && faultAddress >= t_liteWasmProtLo && faultAddress < t_liteWasmProtHi)
     {
-        unsigned char* page = (unsigned char*)((uintptr_t)faultAddress
-            & ~(uintptr_t)(systemPageSize - 1));
+        unsigned char* page = alignPointerDown(faultAddress, systemPageSize);
 
         if (dirtyPageCount < WASM_MAX_DIRTY_PAGES && dirtyPageSnapshots)
         {
-            memcpy(
-                dirtyPageSnapshots + (size_t)dirtyPageCount * systemPageSize,
-                page,
-                systemPageSize);
+            memcpy(dirtyPageSnapshots + (size_t)dirtyPageCount * systemPageSize, page, systemPageSize);
             dirtyPages[dirtyPageCount++] = page;
         }
         else
@@ -70,19 +64,13 @@ static LONG WINAPI handleStateWriteException(EXCEPTION_POINTERS* exceptionPointe
 static void handleStateWriteFault(int signalNumber, siginfo_t* info, void* context)
 {
     unsigned char* faultAddress = (unsigned char*)info->si_addr;
-    if (stateWriteTrackingActive
-        && faultAddress >= t_liteWasmProtLo
-        && faultAddress < t_liteWasmProtHi)
+    if (stateWriteTrackingActive && faultAddress >= t_liteWasmProtLo && faultAddress < t_liteWasmProtHi)
     {
-        unsigned char* page = (unsigned char*)((uintptr_t)faultAddress
-            & ~(uintptr_t)(systemPageSize - 1));
+        unsigned char* page = alignPointerDown(faultAddress, systemPageSize);
 
         if (dirtyPageCount < WASM_MAX_DIRTY_PAGES && dirtyPageSnapshots)
         {
-            memcpy(
-                dirtyPageSnapshots + (size_t)dirtyPageCount * systemPageSize,
-                page,
-                systemPageSize);
+            memcpy(dirtyPageSnapshots + (size_t)dirtyPageCount * systemPageSize, page, systemPageSize);
             dirtyPages[dirtyPageCount++] = page;
         }
         else
@@ -100,9 +88,7 @@ static void handleStateWriteFault(int signalNumber, siginfo_t* info, void* conte
         return;
     }
 
-    if (previousSegvAction.sa_handler
-        && previousSegvAction.sa_handler != SIG_DFL
-        && previousSegvAction.sa_handler != SIG_IGN)
+    if (previousSegvAction.sa_handler && previousSegvAction.sa_handler != SIG_DFL && previousSegvAction.sa_handler != SIG_IGN)
     {
         previousSegvAction.sa_handler(signalNumber);
         return;
@@ -148,8 +134,7 @@ static inline void beginStateWriteTracking(unsigned char* stateStart, unsigned i
 {
     if (!dirtyPageSnapshots)
     {
-        dirtyPageSnapshots = (unsigned char*)malloc(
-            (size_t)WASM_MAX_DIRTY_PAGES * systemPageSize);
+        dirtyPageSnapshots = (unsigned char*)malloc((size_t)WASM_MAX_DIRTY_PAGES * systemPageSize);
     }
 
     if (!dirtyPageSnapshots || !stateStart || !stateSize)
@@ -160,16 +145,11 @@ static inline void beginStateWriteTracking(unsigned char* stateStart, unsigned i
     dirtyPageCount = 0;
     t_liteWasmDirtyTrunc = false;
     t_liteWasmProtLo = stateStart;
-    t_liteWasmProtHi = (unsigned char*)(((uintptr_t)(stateStart + stateSize)
-        + systemPageSize - 1) & ~(uintptr_t)(systemPageSize - 1));
+    t_liteWasmProtHi = alignPointerUp(stateStart + stateSize, systemPageSize);
 
 #ifdef _WIN32
     DWORD oldProtection;
-    if (VirtualProtect(
-        t_liteWasmProtLo,
-        (SIZE_T)(t_liteWasmProtHi - t_liteWasmProtLo),
-        PAGE_READONLY,
-        &oldProtection))
+    if (VirtualProtect(t_liteWasmProtLo, (SIZE_T)(t_liteWasmProtHi - t_liteWasmProtLo), PAGE_READONLY, &oldProtection))
     {
         stateWriteTrackingActive = true;
     }
@@ -192,11 +172,7 @@ static inline void restoreStatePageProtection()
 
 #ifdef _WIN32
     DWORD oldProtection;
-    VirtualProtect(
-        t_liteWasmProtLo,
-        (SIZE_T)(t_liteWasmProtHi - t_liteWasmProtLo),
-        PAGE_READWRITE,
-        &oldProtection);
+    VirtualProtect(t_liteWasmProtLo, (SIZE_T)(t_liteWasmProtHi - t_liteWasmProtLo), PAGE_READWRITE, &oldProtection);
 #else
     mprotect(t_liteWasmProtLo, t_liteWasmProtHi - t_liteWasmProtLo, PROT_READ | PROT_WRITE);
 #endif
@@ -216,19 +192,12 @@ static inline void finishStateWriteTracking(
     traceEntry.stateTruncated = t_liteWasmDirtyTrunc;
 
     unsigned char* stateEnd = stateStart + stateSize;
-    for (unsigned int pageIndex = 0;
-         pageIndex < dirtyPageCount && traceEntry.stateDiff.size() < 256;
-         pageIndex++)
+    for (unsigned int pageIndex = 0; pageIndex < dirtyPageCount && traceEntry.stateDiff.size() < 256; pageIndex++)
     {
         unsigned char* page = dirtyPages[pageIndex];
-        const unsigned char* before =
-            dirtyPageSnapshots + (size_t)pageIndex * systemPageSize;
-        unsigned char* rangeStart = page > stateStart
-            ? page
-            : stateStart;
-        unsigned char* rangeEnd = (page + systemPageSize) < stateEnd
-            ? page + systemPageSize
-            : stateEnd;
+        const unsigned char* before = dirtyPageSnapshots + (size_t)pageIndex * systemPageSize;
+        unsigned char* rangeStart = page > stateStart ? page : stateStart;
+        unsigned char* rangeEnd = (page + systemPageSize) < stateEnd ? page + systemPageSize : stateEnd;
 
         for (unsigned char* current = rangeStart; current < rangeEnd;)
         {
@@ -240,8 +209,7 @@ static inline void finishStateWriteTracking(
             }
 
             unsigned char* changedEnd = current;
-            while (changedEnd < rangeEnd
-                && before[(unsigned int)(changedEnd - page)] != *changedEnd)
+            while (changedEnd < rangeEnd && before[(unsigned int)(changedEnd - page)] != *changedEnd)
             {
                 changedEnd++;
             }

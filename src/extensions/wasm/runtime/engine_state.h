@@ -24,9 +24,7 @@ void logColorToScreen(std::string type, std::string msg);
 namespace Wasm::Runtime
 {
 
-static constexpr unsigned long long WASM_IO_CAPACITY =
-    (unsigned long long)WASM_DISPATCH_FRAME_CAPACITY
-    + WASM_ARENA_SIZE;
+static constexpr unsigned long long WASM_IO_CAPACITY = (unsigned long long)WASM_DISPATCH_FRAME_CAPACITY + WASM_ARENA_SIZE;
 
 static bool engineReady = false;
 static ffi_cif dispatchCallInterface;
@@ -53,7 +51,6 @@ struct EngineSlot
     uint32_t stateSize = 0;
     uint32_t ioBaseOffset = 0;
     uint32_t contextOffset = 0;
-    uint32_t* arenaTop = nullptr;
     uint32_t entryCount = 0;
     EntryBinding entryBindings[WASM_MAX_USER_ENTRIES] = {};
     ffi_closure* entryClosures[WASM_MAX_USER_ENTRIES] = {};
@@ -148,18 +145,17 @@ static MemoryLayout resolveMemoryLayout(const EngineSlot& slot)
     return fixedMemoryLayout(slot.ioBaseOffset);
 }
 
-static bool resolveArenaEnd(
+static bool resolveArenaLimit(
     const MemoryLayout& fixedLayout,
-    uint32_t& arenaEnd)
+    uint32_t& arenaLimit)
 {
-    const unsigned long long end =
-        (unsigned long long)fixedLayout.arenaOffset + WASM_ARENA_SIZE;
-    if (end > 0xffffffffull)
+    const unsigned long long limit = (unsigned long long)fixedLayout.arenaOffset + WASM_ARENA_SIZE;
+    if (limit > 0xffffffffull)
     {
         return false;
     }
 
-    arenaEnd = (uint32_t)end;
+    arenaLimit = (uint32_t)limit;
     return true;
 }
 
@@ -188,14 +184,9 @@ static bool resolveIoSizes(
             return false;
     }
 
-    if (sizes.input > WASM_INPUT_CAPACITY
-        || sizes.output > WASM_OUTPUT_CAPACITY)
+    if (sizes.input > WASM_INPUT_CAPACITY || sizes.output > WASM_OUTPUT_CAPACITY)
     {
-        logColorToScreen(
-            "ERROR",
-            "LITEWASM dispatch in/out exceeds io region idx=" + std::to_string(contractIndex)
-                + " in=" + std::to_string(sizes.input)
-                + " out=" + std::to_string(sizes.output));
+        logColorToScreen("ERROR", "LITEWASM dispatch in/out exceeds io region idx=" + std::to_string(contractIndex) + " in=" + std::to_string(sizes.input) + " out=" + std::to_string(sizes.output));
         return false;
     }
 
@@ -303,7 +294,6 @@ struct ModuleLayout
     uint32_t stateOffset = 0;
     uint32_t stateSize = 0;
     uint32_t ioBaseOffset = 0;
-    uint32_t* arenaTop = nullptr;
 };
 
 struct EntryInfo

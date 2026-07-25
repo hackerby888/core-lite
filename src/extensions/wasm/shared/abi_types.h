@@ -86,24 +86,96 @@ struct HostServices
     void (*prevComputerDigest)(const void* ctx, void* out32);
 
     unsigned char (*isAssetIssued)(const void* ctx, const void* issuer32, unsigned long long assetName);
-    long long (*issueAsset)(const void* ctx, unsigned long long name, const void* issuer32, signed char decimals, long long shares, unsigned long long unit);
+    long long (*issueAsset)(
+        const void* ctx,
+        unsigned long long name,
+        const void* issuer32,
+        signed char decimals,
+        long long shares,
+        unsigned long long unit);
     long long (*numberOfShares)(const void* ctx, const void* asset, const void* ownSel, const void* posSel);
-    long long (*numberOfPossessedShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, unsigned short ownMgmt, unsigned short posMgmt);
-    unsigned int (*assetEnumerate)(const void* ctx, unsigned int kind, const void* issuance, const void* ownSel, const void* posSel, void* outBuf, unsigned int maxEntries);
-    long long (*transferShareOwnershipAndPossession)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, const void* newOwner32);
-    long long (*acquireShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned short srcOwnMgmt, unsigned short srcPosMgmt, long long offeredFee);
-    long long (*releaseShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned short dstOwnMgmt, unsigned short dstPosMgmt, long long offeredFee);
+    long long (*numberOfPossessedShares)(
+        const void* ctx,
+        unsigned long long assetName,
+        const void* issuer32,
+        const void* owner32,
+        const void* possessor32,
+        unsigned short ownMgmt,
+        unsigned short posMgmt);
+    unsigned int (*assetEnumerate)(
+        const void* ctx,
+        unsigned int kind,
+        const void* issuance,
+        const void* ownSel,
+        const void* posSel,
+        void* outBuf,
+        unsigned int maxEntries);
+    long long (*transferShareOwnershipAndPossession)(
+        const void* ctx,
+        unsigned long long assetName,
+        const void* issuer32,
+        const void* owner32,
+        const void* possessor32,
+        long long shares,
+        const void* newOwner32);
+    long long (*acquireShares)(
+        const void* ctx,
+        unsigned long long assetName,
+        const void* issuer32,
+        const void* owner32,
+        const void* possessor32,
+        long long shares,
+        unsigned short srcOwnMgmt,
+        unsigned short srcPosMgmt,
+        long long offeredFee);
+    long long (*releaseShares)(
+        const void* ctx,
+        unsigned long long assetName,
+        const void* issuer32,
+        const void* owner32,
+        const void* possessor32,
+        long long shares,
+        unsigned short dstOwnMgmt,
+        unsigned short dstPosMgmt,
+        long long offeredFee);
     unsigned char (*dayOfWeek)(const void* ctx, unsigned char year, unsigned char month, unsigned char day);
-    unsigned char (*signatureValidity)(const void* ctx, const void* entity32, const void* digest32, const void* signature64);
+    unsigned char (*signatureValidity)(
+        const void* ctx,
+        const void* entity32,
+        const void* digest32,
+        const void* signature64);
     long long (*bidInIPO)(const void* ctx, unsigned int ipoContractIndex, long long price, unsigned int quantity);
     void (*ipoBidId)(const void* ctx, unsigned int ipoContractIndex, unsigned int ipoBidIndex, void* out32);
     long long (*ipoBidPrice)(const void* ctx, unsigned int ipoContractIndex, unsigned int ipoBidIndex);
-    void (*computeMiningFunction)(const void* ctx, const void* miningSeed32, const void* publicKey32, const void* nonce32, void* out32);
+    void (*computeMiningFunction)(
+        const void* ctx,
+        const void* miningSeed32,
+        const void* publicKey32,
+        const void* nonce32,
+        void* out32);
     void (*initMiningSeed)(const void* ctx, const void* miningSeed32);
     unsigned char (*getOracleQueryStatus)(const void* ctx, long long queryId);
     unsigned char (*unsubscribeOracle)(const void* ctx, int oracleSubscriptionId);
-    long long (*queryOracle)(const void* ctx, unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int notificationProcId, unsigned int timeoutMillisec, long long fee);
-    int (*subscribeOracle)(const void* ctx, unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int notificationProcId, unsigned int periodMillisec, unsigned int notifyPrev, long long fee);
+    long long (*queryOracle)(
+        const void* ctx,
+        unsigned int interfaceIndex,
+        const void* query,
+        unsigned int querySize,
+        unsigned int replySize,
+        unsigned int notificationProcId,
+        unsigned int timeoutMillisec,
+        long long fee);
+    int (*subscribeOracle)(
+        const void* ctx,
+        unsigned int interfaceIndex,
+        const void* query,
+        unsigned int querySize,
+        unsigned int replySize,
+        unsigned int timestampOffset,
+        unsigned int notificationProcId,
+        unsigned int periodMillisec,
+        unsigned int notifyPrev,
+        long long fee);
     unsigned int (*getOracleQuery)(const void* ctx, long long queryId, void* out, unsigned int size);
     unsigned int (*getOracleReply)(const void* ctx, long long queryId, void* out, unsigned int size);
     unsigned char (*distributeDividends)(const void* ctx, long long amountPerShare);
@@ -114,8 +186,17 @@ struct HostServices
                                const void* in, unsigned int inSize, void* out, unsigned int outSize,
                                long long invocationReward);
     // Governance callbacks target another deployed contract.
-    unsigned short (*setShareholderProposal)(const void* callerCtx, unsigned int calleeIdx, const void* proposal1024, long long invocationReward);
-    unsigned char  (*setShareholderVotes)(const void* callerCtx, unsigned int calleeIdx, const void* voteData, unsigned int voteSize, long long invocationReward);
+    unsigned short (*setShareholderProposal)(
+        const void* callerCtx,
+        unsigned int calleeIdx,
+        const void* proposal1024,
+        long long invocationReward);
+    unsigned char (*setShareholderVotes)(
+        const void* callerCtx,
+        unsigned int calleeIdx,
+        const void* voteData,
+        unsigned int voteSize,
+        long long invocationReward);
 };
 
 #define WASM_MAX_USER_ENTRIES 1024

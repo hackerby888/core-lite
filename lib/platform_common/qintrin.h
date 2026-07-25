@@ -7,16 +7,8 @@
 #elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <immintrin.h>
 #else
-// ---------------------------------------------------------------------------------------------
-// Non-x86 (e.g. arm64 / Apple Silicon): SIMULATE the x86 intrinsics in software so the AVX2/SSE
-// code compiles + runs unchanged. The SIMD set comes from SIMDe (NEON-backed or scalar); the few
-// scalar x86 intrinsics SIMDe doesn't cover get tiny compiler-builtin shims below.
-// This is the dev/"simulate" build path — mainnet x86 keeps native AVX2/512 (the branch above).
-// NOTE: _umul128 / __shiftleft128 / __shiftright128 are defined (portably) in four_q.h — not here.
-// ---------------------------------------------------------------------------------------------
-// x86 calling-convention keywords are no-ops on arm (single ABI). The legacy UEFI fn-ptr typedefs
-// in uefi.h hardcode __cdecl; arm has no such keyword -> define them empty so those typedefs parse.
-// Runtime-neutral: those EFI function pointers are never called on the OS port.
+// Non-x86 builds emulate the required AVX2 and SSE intrinsics through SIMDe.
+// Scalar intrinsics missing from SIMDe use compiler builtins below.
 #ifndef __cdecl
 #define __cdecl
 #endif
@@ -33,10 +25,10 @@
 #include <cstdint>
 #include <cstdlib>
 #if defined(__APPLE__)
-#include <mach/mach_time.h>   // mach_absolute_time() — the macOS cycle/time source
+#include <mach/mach_time.h>
 #endif
 
-// --- cycle counter -> arm virtual timer ---
+// Map the x86 cycle counter to the native ARM timer.
 static inline unsigned long long __rdtsc(void)
 {
 #if defined(__APPLE__)
@@ -50,78 +42,163 @@ static inline unsigned long long __rdtsc(void)
 #endif
 }
 
-// Signed 128-bit multiply (MSVC intrinsic; math_lib.h's smul uses it). math_lib includes only qintrin,
-// so define it here for non-x86 to avoid msvc_polyfill include-order fragility. Non-template -> preferred
-// over msvc_polyfill's template overload when both are visible, so no conflict on the node build.
-static inline long long _mul128(long long a, long long b, long long* hi)
+// Provide the signed MSVC multiply intrinsic used by math_lib.h.
+static inline long long _mul128(long long a, long long b, long long* high)
 {
-    __int128 p = (__int128)a * (__int128)b;
-    *hi = (long long)(p >> 64);
-    return (long long)p;
+    const __int128 product = (__int128)a * (__int128)b;
+    *high = (long long)(product >> 64);
+    return (long long)product;
 }
 
-// --- add/sub with carry (used heavily by four_q; not a SIMD intrinsic). __int128 => gcc+clang. ---
-static inline unsigned char _addcarry_u64(unsigned char c_in, unsigned long long a, unsigned long long b, unsigned long long* out)
+// FourQ uses these scalar carry helpers.
+static inline unsigned char _addcarry_u64(
+    unsigned char carryIn,
+    unsigned long long a,
+    unsigned long long b,
+    unsigned long long* output)
 {
-    __uint128_t s = (__uint128_t)a + (__uint128_t)b + (__uint128_t)c_in;
-    *out = (unsigned long long)s;
-    return (unsigned char)(s >> 64);
-}
-static inline unsigned char _subborrow_u64(unsigned char b_in, unsigned long long a, unsigned long long b, unsigned long long* out)
-{
-    __uint128_t d = (__uint128_t)a - (__uint128_t)b - (__uint128_t)b_in;
-    *out = (unsigned long long)d;
-    return (unsigned char)((d >> 64) & 1); // borrow if high bits set (wrapped)
+    const __uint128_t sum = (__uint128_t)a + (__uint128_t)b + (__uint128_t)carryIn;
+    *output = (unsigned long long)sum;
+    return (unsigned char)(sum >> 64);
 }
 
-// --- bit ops (BMI/ABM/LZCNT scalar forms) ---
-static inline unsigned long long _lzcnt_u64(unsigned long long x) { return x ? (unsigned long long)__builtin_clzll(x) : 64ULL; }
-static inline unsigned long long __lzcnt64(unsigned long long x) { return x ? (unsigned long long)__builtin_clzll(x) : 64ULL; }
-static inline unsigned int __lzcnt(unsigned int x) { return x ? (unsigned int)__builtin_clz(x) : 32u; }
-// SIMDe maps _mm256_srli/slli_epiN to NEON vshrq_n/vshlq_n which require a CONSTANT shift. The core
-// (score_common.h) shifts by a RUNTIME value (x86 allows it). Override with scalar variable shifts.
+static inline unsigned char _subborrow_u64(
+    unsigned char borrowIn,
+    unsigned long long a,
+    unsigned long long b,
+    unsigned long long* output)
+{
+    const __uint128_t difference = (__uint128_t)a - (__uint128_t)b - (__uint128_t)borrowIn;
+    *output = (unsigned long long)difference;
+    return (unsigned char)((difference >> 64) & 1);
+}
+
+static inline unsigned long long _lzcnt_u64(unsigned long long value)
+{
+    return value ? (unsigned long long)__builtin_clzll(value) : 64ULL;
+}
+
+static inline unsigned long long __lzcnt64(unsigned long long value)
+{
+    return value ? (unsigned long long)__builtin_clzll(value) : 64ULL;
+}
+
+static inline unsigned int __lzcnt(unsigned int value)
+{
+    return value ? (unsigned int)__builtin_clz(value) : 32u;
+}
+
+// SIMDe requires constant shifts, while score_common.h uses runtime values.
 #undef _mm256_srli_epi64
 #undef _mm256_slli_epi64
-static inline __m256i _mm256_srli_epi64(__m256i a, int c) {
-    unsigned long long t[4]; __builtin_memcpy(t, &a, 32);
-    for (int i = 0; i < 4; i++) t[i] = (c <= 0) ? t[i] : (c >= 64 ? 0ULL : (t[i] >> c));
-    __m256i r; __builtin_memcpy(&r, t, 32); return r;
+static inline __m256i _mm256_srli_epi64(__m256i value, int shift)
+{
+    unsigned long long lanes[4];
+    __builtin_memcpy(lanes, &value, 32);
+
+    for (int i = 0; i < 4; i++)
+    {
+        lanes[i] = shift <= 0 ? lanes[i] : (shift >= 64 ? 0ULL : (lanes[i] >> shift));
+    }
+
+    __m256i result;
+    __builtin_memcpy(&result, lanes, 32);
+    return result;
 }
-static inline __m256i _mm256_slli_epi64(__m256i a, int c) {
-    unsigned long long t[4]; __builtin_memcpy(t, &a, 32);
-    for (int i = 0; i < 4; i++) t[i] = (c <= 0) ? t[i] : (c >= 64 ? 0ULL : (t[i] << c));
-    __m256i r; __builtin_memcpy(&r, t, 32); return r;
+
+static inline __m256i _mm256_slli_epi64(__m256i value, int shift)
+{
+    unsigned long long lanes[4];
+    __builtin_memcpy(lanes, &value, 32);
+
+    for (int i = 0; i < 4; i++)
+    {
+        lanes[i] = shift <= 0 ? lanes[i] : (shift >= 64 ? 0ULL : (lanes[i] << shift));
+    }
+
+    __m256i result;
+    __builtin_memcpy(&result, lanes, 32);
+    return result;
 }
-static inline unsigned long long _tzcnt_u64(unsigned long long x) { return x ? (unsigned long long)__builtin_ctzll(x) : 64ULL; }
-static inline unsigned int _blsr_u32(unsigned int x) { return x & (x - 1u); }
-static inline unsigned long long _blsr_u64(unsigned long long x) { return x & (x - 1ULL); }
-static inline unsigned int __popcnt(unsigned int x) { return (unsigned int)__builtin_popcount(x); }
-static inline unsigned long long __popcnt64(unsigned long long x) { return (unsigned long long)__builtin_popcountll(x); }
+
+static inline unsigned long long _tzcnt_u64(unsigned long long value)
+{
+    return value ? (unsigned long long)__builtin_ctzll(value) : 64ULL;
+}
+
+static inline unsigned int _blsr_u32(unsigned int value)
+{
+    return value & (value - 1u);
+}
+
+static inline unsigned long long _blsr_u64(unsigned long long value)
+{
+    return value & (value - 1ULL);
+}
+
+static inline unsigned int __popcnt(unsigned int value)
+{
+    return (unsigned int)__builtin_popcount(value);
+}
+
+static inline unsigned long long __popcnt64(unsigned long long value)
+{
+    return (unsigned long long)__builtin_popcountll(value);
+}
+
 static inline unsigned char _BitScanForward(unsigned long* index, unsigned int mask)
 {
-    if (!mask) return 0;
+    if (!mask)
+    {
+        return 0;
+    }
     *index = (unsigned long)__builtin_ctz(mask);
     return 1;
 }
-static inline unsigned long long _andn_u64(unsigned long long a, unsigned long long b) { return (~a) & b; }
-static inline unsigned int _andn_u32(unsigned int a, unsigned int b) { return (~a) & b; }
-// MSVC-style CPUID (x86 feature/TSC-freq query). No x86 features on arm -> zero (TSC freq via __rdtsc).
-static inline void __cpuid(int info[4], int leaf) { (void)leaf; info[0] = info[1] = info[2] = info[3] = 0; }
 
-// --- HW RNG: arm has no RDRAND. Dev/simulate build only -> weak xorshift fallback (NOT a CSPRNG).
-//     Mainnet uses x86 RDRAND. Fine for a testnet/dev node + the gtests. ---
+static inline unsigned long long _andn_u64(unsigned long long a, unsigned long long b)
+{
+    return (~a) & b;
+}
+
+static inline unsigned int _andn_u32(unsigned int a, unsigned int b)
+{
+    return (~a) & b;
+}
+
+// ARM has no x86 CPUID features.
+static inline void __cpuid(int info[4], int leaf)
+{
+    (void)leaf;
+    info[0] = 0;
+    info[1] = 0;
+    info[2] = 0;
+    info[3] = 0;
+}
+
+// Testnet ARM builds use a non-cryptographic fallback for RDRAND.
 static inline unsigned long long __qinit_xorshift64(void)
 {
-    static unsigned long long s = 0x9e3779b97f4a7c15ULL;
-    s ^= s << 13; s ^= s >> 7; s ^= s << 17;
-    return s ^ __rdtsc();
+    static unsigned long long state = 0x9e3779b97f4a7c15ULL;
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    return state ^ __rdtsc();
 }
-static inline int _rdrand64_step(unsigned long long* out) { *out = __qinit_xorshift64(); return 1; }
-static inline int _rdrand32_step(unsigned int* out) { *out = (unsigned int)__qinit_xorshift64(); return 1; }
 
-// Make code that gates on __AVX2__ take the AVX2 path (e.g. score's "AVX2 or AVX512 required"
-// static_assert) — SIMDe is already included above, so those _mm256_* calls resolve to its emulation.
-// Defined AFTER the SIMDe includes so SIMDe itself still saw __AVX2__ undefined and used emulation.
+static inline int _rdrand64_step(unsigned long long* output)
+{
+    *output = __qinit_xorshift64();
+    return 1;
+}
+
+static inline int _rdrand32_step(unsigned int* output)
+{
+    *output = (unsigned int)__qinit_xorshift64();
+    return 1;
+}
+
+// Expose the emulated AVX2 path after SIMDe selects its non-native implementation.
 #ifndef __AVX2__
 #define __AVX2__ 1
 #endif

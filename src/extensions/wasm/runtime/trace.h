@@ -59,8 +59,8 @@ struct TraceEntry
     unsigned int outputSize = 0;
     unsigned int stateSize = 0;
     bool stateTruncated = false;
-    unsigned char inputHead[WASM_TRACE_CAPTURE_SIZE] = {};
-    unsigned char outputHead[WASM_TRACE_CAPTURE_SIZE] = {};
+    std::vector<unsigned char> input;
+    std::vector<unsigned char> output;
     unsigned long long executionNanoseconds = 0;
     std::string trap;
     std::vector<StateRegionTrace> stateDiff;
@@ -157,8 +157,7 @@ static inline std::vector<TraceEntry> traceSnapshot(
 
         for (unsigned int index = 0; index < WASM_TRACE_RING_CAPACITY; index++)
         {
-            if (traceRing[index].used
-                && traceRing[index].sequence > since)
+            if (traceRing[index].used && traceRing[index].sequence > since)
             {
                 entries.push_back(traceRing[index]);
             }
@@ -225,9 +224,7 @@ static inline void recordLog(
         return;
     }
 
-    const unsigned int capturedSize = size > WASM_TRACE_CAPTURE_SIZE
-        ? WASM_TRACE_CAPTURE_SIZE
-        : size;
+    const unsigned int capturedSize = size > WASM_TRACE_CAPTURE_SIZE ? WASM_TRACE_CAPTURE_SIZE : size;
     entry->logs.push_back(LogTrace{
         type,
         size,

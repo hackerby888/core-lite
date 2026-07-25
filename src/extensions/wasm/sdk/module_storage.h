@@ -40,18 +40,15 @@ typedef void (*MigrateProcedure)(
 // Corpus runs use engine-deployed state, so the local region only reserves one page.
 alignas(65536) static unsigned char moduleStateStorage[65536];
 #else
-alignas(65536) static unsigned char moduleStateStorage[
-    sizeof(CONTRACT_STATE_TYPE::StateData)];
+alignas(65536) static unsigned char moduleStateStorage[sizeof(CONTRACT_STATE_TYPE::StateData)];
 #endif
-static CONTRACT_STATE_TYPE::StateData& moduleState =
-    *reinterpret_cast<CONTRACT_STATE_TYPE::StateData*>(moduleStateStorage);
+static CONTRACT_STATE_TYPE::StateData& moduleState = *reinterpret_cast<CONTRACT_STATE_TYPE::StateData*>(moduleStateStorage);
 alignas(65536) static unsigned char moduleContextStorage[256];
 #ifndef WASM_ARENA_SIZE
 #define WASM_ARENA_SIZE (1024 * 1024 * 1024)
 #endif
 // Layout is input, output, locals, then scratch arena; it must match the node carve.
-alignas(65536) static unsigned char moduleIoStorage[
-    (64 * 1024) + (64 * 1024) + (32 * 1024) + WASM_ARENA_SIZE];
+alignas(65536) static unsigned char moduleIoStorage[(64 * 1024) + (64 * 1024) + (32 * 1024) + WASM_ARENA_SIZE];
 
 static bool moduleRegistered = false;
 static void ensureModuleRegistered()

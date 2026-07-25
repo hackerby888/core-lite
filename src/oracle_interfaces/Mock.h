@@ -42,9 +42,4 @@ struct Mock
 		return (reply.echoedValue == query.value) && (reply.doubledValue == 2 * query.value);
 	}
 
-	/// Return subscription fee, charged per generated query.
-	static sint64 getSubscriptionFee(const OracleQuery& query, uint32 notifyPeriodInMilliseconds)
-	{
-		return 100;
-	}
 };

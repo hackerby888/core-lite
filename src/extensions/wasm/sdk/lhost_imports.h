@@ -64,7 +64,7 @@ LH_IMPORT(prevSpectrumDigest) void lh_prevSpectrumDigest(void* out32);
 LH_IMPORT(prevUniverseDigest) void lh_prevUniverseDigest(void* out32);
 LH_IMPORT(prevComputerDigest) void lh_prevComputerDigest(void* out32);
 LH_IMPORT(isAssetIssued)  unsigned int lh_isAssetIssued(const void* issuer32, unsigned long long assetName);
-LH_IMPORT(issueAsset)     long long lh_issueAsset(unsigned long long name, const void* issuer32, unsigned int decimals, long long shares, unsigned long long unit);
+LH_IMPORT(issueAsset) long long lh_issueAsset(unsigned long long name, const void* issuer32, unsigned int decimals, long long shares, unsigned long long unit);
 LH_IMPORT(numberOfShares) long long lh_numberOfShares(const void* asset, const void* ownSel, const void* posSel);
 LH_IMPORT(numberOfPossessedShares) long long lh_numberOfPossessedShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, unsigned int om, unsigned int pm);
 LH_IMPORT(assetEnumerate) unsigned int lh_assetEnumerate(unsigned int kind, const void* issuance, const void* ownership, const void* possession, void* out, unsigned int capacity);
@@ -80,8 +80,8 @@ LH_IMPORT(computeMiningFunction) void lh_computeMiningFunction(const void* minin
 LH_IMPORT(initMiningSeed) void lh_initMiningSeed(const void* miningSeed32);
 LH_IMPORT(getOracleQueryStatus) unsigned int lh_getOracleQueryStatus(long long queryId);
 LH_IMPORT(unsubscribeOracle) unsigned int lh_unsubscribeOracle(int oracleSubscriptionId);
-LH_IMPORT(queryOracle) long long lh_queryOracle(unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int notificationProcId, unsigned int timeoutMillisec, long long fee);
-LH_IMPORT(subscribeOracle) int lh_subscribeOracle(unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int notificationProcId, unsigned int periodMillisec, unsigned int notifyPrev, long long fee);
+LH_IMPORT(queryOracle) long long lh_queryOracle(unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int replySize, unsigned int notificationProcId, unsigned int timeoutMillisec, long long fee);
+LH_IMPORT(subscribeOracle) int lh_subscribeOracle(unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int replySize, unsigned int timestampOffset, unsigned int notificationProcId, unsigned int periodMillisec, unsigned int notifyPrev, long long fee);
 LH_IMPORT(getOracleQuery) unsigned int lh_getOracleQuery(long long queryId, void* out, unsigned int size);
 LH_IMPORT(getOracleReply) unsigned int lh_getOracleReply(long long queryId, void* out, unsigned int size);
 LH_IMPORT(distributeDividends) unsigned int lh_distributeDividends(long long amountPerShare);
@@ -103,13 +103,7 @@ int callFunction(
     void* output,
     unsigned int outputSize)
 {
-    return lh_liteCallFunction(
-        calleeIndex,
-        inputType,
-        input,
-        inputSize,
-        output,
-        outputSize);
+    return lh_liteCallFunction(calleeIndex, inputType, input, inputSize, output, outputSize);
 }
 
 int invokeProcedure(
@@ -122,14 +116,7 @@ int invokeProcedure(
     unsigned int outputSize,
     long long invocationReward)
 {
-    return lh_liteInvokeProcedure(
-        calleeIndex,
-        inputType,
-        input,
-        inputSize,
-        output,
-        outputSize,
-        invocationReward);
+    return lh_liteInvokeProcedure(calleeIndex, inputType, input, inputSize, output, outputSize, invocationReward);
 }
 
 } // namespace Wasm::Sdk
@@ -172,41 +159,25 @@ static void __releaseScratchpad(void* pointer)
 template <typename T>
 static void __logContractDebugMessage(unsigned int contractIndex, T& message)
 {
-    lh_logBytes(
-        contractIndex,
-        7,
-        &message,
-        (unsigned int)__builtin_offsetof(T, _terminator));
+    lh_logBytes(contractIndex, 7, &message, (unsigned int)__builtin_offsetof(T, _terminator));
 }
 
 template <typename T>
 static void __logContractErrorMessage(unsigned int contractIndex, T& message)
 {
-    lh_logBytes(
-        contractIndex,
-        4,
-        &message,
-        (unsigned int)__builtin_offsetof(T, _terminator));
+    lh_logBytes(contractIndex, 4, &message, (unsigned int)__builtin_offsetof(T, _terminator));
 }
 
 template <typename T>
 static void __logContractInfoMessage(unsigned int contractIndex, T& message)
 {
-    lh_logBytes(
-        contractIndex,
-        6,
-        &message,
-        (unsigned int)__builtin_offsetof(T, _terminator));
+    lh_logBytes(contractIndex, 6, &message, (unsigned int)__builtin_offsetof(T, _terminator));
 }
 
 template <typename T>
 static void __logContractWarningMessage(unsigned int contractIndex, T& message)
 {
-    lh_logBytes(
-        contractIndex,
-        5,
-        &message,
-        (unsigned int)__builtin_offsetof(T, _terminator));
+    lh_logBytes(contractIndex, 5, &message, (unsigned int)__builtin_offsetof(T, _terminator));
 }
 
 

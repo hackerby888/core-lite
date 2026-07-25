@@ -12,28 +12,19 @@ static void discoverRegistration(
     EngineSlot& slot,
     const RequiredExports& exports)
 {
-    wasm_function_inst_t contextAddress = wasm_runtime_lookup_function(
-        slot.instance,
-        "ctx_addr");
+    wasm_function_inst_t contextAddress = wasm_runtime_lookup_function(slot.instance, "ctx_addr");
     if (contextAddress)
     {
         slot.contextOffset = callU32(slot.loadExecEnv, contextAddress);
     }
 
-    slot.entryCount = callU32(
-        slot.loadExecEnv,
-        exports.registrationCount);
+    slot.entryCount = callU32(slot.loadExecEnv, exports.registrationCount);
     if (slot.entryCount > WASM_MAX_USER_ENTRIES)
     {
         slot.entryCount = WASM_MAX_USER_ENTRIES;
     }
 
-    logColorToScreen(
-        "INFO",
-        "LITEWASM: loaded contract — "
-            + std::to_string(slot.entryCount)
-            + " entries, stateSize="
-            + std::to_string(slot.stateSize));
+    logColorToScreen("INFO", "LITEWASM: loaded contract — " + std::to_string(slot.entryCount) + " entries, stateSize=" + std::to_string(slot.stateSize));
 }
 
 static void registerUserFunction(
@@ -43,10 +34,8 @@ static void registerUserFunction(
     void* code)
 {
     contractUserFunctions[contractIndex][inputType] = (USER_FUNCTION)code;
-    contractUserFunctionInputSizes[contractIndex][inputType] =
-        (uint16_t)entry.inputSize;
-    contractUserFunctionOutputSizes[contractIndex][inputType] =
-        (uint16_t)entry.outputSize;
+    contractUserFunctionInputSizes[contractIndex][inputType] = (uint16_t)entry.inputSize;
+    contractUserFunctionOutputSizes[contractIndex][inputType] = (uint16_t)entry.outputSize;
     contractUserFunctionLocalsSizes[contractIndex][inputType] = 0;
 }
 
@@ -57,10 +46,8 @@ static void registerUserProcedure(
     void* code)
 {
     contractUserProcedures[contractIndex][inputType] = (USER_PROCEDURE)code;
-    contractUserProcedureInputSizes[contractIndex][inputType] =
-        (uint16_t)entry.inputSize;
-    contractUserProcedureOutputSizes[contractIndex][inputType] =
-        (uint16_t)entry.outputSize;
+    contractUserProcedureInputSizes[contractIndex][inputType] = (uint16_t)entry.inputSize;
+    contractUserProcedureOutputSizes[contractIndex][inputType] = (uint16_t)entry.outputSize;
     contractUserProcedureLocalsSizes[contractIndex][inputType] = 0;
 
     // Oracle notifications use the synthetic procedure ID registered by native contracts.
@@ -90,15 +77,9 @@ static void registerUserEntries(
             entryIndex,
             slot.ioBaseOffset,
         };
-        wasm_runtime_call_wasm(
-            slot.loadExecEnv,
-            exports.registrationInfo,
-            2,
-            arguments);
+        wasm_runtime_call_wasm(slot.loadExecEnv, exports.registrationInfo, 2, arguments);
 
-        auto* entry = (EntryInfo*)wasm_runtime_addr_app_to_native(
-            slot.instance,
-            slot.ioBaseOffset);
+        auto* entry = (EntryInfo*)wasm_runtime_addr_app_to_native(slot.instance, slot.ioBaseOffset);
         const uint16_t inputType = (uint16_t)entry->inputType;
         slot.entryBindings[entryIndex] = {
             contractIndex,
@@ -107,16 +88,8 @@ static void registerUserEntries(
         };
 
         void* code = nullptr;
-        ffi_closure* closure = (ffi_closure*)ffi_closure_alloc(
-            sizeof(ffi_closure),
-            &code);
-        if (!closure
-            || ffi_prep_closure_loc(
-                   closure,
-                   &dispatchCallInterface,
-                   dispatchClosure,
-                   &slot.entryBindings[entryIndex],
-                   code) != FFI_OK)
+        ffi_closure* closure = (ffi_closure*)ffi_closure_alloc(sizeof(ffi_closure), &code);
+        if (!closure || ffi_prep_closure_loc(closure, &dispatchCallInterface, dispatchClosure, &slot.entryBindings[entryIndex], code) != FFI_OK)
         {
             logToConsole(L"LITEWASM: closure alloc failed");
             continue;
@@ -125,19 +98,11 @@ static void registerUserEntries(
         slot.entryClosures[entryIndex] = closure;
         if (entry->kind == WASM_ENTRY_FUNCTION)
         {
-            registerUserFunction(
-                contractIndex,
-                inputType,
-                *entry,
-                code);
+            registerUserFunction(contractIndex, inputType, *entry, code);
         }
         else
         {
-            registerUserProcedure(
-                contractIndex,
-                inputType,
-                *entry,
-                code);
+            registerUserProcedure(contractIndex, inputType, *entry, code);
         }
     }
 }
@@ -162,27 +127,17 @@ static void registerSystemProcedures(
     EngineSlot& slot,
     unsigned int contractIndex)
 {
-    wasm_function_inst_t maskFunction = wasm_runtime_lookup_function(
-        slot.instance,
-        "reg_sysproc_mask");
-    wasm_function_inst_t localsSizeFunction = wasm_runtime_lookup_function(
-        slot.instance,
-        "sysproc_locals_size");
-    wasm_function_inst_t inputSizeFunction = wasm_runtime_lookup_function(
-        slot.instance,
-        "sysproc_in_size");
-    wasm_function_inst_t outputSizeFunction = wasm_runtime_lookup_function(
-        slot.instance,
-        "sysproc_out_size");
+    wasm_function_inst_t maskFunction = wasm_runtime_lookup_function(slot.instance, "reg_sysproc_mask");
+    wasm_function_inst_t localsSizeFunction = wasm_runtime_lookup_function(slot.instance, "sysproc_locals_size");
+    wasm_function_inst_t inputSizeFunction = wasm_runtime_lookup_function(slot.instance, "sysproc_in_size");
+    wasm_function_inst_t outputSizeFunction = wasm_runtime_lookup_function(slot.instance, "sysproc_out_size");
     if (!maskFunction)
     {
         return;
     }
 
     const uint32_t mask = callU32(slot.loadExecEnv, maskFunction);
-    for (uint32_t systemProcedure = 0;
-         systemProcedure < WASM_SYSTEM_PROCEDURE_COUNT;
-         ++systemProcedure)
+    for (uint32_t systemProcedure = 0; systemProcedure < WASM_SYSTEM_PROCEDURE_COUNT; ++systemProcedure)
     {
         if (!(mask & (1u << systemProcedure)))
         {
@@ -196,38 +151,17 @@ static void registerSystemProcedures(
         };
 
         void* code = nullptr;
-        ffi_closure* closure = (ffi_closure*)ffi_closure_alloc(
-            sizeof(ffi_closure),
-            &code);
-        if (!closure
-            || ffi_prep_closure_loc(
-                   closure,
-                   &dispatchCallInterface,
-                   dispatchClosure,
-                   &slot.systemBindings[systemProcedure],
-                   code) != FFI_OK)
+        ffi_closure* closure = (ffi_closure*)ffi_closure_alloc(sizeof(ffi_closure), &code);
+        if (!closure || ffi_prep_closure_loc(closure, &dispatchCallInterface, dispatchClosure, &slot.systemBindings[systemProcedure], code) != FFI_OK)
         {
             continue;
         }
 
         slot.systemClosures[systemProcedure] = closure;
-        contractSystemProcedures[contractIndex][systemProcedure] =
-            (SYSTEM_PROCEDURE)code;
-        contractSystemProcedureLocalsSizes[contractIndex][systemProcedure] =
-            (uint16_t)callWithU32Argument(
-                slot.loadExecEnv,
-                localsSizeFunction,
-                systemProcedure);
-        slot.systemInputSizes[systemProcedure] =
-            (uint16_t)callWithU32Argument(
-                slot.loadExecEnv,
-                inputSizeFunction,
-                systemProcedure);
-        slot.systemOutputSizes[systemProcedure] =
-            (uint16_t)callWithU32Argument(
-                slot.loadExecEnv,
-                outputSizeFunction,
-                systemProcedure);
+        contractSystemProcedures[contractIndex][systemProcedure] = (SYSTEM_PROCEDURE)code;
+        contractSystemProcedureLocalsSizes[contractIndex][systemProcedure] = (uint16_t)callWithU32Argument(slot.loadExecEnv, localsSizeFunction, systemProcedure);
+        slot.systemInputSizes[systemProcedure] = (uint16_t)callWithU32Argument(slot.loadExecEnv, inputSizeFunction, systemProcedure);
+        slot.systemOutputSizes[systemProcedure] = (uint16_t)callWithU32Argument(slot.loadExecEnv, outputSizeFunction, systemProcedure);
     }
 }
 

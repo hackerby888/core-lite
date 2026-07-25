@@ -522,417 +522,661 @@ class RpcLiveController : public HttpController<RpcLiveController>
     }
 
 #ifdef LITE_WASM_SC
-    // Dynamic-contract registry: deployed slots + their function/procedure inputTypes (tooling autocomplete).
+    // Return reserved slots and their registered entry points.
     inline void dynRegistry(const HttpRequestPtr &req,
                             std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
-        Json::Value arr(Json::arrayValue);
-        // All reserved slots (armed + free) so tooling can resolve name -> slot and auto-allocate.
+        Json::Value contractsJson(Json::arrayValue);
         for (unsigned int i = 0; i < WASM_RESERVED_SLOT_COUNT; i++)
         {
-            const Wasm::Runtime::ContractSlot &s = Wasm::Runtime::contractSlots[i];
-            unsigned int idx = WASM_RESERVED_SLOT_BASE + i;
-            Json::Value c;
-            c["index"] = idx;
-            c["armed"] = s.armed;
-            c["constructed"] = s.constructed;
-            c["version"] = s.version;
-            c["name"] = std::string(s.name);
-            char hex[65];
-            for (int b = 0; b < 32; b++) snprintf(hex + b * 2, 3, "%02x", s.codeHash[b]);
-            c["codeHash"] = std::string(hex, 64);
-            Json::Value fns(Json::arrayValue), procs(Json::arrayValue);
-            if (s.armed)
-                for (unsigned int t = 1; t <= 65535; t++)
+            const Wasm::Runtime::ContractSlot &slot = Wasm::Runtime::contractSlots[i];
+            const unsigned int slotIndex = WASM_RESERVED_SLOT_BASE + i;
+            Json::Value contractJson;
+            contractJson["index"] = slotIndex;
+            contractJson["armed"] = slot.armed;
+            contractJson["constructed"] = slot.constructed;
+            contractJson["version"] = slot.version;
+            contractJson["name"] = std::string(slot.name);
+
+            char hashHex[65];
+            for (int byteIndex = 0; byteIndex < 32; byteIndex++)
+            {
+                snprintf(hashHex + byteIndex * 2, 3, "%02x", slot.codeHash[byteIndex]);
+            }
+            contractJson["codeHash"] = std::string(hashHex, 64);
+
+            Json::Value functionsJson(Json::arrayValue);
+            Json::Value proceduresJson(Json::arrayValue);
+            if (slot.armed)
+            {
+                for (unsigned int inputType = 1; inputType <= 65535; inputType++)
                 {
-                    if (contractUserFunctions[idx][t])
+                    if (contractUserFunctions[slotIndex][inputType])
                     {
-                        Json::Value e; e["inputType"] = t;
-                        e["inputSize"] = contractUserFunctionInputSizes[idx][t];
-                        e["outputSize"] = contractUserFunctionOutputSizes[idx][t];
-                        fns.append(e);
+                        Json::Value entry;
+                        entry["inputType"] = inputType;
+                        entry["inputSize"] = contractUserFunctionInputSizes[slotIndex][inputType];
+                        entry["outputSize"] = contractUserFunctionOutputSizes[slotIndex][inputType];
+                        functionsJson.append(entry);
                     }
-                    if (contractUserProcedures[idx][t])
+                    if (contractUserProcedures[slotIndex][inputType])
                     {
-                        Json::Value e; e["inputType"] = t;
-                        e["inputSize"] = contractUserProcedureInputSizes[idx][t];
-                        e["outputSize"] = contractUserProcedureOutputSizes[idx][t];
-                        procs.append(e);
+                        Json::Value entry;
+                        entry["inputType"] = inputType;
+                        entry["inputSize"] = contractUserProcedureInputSizes[slotIndex][inputType];
+                        entry["outputSize"] = contractUserProcedureOutputSizes[slotIndex][inputType];
+                        proceduresJson.append(entry);
                     }
                 }
-            c["functions"] = fns;
-            c["procedures"] = procs;
-            c["source"] = s.sourceH;   // contract .h source (if submitted via /dev/contract-source) for callee resolution
-            c["lastError"] = Wasm::Runtime::lastTrap(idx);   // most recent dispatch trap reason (empty if last call ok) — for tooling
-            arr.append(c);
+            }
+            contractJson["functions"] = functionsJson;
+            contractJson["procedures"] = proceduresJson;
+            contractJson["source"] = slot.sourceH;
+            contractJson["lastError"] = Wasm::Runtime::lastTrap(slotIndex);
+            contractsJson.append(contractJson);
         }
         json["slotBase"] = (unsigned int)WASM_RESERVED_SLOT_BASE;
         json["slotCount"] = (unsigned int)WASM_RESERVED_SLOT_COUNT;
-        json["contracts"] = arr;
+        json["contracts"] = contractsJson;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
-    // Dev-only: store a deployed contract's .h source (node-local, off-chain) keyed by slot, so tooling can
-    // resolve inter-contract callees (types + slot via dyn-registry) without the caller passing --callee.
-    inline void devPutContractSource(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    // Store node-local source used for inter-contract type resolution.
+    inline void devPutContractSource(const HttpRequestPtr &req,
+                                     std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
-        int idx = std::atoi(req->getParameter("slot").c_str());
-        int local = idx - (int)WASM_RESERVED_SLOT_BASE;
-        if (local < 0 || local >= (int)WASM_RESERVED_SLOT_COUNT)
+        const int slotIndex = std::atoi(req->getParameter("slot").c_str());
+        const int localIndex = slotIndex - (int)WASM_RESERVED_SLOT_BASE;
+        if (localIndex < 0 || localIndex >= (int)WASM_RESERVED_SLOT_COUNT)
         {
-            json["ok"] = false; json["error"] = "bad slot";
+            json["ok"] = false;
+            json["error"] = "bad slot";
             cb(HttpResponse::newHttpJsonResponse(json));
             return;
         }
-        Wasm::Runtime::contractSlots[local].sourceH = std::string(req->getBody());
-        json["ok"] = true; json["slot"] = idx; json["len"] = (Json::UInt)Wasm::Runtime::contractSlots[local].sourceH.size();
+        Wasm::Runtime::contractSlots[localIndex].sourceH = std::string(req->getBody());
+        json["ok"] = true;
+        json["slot"] = slotIndex;
+        json["len"] = (Json::UInt)Wasm::Runtime::contractSlots[localIndex].sourceH.size();
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
-    // Active dynamic-contract upload session: which chunks landed, which are still missing. Lets tooling
-    // confirm assembly before sending DEPLOY and resend only the missing seqs (idempotent, order-free).
-    inline void dynUpload(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    // Return progress for the active dynamic-contract upload.
+    inline void dynUpload(const HttpRequestPtr &req,
+                          std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
-        const Wasm::Runtime::ModuleUpload &u = Wasm::Runtime::moduleUpload;
-        char sid[32]; snprintf(sid, sizeof(sid), "%llu", (unsigned long long)u.sessionId);
-        json["active"] = u.active;
-        json["sessionId"] = std::string(sid);     // u64 as string (JSON loses precision past 2^53)
-        json["totalSize"] = u.totalSize;
-        json["chunkSize"] = 1008u;                 // mirrors receiveModuleChunk's seq*1008 layout
-        json["chunkCount"] = u.chunkCount;
-        json["receivedCount"] = u.receivedCount;
-        json["complete"] = (u.active && u.receivedCount == u.chunkCount);
-        char hex[65];
-        for (int b = 0; b < 32; b++) snprintf(hex + b * 2, 3, "%02x", u.finalHash[b]);
-        json["finalHash"] = std::string(hex, 64);
-        // Missing seqs (bit clear in receivedChunkBits), capped so a large upload can't bloat the response.
+        const Wasm::Runtime::ModuleUpload &upload = Wasm::Runtime::moduleUpload;
+        char sessionId[32];
+        snprintf(sessionId, sizeof(sessionId), "%llu", (unsigned long long)upload.sessionId);
+        json["active"] = upload.active;
+        // JSON cannot represent every 64-bit session ID exactly.
+        json["sessionId"] = std::string(sessionId);
+        json["totalSize"] = upload.totalSize;
+        json["chunkSize"] = 1008u;
+        json["chunkCount"] = upload.chunkCount;
+        json["receivedCount"] = upload.receivedCount;
+        json["complete"] = upload.active && upload.receivedCount == upload.chunkCount;
+
+        char hashHex[65];
+        for (int byteIndex = 0; byteIndex < 32; byteIndex++)
+        {
+            snprintf(hashHex + byteIndex * 2, 3, "%02x", upload.finalHash[byteIndex]);
+        }
+        json["finalHash"] = std::string(hashHex, 64);
+
+        // Cap the missing-sequence response for large uploads.
         Json::Value missing(Json::arrayValue);
         unsigned int missingCount = 0;
         const unsigned int CAP = 4096;
-        if (u.active)
-            for (unsigned int seq = 0; seq < u.chunkCount; seq++)
+        if (upload.active)
+        {
+            for (unsigned int sequence = 0; sequence < upload.chunkCount; sequence++)
             {
-                const unsigned int byteIdx = seq >> 3, bit = 1u << (seq & 7);
-                if (!(Wasm::Runtime::receivedChunkBits[byteIdx] & bit))
+                const unsigned int byteIndex = sequence >> 3;
+                const unsigned int bit = 1u << (sequence & 7);
+                if (!(Wasm::Runtime::receivedChunkBits[byteIndex] & bit))
                 {
-                    if (missingCount < CAP) missing.append(seq);
+                    if (missingCount < CAP)
+                    {
+                        missing.append(sequence);
+                    }
                     missingCount++;
                 }
             }
+        }
         json["missing"] = missing;
         json["missingCount"] = missingCount;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
-    // Running logId + the last few stored log entries (type + payload) — for verifying contract logs.
-    inline void logStats(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    // Return the current log ID and a small recent sample.
+    inline void logStats(const HttpRequestPtr &req,
+                         std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
-        unsigned long long cur = qLogger::logId;
-        json["logId"] = (Json::UInt64)cur;
-        Json::Value arr(Json::arrayValue);
-        unsigned long long start = cur > 16 ? cur - 16 : 0;
-        for (unsigned long long id = start; id < cur; id++)
+        const unsigned long long currentLogId = qLogger::logId;
+        json["logId"] = (Json::UInt64)currentLogId;
+        Json::Value recentEntries(Json::arrayValue);
+        const unsigned long long firstLogId = currentLogId > 16 ? currentLogId - 16 : 0;
+        for (unsigned long long logId = firstLogId; logId < currentLogId; logId++)
         {
-            auto it = qLogger::tmpLogBuffer.find(id);
-            if (it == qLogger::tmpLogBuffer.end() || !it->second) continue;
-            const unsigned char *b = (const unsigned char *)it->second;
-            unsigned int szType = *((unsigned int *)(b + 6));
-            unsigned int msgSize = szType & 0xFFFFFF;
-            Json::Value e;
-            e["logId"] = (Json::UInt64)id;
-            e["type"] = (unsigned int)(szType >> 24);
-            if (msgSize >= 4) e["contractIndex"] = *((unsigned int *)(b + 26));
-            char hx[65];
-            unsigned int n = msgSize < 32 ? msgSize : 32;
-            for (unsigned int k = 0; k < n; k++) snprintf(hx + k * 2, 3, "%02x", b[26 + k]);
-            e["payloadHex"] = std::string(hx, n * 2);
-            arr.append(e);
+            auto logEntry = qLogger::tmpLogBuffer.find(logId);
+            if (logEntry == qLogger::tmpLogBuffer.end() || !logEntry->second)
+            {
+                continue;
+            }
+
+            const unsigned char *bytes = (const unsigned char *)logEntry->second;
+            const unsigned int sizeAndType = *((unsigned int *)(bytes + 6));
+            const unsigned int messageSize = sizeAndType & 0xFFFFFF;
+            Json::Value entry;
+            entry["logId"] = (Json::UInt64)logId;
+            entry["type"] = (unsigned int)(sizeAndType >> 24);
+            if (messageSize >= 4)
+            {
+                entry["contractIndex"] = *((unsigned int *)(bytes + 26));
+            }
+
+            char payloadHex[65];
+            const unsigned int capturedSize = messageSize < 32 ? messageSize : 32;
+            for (unsigned int i = 0; i < capturedSize; i++)
+            {
+                snprintf(payloadHex + i * 2, 3, "%02x", bytes[26 + i]);
+            }
+            entry["payloadHex"] = std::string(payloadHex, capturedSize * 2);
+            recentEntries.append(entry);
         }
-        json["recent"] = arr;
+        json["recent"] = recentEntries;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
-    // GET /live/v1/debug-trace?since=<seq>&limit=<n> — recent wasm contract-call traces (debug toggle).
-    inline void debugTrace(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    // Return recent Wasm call traces after the requested sequence.
+    inline void debugTrace(const HttpRequestPtr &req,
+                           std::function<void(const HttpResponsePtr &)> &&cb)
     {
-        unsigned long long since = 0; unsigned int limit = 64;
-        try { auto s = req->getParameter("since"); if (!s.empty()) since = std::stoull(s); } catch (...) {}
-        try { auto s = req->getParameter("limit"); if (!s.empty()) limit = (unsigned int)std::stoul(s); } catch (...) {}
-        if (limit == 0 || limit > WASM_TRACE_RING_CAPACITY) limit = WASM_TRACE_RING_CAPACITY;
-        Json::Value json; json["enabled"] = Wasm::Runtime::traceEnabled();
-        Json::Value arr(Json::arrayValue);
-        for (const auto &t : Wasm::Runtime::traceSnapshot(since, limit))
+        unsigned long long since = 0;
+        unsigned int limit = 64;
+        try
         {
-            Json::Value e;
-            e["seq"] = (Json::UInt64)t.sequence; e["tick"] = t.tick; e["index"] = t.contractIndex;
-            e["entry"] = (unsigned int)t.inputType; e["kind"] = (unsigned int)t.kind; e["ok"] = t.ok;
-            e["execNs"] = (Json::UInt64)t.executionNanoseconds;
-            e["inSize"] = t.inputSize; e["outSize"] = t.outputSize; e["stateSize"] = t.stateSize; e["stateTruncated"] = t.stateTruncated;
-            e["invocator"] = Wasm::Runtime::hex(&t.invocator, 32);
-            e["invocationReward"] = (Json::Int64)t.invocationReward;
-            unsigned int ih = t.inputSize  < WASM_TRACE_CAPTURE_SIZE ? t.inputSize  : WASM_TRACE_CAPTURE_SIZE;
-            unsigned int oh = t.outputSize < WASM_TRACE_CAPTURE_SIZE ? t.outputSize : WASM_TRACE_CAPTURE_SIZE;
-            e["inHex"] = Wasm::Runtime::hex(t.inputHead, ih);
-            e["outHex"] = Wasm::Runtime::hex(t.outputHead, oh);
-            Json::Value sd(Json::arrayValue);   // full-state diff: changed byte runs (offset within StateData)
-            for (const auto &r : t.stateDiff) { Json::Value x; x["off"] = r.offset; x["before"] = r.before; x["after"] = r.after; sd.append(x); }
-            e["stateDiff"] = sd;
-            if (!t.trap.empty()) e["trap"] = t.trap;
-            Json::Value hc(Json::arrayValue);
-            for (const auto &h : t.hostCalls) { Json::Value x; x["name"] = h.name; x["detail"] = h.detail; hc.append(x); }
-            e["hostCalls"] = hc;
-            Json::Value lg(Json::arrayValue);   // contract LOG_* calls: severity type + raw struct bytes (hex)
-            for (const auto &l : t.logs) { Json::Value x; x["type"] = (unsigned int)l.type; x["size"] = l.size; x["hex"] = l.hex; lg.append(x); }
-            e["logs"] = lg;
-            arr.append(e);
+            const auto value = req->getParameter("since");
+            if (!value.empty())
+            {
+                since = std::stoull(value);
+            }
         }
-        json["entries"] = arr;
+        catch (...)
+        {
+        }
+        try
+        {
+            const auto value = req->getParameter("limit");
+            if (!value.empty())
+            {
+                limit = (unsigned int)std::stoul(value);
+            }
+        }
+        catch (...)
+        {
+        }
+        if (limit == 0 || limit > WASM_TRACE_RING_CAPACITY)
+        {
+            limit = WASM_TRACE_RING_CAPACITY;
+        }
+
+        Json::Value json;
+        json["enabled"] = Wasm::Runtime::traceEnabled();
+        Json::Value entries(Json::arrayValue);
+        for (const auto &trace : Wasm::Runtime::traceSnapshot(since, limit))
+        {
+            Json::Value entry;
+            entry["seq"] = (Json::UInt64)trace.sequence;
+            entry["tick"] = trace.tick;
+            entry["index"] = trace.contractIndex;
+            entry["entry"] = (unsigned int)trace.inputType;
+            entry["kind"] = (unsigned int)trace.kind;
+            entry["ok"] = trace.ok;
+            entry["execNs"] = (Json::UInt64)trace.executionNanoseconds;
+            entry["inSize"] = trace.inputSize;
+            entry["outSize"] = trace.outputSize;
+            entry["stateSize"] = trace.stateSize;
+            entry["stateTruncated"] = trace.stateTruncated;
+            entry["invocator"] = Wasm::Runtime::hex(&trace.invocator, 32);
+            entry["invocationReward"] = (Json::Int64)trace.invocationReward;
+
+            entry["inHex"] = trace.input.empty() ? "" : Wasm::Runtime::hex(trace.input.data(), (unsigned int)trace.input.size());
+            entry["outHex"] = trace.output.empty() ? "" : Wasm::Runtime::hex(trace.output.data(), (unsigned int)trace.output.size());
+
+            Json::Value stateDiff(Json::arrayValue);
+            for (const auto &run : trace.stateDiff)
+            {
+                Json::Value diff;
+                diff["off"] = run.offset;
+                diff["before"] = run.before;
+                diff["after"] = run.after;
+                stateDiff.append(diff);
+            }
+            entry["stateDiff"] = stateDiff;
+            if (!trace.trap.empty())
+            {
+                entry["trap"] = trace.trap;
+            }
+
+            Json::Value hostCalls(Json::arrayValue);
+            for (const auto &hostCall : trace.hostCalls)
+            {
+                Json::Value call;
+                call["name"] = hostCall.name;
+                call["detail"] = hostCall.detail;
+                hostCalls.append(call);
+            }
+            entry["hostCalls"] = hostCalls;
+
+            Json::Value logs(Json::arrayValue);
+            for (const auto &log : trace.logs)
+            {
+                Json::Value logEntry;
+                logEntry["type"] = (unsigned int)log.type;
+                logEntry["size"] = log.size;
+                logEntry["hex"] = log.hex;
+                logs.append(logEntry);
+            }
+            entry["logs"] = logs;
+            entries.append(entry);
+        }
+        json["entries"] = entries;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
-    // GET /live/v1/dev/debug?on=0|1 — toggle trace capture (off by default; on adds per-call overhead).
-    inline void devDebug(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+
+    // Toggle Wasm trace capture.
+    inline void devDebug(const HttpRequestPtr &req,
+                         std::function<void(const HttpResponsePtr &)> &&cb)
     {
         auto on = req->getParameter("on");
-        if (!on.empty()) Wasm::Runtime::setTraceEnabled(on == "1" || on == "true");   // installs the SIGSEGV dirty-tracker on first enable
-        Json::Value json; json["enabled"] = Wasm::Runtime::traceEnabled();
+        if (!on.empty())
+        {
+            Wasm::Runtime::setTraceEnabled(on == "1" || on == "true");
+        }
+        Json::Value json;
+        json["enabled"] = Wasm::Runtime::traceEnabled();
         cb(HttpResponse::newHttpJsonResponse(json));
     }
-    // GET /live/v1/dev/debug-clear — drop all captured traces.
-    inline void devDebugClear(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+
+    // Drop all captured traces.
+    inline void devDebugClear(const HttpRequestPtr &req,
+                              std::function<void(const HttpResponsePtr &)> &&cb)
     {
-        (void)req; Wasm::Runtime::clearTrace();
-        Json::Value json; json["cleared"] = true;
+        (void)req;
+        Wasm::Runtime::clearTrace();
+        Json::Value json;
+        json["cleared"] = true;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
-    // GET /live/v1/dev/state-read?slot=N&off=&len= — current contract state bytes (hex), for the debugger's
-    // logical container decode. Capped; reads the resident (aliased) state. Best-effort snapshot (no lock).
-    inline void devStateRead(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+
+    // Return a bounded best-effort snapshot of contract state bytes.
+    inline void devStateRead(const HttpRequestPtr &req,
+                             std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
-        int idx = std::atoi(req->getParameter("slot").c_str());
-        unsigned long long off = strtoull(req->getParameter("off").c_str(), nullptr, 10);
-        unsigned long long len = strtoull(req->getParameter("len").c_str(), nullptr, 10);
-        // dynamic wasm slot (idx >= dyn base) -> resident wasm state; otherwise a native system contract (1..contractCount-1).
-        const int local = idx - (int)WASM_RESERVED_SLOT_BASE;
-        bool ok; unsigned long long ss;
-        if (idx >= (int)WASM_RESERVED_SLOT_BASE) {
-            ok = (local >= 0 && local < (int)WASM_RESERVED_SLOT_COUNT && Wasm::Runtime::isContractLoaded(idx) && contractStates[idx]);
-            ss = ok ? Wasm::Runtime::effectiveStateSize(idx, contractDescriptions[idx].stateSize) : 0;
-        } else {
-            ok = (idx >= 1 && idx < (int)contractCount && contractStates[idx]);
-            ss = ok ? contractDescriptions[idx].stateSize : 0;
+        const int slotIndex = std::atoi(req->getParameter("slot").c_str());
+        unsigned long long offset = strtoull(req->getParameter("off").c_str(), nullptr, 10);
+        unsigned long long length = strtoull(req->getParameter("len").c_str(), nullptr, 10);
+        const int localIndex = slotIndex - (int)WASM_RESERVED_SLOT_BASE;
+        bool validSlot;
+        unsigned long long stateSize;
+        if (slotIndex >= (int)WASM_RESERVED_SLOT_BASE)
+        {
+            validSlot = localIndex >= 0 && localIndex < (int)WASM_RESERVED_SLOT_COUNT && Wasm::Runtime::isContractLoaded(slotIndex) && contractStates[slotIndex];
+            stateSize = validSlot ? Wasm::Runtime::effectiveStateSize(slotIndex, contractDescriptions[slotIndex].stateSize) : 0;
         }
-        if (!ok) { json["error"] = "bad slot"; cb(HttpResponse::newHttpJsonResponse(json)); return; }
-        if (off > ss) off = ss;
-        if (len > 262144ull) len = 262144ull;     // cap response
-        if (off + len > ss) len = ss - off;
-        const unsigned char *st = contractStates[idx];
-        static const char *h = "0123456789abcdef";
-        std::string hex; hex.reserve((size_t)len * 2);
-        for (unsigned long long i = 0; i < len; i++) { hex += h[st[off + i] >> 4]; hex += h[st[off + i] & 15]; }
-        json["off"] = (Json::UInt64)off; json["len"] = (Json::UInt64)len; json["stateSize"] = (Json::UInt64)ss; json["hex"] = hex;
+        else
+        {
+            validSlot = slotIndex >= 1 && slotIndex < (int)contractCount && contractStates[slotIndex];
+            stateSize = validSlot ? contractDescriptions[slotIndex].stateSize : 0;
+        }
+        if (!validSlot)
+        {
+            json["error"] = "bad slot";
+            cb(HttpResponse::newHttpJsonResponse(json));
+            return;
+        }
+
+        if (offset > stateSize)
+        {
+            offset = stateSize;
+        }
+        if (length > 262144ull)
+        {
+            length = 262144ull;
+        }
+        if (offset + length > stateSize)
+        {
+            length = stateSize - offset;
+        }
+
+        const unsigned char *state = contractStates[slotIndex];
+        static const char *hexDigits = "0123456789abcdef";
+        std::string hex;
+        hex.reserve((size_t)length * 2);
+        for (unsigned long long i = 0; i < length; i++)
+        {
+            hex += hexDigits[state[offset + i] >> 4];
+            hex += hexDigits[state[offset + i] & 15];
+        }
+        json["off"] = (Json::UInt64)offset;
+        json["len"] = (Json::UInt64)length;
+        json["stateSize"] = (Json::UInt64)stateSize;
+        json["hex"] = hex;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
-    // GET /live/v1/dev/contract-digest?slot=N — K12 digest of the contract's full effective state (the
-    // consensus contract-state digest). Cross-platform determinism check: identical exec => identical digest,
-    // regardless of arch/OS. Catches a state-byte/layout divergence that a value read (Get==1) would miss.
-    inline void devContractDigest(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+
+    // Return the canonical K12 digest of a contract's effective state.
+    inline void devContractDigest(const HttpRequestPtr &req,
+                                  std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
-        int idx = std::atoi(req->getParameter("slot").c_str());
-        const int local = idx - (int)WASM_RESERVED_SLOT_BASE;
-        bool ok; unsigned long long ss;
-        if (idx >= (int)WASM_RESERVED_SLOT_BASE) {
-            ok = (local >= 0 && local < (int)WASM_RESERVED_SLOT_COUNT && Wasm::Runtime::isContractLoaded(idx) && contractStates[idx]);
-            ss = ok ? Wasm::Runtime::effectiveStateSize(idx, contractDescriptions[idx].stateSize) : 0;
-        } else {
-            ok = (idx >= 1 && idx < (int)contractCount && contractStates[idx]);
-            ss = ok ? contractDescriptions[idx].stateSize : 0;
+        const int slotIndex = std::atoi(req->getParameter("slot").c_str());
+        const int localIndex = slotIndex - (int)WASM_RESERVED_SLOT_BASE;
+        bool validSlot;
+        unsigned long long stateSize;
+        if (slotIndex >= (int)WASM_RESERVED_SLOT_BASE)
+        {
+            validSlot = localIndex >= 0 && localIndex < (int)WASM_RESERVED_SLOT_COUNT && Wasm::Runtime::isContractLoaded(slotIndex) && contractStates[slotIndex];
+            stateSize = validSlot ? Wasm::Runtime::effectiveStateSize(slotIndex, contractDescriptions[slotIndex].stateSize) : 0;
         }
-        if (!ok) { json["error"] = "bad slot"; cb(HttpResponse::newHttpJsonResponse(json)); return; }
-        unsigned char d[32];
-        KangarooTwelve(contractStates[idx], (unsigned int)ss, d, 32);
-        static const char *hx = "0123456789abcdef";
-        std::string hex; hex.reserve(64);
-        for (int i = 0; i < 32; i++) { hex += hx[d[i] >> 4]; hex += hx[d[i] & 15]; }
-        json["slot"] = idx; json["stateSize"] = (Json::UInt64)ss; json["digest"] = hex;
+        else
+        {
+            validSlot = slotIndex >= 1 && slotIndex < (int)contractCount && contractStates[slotIndex];
+            stateSize = validSlot ? contractDescriptions[slotIndex].stateSize : 0;
+        }
+        if (!validSlot)
+        {
+            json["error"] = "bad slot";
+            cb(HttpResponse::newHttpJsonResponse(json));
+            return;
+        }
+
+        unsigned char digest[32];
+        KangarooTwelve(contractStates[slotIndex], (unsigned int)stateSize, digest, 32);
+        static const char *hexDigits = "0123456789abcdef";
+        std::string hex;
+        hex.reserve(64);
+        for (int i = 0; i < 32; i++)
+        {
+            hex += hexDigits[digest[i] >> 4];
+            hex += hexDigits[digest[i] & 15];
+        }
+        json["slot"] = slotIndex;
+        json["stateSize"] = (Json::UInt64)stateSize;
+        json["digest"] = hex;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
 #if ADDON_TX_STATUS_REQUEST
-    // Exact tx confirmation: is transaction <tx> (60-char id) included+processed in tick <tick>?
-    // Reads the qli tx-status store (confirmedTx, keyed per tick). Lets tooling wait for a specific
-    // tx instead of guessing a tick margin. found => included; processed => node ticked past <tick>
-    // (so a false `found` with processed=true means the tx was dropped/not accepted).
-    inline void txStatus(const HttpRequestPtr &req,
+    // Return exact inclusion and processing status for one transaction.
+    inline void txStatus(const HttpRequestPtr &,
                          std::function<void(const HttpResponsePtr &)> &&cb,
-                         const std::string &tickStr, const std::string &txId)
+                         const std::string &tickString,
+                         const std::string &transactionId)
     {
         Json::Value result;
-        unsigned int tick = (unsigned int)strtoul(tickStr.c_str(), nullptr, 10);
+        const unsigned int tick = (unsigned int)strtoul(tickString.c_str(), nullptr, 10);
         result["tick"] = tick;
         result["currentTick"] = system.tick;
-        result["txId"] = txId;
+        result["txId"] = transactionId;
 
-        // tx id is the digest in the identity alphabet, lowercased — uppercase, then decode to m256i.
-        std::string up = txId;
-        for (auto &ch : up) if (ch >= 'a' && ch <= 'z') ch -= 32;
-        m256i target;
-        getPublicKeyFromIdentity(reinterpret_cast<const unsigned char *>(up.c_str()), target.m256i_u8);
+        std::string uppercaseId = transactionId;
+        for (auto &character : uppercaseId)
+        {
+            if (character >= 'a' && character <= 'z')
+            {
+                character -= 32;
+            }
+        }
+        m256i targetDigest;
+        getPublicKeyFromIdentity(reinterpret_cast<const unsigned char *>(uppercaseId.c_str()), targetDigest.m256i_u8);
 
-        // Locate the tick in the confirmed-tx store (current epoch, or kept ticks of the previous one).
+        // Search the current or retained previous epoch.
         bool inRange = false;
         int tickIndex = 0;
-        if (tick >= txStatusData.confirmedTxCurrentEpochBeginTick && tick < txStatusData.confirmedTxCurrentEpochBeginTick + MAX_NUMBER_OF_TICKS_PER_EPOCH)
+        if (tick >= txStatusData.confirmedTxCurrentEpochBeginTick &&
+            tick < txStatusData.confirmedTxCurrentEpochBeginTick + MAX_NUMBER_OF_TICKS_PER_EPOCH)
         {
             tickIndex = tick - txStatusData.confirmedTxCurrentEpochBeginTick;
             inRange = true;
         }
-        else if (txStatusData.confirmedTxPreviousEpochBeginTick != 0 && tick >= txStatusData.confirmedTxPreviousEpochBeginTick && tick < txStatusData.confirmedTxCurrentEpochBeginTick)
+        else if (txStatusData.confirmedTxPreviousEpochBeginTick != 0 &&
+                 tick >= txStatusData.confirmedTxPreviousEpochBeginTick &&
+                 tick < txStatusData.confirmedTxCurrentEpochBeginTick)
         {
             tickIndex = tick - txStatusData.confirmedTxPreviousEpochBeginTick + MAX_NUMBER_OF_TICKS_PER_EPOCH;
             inRange = true;
         }
 
-        bool found = false, moneyFlew = false;
+        bool found = false;
+        bool moneyFlew = false;
         if (inRange)
         {
             ACQUIRE(confirmedTxLock);
-            unsigned int start = txStatusData.tickTxIndexStart[tickIndex];
-            unsigned int count = txStatusData.tickTxCounter[tickIndex];
-            for (unsigned int i = 0; i < count; i++)
+            const unsigned int firstIndex = txStatusData.tickTxIndexStart[tickIndex];
+            const unsigned int transactionCount = txStatusData.tickTxCounter[tickIndex];
+            for (unsigned int i = 0; i < transactionCount; i++)
             {
-                ConfirmedTx &c = confirmedTx[start + i];
-                if (c.digest == target) { found = true; moneyFlew = (c.moneyFlew != 0); break; }
+                const ConfirmedTx &transaction = confirmedTx[firstIndex + i];
+                if (transaction.digest == targetDigest)
+                {
+                    found = true;
+                    moneyFlew = transaction.moneyFlew != 0;
+                    break;
+                }
             }
             RELEASE(confirmedTxLock);
         }
         result["found"] = found;
         result["moneyFlew"] = moneyFlew;
-        result["processed"] = (system.tick > tick); // verdict is final once the node ticked past <tick>
+        result["processed"] = system.tick > tick;
         cb(HttpResponse::newHttpJsonResponse(result));
     }
 #endif
 
 #if defined(TESTNET)
-    // Testnet dev only: a prefilled (funded) seed so tooling can sign deploy txs with no seed set.
-    inline void devFundedSeed(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    // Return a pre-funded testnet seed.
+    inline void devFundedSeed(const HttpRequestPtr &,
+                              std::function<void(const HttpResponsePtr &)> &&cb)
     {
         Json::Value json;
         if (std::size(broadcastedComputorSeeds) > 0)
+        {
             json["seed"] = std::string((const char *)broadcastedComputorSeeds[0]);
+        }
         cb(HttpResponse::newHttpJsonResponse(json));
     }
-    // Testnet dev only: the funded-seed list (capped via ?limit, default 32) so tooling can let the user pick one.
-    inline void devFundedSeeds(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+
+    // Return the requested number of pre-funded testnet seeds.
+    inline void devFundedSeeds(const HttpRequestPtr &req,
+                               std::function<void(const HttpResponsePtr &)> &&cb)
     {
         const unsigned int total = (unsigned int)std::size(broadcastedComputorSeeds);
         unsigned int limit = 32;
-        try { auto s = req->getParameter("limit"); if (!s.empty()) limit = (unsigned int)std::stoul(s); } catch (...) {}
-        if (limit == 0 || limit > total) limit = total;
-        Json::Value json, arr(Json::arrayValue);
-        for (unsigned int i = 0; i < limit; i++) arr.append(std::string((const char *)broadcastedComputorSeeds[i]));
-        json["seeds"] = arr;
+        try
+        {
+            const auto value = req->getParameter("limit");
+            if (!value.empty())
+            {
+                limit = (unsigned int)std::stoul(value);
+            }
+        }
+        catch (...)
+        {
+        }
+        if (limit == 0 || limit > total)
+        {
+            limit = total;
+        }
+
+        Json::Value json;
+        Json::Value seeds(Json::arrayValue);
+        for (unsigned int i = 0; i < limit; i++)
+        {
+            seeds.append(std::string((const char *)broadcastedComputorSeeds[i]));
+        }
+        json["seeds"] = seeds;
         json["count"] = total;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
-    // Last processable tick of the current epoch (the transition fires at initialTick + duration).
-    inline unsigned int liteDevEpochLastTick() const { return system.initialTick + (unsigned int)TESTNET_EPOCH_DURATION - 1; }
+    inline unsigned int liteDevEpochLastTick() const
+    {
+        return system.initialTick + (unsigned int)TESTNET_EPOCH_DURATION - 1;
+    }
 
-    // Fast-forward: temporarily zero the per-tick delay (the same tickDelay the ticking loop honors) until
-    // system.tick reaches target, then restore it. Bounded by a wall-clock timeout so the worker never hangs.
+    // Fast-forward with a timeout, then restore the configured tick delay.
     inline unsigned int liteDevFastForwardTo(unsigned int target, unsigned int timeoutMs)
     {
-        if (system.tick >= target) return system.tick;
-        const unsigned long long saved = tickDelay;
+        if (system.tick >= target)
+        {
+            return system.tick;
+        }
+
+        const unsigned long long savedTickDelay = tickDelay;
         tickDelay = 0;
-        const auto t0 = std::chrono::steady_clock::now();
+        const auto startTime = std::chrono::steady_clock::now();
         while (system.tick < target)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() > (long long)timeoutMs) break;
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime);
+            if (elapsed.count() > (long long)timeoutMs)
+            {
+                break;
+            }
         }
-        tickDelay = saved;
+        tickDelay = savedTickDelay;
         return system.tick;
     }
 
-    // Testnet dev only: current-epoch tick window (so tooling can show "last tick of epoch" + ticks left).
-    inline void devEpochInfo(const HttpRequestPtr &, std::function<void(const HttpResponsePtr &)> &&cb)
+    // Return the current testnet epoch window.
+    inline void devEpochInfo(const HttpRequestPtr &,
+                             std::function<void(const HttpResponsePtr &)> &&cb)
     {
-        const unsigned int last = liteDevEpochLastTick();
+        const unsigned int lastTick = liteDevEpochLastTick();
         Json::Value json;
         json["epoch"] = (unsigned int)system.epoch;
         json["tick"] = system.tick;
         json["initialTick"] = system.initialTick;
-        json["epochLastTick"] = last;
-        json["ticksLeft"] = (system.tick <= last) ? (last - system.tick) : 0u;
+        json["epochLastTick"] = lastTick;
+        json["ticksLeft"] = system.tick <= lastTick ? lastTick - system.tick : 0u;
         json["duration"] = (unsigned int)TESTNET_EPOCH_DURATION;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
-    // Testnet dev only: advance the chain by n ticks (default 1). Capped at the epoch's last tick — crossing the
-    // boundary needs the epoch-transition path (advance-epoch), so plain tick-advance never triggers it.
-    inline void devAdvanceTick(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    // Advance without crossing the current epoch boundary.
+    inline void devAdvanceTick(const HttpRequestPtr &req,
+                               std::function<void(const HttpResponsePtr &)> &&cb)
     {
-        unsigned int n = 1;
-        try { auto s = req->getParameter("n"); if (!s.empty()) n = (unsigned int)std::stoul(s); } catch (...) {}
-        if (!n) n = 1;
-        const unsigned int from = system.tick, last = liteDevEpochLastTick();
-        unsigned int target = from + n;
-        const bool capped = target > last;
-        if (capped) target = last;
-        const unsigned int reached = liteDevFastForwardTo(target, 12000);   // bounded: may return < target, caller re-calls
+        unsigned int requestedTicks = 1;
+        try
+        {
+            const auto value = req->getParameter("n");
+            if (!value.empty())
+            {
+                requestedTicks = (unsigned int)std::stoul(value);
+            }
+        }
+        catch (...)
+        {
+        }
+        if (requestedTicks == 0)
+        {
+            requestedTicks = 1;
+        }
+
+        const unsigned int startTick = system.tick;
+        const unsigned int lastTick = liteDevEpochLastTick();
+        unsigned int targetTick = startTick + requestedTicks;
+        const bool capped = targetTick > lastTick;
+        if (capped)
+        {
+            targetTick = lastTick;
+        }
+        const unsigned int reachedTick = liteDevFastForwardTo(targetTick, 12000);
+
         Json::Value json;
-        json["from"] = from; json["requested"] = n; json["target"] = target; json["reached"] = reached;
-        json["epochLastTick"] = last; json["cappedAtEpochEnd"] = capped;
+        json["from"] = startTick;
+        json["requested"] = requestedTicks;
+        json["target"] = targetTick;
+        json["reached"] = reachedTick;
+        json["epochLastTick"] = lastTick;
+        json["cappedAtEpochEnd"] = capped;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
-    // Testnet dev only: advance to (epochLastTick - gap), default gap 3 — the safe pre-transition resting point.
-    inline void devAdvanceToLast(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb)
+    // Advance to a safe gap before the current epoch boundary.
+    inline void devAdvanceToLast(const HttpRequestPtr &req,
+                                 std::function<void(const HttpResponsePtr &)> &&cb)
     {
         unsigned int gap = 3;
-        try { auto s = req->getParameter("gap"); if (!s.empty()) gap = (unsigned int)std::stoul(s); } catch (...) {}
-        const unsigned int from = system.tick, last = liteDevEpochLastTick();
-        const unsigned int target = (last > gap) ? (last - gap) : last;
-        const unsigned int reached = liteDevFastForwardTo(target, 12000);   // bounded: may return < target, caller re-calls
+        try
+        {
+            const auto value = req->getParameter("gap");
+            if (!value.empty())
+            {
+                gap = (unsigned int)std::stoul(value);
+            }
+        }
+        catch (...)
+        {
+        }
+
+        const unsigned int startTick = system.tick;
+        const unsigned int lastTick = liteDevEpochLastTick();
+        const unsigned int targetTick = lastTick > gap ? lastTick - gap : lastTick;
+        const unsigned int reachedTick = liteDevFastForwardTo(targetTick, 12000);
+
         Json::Value json;
-        json["from"] = from; json["target"] = target; json["reached"] = reached;
-        json["epochLastTick"] = last; json["epoch"] = (unsigned int)system.epoch;
+        json["from"] = startTick;
+        json["target"] = targetTick;
+        json["reached"] = reachedTick;
+        json["epochLastTick"] = lastTick;
+        json["epoch"] = (unsigned int)system.epoch;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 
-    // Testnet dev only: advance to the next epoch via the node's own seamless transition. Fast-tick to the epoch
-    // boundary (forceSwitchEpoch makes the transition tick suit on a single node), then drive the clean-memory
-    // flag the way F10 / SPECIAL_COMMAND_CONTINUE_SWITCH_EPOCH does so beginEpoch proceeds. No manual epoch forcing.
-    inline void devAdvanceEpoch(const HttpRequestPtr &, std::function<void(const HttpResponsePtr &)> &&cb)
+    // Advance through the node's normal epoch transition.
+    inline void devAdvanceEpoch(const HttpRequestPtr &,
+                                std::function<void(const HttpResponsePtr &)> &&cb)
     {
-        const unsigned int startEpoch = (unsigned int)system.epoch, fromTick = system.tick;
-        const unsigned long long saved = tickDelay;
+        const unsigned int startEpoch = (unsigned int)system.epoch;
+        const unsigned int startTick = system.tick;
+        const unsigned long long savedTickDelay = tickDelay;
         tickDelay = 0;
         forceSwitchEpoch = true;
-        const auto t0 = std::chrono::steady_clock::now();
+        const auto startTime = std::chrono::steady_clock::now();
         while ((unsigned int)system.epoch == startEpoch)
         {
-            // Hold the clean-memory flag high (exactly what F10 / SPECIAL_COMMAND_CONTINUE_SWITCH_EPOCH do). beginEpoch
-            // zeroes epochTransitionState *before* its clean-memory WAIT_WHILE, so this must be unconditional, not gated.
+            // Keep the transition moving through its clean-memory wait.
             epochTransitionCleanMemoryFlag = 1;
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            // bounded: drive only the final ticks + transition. Callers fast-tick to the boundary first (advance-tick),
-            // so this completes quickly; if called far from the boundary it returns switched:false and the caller re-advances.
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() > 25000) break;
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime);
+            if (elapsed.count() > 25000)
+            {
+                break;
+            }
         }
-        tickDelay = saved;
-        if ((unsigned int)system.epoch == startEpoch) forceSwitchEpoch = false;   // failed/timeout: don't leave it armed
+        tickDelay = savedTickDelay;
+        if ((unsigned int)system.epoch == startEpoch)
+        {
+            forceSwitchEpoch = false;
+        }
+
         Json::Value json;
-        json["fromEpoch"] = startEpoch; json["toEpoch"] = (unsigned int)system.epoch;
-        json["fromTick"] = fromTick; json["tick"] = system.tick; json["initialTick"] = system.initialTick;
-        json["switched"] = ((unsigned int)system.epoch != startEpoch);
+        json["fromEpoch"] = startEpoch;
+        json["toEpoch"] = (unsigned int)system.epoch;
+        json["fromTick"] = startTick;
+        json["tick"] = system.tick;
+        json["initialTick"] = system.initialTick;
+        json["switched"] = (unsigned int)system.epoch != startEpoch;
         cb(HttpResponse::newHttpJsonResponse(json));
     }
 #endif
@@ -977,8 +1221,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
                 cb(res);
                 return;
             }
-            // Guard: unregistered function (e.g. a dynamic slot whose .so failed to load) would
-            // otherwise call a null fn ptr (contract_exec.h has no null check) and crash the node.
+            // Reject unregistered functions before dispatching through a null pointer.
             if (!contractUserFunctions[contractIndex][inputType])
             {
                 result["code"] = 3;

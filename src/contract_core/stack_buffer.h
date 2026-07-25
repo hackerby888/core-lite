@@ -7,13 +7,18 @@
 // Supports unwinding for analyzing stack in error handling and tagging blocks as "special" (for example those
 // with infos about locks that need to be released).
 // #define TRACK_MAX_STACK_BUFFER_SIZE to collect info on how much stack is used.
-template <typename StackBufferSizeType, StackBufferSizeType bufferSize, StackBufferSizeType alignment = 1>
+template <
+    typename StackBufferSizeType,
+    StackBufferSizeType bufferSize,
+    StackBufferSizeType alignment = 1>
 struct StackBuffer
 {
     // Data type used for size and index.
     typedef StackBufferSizeType SizeType;
     static_assert(SizeType(-1) > 0, "Signed StackBufferSizeType is not supported!");
-    static_assert(alignment != 0 && (alignment & (alignment - 1)) == 0, "alignment must be a power of two!");
+    static_assert(
+        alignment != 0 && (alignment & (alignment - 1)) == 0,
+        "alignment must be a power of two!");
 
     // Constructor (disabled because not called without MS CRT, you need to call init() to init)
     //StackBuffer()
@@ -60,7 +65,7 @@ struct StackBuffer
     {
         ASSERT(_allocatedSize <= bufferSize);
 
-        // round size up to 'alignment' so every block start stays aligned (size footer in last sizeof(SizeType) bytes).
+        // Pad each block so the next allocation stays aligned.
         StackBufferSizeType newSize = _allocatedSize + size + sizeof(SizeType);
         newSize = (newSize + (alignment - 1)) & ~StackBufferSizeType(alignment - 1);
 
@@ -89,10 +94,10 @@ struct StackBuffer
             return nullptr;
         }
 
-        // get pointer to return (aligned by the _allocatedSize invariant)
+        // _allocatedSize keeps this pointer aligned.
         char* allocatedBuffer = _buffer + _allocatedSize;
 
-        // store size from before allocating buffer in the last sizeof(SizeType) bytes of the (padded) block
+        // Store the previous size in the padded block footer.
         SizeType* sizeBeforeAlloc = reinterpret_cast<SizeType*>(_buffer + newSize - sizeof(SizeType));
         *sizeBeforeAlloc = _allocatedSize;
         if (specialBlock)

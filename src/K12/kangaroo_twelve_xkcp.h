@@ -4,8 +4,7 @@
 
 #include "platform/memory.h"
 
-// Anonymous namespace -> internal linkage per TU, so multiple TUs (kangaroo_twelve.cpp and
-// k12_engine.cpp in the test binary) can each include this header without multiple-definition at link.
+// Give header definitions internal linkage in each translation unit.
 namespace
 {
 namespace XKCP{
@@ -1509,4 +1508,4 @@ namespace K12xkcp
 } // namespace K12xkcp
 #endif
 } // namespace XKCP
-} // anonymous namespace
+} // namespace

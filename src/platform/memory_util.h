@@ -4,6 +4,25 @@
 #include <lib/platform_efi/uefi.h>
 #include "memory.h"
 
+#include <cstddef>
+#include <cstdint>
+
+template <typename T>
+inline T* alignPointerDown(T* pointer, std::size_t alignment)
+{
+    return reinterpret_cast<T*>(
+        reinterpret_cast<std::uintptr_t>(pointer)
+        & ~(static_cast<std::uintptr_t>(alignment) - 1));
+}
+
+template <typename T>
+inline T* alignPointerUp(T* pointer, std::size_t alignment)
+{
+    return reinterpret_cast<T*>(
+        (reinterpret_cast<std::uintptr_t>(pointer) + alignment - 1)
+        & ~(static_cast<std::uintptr_t>(alignment) - 1));
+}
+
 #ifdef NO_UEFI
 
 #include <cstdlib>
@@ -14,17 +33,22 @@ inline void* qVirtualAlloc(const unsigned long long size, bool commitMem);
 inline void* qVirtualCommit(void* address, const unsigned long long size);
 inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size);
 #ifdef _MSC_VER
-inline void* qVirtualAllocLazy(const unsigned long long size);   // reserve + commit-on-touch (overload.h)
+// Reserve memory and commit pages on first touch.
+inline void* qVirtualAllocLazy(const unsigned long long size);
 #endif
 
 // useVirtualMem indicates whether to use VirtualAlloc or malloc
 // commitMem indicates whether to commit memory when using VirtualAlloc
 // NOTE: commitMem only used if host machine have enough RAM+Pagefile, otherwise VirtualAlloc will fail
-// lazyCommit (Windows only): reserve only and commit pages on first touch (overcommit emulation), so the
-//   commit charge tracks the WRITTEN footprint not the full reserve. On Linux/macOS mmap overcommit already
-//   does this, so the flag is a no-op there (commitMem path is identical). Only safe for user-mode-written
-//   buffers — NOT for kernel write targets (socket recv); see qVirtualAllocLazy.
-static bool allocPoolWithErrorLog(const wchar_t* name, const unsigned long long size, void** buffer, const int LINE, bool useVirtualMem = false, bool commitMem = false, bool lazyCommit = false)
+// lazyCommit is only safe for buffers written from user mode.
+static bool allocPoolWithErrorLog(
+    const wchar_t* name,
+    const unsigned long long size,
+    void** buffer,
+    const int LINE,
+    bool useVirtualMem = false,
+    bool commitMem = false,
+    bool lazyCommit = false)
 {
     static unsigned long long totalMemoryUsed = 0;
     static unsigned long long totalVirtualMemoryUsed = 0;
@@ -33,7 +57,7 @@ static bool allocPoolWithErrorLog(const wchar_t* name, const unsigned long long 
 #ifdef _MSC_VER
 		*buffer = lazyCommit ? qVirtualAllocLazy(size) : qVirtualAlloc(size, commitMem);
 #else
-		(void)lazyCommit;   // mmap(MAP_ANONYMOUS) overcommit is already demand-zero/lazy
+		(void)lazyCommit;
 		*buffer = qVirtualAlloc(size, commitMem);
 #endif
     }

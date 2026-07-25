@@ -27,7 +27,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     message(STATUS "Linux platform detected")
 endif()
 
-# Detect macOS (Darwin). Additive — Linux/Windows detection above is unchanged.
+# Detect macOS without changing the existing Linux and Windows flags.
 set(IS_MACOS FALSE CACHE INTERNAL "macOS platform detected")
 if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "Darwin")
     set(IS_MACOS TRUE CACHE INTERNAL "macOS platform detected" FORCE)
@@ -71,8 +71,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     endif()
 endif()
 
-# Detect ARM (aarch64 / Apple Silicon). The arm build uses the SIMDe-simulated x86 SIMD path
-# (see lib/platform_common/qintrin.h) instead of native AVX, so no -mavx*/-mrdrnd flags apply.
+# ARM uses SIMDe instead of native AVX instructions.
 set(IS_ARM FALSE CACHE INTERNAL "ARM/aarch64 detected")
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64|armv8")
     set(IS_ARM TRUE CACHE INTERNAL "ARM/aarch64 detected" FORCE)
@@ -186,10 +185,16 @@ elseif(IS_CLANG OR IS_GCC)
     set(OS_CXX_FLAGS "${OS_C_FLAGS}" CACHE INTERNAL "OS-specific C++ compiler flags" FORCE)
 endif()
 
-# GCC: disable strict aliasing — this codebase type-puns pervasively and TBAA can miscompile it at -O2.
+# The codebase relies on type-punning that is unsafe under strict aliasing.
 if(IS_GCC)
-    set(COMMON_C_FLAGS "${COMMON_C_FLAGS} -fno-strict-aliasing" CACHE INTERNAL "Common C compiler flags" FORCE)
-    set(COMMON_CXX_FLAGS "${COMMON_CXX_FLAGS} -fno-strict-aliasing" CACHE INTERNAL "Common C++ compiler flags" FORCE)
+    set(
+        COMMON_C_FLAGS "${COMMON_C_FLAGS} -fno-strict-aliasing"
+        CACHE INTERNAL "Common C compiler flags" FORCE
+    )
+    set(
+        COMMON_CXX_FLAGS "${COMMON_CXX_FLAGS} -fno-strict-aliasing"
+        CACHE INTERNAL "Common C++ compiler flags" FORCE
+    )
 endif()
 
 # --- CPU Instruction Set Flags ---
@@ -211,9 +216,7 @@ if(IS_MSVC)
     endif()
 elseif(IS_CLANG OR IS_GCC)
     if(IS_ARM)
-        # No -mavx on arm (SIMDe simulates). -fsigned-char is MANDATORY: arm defaults char to
-        # unsigned, but FourQ wNAF (four_q.h) stores SIGNED digits in char[] -> wrong points /
-        # broken signature verify without it. x86 char is already signed.
+        # FourQ stores signed wNAF digits in char arrays.
         set(CPU_INSTRUCTION_FLAGS "-fsigned-char" CACHE INTERNAL "CPU instruction set flags" FORCE)
         message(STATUS "ARM: x86 SIMD simulated via SIMDe -- no -mavx flags, -fsigned-char on")
     elseif(ENABLE_AVX512)
@@ -232,7 +235,7 @@ set(TEST_SPECIFIC_FLAGS "" CACHE INTERNAL "Test-specific compiler flags")
 if(IS_MSVC)
     set(TEST_SPECIFIC_FLAGS "/WX /EHsc" CACHE INTERNAL "Test-specific compiler flags" FORCE)
 elseif(IS_ARM)
-    # SIMDe emits portability warnings; -mrdrnd is x86-only. -fsigned-char: FourQ wNAF needs signed char.
+    # ARM uses SIMDe and needs signed char for FourQ wNAF digits.
     set(TEST_SPECIFIC_FLAGS "-Wcast-align -fsigned-char -w" CACHE INTERNAL "Test-specific compiler flags" FORCE)
     set(TEST_SPECIFIC_LINK_FLAGS "" CACHE INTERNAL "Test-specific linker flags" FORCE)
 elseif(IS_CLANG OR IS_GCC)

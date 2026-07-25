@@ -1,0 +1,364 @@
+name: Dynamic Contract Tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # Build and smoke the node on the same runner so every supported platform gates.
+  build-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            key: linux-x64
+            cc: clang-18
+            cxx: clang++-18
+            release_file: Qubic-linux-x64
+          - runner: ubuntu-24.04-arm
+            key: linux-arm64
+            cc: clang-18
+            cxx: clang++-18
+            release_file: Qubic-linux-arm64
+          - runner: macos-14
+            key: darwin-arm64
+            cc: clang
+            cxx: clang++
+            release_file: Qubic-darwin-arm64
+          - runner: windows-latest
+            key: windows-x64
+            release_file: Qubic-windows-x64.tar.gz
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout core-lite
+        uses: actions/checkout@v7
+        with:
+          path: core
+
+      - name: Checkout qinit
+        uses: actions/checkout@v7
+        with:
+          repository: hackerby888/qinit
+          ref: main
+          path: qinit
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install Linux dependencies (x64)
+        if: matrix.key == 'linux-x64'
+        run: |
+          sudo apt update -y
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt install -y clang cmake nasm \
+            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
+            zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev \
+            liblz4-dev libssl-dev libffi-dev
+
+      - name: Install Linux dependencies (ARM64)
+        if: matrix.key == 'linux-arm64'
+        run: |
+          sudo apt update -y
+          sudo apt install -y clang-18 cmake nasm \
+            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
+            zlib1g-dev libzstd-dev g++ libfmt-dev liblzo2-dev liblz4-dev \
+            libssl-dev libffi-dev
+
+      - name: Install macOS dependencies
+        if: matrix.key == 'darwin-arm64'
+        run: brew install cmake nasm jq jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi
+
+      - name: Cache Windows dependencies
+        if: matrix.key == 'windows-x64'
+        uses: actions/cache@v6
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: vcpkg-x64-win-rel-${{ github.run_id }}
+          restore-keys: vcpkg-x64-win-rel-
+
+      - name: Configure Windows dependencies
+        if: matrix.key == 'windows-x64'
+        shell: pwsh
+        working-directory: core
+        run: |
+          New-Item -ItemType Directory -Force triplets-overlay | Out-Null
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x64)',
+            'set(VCPKG_CRT_LINKAGE dynamic)',
+            'set(VCPKG_LIBRARY_LINKAGE dynamic)',
+            'set(VCPKG_BUILD_TYPE release)'
+          ) | Set-Content -Encoding ascii triplets-overlay/x64-windows-rel.cmake
+
+      - name: Build POSIX node
+        if: matrix.key != 'windows-x64'
+        shell: bash
+        working-directory: core
+        run: |
+          set -o pipefail
+          BUILD_JOBS=$(getconf _NPROCESSORS_ONLN)
+          CC=${{ matrix.cc }}
+          CXX=${{ matrix.cxx }}
+          if [ "${{ matrix.key }}" = 'darwin-arm64' ]; then
+            CC=$(xcrun -f clang)
+            CXX=$(xcrun -f clang++)
+          fi
+          {
+            cmake -S . -B build-node \
+              -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+              -DCMAKE_C_COMPILER="$CC" \
+              -DCMAKE_CXX_COMPILER="$CXX" \
+              -DBUILD_BINARY=ON \
+              -DBUILD_TESTS=OFF \
+              -DENABLE_AVX512=OFF \
+              -DUSE_SANITIZER=OFF \
+              -DTESTNET=ON \
+              -DTESTNET_LITE_RAM=ON \
+              -DTESTNET_PREFILL_QUS=ON \
+              -DLITE_WASM_SC=ON \
+              -DCMAKE_NO_USE_SWAP=ON \
+              -DADDON_TX_STATUS_REQUEST=ON \
+              -DONLY_LOGGING=OFF
+            cmake --build build-node -- -j"$BUILD_JOBS" Qubic
+          } 2>&1 | tee "$RUNNER_TEMP/node-build.log"
+
+      - name: Upload macOS build log on failure
+        if: failure() && matrix.key == 'darwin-arm64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-build-log
+          path: ${{ runner.temp }}/node-build.log
+          if-no-files-found: ignore
+
+      - name: Configure Windows node
+        if: matrix.key == 'windows-x64'
+        shell: pwsh
+        working-directory: core
+        run: |
+          $vcpkg = "$env:VCPKG_INSTALLATION_ROOT"
+          cmake -S . -B build-win -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_OVERLAY_TRIPLETS="$PWD/triplets-overlay" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-rel `
+            -DBUILD_BINARY=ON -DBUILD_TESTS=OFF -DENABLE_AVX512=OFF -DUSE_SANITIZER=OFF `
+            -DTESTNET=ON -DTESTNET_LITE_RAM=ON -DTESTNET_PREFILL_QUS=ON `
+            -DLITE_WASM_SC=ON -DCMAKE_NO_USE_SWAP=ON `
+            -DADDON_TX_STATUS_REQUEST=ON -DONLY_LOGGING=OFF
+
+      - name: Build Windows node
+        if: matrix.key == 'windows-x64'
+        working-directory: core
+        run: cmake --build build-win --config Release --target Qubic --parallel 4
+
+      - name: Select built node
+        shell: bash
+        run: |
+          if [ "${{ matrix.key }}" = 'windows-x64' ]; then
+            NODE_BIN="$GITHUB_WORKSPACE/core/build-win/src/Release/Qubic.exe"
+          else
+            NODE_BIN="$GITHUB_WORKSPACE/core/build-node/src/Qubic"
+            chmod +x "$NODE_BIN"
+          fi
+          echo "NODE_BIN=$NODE_BIN" >> "$GITHUB_ENV"
+          file "$NODE_BIN"
+
+      - name: Install qinit dependencies
+        shell: bash
+        run: cd qinit && bun install
+
+      - name: Build compiled qinit CLI
+        shell: bash
+        run: |
+          cd qinit
+          echo "qinit commit $(git rev-parse HEAD)"
+          mkdir -p dist
+          if [ "${{ matrix.key }}" = 'windows-x64' ]; then
+            bun build packages/cli/src/index.tsx --compile --minify --outfile dist/qinit.exe
+            echo "QINIT_BIN=$GITHUB_WORKSPACE/qinit/dist/qinit.exe" >> "$GITHUB_ENV"
+          else
+            bun run build:bin
+            chmod +x dist/qinit
+            echo "QINIT_BIN=$GITHUB_WORKSPACE/qinit/dist/qinit" >> "$GITHUB_ENV"
+          fi
+
+      - name: Compiled qinit crypto smoke
+        shell: bash
+        run: '"$QINIT_BIN" smoke'
+
+      - name: Start node through compiled qinit
+        shell: bash
+        run: |
+          "$QINIT_BIN" node run \
+            --real \
+            --core "$GITHUB_WORKSPACE/core" \
+            --bin "$NODE_BIN" \
+            --restart \
+            --keep \
+            --wait 150
+
+      - name: Gate cached wasi-sdk
+        shell: bash
+        run: '"$QINIT_BIN" doctor'
+
+      - name: QPI compiler/runtime parity
+        shell: bash
+        working-directory: qinit
+        env:
+          QINIT_CORE: ${{ github.workspace }}/core
+          QINIT_QPI_DIGEST_FILE: ${{ github.workspace }}/qpi-${{ matrix.key }}.txt
+        run: bun run scripts/ci-qpi-dual-engine.ts
+
+      - name: Restart clean node after QPI parity
+        shell: bash
+        run: |
+          "$QINIT_BIN" node run \
+            --real \
+            --core "$GITHUB_WORKSPACE/core" \
+            --bin "$NODE_BIN" \
+            --restart \
+            --wait 150
+
+      - name: qinit test (deploy + read + write)
+        shell: bash
+        run: |
+          mkdir -p proj/contracts
+          cp qinit/fixtures/DigestProbe.h proj/contracts/DigestProbe.h
+          cd proj
+          "$QINIT_BIN" test \
+            --real \
+            --native \
+            --core "$GITHUB_WORKSPACE/core" \
+            --contract contracts/DigestProbe.h \
+            --name DigestProbe \
+            --skip-verify \
+            --timeout 90000
+
+      - name: Read canonical state digest through compiled qinit
+        shell: bash
+        run: |
+          cd proj
+          STATE_JSON=$("$QINIT_BIN" state DigestProbe --digest --json)
+          echo "$STATE_JSON"
+          STATE_DIGEST=$(printf '%s\n' "$STATE_JSON" | jq -er '.digest')
+          QPI_DIGESTS=$(cat "$GITHUB_WORKSPACE/qpi-${{ matrix.key }}.txt")
+          printf '%s %s\n' "$STATE_DIGEST" "$QPI_DIGESTS" > "$GITHUB_WORKSPACE/digest-${{ matrix.key }}.txt"
+          echo "::notice::${{ matrix.key }} DigestProbe state digest = $STATE_DIGEST"
+          echo "::notice::${{ matrix.key }} QPI driver/callee state digests = $QPI_DIGESTS"
+
+      - name: Stop node
+        if: always() && matrix.key != 'windows-x64'
+        shell: bash
+        run: |
+          if [ -n "${QINIT_BIN:-}" ] && [ -f "$QINIT_BIN" ]; then
+            "$QINIT_BIN" node stop
+          fi
+
+      - name: Stop Windows node
+        if: always() && matrix.key == 'windows-x64'
+        shell: pwsh
+        run: |
+          if (-not $env:QINIT_BIN -or -not (Test-Path $env:QINIT_BIN)) {
+            exit 0
+          }
+          & $env:QINIT_BIN node stop
+          if ($LASTEXITCODE -ne 0) {
+            Get-Process -Name Qubic -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep -Milliseconds 500
+          }
+          if (Get-Process -Name Qubic -ErrorAction SilentlyContinue) {
+            throw 'Qubic.exe is still running'
+          }
+          exit 0
+
+      - name: Upload state digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.key }}
+          path: digest-${{ matrix.key }}.txt
+          if-no-files-found: error
+
+      - name: Package POSIX release node
+        if: (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/qinit-v')) && matrix.key != 'windows-x64'
+        shell: bash
+        run: |
+          cp "$NODE_BIN" "${{ matrix.release_file }}"
+          shasum -a 256 "${{ matrix.release_file }}" | awk '{print $1}' > "${{ matrix.release_file }}.sha256"
+
+      - name: Package Windows release node
+        if: (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/qinit-v')) && matrix.key == 'windows-x64'
+        shell: pwsh
+        run: |
+          tar -czf Qubic-windows-x64.tar.gz -C core/build-win/src/Release .
+          (Get-FileHash -Algorithm SHA256 Qubic-windows-x64.tar.gz).Hash.ToLower() |
+            Set-Content -NoNewline -Encoding ascii Qubic-windows-x64.tar.gz.sha256
+
+      - name: Upload release node
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/qinit-v')
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-node-${{ matrix.key }}
+          path: |
+            ${{ matrix.release_file }}
+            ${{ matrix.release_file }}.sha256
+          if-no-files-found: error
+
+      - name: Diagnose contract build on failure
+        if: failure()
+        shell: bash
+        run: |
+          if [ -n "${QINIT_BIN:-}" ] && [ -f "$QINIT_BIN" ]; then
+            "$QINIT_BIN" build "$GITHUB_WORKSPACE/qinit/fixtures/DigestProbe.h" \
+              --name DigestProbe \
+              --slot 28 \
+              --core "$GITHUB_WORKSPACE/core" \
+              --out "$RUNNER_TEMP/qinit-build-diag" \
+              --native \
+              --skip-verify \
+              --json || true
+          fi
+
+      - name: Node log tail on failure
+        if: failure()
+        shell: bash
+        run: tail -400 "$HOME/.cache/qinit/run/node.log" 2>/dev/null || true
+
+      - name: Upload full node log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nodelog-${{ matrix.key }}
+          path: ~/.cache/qinit/run/node.log
+          if-no-files-found: ignore
+
+  digest-check:
+    needs: build-smoke
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: 'digest-*'
+          path: digests
+          merge-multiple: true
+      - name: State digests must match across platforms
+        run: |
+          cd digests
+          echo "=== per-platform DigestProbe and QPI state digests ==="
+          for digest_file in digest-*.txt; do
+            echo "$digest_file -> $(cat "$digest_file")"
+          done
+          DIGEST_COUNT=$(find . -maxdepth 1 -name 'digest-*.txt' | wc -l)
+          if [ "$DIGEST_COUNT" -ne 4 ]; then
+            echo "need 4 platform digests, got $DIGEST_COUNT"
+            exit 1
+          fi
+          UNIQUE_DIGEST_COUNT=$(cat digest-*.txt | sort -u | wc -l)
+          if [ "$UNIQUE_DIGEST_COUNT" -ne 1 ]; then
+            echo "::error::DIVERGENCE — contract state digests differ across platforms"
+            exit 1
+          fi
+          FIRST_DIGEST=$(sort -u digest-*.txt)
+          echo "OK: all $DIGEST_COUNT platforms agree on the DigestProbe and QPI state digests -> $FIRST_DIGEST"

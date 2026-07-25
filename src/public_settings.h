@@ -44,7 +44,12 @@
 
 #ifdef TESTNET
 #define TARGET_TICK_DURATION 7000
-#define TRANSACTION_SPARSENESS 1
+  #ifdef LONG_RUN_LOCAL_TESTNET
+  // low-traffic testnet: mainnet-like sparseness bounds tick storage
+  #define TRANSACTION_SPARSENESS 10
+  #else
+  #define TRANSACTION_SPARSENESS 1
+  #endif
 // Number of ticks that are stored in the pending txs pool. This also defines how many ticks in advance a tx can be registered.
   #ifdef TESTNET_LITE_RAM
   #define PENDING_TXS_POOL_NUM_TICKS (32ULL)
@@ -107,12 +112,12 @@ static_assert(AUTO_FORCE_NEXT_TICK_THRESHOLD* TARGET_TICK_DURATION >= PEER_REFRE
 // Config options that should NOT be changed by operators
 
 #define VERSION_A 1
-#define VERSION_B 299
-#define VERSION_C 1
+#define VERSION_B 300
+#define VERSION_C 0
 
 // Epoch and initial tick for node startup
-#define EPOCH 222
-#define TICK 66360000
+#define EPOCH 223
+#define TICK 68200000
 #define TICK_IS_FIRST_TICK_OF_EPOCH 1 // Set to 0 if the network is restarted during the EPOCH with a new initial TICK
 
 #define ARBITRATOR "AFZPUAIYVPNUYGJRQVLUKOPPVLHAZQTGLYAAUUNBXFTVTAMSBKQBLEIEPCVJ"
@@ -168,7 +173,15 @@ static constexpr long long NEURON_VALUE_LIMIT = 1LL;
 #include "network_messages/common_def.h"
 
 #ifdef TESTNET
-#define TESTNET_EPOCH_DURATION 3000ULL
+  #ifdef LONG_RUN_LOCAL_TESTNET
+  // 60 days at 1s ticks; see doc/long_run_local_testnet.md
+  #ifndef LONG_RUN_EPOCH_TICK_CAPACITY
+  #define LONG_RUN_EPOCH_TICK_CAPACITY 5184000ULL
+  #endif
+  #define TESTNET_EPOCH_DURATION LONG_RUN_EPOCH_TICK_CAPACITY
+  #else
+  #define TESTNET_EPOCH_DURATION 3000ULL
+  #endif
 #define MAX_NUMBER_OF_TICKS_PER_EPOCH (TESTNET_EPOCH_DURATION + 3)
 #else
 #define MAX_NUMBER_OF_TICKS_PER_EPOCH (((((60ULL * 60 * 24 * 7 * 1000) / TICK_DURATION_FOR_ALLOCATION_MS) + NUMBER_OF_COMPUTORS - 1) / NUMBER_OF_COMPUTORS) * NUMBER_OF_COMPUTORS)

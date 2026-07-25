@@ -341,11 +341,8 @@ constexpr unsigned short TESTEXD_CONTRACT_INDEX = (CONTRACT_INDEX + 1);
 #error "LITE_WASM_SC requires TESTNET and TESTNET_LITE_RAM"
 #endif
 
-// Reserved deployable slots for runtime dynamic contracts. See extensions/DYNAMIC_CONTRACTS.md.
-// Each include generates a distinct stub struct; the host patches a slot's tables at deploy.
-// Reserve enough state per dyn/wasm slot to hold ANY contract (QX ~593MB, QEARN ~204MB). Array<> needs a
-// power of 2; MAX_CONTRACT_STATE_SIZE is 2^30 (1GB), the node's per-contract max. USE_SWAP makes contractStates
-// disk-backed + sparse, so the reserve only costs disk for pages actually touched.
+// Reserve deployable slots large enough for any supported contract.
+// The host patches each generated stub's dispatch tables at deployment.
 #ifndef WASM_RESERVED_SLOT_STATE_SIZE
 #define WASM_RESERVED_SLOT_STATE_SIZE MAX_CONTRACT_STATE_SIZE
 #endif
@@ -643,11 +640,8 @@ struct ContractStateChangeInfo
 };
 // Contracts whose state struct changed this epoch. Update this list each epoch as needed.
 // Each entry is { CONTRACT_INDEX, PADDING or RESET or MIGRATE, EPOCH }
-// When enabling, replace both lines below, e.g.:
-//constexpr ContractStateChangeInfo contractStateChangeInfos[] = { { DUMMY_CONTRACT_INDEX, MIGRATE, 219 } };
-//constexpr unsigned int contractStateChangeCount = sizeof(contractStateChangeInfos) / sizeof(contractStateChangeInfos[0]);
- constexpr const ContractStateChangeInfo* contractStateChangeInfos = nullptr;
- constexpr unsigned int contractStateChangeCount = 0;
+constexpr ContractStateChangeInfo contractStateChangeInfos[] = { { QRAFFLE_CONTRACT_INDEX, MIGRATE, 223 } };
+constexpr unsigned int contractStateChangeCount = sizeof(contractStateChangeInfos) / sizeof(contractStateChangeInfos[0]);
 
 
 // Class for registering and looking up user procedures independently of input type, for example for notifications

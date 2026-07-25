@@ -218,29 +218,6 @@ public:
 
     void beginEpoch(bool expectSuccess = true)
     {
-        // Mirror the contract's epoch-218 repair (Qearn.h BEGIN_EPOCH): it rewrites the epoch-217 round
-        // info with the audited mainnet bonus and re-derives epoch 218's bonus from the corrected books.
-        if (system.epoch == 218)
-        {
-            EpochData& ed217 = allEpochData[217];
-            ed217.bonusAmount = 50227542196ULL;
-            ed217.initialBonusAmount = 50227542196ULL;
-            ed217.initialTotalLockedAmount = ed217.amountCurrentlyLocked;
-
-            unsigned long long books = 0;
-            for (uint16 t = 218 - 52; t <= 217; ++t)
-            {
-                auto it = allEpochData.find(t);
-                if (it != allEpochData.end())
-                    books += it->second.bonusAmount + it->second.amountCurrentlyLocked;
-            }
-            const unsigned long long balance = getBalance(QEARN_CONTRACT_ID);
-            unsigned long long& bonus218 = allEpochData[218].bonusAmount;
-            bonus218 = balance > books ? balance - books : 0;
-            if (bonus218 > QEARN_MAX_BONUS_AMOUNT)
-                bonus218 = QEARN_MAX_BONUS_AMOUNT;
-        }
-
         callSystemProcedure(QEARN_CONTRACT_INDEX, BEGIN_EPOCH, expectSuccess);
 
         // If there is no entry for this epoch in allEpochData, create one with default init (all 0)

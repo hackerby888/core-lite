@@ -73,6 +73,7 @@ include(FetchContent)
 set(BUILD_EXAMPLES OFF CACHE BOOL "Disable Blosc2 examples" FORCE)
 set(BUILD_TESTS_BLOSC OFF CACHE BOOL "Disable Blosc2 tests" FORCE)
 set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable Blosc2 benchmarks" FORCE)
+set(PREFER_EXTERNAL_ZLIB ON CACHE BOOL "Use the existing zlib dependency in Blosc2" FORCE)
 FetchContent_Declare(
         blosc2
         GIT_REPOSITORY https://github.com/Blosc/c-blosc2.git
@@ -81,23 +82,19 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(blosc2)
 include_directories(${blosc2_SOURCE_DIR}/include)
 
-# Windows: blosc2's project() enables ASM_NASM (so nasm must exist), but our .asm files (EDK2 BaseLib
-# SetJump/LongJump, WAMR invokeNative_em64) are MASM syntax. Both ASM_NASM and ASM_MASM claim the .asm
-# extension and NASM (enabled later) wins -> nasm -fwin32 -> MSB3721. Drop "asm" from NASM's extensions so
-# .asm route to ml64 (MASM); blosc2 has no .asm sources (its SSE4.2 CRC is inline C).
+# blosc2 enables NASM, but the Windows .asm sources use MASM.
 if(WIN32)
     list(REMOVE_ITEM CMAKE_ASM_NASM_SOURCE_FILE_EXTENSIONS asm)
 endif()
 
-# WAMR runtime for wasm contracts, fetched + SHA-pinned (= tag WAMR-2.4.3) so src/ and test/ build vmlib from
-# the same source. Consensus-critical: bump the SHA deliberately. SOURCE_SUBDIR -> a nonexistent dir makes
-# MakeAvailable download-only; vmlib is built via build-scripts/runtime_lib.cmake in src/ and test/.
+# Keep the WAMR runtime SHA-pinned because it is consensus-critical.
+# The nonexistent source directory makes FetchContent download-only.
 if(LITE_WASM_SC)
     FetchContent_Declare(
-            wamr
-            GIT_REPOSITORY https://github.com/bytecodealliance/wasm-micro-runtime.git
-            GIT_TAG        0e47872fb4e57833dbeccf7c312a406fa2dac2bc
-            SOURCE_SUBDIR  does-not-exist
+        wamr
+        GIT_REPOSITORY https://github.com/bytecodealliance/wasm-micro-runtime.git
+        GIT_TAG        0e47872fb4e57833dbeccf7c312a406fa2dac2bc
+        SOURCE_SUBDIR  does-not-exist
     )
     FetchContent_MakeAvailable(wamr)
     set(WAMR_ROOT_DIR ${wamr_SOURCE_DIR})
