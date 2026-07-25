@@ -145,7 +145,7 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-static-rel `
             -DVCPKG_APPLOCAL_DEPS=OFF `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
-            -DCMAKE_SYSTEM_VERSION=10.0 `
+            '-DCMAKE_SYSTEM_VERSION=10.0' `
             -DBUILD_BINARY=ON `
             -DBUILD_TESTS=OFF `
             -DENABLE_AVX512=OFF `

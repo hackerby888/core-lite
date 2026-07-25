@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
-project(qubic_core CXX ASM_NASM)
+project(qubic_core CXX)
+
+if(NOT WIN32)
+    enable_language(ASM_NASM)
+endif()
 
 # GoogleTest requires at least C++20
 set(CMAKE_CXX_STANDARD 20)
