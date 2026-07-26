@@ -84,6 +84,7 @@ endif()
 # src/platform/virtual_memory.h). Declare it here so both subdirectories see the
 # target regardless of which is added first.
 include(FetchContent)
+set(BUILD_SHARED OFF CACHE BOOL "Disable Blosc2 shared library" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "Disable Blosc2 examples" FORCE)
 set(BUILD_TESTS_BLOSC OFF CACHE BOOL "Disable Blosc2 tests" FORCE)
 set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable Blosc2 benchmarks" FORCE)

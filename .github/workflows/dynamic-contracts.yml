@@ -397,7 +397,7 @@ jobs:
         env:
           QINIT_CORE: ${{ github.workspace }}/core
           QINIT_QPI_DIGEST_FILE: ${{ github.workspace }}/qpi-${{ matrix.key }}.txt
-        run: bun run scripts/ci-qpi-dual-engine.ts
+        run: bun run scripts/live-node/ci-qpi-dual-engine.ts
 
       - name: Restart clean node after QPI parity
         if: env.RUN_LIVE_NODE == 'true'
