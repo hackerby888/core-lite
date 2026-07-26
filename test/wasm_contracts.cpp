@@ -600,7 +600,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
             char byteHex[3];
             for (uint32_t i = 0; i < outputSize; ++i)
             {
-                sprintf(byteHex, "%02x", nativeOutput[i]);
+                snprintf(byteHex, sizeof(byteHex), "%02x", nativeOutput[i]);
                 outHex += byteHex;
             }
             printf("CROSSHOST_OP=%u:ok:%s\n", operationIndex++, outHex.c_str());
@@ -625,7 +625,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
     char byteHex[3];
     for (uint32_t i = 0; i < ss; i++)
     {
-        sprintf(byteHex, "%02x", state[i]);
+        snprintf(byteHex, sizeof(byteHex), "%02x", state[i]);
         stateHex += byteHex;
     }
     printf("CROSSHOST_STATE=%s\n", stateHex.c_str());

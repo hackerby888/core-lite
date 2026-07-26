@@ -134,6 +134,9 @@ add_executable(
   qubic.cpp
   ${CUSTOM_STACK_OBJ}
 )
+if(QUBIC_STANDALONE_RELEASE)
+    set_target_properties(Qubic PROPERTIES SKIP_BUILD_RPATH TRUE)
+endif()
 
 # Explorer asset bundling: regen embedded header when HTML/CSS/JS change.
 if(NOT WIN32)

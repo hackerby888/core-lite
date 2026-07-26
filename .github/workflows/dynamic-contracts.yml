@@ -142,7 +142,7 @@ jobs:
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_C_COMPILER="$CC" \
               -DCMAKE_CXX_COMPILER="$CXX" \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 \
               -DBUILD_BINARY=ON \
               -DBUILD_TESTS=OFF \
               -DENABLE_AVX512=OFF \
@@ -283,7 +283,6 @@ jobs:
         shell: bash
         run: |
           NODE_BIN="$GITHUB_WORKSPACE/core/build-node/src/Qubic"
-          chmod +x "$NODE_BIN"
           echo "NODE_BIN=$NODE_BIN" >> "$GITHUB_ENV"
           file "$NODE_BIN"
 
