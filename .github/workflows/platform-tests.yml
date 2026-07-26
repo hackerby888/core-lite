@@ -51,8 +51,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/AppData/Local/vcpkg/archives
-          key: vcpkg-x64-win-rel-${{ hashFiles('vcpkg.json') }}
-          restore-keys: vcpkg-x64-win-rel-
+          key: vcpkg-x64-windows-static-rel-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-x64-windows-static-rel-
 
       - name: Configure Windows dependencies
         if: runner.os == 'Windows'
@@ -61,10 +61,10 @@ jobs:
           New-Item -ItemType Directory -Force triplets-overlay | Out-Null
           @(
             'set(VCPKG_TARGET_ARCHITECTURE x64)',
-            'set(VCPKG_CRT_LINKAGE dynamic)',
-            'set(VCPKG_LIBRARY_LINKAGE dynamic)',
+            'set(VCPKG_CRT_LINKAGE static)',
+            'set(VCPKG_LIBRARY_LINKAGE static)',
             'set(VCPKG_BUILD_TYPE release)'
-          ) | Set-Content -Encoding ascii triplets-overlay/x64-windows-rel.cmake
+          ) | Set-Content -Encoding ascii triplets-overlay/x64-windows-static-rel.cmake
 
       - name: Configure POSIX tests
         if: runner.os != 'Windows'
@@ -96,7 +96,7 @@ jobs:
           cmake -S . -B build-platform-tests -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_OVERLAY_TRIPLETS="$PWD/triplets-overlay" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows-rel `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-rel `
             -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF `
             -DUSE_SANITIZER=OFF -DONLY_LOGGING=ON -DLITE_WASM_SC=ON `
             -DTESTNET=ON -DTESTNET_LITE_RAM=ON

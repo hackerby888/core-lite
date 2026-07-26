@@ -134,9 +134,7 @@ add_executable(
   qubic.cpp
   ${CUSTOM_STACK_OBJ}
 )
-if(QUBIC_STANDALONE_RELEASE)
-    set_target_properties(Qubic PROPERTIES SKIP_BUILD_RPATH TRUE)
-endif()
+set_target_properties(Qubic PROPERTIES SKIP_BUILD_RPATH TRUE)
 
 # Explorer asset bundling: regen embedded header when HTML/CSS/JS change.
 if(NOT WIN32)
@@ -332,32 +330,17 @@ elseif(WIN32)
         Threads::Threads
     )
 else()
-    if(QUBIC_STANDALONE_RELEASE)
-        target_link_libraries(Qubic
-            platform_common
-            platform_efi
-            jsoncpp_static drogon fmt::fmt backtrace_static Blosc2::blosc2_static
-            Threads::Threads
-            dl
-            z
-            rt
-            m
-        )
-        target_link_options(Qubic PRIVATE -static)
-    else()
-        target_link_libraries(Qubic
-            platform_common
-            platform_efi
-            -Wl,-Bstatic
-            jsoncpp_static drogon fmt::fmt backtrace_static Blosc2::blosc2_static
-            -Wl,-Bdynamic
-            Threads::Threads
-            dl
-            z
-            rt
-            m
-        )
-    endif()
+    target_link_libraries(Qubic
+        platform_common
+        platform_efi
+        jsoncpp_static drogon fmt::fmt backtrace_static Blosc2::blosc2_static
+        Threads::Threads
+        dl
+        z
+        rt
+        m
+    )
+    target_link_options(Qubic PRIVATE -static)
 endif()
 
 # qubic-cli: standalone debug tool binary (eg. read-entity, read-score-cache).

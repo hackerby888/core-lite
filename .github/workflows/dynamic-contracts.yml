@@ -75,8 +75,7 @@ jobs:
                 -DLITE_WASM_SC=ON \
                 -DCMAKE_NO_USE_SWAP=ON \
                 -DADDON_TX_STATUS_REQUEST=ON \
-                -DONLY_LOGGING=OFF \
-                -DQUBIC_STANDALONE_RELEASE=ON
+                -DONLY_LOGGING=OFF
               cmake --build build-node --target Qubic --parallel
             '
 
@@ -153,8 +152,7 @@ jobs:
               -DLITE_WASM_SC=ON \
               -DCMAKE_NO_USE_SWAP=ON \
               -DADDON_TX_STATUS_REQUEST=ON \
-              -DONLY_LOGGING=OFF \
-              -DQUBIC_STANDALONE_RELEASE=ON
+              -DONLY_LOGGING=OFF
             cmake --build build-node -- -j"$BUILD_JOBS" Qubic
           } 2>&1 | tee "$RUNNER_TEMP/node-build.log"
 
@@ -188,8 +186,7 @@ jobs:
             -DLITE_WASM_SC=ON `
             -DCMAKE_NO_USE_SWAP=ON `
             -DADDON_TX_STATUS_REQUEST=ON `
-            -DONLY_LOGGING=OFF `
-            -DQUBIC_STANDALONE_RELEASE=ON
+            -DONLY_LOGGING=OFF
 
       - name: Build Windows node
         if: matrix.key == 'windows-x64'
