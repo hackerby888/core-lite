@@ -361,7 +361,7 @@ jobs:
       - name: Check live-node capacity
         shell: bash
         run: |
-          PROCESSOR_COUNT=$(bun -e 'console.log(require("node:os").cpus().length)')
+          PROCESSOR_COUNT=$(bun -e 'console.log(require("node:os").availableParallelism())')
           if [ "$PROCESSOR_COUNT" -ge 3 ]; then
             echo "RUN_LIVE_NODE=true" >> "$GITHUB_ENV"
           else
