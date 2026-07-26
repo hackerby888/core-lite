@@ -2,6 +2,13 @@ name: Dynamic Contract Tests
 
 on:
   workflow_call:
+    inputs:
+      qinit_repository:
+        type: string
+        required: true
+      qinit_ref:
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -41,11 +48,13 @@ jobs:
       - name: Checkout qinit
         uses: actions/checkout@v7
         with:
-          repository: hackerby888/qinit
-          ref: main
+          repository: ${{ inputs.qinit_repository }}
+          ref: ${{ inputs.qinit_ref }}
           path: qinit
 
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
 
       - name: Build standalone Linux node
         if: startsWith(matrix.key, 'linux-')
@@ -341,105 +350,26 @@ jobs:
         run: |
           cd qinit
           echo "qinit commit $(git rev-parse HEAD)"
-          mkdir -p dist
+          bun run build:bin
           if [ "${{ matrix.key }}" = 'windows-x64' ]; then
-            bun build packages/cli/src/index.tsx --compile --minify --outfile dist/qinit.exe
             echo "QINIT_BIN=$GITHUB_WORKSPACE/qinit/dist/qinit.exe" >> "$GITHUB_ENV"
           else
-            bun run build:bin
             chmod +x dist/qinit
             echo "QINIT_BIN=$GITHUB_WORKSPACE/qinit/dist/qinit" >> "$GITHUB_ENV"
           fi
 
-      - name: Compiled qinit crypto smoke
-        shell: bash
-        run: '"$QINIT_BIN" smoke'
-
-      - name: Start node through compiled qinit
+      - name: Qinit compatibility smoke
         shell: bash
         run: |
-          "$QINIT_BIN" node run \
-            --real \
+          cd qinit
+          bun run ci:core-lite-smoke -- \
             --core "$GITHUB_WORKSPACE/core" \
             --bin "$NODE_BIN" \
-            --restart \
-            --keep \
-            --wait 150
-
-      - name: Check live-node readiness
-        shell: bash
-        run: |
-          NODE_LOG="$HOME/.cache/qinit/run/node.log"
-          for ((attempt = 0; attempt < 150; attempt++)); do
-            if grep -q 'processors are being used' "$NODE_LOG" 2>/dev/null; then
-              echo "RUN_LIVE_NODE=true" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            if grep -q 'At least 4 healthy enabled processors are required' "$NODE_LOG" 2>/dev/null; then
-              echo "RUN_LIVE_NODE=false" >> "$GITHUB_ENV"
-              echo "::notice::Skipping live-node parity: this runner cannot initialize core-lite's processor roles"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::core-lite did not finish processor initialization"
-          tail -200 "$NODE_LOG" 2>/dev/null || true
-          exit 1
-
-      - name: Gate cached wasi-sdk
-        shell: bash
-        run: '"$QINIT_BIN" doctor'
-
-      - name: QPI compiler/runtime parity
-        if: env.RUN_LIVE_NODE == 'true'
-        shell: bash
-        working-directory: qinit
-        env:
-          QINIT_CORE: ${{ github.workspace }}/core
-          QINIT_QPI_DIGEST_FILE: ${{ github.workspace }}/qpi-${{ matrix.key }}.txt
-        run: bun run scripts/live-node/ci-qpi-dual-engine.ts
-
-      - name: Restart clean node after QPI parity
-        if: env.RUN_LIVE_NODE == 'true'
-        shell: bash
-        run: |
-          "$QINIT_BIN" node run \
-            --real \
-            --core "$GITHUB_WORKSPACE/core" \
-            --bin "$NODE_BIN" \
-            --restart \
-            --wait 150
-
-      - name: qinit test (deploy + read + write)
-        if: env.RUN_LIVE_NODE == 'true'
-        shell: bash
-        run: |
-          mkdir -p proj/contracts
-          cp qinit/fixtures/DigestProbe.h proj/contracts/DigestProbe.h
-          cd proj
-          "$QINIT_BIN" test \
-            --real \
-            --native \
-            --core "$GITHUB_WORKSPACE/core" \
-            --bin "$NODE_BIN" \
-            --keep \
-            --contract contracts/DigestProbe.h \
-            --name DigestProbe \
-            --skip-verify \
-            --timeout 90000
-
-      - name: Read canonical state digest through compiled qinit
-        if: env.RUN_LIVE_NODE == 'true'
-        shell: bash
-        run: |
-          cd proj
-          STATE_JSON=$("$QINIT_BIN" state DigestProbe --digest --json)
-          echo "$STATE_JSON"
-          STATE_DIGEST=$(printf '%s\n' "$STATE_JSON" | jq -er '.digest')
-          QPI_DIGESTS=$(cat "$GITHUB_WORKSPACE/qpi-${{ matrix.key }}.txt")
-          printf '%s %s\n' "$STATE_DIGEST" "$QPI_DIGESTS" > "$GITHUB_WORKSPACE/digest-${{ matrix.key }}.txt"
-          echo "::notice::${{ matrix.key }} DigestProbe state digest = $STATE_DIGEST"
-          echo "::notice::${{ matrix.key }} QPI driver/callee state digests = $QPI_DIGESTS"
+            --platform "${{ matrix.key }}" \
+            --result "$GITHUB_WORKSPACE/compat-${{ matrix.key }}.json" \
+            --qinit-bin "$QINIT_BIN" \
+            --qinit-repository "${{ inputs.qinit_repository }}" \
+            --core-repository "${{ github.repository }}"
 
       - name: Stop node
         if: always() && matrix.key != 'windows-x64'
@@ -466,12 +396,12 @@ jobs:
           }
           exit 0
 
-      - name: Upload state digest
-        if: env.RUN_LIVE_NODE == 'true'
+      - name: Upload compatibility result
+        if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: digest-${{ matrix.key }}
-          path: digest-${{ matrix.key }}.txt
+          name: compat-${{ matrix.key }}
+          path: compat-${{ matrix.key }}.json
           if-no-files-found: error
 
       - name: Package POSIX release node
@@ -525,25 +455,35 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: 'digest-*'
-          path: digests
+          pattern: 'compat-*'
+          path: results
           merge-multiple: true
       - name: State digests must match across platforms
         run: |
-          cd digests
-          echo "=== per-platform DigestProbe and QPI state digests ==="
-          for digest_file in digest-*.txt; do
-            echo "$digest_file -> $(cat "$digest_file")"
+          cd results
+          echo "=== per-platform compatibility results ==="
+          for result_file in compat-*.json; do
+            jq -c '{platform, skipped, sources, stateDigest, qpiDigests, reason}' "$result_file"
           done
-          DIGEST_COUNT=$(find . -maxdepth 1 -name 'digest-*.txt' | wc -l)
-          if [ "$DIGEST_COUNT" -lt 3 ]; then
-            echo "need at least 3 runnable platform digests, got $DIGEST_COUNT"
+
+          RUNNABLE_COUNT=$(jq -s '[.[] | select(.skipped == false)] | length' compat-*.json)
+          if [ "$RUNNABLE_COUNT" -lt 3 ]; then
+            echo "need at least 3 runnable platform results, got $RUNNABLE_COUNT"
             exit 1
           fi
-          UNIQUE_DIGEST_COUNT=$(cat digest-*.txt | sort -u | wc -l)
+
+          UNIQUE_DIGEST_COUNT=$(
+            jq -r 'select(.skipped == false) |
+              [.stateDigest, .qpiDigests.driver, .qpiDigests.callee] | @tsv' \
+              compat-*.json | sort -u | wc -l
+          )
           if [ "$UNIQUE_DIGEST_COUNT" -ne 1 ]; then
             echo "::error::DIVERGENCE — contract state digests differ across platforms"
             exit 1
           fi
-          FIRST_DIGEST=$(sort -u digest-*.txt)
-          echo "OK: all $DIGEST_COUNT platforms agree on the DigestProbe and QPI state digests -> $FIRST_DIGEST"
+          FIRST_DIGEST=$(
+            jq -r 'select(.skipped == false) |
+              [.stateDigest, .qpiDigests.driver, .qpiDigests.callee] | @tsv' \
+              compat-*.json | sort -u
+          )
+          echo "OK: all $RUNNABLE_COUNT runnable platforms agree -> $FIRST_DIGEST"

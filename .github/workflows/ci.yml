@@ -1,10 +1,120 @@
 name: CI
 on:
   workflow_call:
+    inputs:
+      compat_mode:
+        type: string
+        required: false
+        default: default
+      qinit_repository:
+        type: string
+        required: false
+        default: ""
+      qinit_ref:
+        type: string
+        required: false
+        default: ""
+    outputs:
+      qinit_repository:
+        value: ${{ jobs.resolve-qinit.outputs.repository }}
+      qinit_sha:
+        value: ${{ jobs.resolve-qinit.outputs.sha }}
+  workflow_dispatch:
+    inputs:
+      compat_mode:
+        description: "default, latest development ref, or pinned production commit"
+        type: choice
+        options: [default, latest, pinned]
+        default: default
+      qinit_repository:
+        description: "temporary owner/repo override (requires qinit_ref)"
+        required: false
+        default: ""
+      qinit_ref:
+        description: "temporary qinit branch, tag, or commit"
+        required: false
+        default: ""
   push:
     branches: ["**"]
   pull_request:
+
+permissions:
+  contents: read
+
 jobs:
+  resolve-qinit:
+    runs-on: ubuntu-22.04
+    outputs:
+      repository: ${{ steps.source.outputs.repository }}
+      ref: ${{ steps.source.outputs.ref }}
+      mode: ${{ steps.source.outputs.mode }}
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select qinit source
+        id: source
+        shell: bash
+        env:
+          COMPAT_MODE: ${{ inputs.compat_mode }}
+          REPOSITORY_COMPAT_MODE: ${{ vars.CROSS_REPO_COMPAT_MODE }}
+          QINIT_REPOSITORY: ${{ inputs.qinit_repository }}
+          QINIT_REF: ${{ inputs.qinit_ref }}
+        run: |
+          configured_repository=$(jq -r .repository .github/compat/qinit.json)
+          development_ref=$(jq -r .developmentRef .github/compat/qinit.json)
+          pinned_commit=$(jq -r .pinnedCommit .github/compat/qinit.json)
+          repository="${QINIT_REPOSITORY:-$configured_repository}"
+
+          if [ -n "$QINIT_REPOSITORY" ] && [ -z "$QINIT_REF" ]; then
+            echo "::error::a qinit repository override requires qinit_ref"
+            exit 1
+          fi
+          if [[ ! "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::invalid GitHub repository: $repository"
+            exit 1
+          fi
+
+          if [ -n "$QINIT_REF" ]; then
+            mode=override
+            ref="$QINIT_REF"
+          else
+            mode="${COMPAT_MODE:-default}"
+            if [ "$mode" = default ]; then
+              mode="${REPOSITORY_COMPAT_MODE:-latest}"
+            fi
+            case "$mode" in
+              latest) ref="$development_ref" ;;
+              pinned)
+                if [[ ! "$pinned_commit" =~ ^[0-9a-f]{40}$ ]]; then
+                  echo "::error::pinnedCommit must be a full lowercase commit SHA"
+                  exit 1
+                fi
+                ref="$pinned_commit"
+                ;;
+              *)
+                echo "::error::invalid compatibility mode: $mode"
+                exit 1
+                ;;
+            esac
+          fi
+
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+      - name: Resolve qinit commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.source.outputs.repository }}
+          ref: ${{ steps.source.outputs.ref }}
+          path: resolved-qinit
+      - name: Record qinit commit
+        id: commit
+        shell: bash
+        run: |
+          sha=$(git -C resolved-qinit rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "::notice::qinit ${{ steps.source.outputs.mode }} = ${{ steps.source.outputs.repository }}@${{ steps.source.outputs.ref }} ($sha)"
+
   build-linux:
     uses: ./.github/workflows/linux-build.yml
     with:
@@ -30,4 +140,8 @@ jobs:
     uses: ./.github/workflows/platform-tests.yml
 
   dynamic-contract-tests:
+    needs: resolve-qinit
     uses: ./.github/workflows/dynamic-contracts.yml
+    with:
+      qinit_repository: ${{ needs.resolve-qinit.outputs.repository }}
+      qinit_ref: ${{ needs.resolve-qinit.outputs.sha }}
