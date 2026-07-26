@@ -38,8 +38,8 @@ if(IS_ARM)
     # ARM uses system stack recovery and a shim for x86 CPUID includes.
     include_directories(${CMAKE_SOURCE_DIR}/lib/platform_common/arm_shims)
     set(CUSTOM_STACK_OBJ ${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack_arm_stub.cpp)
-elseif(WIN32)
-    # Windows uses system stack recovery instead of the Linux NASM object.
+elseif(WIN32 OR IS_MACOS)
+    # Windows and macOS use system stack recovery instead of the Linux NASM object.
     set(CUSTOM_STACK_OBJ ${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack_arm_stub.cpp)
 else()
     set(ASM_FILE "${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack.nasm")
@@ -134,6 +134,7 @@ add_executable(
   qubic.cpp
   ${CUSTOM_STACK_OBJ}
 )
+set_target_properties(Qubic PROPERTIES SKIP_BUILD_RPATH TRUE)
 
 # Explorer asset bundling: regen embedded header when HTML/CSS/JS change.
 if(NOT WIN32)
@@ -329,18 +330,17 @@ elseif(WIN32)
         Threads::Threads
     )
 else()
-target_link_libraries(Qubic
+    target_link_libraries(Qubic
         platform_common
         platform_efi
-        -Wl,-Bstatic
         jsoncpp_static drogon fmt::fmt backtrace_static Blosc2::blosc2_static
-        -Wl,-Bdynamic
         Threads::Threads
         dl
         z
         rt
         m
-)
+    )
+    target_link_options(Qubic PRIVATE -static)
 endif()
 
 # qubic-cli: standalone debug tool binary (eg. read-entity, read-score-cache).

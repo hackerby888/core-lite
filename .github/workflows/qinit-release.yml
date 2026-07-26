@@ -68,6 +68,7 @@ jobs:
           LINUX_X64_SHA=$(cat Qubic-linux-x64.sha256)
           LINUX_ARM64_SHA=$(cat Qubic-linux-arm64.sha256)
           DARWIN_ARM64_SHA=$(cat Qubic-darwin-arm64.sha256)
+          DARWIN_X64_SHA=$(cat Qubic-darwin-x64.sha256)
           WINDOWS_X64_SHA=$(cat Qubic-windows-x64.exe.sha256)
           HEADERS_SHA=$(cat core-headers.sha256)
           cat > qinit-manifest.json <<EOF
@@ -78,12 +79,24 @@ jobs:
               "linux-x64": { "url": "$BASE_URL/Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
               "linux-arm64": { "url": "$BASE_URL/Qubic-linux-arm64", "sha256": "$LINUX_ARM64_SHA" },
               "darwin-arm64": { "url": "$BASE_URL/Qubic-darwin-arm64", "sha256": "$DARWIN_ARM64_SHA" },
+              "darwin-x64": { "url": "$BASE_URL/Qubic-darwin-x64", "sha256": "$DARWIN_X64_SHA" },
               "windows-x64": { "url": "$BASE_URL/Qubic-windows-x64.exe", "sha256": "$WINDOWS_X64_SHA" }
             },
             "headers": { "url": "$BASE_URL/core-headers.tar.gz", "sha256": "$HEADERS_SHA" }
           }
           EOF
           cat qinit-manifest.json
+          jq -e '
+            (.nodes | keys == [
+              "darwin-arm64",
+              "darwin-x64",
+              "linux-arm64",
+              "linux-x64",
+              "windows-x64"
+            ]) and
+            ([.node.sha256, .headers.sha256, .nodes[].sha256] |
+              all(test("^[0-9a-f]{64}$")))
+          ' qinit-manifest.json
       - name: Publish release
         working-directory: dist
         run: |
@@ -91,15 +104,17 @@ jobs:
             Qubic-linux-x64 \
             Qubic-linux-arm64 \
             Qubic-darwin-arm64 \
+            Qubic-darwin-x64 \
             Qubic-windows-x64.exe \
             core-headers.tar.gz \
             qinit-manifest.json \
             --title "$TAG" \
-            --notes "qinit turnkey: prebuilt dynamic-contract nodes (linux-x64 + linux-arm64 + darwin-arm64 + windows-x64) + core-header snapshot" \
+            --notes "qinit turnkey: prebuilt dynamic-contract nodes (linux-x64 + linux-arm64 + darwin-arm64 + darwin-x64 + windows-x64) + core-header snapshot" \
             || gh release upload "$TAG" \
               Qubic-linux-x64 \
               Qubic-linux-arm64 \
               Qubic-darwin-arm64 \
+              Qubic-darwin-x64 \
               Qubic-windows-x64.exe \
               core-headers.tar.gz \
               qinit-manifest.json \
