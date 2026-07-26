@@ -23,8 +23,10 @@ jobs:
             runner: ubuntu-24.04
           - name: Linux ARM64
             runner: ubuntu-24.04-arm
-          - name: macOS
+          - name: macOS ARM64
             runner: macos-14
+          - name: macOS x64
+            runner: macos-15-intel
           - name: Windows
             runner: windows-latest
     runs-on: ${{ matrix.runner }}

@@ -15,19 +15,18 @@ jobs:
         include:
           - runner: ubuntu-22.04
             key: linux-x64
-            cc: clang-18
-            cxx: clang++-18
             release_file: Qubic-linux-x64
           - runner: ubuntu-24.04-arm
             key: linux-arm64
-            cc: clang-18
-            cxx: clang++-18
             release_file: Qubic-linux-arm64
           - runner: macos-14
             key: darwin-arm64
-            cc: clang
-            cxx: clang++
+            arch: arm64
             release_file: Qubic-darwin-arm64
+          - runner: macos-15-intel
+            key: darwin-x64
+            arch: x86_64
+            release_file: Qubic-darwin-x64
           - runner: windows-2022
             key: windows-x64
             release_file: Qubic-windows-x64.exe
@@ -48,29 +47,64 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
-      - name: Install Linux dependencies (x64)
-        if: matrix.key == 'linux-x64'
+      - name: Build standalone Linux node
+        if: startsWith(matrix.key, 'linux-')
+        shell: bash
         run: |
-          sudo apt update -y
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt install -y clang cmake nasm \
-            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
-            zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev \
-            liblz4-dev libssl-dev libffi-dev
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE/core:/src" \
+            --workdir /src \
+            alpine:3.22 \
+            sh -euxc '
+              apk add --no-cache \
+                autoconf automake bash boost-dev build-base clang20 cmake git \
+                libffi-dev libtool linux-headers nasm openssl-dev \
+                openssl-libs-static util-linux-dev util-linux-static \
+                zlib-dev zlib-static
+              cmake -S . -B build-node \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_COMPILER=clang \
+                -DCMAKE_CXX_COMPILER=clang++ \
+                -DBUILD_BINARY=ON \
+                -DBUILD_TESTS=OFF \
+                -DENABLE_AVX512=OFF \
+                -DUSE_SANITIZER=OFF \
+                -DTESTNET=ON \
+                -DTESTNET_LITE_RAM=ON \
+                -DTESTNET_PREFILL_QUS=ON \
+                -DLITE_WASM_SC=ON \
+                -DCMAKE_NO_USE_SWAP=ON \
+                -DADDON_TX_STATUS_REQUEST=ON \
+                -DONLY_LOGGING=OFF \
+                -DQUBIC_STANDALONE_RELEASE=ON
+              cmake --build build-node --target Qubic --parallel
+            '
 
-      - name: Install Linux dependencies (ARM64)
-        if: matrix.key == 'linux-arm64'
+      - name: Smoke standalone Linux node in Alpine
+        if: startsWith(matrix.key, 'linux-')
+        shell: bash
         run: |
-          sudo apt update -y
-          sudo apt install -y clang-18 cmake nasm \
-            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
-            zlib1g-dev libzstd-dev g++ libfmt-dev liblzo2-dev liblz4-dev \
-            libssl-dev libffi-dev
+          docker run --rm \
+            --network none \
+            --read-only \
+            --tmpfs /smoke \
+            --volume "$GITHUB_WORKSPACE/core/build-node/src/Qubic:/Qubic:ro" \
+            --workdir /smoke \
+            alpine:3.22 \
+            sh -euxc '
+              set +e
+              timeout -k 2 5 /Qubic >node-smoke.log 2>&1
+              status=$?
+              set -e
+              if [ "$status" -ne 124 ] && [ "$status" -ne 137 ] &&
+                 [ "$status" -ne 143 ]; then
+                cat node-smoke.log
+                exit 1
+              fi
+            '
 
       - name: Install macOS dependencies
-        if: matrix.key == 'darwin-arm64'
+        if: startsWith(matrix.key, 'darwin-')
         run: brew install cmake nasm jq jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi
 
       - name: Cache Windows dependencies
@@ -94,24 +128,21 @@ jobs:
             'set(VCPKG_BUILD_TYPE release)'
           ) | Set-Content -Encoding ascii triplets-overlay/x64-windows-static-rel.cmake
 
-      - name: Build POSIX node
-        if: matrix.key != 'windows-x64'
+      - name: Build macOS node
+        if: startsWith(matrix.key, 'darwin-')
         shell: bash
         working-directory: core
         run: |
           set -o pipefail
           BUILD_JOBS=$(getconf _NPROCESSORS_ONLN)
-          CC=${{ matrix.cc }}
-          CXX=${{ matrix.cxx }}
-          if [ "${{ matrix.key }}" = 'darwin-arm64' ]; then
-            CC=$(xcrun -f clang)
-            CXX=$(xcrun -f clang++)
-          fi
+          CC=$(xcrun -f clang)
+          CXX=$(xcrun -f clang++)
           {
             cmake -S . -B build-node \
-              -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+              -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_C_COMPILER="$CC" \
               -DCMAKE_CXX_COMPILER="$CXX" \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
               -DBUILD_BINARY=ON \
               -DBUILD_TESTS=OFF \
               -DENABLE_AVX512=OFF \
@@ -122,15 +153,16 @@ jobs:
               -DLITE_WASM_SC=ON \
               -DCMAKE_NO_USE_SWAP=ON \
               -DADDON_TX_STATUS_REQUEST=ON \
-              -DONLY_LOGGING=OFF
+              -DONLY_LOGGING=OFF \
+              -DQUBIC_STANDALONE_RELEASE=ON
             cmake --build build-node -- -j"$BUILD_JOBS" Qubic
           } 2>&1 | tee "$RUNNER_TEMP/node-build.log"
 
       - name: Upload macOS build log on failure
-        if: failure() && matrix.key == 'darwin-arm64'
+        if: failure() && startsWith(matrix.key, 'darwin-')
         uses: actions/upload-artifact@v7
         with:
-          name: macos-build-log
+          name: macos-build-log-${{ matrix.key }}
           path: ${{ runner.temp }}/node-build.log
           if-no-files-found: ignore
 
@@ -156,7 +188,8 @@ jobs:
             -DLITE_WASM_SC=ON `
             -DCMAKE_NO_USE_SWAP=ON `
             -DADDON_TX_STATUS_REQUEST=ON `
-            -DONLY_LOGGING=OFF
+            -DONLY_LOGGING=OFF `
+            -DQUBIC_STANDALONE_RELEASE=ON
 
       - name: Build Windows node
         if: matrix.key == 'windows-x64'
@@ -253,6 +286,55 @@ jobs:
           chmod +x "$NODE_BIN"
           echo "NODE_BIN=$NODE_BIN" >> "$GITHUB_ENV"
           file "$NODE_BIN"
+
+      - name: Gate standalone Linux binary
+        if: startsWith(matrix.key, 'linux-')
+        shell: bash
+        run: |
+          file "$NODE_BIN" | grep -q 'statically linked'
+          if readelf -l "$NODE_BIN" | grep 'INTERP' >/dev/null; then
+            echo "::error::standalone Linux node has a program interpreter"
+            exit 1
+          fi
+          if readelf -d "$NODE_BIN" | grep '(NEEDED)' >/dev/null; then
+            echo "::error::standalone Linux node has dynamic dependencies"
+            exit 1
+          fi
+          if readelf -d "$NODE_BIN" | grep -E '(RPATH|RUNPATH)' >/dev/null; then
+            echo "::error::standalone Linux node has a runtime library path"
+            exit 1
+          fi
+
+      - name: Gate standalone macOS binary
+        if: startsWith(matrix.key, 'darwin-')
+        shell: bash
+        run: |
+          test "$(lipo -archs "$NODE_BIN")" = "${{ matrix.arch }}"
+          MIN_OS=$(otool -l "$NODE_BIN" | awk '
+            $1 == "cmd" && ($2 == "LC_BUILD_VERSION" || $2 == "LC_VERSION_MIN_MACOSX") { found = 1 }
+            found && ($1 == "minos" || $1 == "version") { print $2; exit }
+          ')
+          case "$MIN_OS" in
+            10.*|11.*|12.*|13.*) ;;
+            *)
+              echo "::error::expected macOS deployment target 13 or older, got $MIN_OS"
+              exit 1
+              ;;
+          esac
+          if otool -l "$NODE_BIN" | grep LC_RPATH >/dev/null; then
+            echo "::error::standalone macOS node has LC_RPATH"
+            exit 1
+          fi
+          otool -L "$NODE_BIN"
+          otool -L "$NODE_BIN" | tail -n +2 | awk '{print $1}' | while read -r dependency; do
+            case "$dependency" in
+              /usr/lib/*|/System/Library/Frameworks/*) ;;
+              *)
+                echo "::error::non-system macOS dependency: $dependency"
+                exit 1
+                ;;
+            esac
+          done
 
       - name: Install qinit dependencies
         shell: bash
@@ -433,8 +515,8 @@ jobs:
             echo "$digest_file -> $(cat "$digest_file")"
           done
           DIGEST_COUNT=$(find . -maxdepth 1 -name 'digest-*.txt' | wc -l)
-          if [ "$DIGEST_COUNT" -ne 4 ]; then
-            echo "need 4 platform digests, got $DIGEST_COUNT"
+          if [ "$DIGEST_COUNT" -ne 5 ]; then
+            echo "need 5 platform digests, got $DIGEST_COUNT"
             exit 1
           fi
           UNIQUE_DIGEST_COUNT=$(cat digest-*.txt | sort -u | wc -l)
