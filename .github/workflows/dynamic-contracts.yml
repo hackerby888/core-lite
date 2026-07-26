@@ -358,19 +358,7 @@ jobs:
         shell: bash
         run: '"$QINIT_BIN" smoke'
 
-      - name: Check live-node capacity
-        shell: bash
-        run: |
-          PROCESSOR_COUNT=$(bun -e 'console.log(require("node:os").availableParallelism())')
-          if [ "$PROCESSOR_COUNT" -ge 3 ]; then
-            echo "RUN_LIVE_NODE=true" >> "$GITHUB_ENV"
-          else
-            echo "RUN_LIVE_NODE=false" >> "$GITHUB_ENV"
-            echo "::notice::Skipping live-node parity: the runner exposes $PROCESSOR_COUNT CPUs, but core-lite needs three processor roles"
-          fi
-
       - name: Start node through compiled qinit
-        if: env.RUN_LIVE_NODE == 'true'
         shell: bash
         run: |
           "$QINIT_BIN" node run \
@@ -380,6 +368,26 @@ jobs:
             --restart \
             --keep \
             --wait 150
+
+      - name: Check live-node readiness
+        shell: bash
+        run: |
+          NODE_LOG="$HOME/.cache/qinit/run/node.log"
+          for ((attempt = 0; attempt < 150; attempt++)); do
+            if grep -q 'processors are being used' "$NODE_LOG" 2>/dev/null; then
+              echo "RUN_LIVE_NODE=true" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            if grep -q 'At least 4 healthy enabled processors are required' "$NODE_LOG" 2>/dev/null; then
+              echo "RUN_LIVE_NODE=false" >> "$GITHUB_ENV"
+              echo "::notice::Skipping live-node parity: this runner cannot initialize core-lite's processor roles"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::core-lite did not finish processor initialization"
+          tail -200 "$NODE_LOG" 2>/dev/null || true
+          exit 1
 
       - name: Gate cached wasi-sdk
         shell: bash
