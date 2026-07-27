@@ -60,7 +60,7 @@ jobs:
           WASI_SYSROOT: ${{ github.workspace }}/wasi-sdk/share/wasi-sysroot
         run: |
           bun run snapshot:core -- \
-            --core "$GITHUB_WORKSPACE/core" \
+            --core-dir "$GITHUB_WORKSPACE/core" \
             --out "$GITHUB_WORKSPACE/snapshot-out"
       - name: Stage header snapshot
         run: |

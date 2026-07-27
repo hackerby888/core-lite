@@ -363,8 +363,8 @@ jobs:
         run: |
           cd qinit
           bun run ci:core-lite-smoke -- \
-            --core "$GITHUB_WORKSPACE/core" \
-            --bin "$NODE_BIN" \
+            --core-dir "$GITHUB_WORKSPACE/core" \
+            --node-bin "$NODE_BIN" \
             --platform "${{ matrix.key }}" \
             --result "$GITHUB_WORKSPACE/compat-${{ matrix.key }}.json" \
             --qinit-bin "$QINIT_BIN" \
@@ -427,11 +427,11 @@ jobs:
         run: |
           if [ -n "${QINIT_BIN:-}" ] && [ -f "$QINIT_BIN" ]; then
             "$QINIT_BIN" build "$GITHUB_WORKSPACE/qinit/fixtures/DigestProbe.h" \
-              --name DigestProbe \
+              --contract-name DigestProbe \
               --slot 28 \
-              --core "$GITHUB_WORKSPACE/core" \
+              --core-dir "$GITHUB_WORKSPACE/core" \
               --out "$RUNNER_TEMP/qinit-build-diag" \
-              --native \
+              --compiler clang \
               --skip-verify \
               --json || true
           fi
