@@ -7,11 +7,6 @@ on:
         description: "release tag"
         required: true
         default: "qinit-dev"
-      compat_mode:
-        description: "default, latest development ref, or pinned production commit"
-        type: choice
-        options: [default, latest, pinned]
-        default: default
       qinit_repository:
         description: "temporary owner/repo override (requires qinit_ref)"
         required: false
@@ -30,7 +25,6 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yml
     with:
-      compat_mode: ${{ inputs.compat_mode || 'default' }}
       qinit_repository: ${{ inputs.qinit_repository || '' }}
       qinit_ref: ${{ inputs.qinit_ref || '' }}
 
