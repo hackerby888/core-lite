@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
-project(qubic_core CXX ASM_NASM)
+project(qubic_core CXX)
+
+if(NOT WIN32)
+    enable_language(ASM_NASM)
+endif()
 
 # GoogleTest requires at least C++20
 set(CMAKE_CXX_STANDARD 20)
@@ -34,8 +38,8 @@ if(IS_ARM)
     # ARM uses system stack recovery and a shim for x86 CPUID includes.
     include_directories(${CMAKE_SOURCE_DIR}/lib/platform_common/arm_shims)
     set(CUSTOM_STACK_OBJ ${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack_arm_stub.cpp)
-elseif(WIN32)
-    # Windows uses system stack recovery instead of the Linux NASM object.
+elseif(WIN32 OR IS_MACOS)
+    # Windows and macOS use system stack recovery instead of the Linux NASM object.
     set(CUSTOM_STACK_OBJ ${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack_arm_stub.cpp)
 else()
     set(ASM_FILE "${CMAKE_CURRENT_SOURCE_DIR}/platform/custom_stack.nasm")
@@ -130,6 +134,7 @@ add_executable(
   qubic.cpp
   ${CUSTOM_STACK_OBJ}
 )
+set_target_properties(Qubic PROPERTIES SKIP_BUILD_RPATH TRUE)
 
 # Explorer asset bundling: regen embedded header when HTML/CSS/JS change.
 if(NOT WIN32)
@@ -288,11 +293,18 @@ elseif(IS_CLANG OR IS_GCC)
     )
 elseif(IS_MSVC)
     # Match Qubic.sln's CHAR16 representation and suppress Windows min/max macros.
+    set_property(TARGET Qubic PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     target_compile_options(Qubic PRIVATE
        /D_CONSOLE
        /DNOMINMAX
        /Zc:wchar_t-
        $<$<CONFIG:Release>:/DNDEBUG>
+    )
+    target_link_options(Qubic PRIVATE
+        $<$<CONFIG:Release>:/SUBSYSTEM:CONSOLE,10.00>
+        $<$<CONFIG:Release>:/DEBUG:NONE>
+        $<$<CONFIG:Release>:/OPT:REF>
+        $<$<CONFIG:Release>:/OPT:ICF>
     )
 endif()
 
@@ -318,18 +330,17 @@ elseif(WIN32)
         Threads::Threads
     )
 else()
-target_link_libraries(Qubic
+    target_link_libraries(Qubic
         platform_common
         platform_efi
-        -Wl,-Bstatic
         jsoncpp_static drogon fmt::fmt backtrace_static Blosc2::blosc2_static
-        -Wl,-Bdynamic
         Threads::Threads
         dl
         z
         rt
         m
-)
+    )
+    target_link_options(Qubic PRIVATE -static)
 endif()
 
 # qubic-cli: standalone debug tool binary (eg. read-entity, read-score-cache).
