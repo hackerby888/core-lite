@@ -34,6 +34,7 @@ add_executable(
 		assets.cpp
    		common_def.cpp
    		contract_core.cpp
+		contract_invocation_alignment.cpp
    		contract_gqmprop.cpp
    		contract_msvault.cpp
    		contract_nostromo.cpp
