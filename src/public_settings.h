@@ -62,7 +62,7 @@
 
 // The tick duration used to calculate the size of memory buffers.
 // This determines the memory footprint of the application.
-#define TICK_DURATION_FOR_ALLOCATION_MS 350
+#define TICK_DURATION_FOR_ALLOCATION_MS 225
 #define TRANSACTION_SPARSENESS 10
 // Number of ticks that are stored in the pending txs pool. This also defines how many ticks in advance a tx can be registered.
 #define PENDING_TXS_POOL_NUM_TICKS (1000 * 60 * 3ULL / TICK_DURATION_FOR_ALLOCATION_MS) // 3 minutes
@@ -176,11 +176,11 @@ static constexpr long long NEURON_VALUE_LIMIT = 1LL;
   #ifdef LONG_RUN_LOCAL_TESTNET
   // 60 days at 1s ticks; see doc/long_run_local_testnet.md
   #ifndef LONG_RUN_EPOCH_TICK_CAPACITY
-  #define LONG_RUN_EPOCH_TICK_CAPACITY 5184000ULL
+  #define LONG_RUN_EPOCH_TICK_CAPACITY 5184244ULL
   #endif
   #define TESTNET_EPOCH_DURATION LONG_RUN_EPOCH_TICK_CAPACITY
   #else
-  #define TESTNET_EPOCH_DURATION 3000ULL
+  #define TESTNET_EPOCH_DURATION 2701ULL
   #endif
 #define MAX_NUMBER_OF_TICKS_PER_EPOCH (TESTNET_EPOCH_DURATION + 3)
 #else
