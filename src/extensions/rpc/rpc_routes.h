@@ -1,17 +1,28 @@
 #pragma once
 
-// http.h endpoints as RpcReq->RpcResp router handlers (same JSON-from-state bodies, swapped
-// I/O edges). Included late in qubic.cpp so node globals are visible.
+// Generic/admin endpoints as RpcReq->RpcResp router handlers.
+// Included late in qubic.cpp so node globals are visible.
 
 #ifdef __linux__
 
 #include <string>
 #include <filesystem>
+#include <memory>
 #include <system_error>
 #include "extensions/rpc/rpc_core.h"
 #include "extensions/http/utils.h"
 #include "extensions/tick_bench.h"
 #include "extensions/tx_stats.h"
+
+// Parse a JSON request body; null on failure (mirrors drogon req->getJsonObject()).
+static std::shared_ptr<Json::Value> rpcJsonBody(const std::string& body)
+{
+    auto j = std::make_shared<Json::Value>();
+    Json::CharReaderBuilder rb; std::string err;
+    const std::unique_ptr<Json::CharReader> rd(rb.newCharReader());
+    if (!rd->parse(body.data(), body.data() + body.size(), j.get(), &err)) return nullptr;
+    return j;
+}
 
 // Was in http.h; the RPC routes reference it for passcode-gated endpoints.
 extern unsigned long long httpPasscodes[4];
@@ -232,6 +243,9 @@ RPC_ROUTE("GET", "/set-operator-seed")
     return jsonResp(json);
 }
 
-#include "extensions/rpc/rpc_routes_controllers.h"
+#include "extensions/http/controller/explorer_controller.h"
+#include "extensions/http/controller/rpc_stats_controller.h"
+#include "extensions/http/controller/rpc_live_controller.h"
+#include "extensions/http/controller/rpc_queryv2_controller.h"
 
 #endif // __linux__

@@ -1,7 +1,6 @@
 #pragma once
 
-// Static helpers from RpcQueryV2Controller — extracted so the queryv2 RPC routes
-// don't depend on the drogon controller. No drogon types; pure data manipulation.
+// Static helpers for the query-v2 RPC handlers. No Drogon types; pure data manipulation.
 
 #include "extensions/http/utils.h"
 #include "extensions/utils.h"

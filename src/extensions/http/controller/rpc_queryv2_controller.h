@@ -1,7 +1,6 @@
 #pragma once
 
-// /query/v1 endpoints as RpcReq->RpcResp handlers; reuses RpcQueryV2Controller's static log
-// helpers verbatim (its drogon registration is inert with no loop running). Edges swapped.
+// Query-v2 endpoints as RpcReq->RpcResp router handlers.
 
 #ifdef __linux__
 
