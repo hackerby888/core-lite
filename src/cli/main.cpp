@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cerrno>
 #include <filesystem>
+#include <limits>
 #include <string>
 
 #include "platform/host_file.h"
@@ -303,23 +304,22 @@ static int cmdReadScoreCache(int argc, char** argv)
         bytesToHex(e.miningSeed.m256i_u8, 32, seedHex);
         bytesToHex(e.nonce.m256i_u8, 32, nonceHex);
 
-        bool isHyper = (e.nonce.m256i_u8[0] & 1) == 0;
-        const char* algo = isHyper ? "HyperIdentity" : "Addition";
-        unsigned int s = (unsigned int)e.score;
-        bool good = (s != 0xFFFFFFFFU); // INVALID_SCORE_VALUE
-        if (good && isHyper)
-            good = (s >= HYPERIDENTITY_SOLUTION_THRESHOLD_DEFAULT
-                    && s <= HYPERIDENTITY_NUMBER_OF_OUTPUT_NEURONS);
-        else if (good)
-            good = (s >= ADDITION_SOLUTION_THRESHOLD_DEFAULT
-                    && s <= ADDITION_NUMBER_OF_OUTPUT_NEURONS * (1ULL << ADDITION_NUMBER_OF_INPUT_NEURONS));
+        const unsigned char algoId = e.nonce.m256i_u8[0];
+        const bool isBpp9000 = algoId == 1;
+        const char* algo = isBpp9000 ? "BPP9000" : algoId == 0 ? "Neuraxon (reserved)" : "Unknown";
+        const unsigned int score = (unsigned int)e.score;
+        const bool valid = isBpp9000
+            && score != std::numeric_limits<unsigned int>::max()
+            && score <= BPP9000_NUMBER_OF_WINDOWS;
+        const bool good = valid && score <= BPP9000_SOLUTION_THRESHOLD_DEFAULT;
+        const char* scoreStatus = good ? "(good)" : valid ? "(above threshold)" : "(invalid)";
 
         printf("Cache index:    %d\n", i);
         printf("Identity:       %s\n", idBuf);
         printf("Mining seed:    %s\n", seedHex);
         printf("Nonce:          %s\n", nonceHex);
         printf("Algo:           %s\n", algo);
-        printf("Score:          %d %s\n", e.score, good ? "(good)" : "(below threshold)");
+        printf("Score:          %u %s\n", score, scoreStatus);
         printf("---\n");
         found++;
     }

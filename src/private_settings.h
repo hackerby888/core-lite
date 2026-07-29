@@ -1432,6 +1432,7 @@ static const unsigned char ocMachineIPs[][4] = {
 #define LOG_CONTRACT_DEBUG_MESSAGES 1
 #define LOG_CUSTOM_MESSAGES 1
 #define LOG_ORACLES 1
+#define LOG_OC 1
 #else
 #define LOG_UNIVERSE 0
 #define LOG_SPECTRUM 0
@@ -1441,6 +1442,7 @@ static const unsigned char ocMachineIPs[][4] = {
 #define LOG_CONTRACT_DEBUG_MESSAGES 0
 #define LOG_CUSTOM_MESSAGES 0
 #define LOG_ORACLES 0
+#define LOG_OC 0
 #endif
 
 static unsigned long long logReaderPasscodes[4] = {

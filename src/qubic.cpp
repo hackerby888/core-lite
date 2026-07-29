@@ -119,14 +119,14 @@
 #include "network_core/peers.h"
 
 #include "system.h"
-#include "contract_core/qpi_system_impl.h"
+#include "qpi/impl/qpi_system_impl.h"
 
 #include "assets/assets.h"
 #include "assets/net_msg_impl.h"
-#include "contract_core/qpi_asset_impl.h"
+#include "qpi/impl/qpi_assets_impl.h"
 
 #include "spectrum/spectrum.h"
-#include "contract_core/qpi_spectrum_impl.h"
+#include "qpi/impl/qpi_spectrum_impl.h"
 
 #include "logging/logging.h"
 #include "logging/net_msg_impl.h"
@@ -134,28 +134,34 @@
 #include "ticking/ticking.h"
 #include "ticking/tick_storage.h"
 #include "ticking/pending_txs_pool.h"
-#include "contract_core/qpi_ticking_impl.h"
+#include "qpi/impl/qpi_ticking_impl.h"
 #include "vote_counter.h"
 #include "ticking/execution_fee_report_collector.h"
 #include "ticking/stable_computor_index.h"
 #include "network_messages/execution_fees.h"
 
 #include "contract_core/ipo.h"
-#include "contract_core/qpi_ipo_impl.h"
+#include "qpi/impl/qpi_ipo_impl.h"
 
 #include "addons/tx_status_request.h"
 
 #include "files/files.h"
 #include "mining/mining.h"
 #include "mining/custom_qubic_mining_storage.h"
+#include "mining/bpp9000_task.generated.h"
 
 #include "oracle_core/oracle_engine.h"
 #include "oracle_core/net_msg_impl.h"
 #include "oracle_core/snapshot_files.h"
 #include "oracle_core/oracle_interfaces_def.h"
-#include "contract_core/qpi_oracle_impl.h"
+#include "qpi/impl/qpi_oracle_impl.h"
 
-#include "contract_core/qpi_mining_impl.h"
+#include "oc_core/oc_engine.h"
+#include "oc_core/oc_interfaces_def.h"
+#include "oc_core/snapshot_files.h"
+#include "qpi/impl/qpi_oc_impl.h"
+
+#include "qpi/impl/qpi_mining_impl.h"
 #include "extensions/core_utils.h"
 #include "revenue.h"
 
@@ -217,6 +223,11 @@ TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
 #define MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET 3 // Must be 3+
 #define ORACLE_REPLY_COMMIT_PUBLICATION_OFFSET 4
 #define ORACLE_REPLY_REVEAL_PUBLICATION_OFFSET 3
+#define OC_AUTH_SIGNATURE_PUBLICATION_OFFSET 3 // Must be 3+: tick data for T+2 is already crafted during processTick(T)
+static_assert(OC_AUTH_RESCHEDULE_TICKS > OC_AUTH_SIGNATURE_PUBLICATION_OFFSET,
+    "A retry must not fire before the previous attempt's target tick has executed.");
+static_assert(OC_AUTH_RESCHEDULE_TICKS + OC_AUTH_SIGNATURE_PUBLICATION_OFFSET < OC_INVOCATION_TIMEOUT_DEFAULT_TICKS,
+    "The first retry must be able to execute before the invocation times out.");
 #define TIME_ACCURACY 5000
 constexpr unsigned long long TARGET_MAINTHREAD_LOOP_DURATION = 30; // mcs, it is the target duration of the main thread loop
 constexpr unsigned int COMMON_BUFFERS_COUNT = 2;
@@ -261,7 +272,7 @@ static bool forceVerifySolutions = false;
 static bool forceBroadcastInvalidSolution = false;
 static unsigned int gFbisCount = 1;          // test: number of solution txs to inject per tick
 static bool gFbisSameComputor = false;       // test: all from one computor (drains it -> out-of-qus)
-static int gTestSolutionThreshold = -1;      // test: override runtime solution threshold (-1 = off, 0 = all valid)
+static int gTestSolutionThreshold = -1;      // test: override runtime Bpp9000 threshold (-1 = off)
 
 static volatile unsigned char epochTransitionState = 0;
 static volatile unsigned char epochTransitionCleanMemoryFlag = 1;
@@ -349,15 +360,20 @@ static int nSolutionProcessorIDs = 0;
 static ScoreFunction<
     NUMBER_OF_SOLUTION_PROCESSORS
 > * score = nullptr;
+static unsigned char* gBpp9000TaskBuffer = nullptr;
 static volatile char solutionsLock = 0;
 static unsigned long long* minerSolutionFlags = NULL;
 static volatile m256i minerPublicKeys[MAX_NUMBER_OF_MINERS + 1];
 static volatile unsigned int minerScores[MAX_NUMBER_OF_MINERS + 1];
+static volatile unsigned int minerBestScoreTicks[MAX_NUMBER_OF_MINERS + 1];
 static volatile unsigned int numberOfMiners = NUMBER_OF_COMPUTORS;
 static m256i competitorPublicKeys[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
 static unsigned int competitorScores[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
+static unsigned int competitorTicks[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
 static bool competitorComputorStatuses[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
-static unsigned int minimumComputorScore = 0, minimumCandidateScore = 0;
+static constexpr unsigned int NO_MINER_SCORE = 0xFFFFFFFFU;
+static unsigned int minimumComputorScore = NO_MINER_SCORE;
+static unsigned int minimumCandidateScore = NO_MINER_SCORE;
 static int solutionThreshold[MAX_NUMBER_EPOCH][score_engine::AlgoType::MaxAlgoCount];
 static unsigned long long solutionTotalExecutionTicks = 0;
 static unsigned long long K12MeasurementsCount = 0;
@@ -366,10 +382,22 @@ static volatile char minerScoreArrayLock = 0;
 static SpecialCommandGetMiningScoreRanking<MAX_NUMBER_OF_MINERS> requestMiningScoreRanking;
 static constexpr unsigned int gScoreMultiplier[score_engine::AlgoType::MaxAlgoCount] =
 {
-    HYPERIDENTITY_SOLUTION_MULTIPLER,   // HyperIdentity
-    ADDITION_SOLUTION_MULTIPLER         // Addition
+    NEURAXON_SOLUTION_MULTIPLER,   // Neuraxon (reserved)
+    BPP9000_SOLUTION_MULTIPLER     // Bpp9000
 };
 
+// Active solution threshold for an algorithm
+static int getSolutionThreshold(score_engine::AlgoType selectedAlgo)
+{
+    if (selectedAlgo >= score_engine::AlgoType::MaxAlgoCount)
+    {
+        return 0;
+    }
+    return (system.epoch < MAX_NUMBER_EPOCH)
+        ? solutionThreshold[system.epoch][selectedAlgo]
+        : score_engine::DEFAUL_SOLUTION_THRESHOLD[selectedAlgo];
+}
+static bool applyBpp9000Task();
 
 // DOGE merged-mining shares
 static volatile char gDogeMiningSharesCountLock = 0;
@@ -385,8 +413,10 @@ struct
     Tick etalonTick;
     m256i minerPublicKeys[MAX_NUMBER_OF_MINERS + 1];
     unsigned int minerScores[MAX_NUMBER_OF_MINERS + 1];
+    unsigned int minerBestScoreTicks[MAX_NUMBER_OF_MINERS + 1];
     m256i competitorPublicKeys[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
     unsigned int competitorScores[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
+    unsigned int competitorTicks[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
     bool competitorComputorStatuses[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
     m256i currentRandomSeed;    
     int solutionPublicationTicks[MAX_NUMBER_OF_SOLUTIONS];
@@ -820,11 +850,12 @@ static void processBroadcastMessage(const unsigned long long processorNumber, Re
                                 {
                                 case MESSAGE_TYPE_SOLUTION:
                                 {
-                                    if (messagePayloadSize >= 32 + 32)
+                                    if (messagePayloadSize >= 32 + 32 + 4)
                                     {
 
                                         const m256i& solution_miningSeed = *(m256i*)((unsigned char*)request + sizeof(BroadcastMessage));
                                         const m256i& solution_nonce = *(m256i*)((unsigned char*)request + sizeof(BroadcastMessage) + 32);
+                                        const unsigned int solution_claimedScore = *(unsigned int*)((unsigned char*)request + sizeof(BroadcastMessage) + 64);
                                         unsigned int k;
                                         for (k = 0; k < system.numberOfSolutions; k++)
                                         {
@@ -839,10 +870,9 @@ static void processBroadcastMessage(const unsigned long long processorNumber, Re
                                         {
                                             unsigned int solutionScore = (*score)(processorNumber, request->destinationPublicKey, solution_miningSeed, solution_nonce);
                                             score_engine::AlgoType selectedAlgo = score_engine::getAlgoType(solution_nonce.m256i_u8);
-                                            const int threshold = (system.epoch < MAX_NUMBER_EPOCH) ?
-                                                solutionThreshold[system.epoch][selectedAlgo]
-                                                : score_engine::DEFAUL_SOLUTION_THRESHOLD[selectedAlgo];
+                                            const int threshold = getSolutionThreshold(selectedAlgo);
                                             if (system.numberOfSolutions < MAX_NUMBER_OF_SOLUTIONS
+                                                && solution_claimedScore == solutionScore
                                                 && score->isValidScore(solutionScore, selectedAlgo)
                                                 && score->isGoodScore(solutionScore, threshold, selectedAlgo))
                                             {
@@ -861,7 +891,8 @@ static void processBroadcastMessage(const unsigned long long processorNumber, Re
                                                 {
                                                     system.solutions[system.numberOfSolutions].computorPublicKey = request->destinationPublicKey;
                                                     system.solutions[system.numberOfSolutions].miningSeed = solution_miningSeed;
-                                                    system.solutions[system.numberOfSolutions++].nonce = solution_nonce;
+                                                    system.solutions[system.numberOfSolutions].nonce = solution_nonce;
+                                                    system.solutions[system.numberOfSolutions++].score = solutionScore;
                                                 }
 
                                                 RELEASE(solutionsLock);
@@ -1639,8 +1670,8 @@ static void processRequestSystemInfo(Peer* peer, RequestResponseHeader* header)
     respondedSystemInfo.numberOfTransactions = numberOfTransactions;
 
     respondedSystemInfo.randomMiningSeed = score->currentRandomSeed;
-    respondedSystemInfo.solutionThreshold = (system.epoch < MAX_NUMBER_EPOCH) ? solutionThreshold[system.epoch][score_engine::AlgoType::HyperIdentity] : HYPERIDENTITY_SOLUTION_THRESHOLD_DEFAULT;
-    respondedSystemInfo.solutionAdditionalThreshold = (system.epoch < MAX_NUMBER_EPOCH) ? solutionThreshold[system.epoch][score_engine::AlgoType::Addition] : ADDITION_SOLUTION_THRESHOLD_DEFAULT;
+    respondedSystemInfo.solutionThreshold = (system.epoch < MAX_NUMBER_EPOCH) ? solutionThreshold[system.epoch][score_engine::AlgoType::Bpp9000] : BPP9000_SOLUTION_THRESHOLD_DEFAULT;
+    respondedSystemInfo.solutionAdditionalThreshold = (system.epoch < MAX_NUMBER_EPOCH) ? solutionThreshold[system.epoch][score_engine::AlgoType::Neuraxon] : NEURAXON_SOLUTION_THRESHOLD_DEFAULT;
 
     respondedSystemInfo.totalSpectrumAmount = spectrumInfo.totalAmount;
     respondedSystemInfo.currentEntityBalanceDustThreshold = (dustThresholdBurnAll > dustThresholdBurnHalf) ? dustThresholdBurnAll : dustThresholdBurnHalf;
@@ -1837,13 +1868,13 @@ static void processSpecialCommand(Peer* peer, RequestResponseHeader* header)
                 // can only set future epoch
                 if (_request->epoch > system.epoch && _request->epoch < MAX_NUMBER_EPOCH)
                 {
-                    if (_request->algoType == score_engine::AlgoType::HyperIdentity)
+                    if (_request->algoType == score_engine::AlgoType::Neuraxon)
                     {
-                        solutionThreshold[_request->epoch][score_engine::AlgoType::HyperIdentity] = _request->threshold;
+                        solutionThreshold[_request->epoch][score_engine::AlgoType::Neuraxon] = _request->threshold;
                     }
-                    else if (_request->algoType == score_engine::AlgoType::Addition)
+                    else if (_request->algoType == score_engine::AlgoType::Bpp9000)
                     {
-                        solutionThreshold[_request->epoch][score_engine::AlgoType::Addition] = _request->threshold;
+                        solutionThreshold[_request->epoch][score_engine::AlgoType::Bpp9000] = _request->threshold;
                     }
                     else // unknown algo, don't do anything
                     {
@@ -1854,13 +1885,13 @@ static void processSpecialCommand(Peer* peer, RequestResponseHeader* header)
                 response.everIncreasingNonceAndCommandType = _request->everIncreasingNonceAndCommandType;
                 response.epoch = _request->epoch;
                 response.algoType = _request->algoType;
-                if (_request->algoType == score_engine::AlgoType::HyperIdentity)
+                if (_request->algoType == score_engine::AlgoType::Neuraxon)
                 {
-                    response.threshold = (_request->epoch < MAX_NUMBER_EPOCH) ? solutionThreshold[_request->epoch][score_engine::AlgoType::HyperIdentity] : HYPERIDENTITY_SOLUTION_THRESHOLD_DEFAULT;
+                    response.threshold = (_request->epoch < MAX_NUMBER_EPOCH) ? solutionThreshold[_request->epoch][score_engine::AlgoType::Neuraxon] : NEURAXON_SOLUTION_THRESHOLD_DEFAULT;
                 }
-                else if (_request->algoType == score_engine::AlgoType::Addition)
+                else if (_request->algoType == score_engine::AlgoType::Bpp9000)
                 {
-                    response.threshold = (_request->epoch < MAX_NUMBER_EPOCH) ? solutionThreshold[_request->epoch][score_engine::AlgoType::Addition] : ADDITION_SOLUTION_THRESHOLD_DEFAULT;
+                    response.threshold = (_request->epoch < MAX_NUMBER_EPOCH) ? solutionThreshold[_request->epoch][score_engine::AlgoType::Bpp9000] : BPP9000_SOLUTION_THRESHOLD_DEFAULT;
                 }
                 else // unknown algo, respond with an invalid number
                 {
@@ -2060,8 +2091,9 @@ static void setNewMiningSeed()
 static bool gIsInFullExternalTime = false;
 static void checkAndSwitchMiningPhase(short tickEpoch, TimeDate tickDate, bool resetPhase)
 {
-    // The mining seed rotates every MINING_SEED_ROTATION_INTERVAL ticks.
-    if (resetPhase || (system.tick % MINING_SEED_ROTATION_INTERVAL) == 0)
+    // One shared random2 pool per epoch, the mining seed is set once at epoch begin (from the epoch-start
+    // spectrum digest) and stays fixed for the whole epoch
+    if (resetPhase)
     {
         setNewMiningSeed();
     }
@@ -2733,7 +2765,19 @@ static bool processTickTransactionContractProcedure(const Transaction* transacti
     return transaction->amount > 0;
 }
 
-static void processTickTransactionSolution(const MiningSolutionTransaction* transaction, unsigned int transactionIndex, const unsigned long long processorNumber, bool isRevalidation = false)
+// Ranking order of miners and competitors, the score is an error count, so the smaller score ranks
+// first, and on equal score the entry that reached it in the earlier tick ranks first. Returns true
+// if entry A ranks below entry B.
+static bool ranksBelow(unsigned int scoreA, unsigned int tickA, unsigned int scoreB, unsigned int tickB)
+{
+    if (scoreA != scoreB)
+    {
+        return scoreA > scoreB;
+    }
+    return tickA > tickB;
+}
+
+static void processTickTransactionSolution(const MiningSolutionTransaction* transaction, unsigned int transactionIndex, const unsigned long long processorNumber)
 {
     PROFILE_SCOPE();
 
@@ -2743,7 +2787,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
     ASSERT(transaction->tick == system.tick);
     ASSERT(isZero(transaction->destinationPublicKey));
     ASSERT(transaction->amount >=MiningSolutionTransaction::minAmount()
-            && transaction->inputSize == 64
+            && transaction->inputSize == MiningSolutionTransaction::minInputSize()
             && transaction->inputType == MiningSolutionTransaction::transactionType());
 
     m256i data[3] = { transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce };
@@ -2760,24 +2804,24 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
         minerSolutionFlags[flagIndices[0] >> 6] |= (1ULL << (flagIndices[0] & 63));
         minerSolutionFlags[flagIndices[1] >> 6] |= (1ULL << (flagIndices[1] & 63));
         score_engine::AlgoType selectedAlgo = score_engine::getAlgoType(transaction->nonce.m256i_u8);
-        const int threshold = (system.epoch < MAX_NUMBER_EPOCH) ?
-                solutionThreshold[system.epoch][selectedAlgo]
-                : score_engine::DEFAUL_SOLUTION_THRESHOLD[selectedAlgo];
+        const int threshold = getSolutionThreshold(selectedAlgo);
         unsigned int solutionScore;
-        if (isMainMode() || isRevalidation || isLastTickInEpoch() || forceVerifySolutions)
+        if (isMainMode() || gReRunStrict || isLastTickInEpoch() || forceVerifySolutions)
         {
             solutionScore = (*::score)(processorNumber, transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce);
-        } else
+        }
+        else
         {
-            // Make the score is valid
-            solutionScore = threshold + 1;
+            solutionScore = transaction->score;
         }
 
         if (score->isValidScore(solutionScore, selectedAlgo))
         {
             resourceTestingDigest ^= solutionScore;
             KangarooTwelve(&resourceTestingDigest, sizeof(resourceTestingDigest), &resourceTestingDigest, sizeof(resourceTestingDigest));
-            if (score->isGoodScore(solutionScore, threshold, selectedAlgo))
+            // The deposit is only returned when the miner's claimed score matches the one computed
+            if (transaction->score == solutionScore
+                && score->isGoodScore(solutionScore, threshold, selectedAlgo))
             {
                 // Solution deposit return
                 {
@@ -2811,6 +2855,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
                             system.solutions[system.numberOfSolutions].computorPublicKey = transaction->sourcePublicKey;
                             system.solutions[system.numberOfSolutions].miningSeed = transaction->miningSeed;
                             system.solutions[system.numberOfSolutions].nonce = transaction->nonce;
+                            system.solutions[system.numberOfSolutions].score = solutionScore;
                             solutionPublicationTicks[system.numberOfSolutions++] = SOLUTION_RECORDED_FLAG;
                         }
 
@@ -2820,33 +2865,68 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
                     }
                 }
 
+                // A miner is ranked by its single best score of the epoch, not by the number of
+                // accepted solutions
+                const unsigned int newScore = solutionScore * gScoreMultiplier[selectedAlgo];
+                const unsigned int newTick = system.tick;
+
                 ACQUIRE(minerScoreArrayLock);
+                bool minerEntryChanged = false;
                 unsigned int minerIndex;
                 for (minerIndex = 0; minerIndex < numberOfMiners; minerIndex++)
                 {
                     if (transaction->sourcePublicKey == minerPublicKeys[minerIndex])
                     {
-                        minerScores[minerIndex] += gScoreMultiplier[selectedAlgo];
+                        if (newScore < minerScores[minerIndex])
+                        {
+                            minerScores[minerIndex] = newScore;
+                            minerBestScoreTicks[minerIndex] = newTick;
+                            minerEntryChanged = true;
+                        }
 
                         break;
                     }
                 }
-                if (minerIndex == numberOfMiners
-                    && numberOfMiners < MAX_NUMBER_OF_MINERS)
+                if (minerIndex == numberOfMiners)
                 {
-                    minerPublicKeys[numberOfMiners] = transaction->sourcePublicKey;
-                    minerScores[numberOfMiners++] = gScoreMultiplier[selectedAlgo];
+                    if (numberOfMiners < MAX_NUMBER_OF_MINERS)
+                    {
+                        minerPublicKeys[numberOfMiners] = transaction->sourcePublicKey;
+                        minerBestScoreTicks[numberOfMiners] = newTick;
+                        minerScores[numberOfMiners++] = newScore;
+                        minerEntryChanged = true;
+                    }
+                    else
+                    {
+                        // The table is full. Entries beyond the computor block are kept sorted, so the
+                        // worst-ranked one sits at the end and is replaced only if the newcomer outranks it.
+                        const unsigned int worstIndex = numberOfMiners - 1;
+                        if (ranksBelow(minerScores[worstIndex], minerBestScoreTicks[worstIndex], newScore, newTick))
+                        {
+                            minerPublicKeys[worstIndex] = transaction->sourcePublicKey;
+                            minerScores[worstIndex] = newScore;
+                            minerBestScoreTicks[worstIndex] = newTick;
+                            minerIndex = worstIndex;
+                            minerEntryChanged = true;
+                        }
+                    }
                 }
 
-                const m256i tmpPublicKey = minerPublicKeys[minerIndex];
-                const unsigned int tmpScore = minerScores[minerIndex];
-                while (minerIndex > (unsigned int)(minerIndex < NUMBER_OF_COMPUTORS ? 0 : NUMBER_OF_COMPUTORS)
-                    && minerScores[minerIndex - 1] < minerScores[minerIndex])
+                if (minerEntryChanged)
                 {
-                    minerPublicKeys[minerIndex] = minerPublicKeys[minerIndex - 1];
-                    minerScores[minerIndex] = minerScores[minerIndex - 1];
-                    minerPublicKeys[--minerIndex] = tmpPublicKey;
-                    minerScores[minerIndex] = tmpScore;
+                    const m256i tmpPublicKey = minerPublicKeys[minerIndex];
+                    const unsigned int tmpScore = minerScores[minerIndex];
+                    const unsigned int tmpTick = minerBestScoreTicks[minerIndex];
+                    while (minerIndex > (unsigned int)(minerIndex < NUMBER_OF_COMPUTORS ? 0 : NUMBER_OF_COMPUTORS)
+                        && ranksBelow(minerScores[minerIndex - 1], minerBestScoreTicks[minerIndex - 1], minerScores[minerIndex], minerBestScoreTicks[minerIndex]))
+                    {
+                        minerPublicKeys[minerIndex] = minerPublicKeys[minerIndex - 1];
+                        minerScores[minerIndex] = minerScores[minerIndex - 1];
+                        minerBestScoreTicks[minerIndex] = minerBestScoreTicks[minerIndex - 1];
+                        minerPublicKeys[--minerIndex] = tmpPublicKey;
+                        minerScores[minerIndex] = tmpScore;
+                        minerBestScoreTicks[minerIndex] = tmpTick;
+                    }
                 }
 
                 // combine 225 worst current computors with 225 best candidates
@@ -2854,16 +2934,19 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
                 {
                     competitorPublicKeys[i] = minerPublicKeys[QUORUM + i];
                     competitorScores[i] = minerScores[QUORUM + i];
+                    competitorTicks[i] = minerBestScoreTicks[QUORUM + i];
                     competitorComputorStatuses[i] = true;
 
                     if (NUMBER_OF_COMPUTORS + i < numberOfMiners)
                     {
                         competitorPublicKeys[i + (NUMBER_OF_COMPUTORS - QUORUM)] = minerPublicKeys[NUMBER_OF_COMPUTORS + i];
                         competitorScores[i + (NUMBER_OF_COMPUTORS - QUORUM)] = minerScores[NUMBER_OF_COMPUTORS + i];
+                        competitorTicks[i + (NUMBER_OF_COMPUTORS - QUORUM)] = minerBestScoreTicks[NUMBER_OF_COMPUTORS + i];
                     }
                     else
                     {
-                        competitorScores[i + (NUMBER_OF_COMPUTORS - QUORUM)] = 0;
+                        competitorScores[i + (NUMBER_OF_COMPUTORS - QUORUM)] = NO_MINER_SCORE;
+                        competitorTicks[i + (NUMBER_OF_COMPUTORS - QUORUM)] = 0;
                     }
                     competitorComputorStatuses[i + (NUMBER_OF_COMPUTORS - QUORUM)] = false;
                 }
@@ -2875,15 +2958,18 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
                     int j = i;
                     const m256i tmpPublicKey = competitorPublicKeys[j];
                     const unsigned int tmpScore = competitorScores[j];
+                    const unsigned int tmpTick = competitorTicks[j];
                     const bool tmpComputorStatus = false;
                     while (j
-                        && competitorScores[j - 1] < competitorScores[j])
+                        && ranksBelow(competitorScores[j - 1], competitorTicks[j - 1], competitorScores[j], competitorTicks[j]))
                     {
                         competitorPublicKeys[j] = competitorPublicKeys[j - 1];
                         competitorScores[j] = competitorScores[j - 1];
+                        competitorTicks[j] = competitorTicks[j - 1];
                         competitorComputorStatuses[j] = competitorComputorStatuses[j - 1];
                         competitorPublicKeys[--j] = tmpPublicKey;
                         competitorScores[j] = tmpScore;
+                        competitorTicks[j] = tmpTick;
                         competitorComputorStatuses[j] = tmpComputorStatus;
                     }
                 }
@@ -2950,6 +3036,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
                     system.solutions[system.numberOfSolutions].computorPublicKey = transaction->sourcePublicKey;
                     system.solutions[system.numberOfSolutions].miningSeed = transaction->miningSeed;
                     system.solutions[system.numberOfSolutions].nonce = transaction->nonce;
+                    system.solutions[system.numberOfSolutions].score = transaction->score;
                     solutionPublicationTicks[system.numberOfSolutions++] = SOLUTION_RECORDED_FLAG;
                 }
 
@@ -3077,7 +3164,7 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                     if (transaction->amount >= MiningSolutionTransaction::minAmount()
                         && transaction->inputSize >= MiningSolutionTransaction::minInputSize())
                     {
-                        processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber, gReRunStrict);
+                        processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber);
                     }
                 }
                 break;
@@ -3091,6 +3178,12 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                 case OracleReplyRevealTransactionPrefix::transactionType():
                 {
                     oracleEngine.processOracleReplyRevealTransaction((OracleReplyRevealTransactionPrefix*)transaction, transactionIndex);
+                }
+                break;
+
+                case OcAuthSignatureTransactionPrefix::transactionType():
+                {
+                    ocEngine.processOcAuthSignatureTransaction((OcAuthSignatureTransactionPrefix*)transaction);
                 }
                 break;
 
@@ -3362,13 +3455,9 @@ static void processTick(unsigned long long processorNumber)
     PROFILE_SCOPE();
     TickBench::Scope _btTotal(TickBench::TICK_TOTAL);
 
-    // TEST: force the runtime solution threshold (e.g. 0 = injected solutions validate). Applied on
-    // both quorum + re-run nodes so they agree. HyperIdentity stays pre-activation-pinned (line ~795),
-    // so with random nonces this naturally yields a valid(Addition)/invalid(HyperIdentity) mix.
     if (gTestSolutionThreshold >= 0 && system.epoch < MAX_NUMBER_EPOCH)
     {
-        solutionThreshold[system.epoch][score_engine::AlgoType::HyperIdentity] = gTestSolutionThreshold;
-        solutionThreshold[system.epoch][score_engine::AlgoType::Addition] = gTestSolutionThreshold;
+        solutionThreshold[system.epoch][score_engine::AlgoType::Bpp9000] = gTestSolutionThreshold;
     }
 
 #ifdef TESTNET
@@ -3482,29 +3571,35 @@ static void processTick(unsigned long long processorNumber)
 #if ADDON_TX_STATUS_REQUEST
         txStatusData.tickTxIndexStart[system.tick - system.initialTick] = numberOfTransactions; // qli: part of tx_status_request add-on
 #endif
-
         // Only apply skipping compute solution when in Mainnet with Aux node (except for last tick)
-        if (isMainMode() || isTestnet() || isLastTickInEpoch()) {
+        if (isMainMode() || isTestnet() || isLastTickInEpoch() || forceVerifySolutions)
+        {
             PROFILE_NAMED_SCOPE_BEGIN("processTick(): pre-scan solutions");
             unsigned long long _bPrescanStart = __rdtsc();
             // reset solution task queue
             score->resetTaskQueue();
             // pre-scan any solution tx and add them to solution task queue
-            for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++) {
-                if (!isZero(nextTickData.transactionDigests[transactionIndex])) {
-                    if (tsCurrentTickTransactionOffsets[transactionIndex]) {
-                        Transaction *transaction = ts.tickTransactions(tsCurrentTickTransactionOffsets[transactionIndex]);
+            for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
+            {
+                if (!isZero(nextTickData.transactionDigests[transactionIndex]))
+                {
+                    if (tsCurrentTickTransactionOffsets[transactionIndex])
+                    {
+                        Transaction* transaction = ts.tickTransactions(tsCurrentTickTransactionOffsets[transactionIndex]);
                         ASSERT(transaction->checkValidity());
                         ASSERT(transaction->tick == system.tick);
                         const int spectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
-                        if (spectrumIndex >= 0) {
+                        if (spectrumIndex >= 0)
+                        {
                             // Solution transactions
                             if (isZero(transaction->destinationPublicKey)
                                 && transaction->amount >= MiningSolutionTransaction::minAmount()
-                                && transaction->inputType == MiningSolutionTransaction::transactionType()) {
-                                if (transaction->inputSize == 32 + 32) {
-                                    const m256i &solution_miningSeed = *(m256i *) transaction->inputPtr();
-                                    const m256i &solution_nonce = *(m256i *) (transaction->inputPtr() + 32);
+                                && transaction->inputType == MiningSolutionTransaction::transactionType())
+                            {
+                                if (transaction->inputSize == MiningSolutionTransaction::minInputSize())
+                                {
+                                    const m256i& solution_miningSeed = *(m256i*)transaction->inputPtr();
+                                    const m256i& solution_nonce = *(m256i*)(transaction->inputPtr() + 32);
                                     m256i data[3] = { transaction->sourcePublicKey, solution_miningSeed, solution_nonce };
                                     static_assert(sizeof(data) == 3 * 32, "Unexpected array size");
                                     unsigned int flagIndices[2];
@@ -3513,7 +3608,8 @@ static void processTick(unsigned long long processorNumber)
                                     flagIndices[0] &= (unsigned int)(NUMBER_OF_MINER_SOLUTION_FLAGS - 1);
                                     flagIndices[1] &= (unsigned int)(NUMBER_OF_MINER_SOLUTION_FLAGS - 1);
                                     if (!(minerSolutionFlags[flagIndices[0] >> 6] & (1ULL << (flagIndices[0] & 63)))
-                                    || !(minerSolutionFlags[flagIndices[1] >> 6] & (1ULL << (flagIndices[1] & 63)))) {
+                                        || !(minerSolutionFlags[flagIndices[1] >> 6] & (1ULL << (flagIndices[1] & 63))))
+                                    {
                                         score->addTask(transaction->sourcePublicKey, solution_miningSeed, solution_nonce);
                                     }
                                 }
@@ -3708,6 +3804,12 @@ static void processTick(unsigned long long processorNumber)
         // Check for oracle query timeouts (may schedule notification)
         oracleEngine.processTimeouts();
     }
+
+    // Check for OC invocation timeouts (PENDING_AUTH -> TIMEOUT)
+    ocEngine.processTimeouts();
+
+    // Push any newly AUTHORIZED bundles to configured OC machine peers
+    ocEngine.deliverAuthorizedInvocations();
 
     // Notify contracts about successfully obtained oracle replies and about errors (using contract processor)
     const OracleNotificationData* oracleNotification = oracleEngine.getNotification();
@@ -4187,6 +4289,51 @@ static void processTick(unsigned long long processorNumber)
             }
         }
 
+        // Publish OcAuthSignatureTransactions for any new PENDING_AUTH invocations
+        {
+            PROFILE_NAMED_SCOPE("processTick(): broadcast OC auth signature transactions");
+            const auto txTick = system.tick + OC_AUTH_SIGNATURE_PUBLICATION_OFFSET;
+            auto* tx = (OcAuthSignatureTransactionPrefix*)txBuffer;
+            for (unsigned int i = 0; i < numberOfOwnComputorIndices; i++)
+            {
+                const auto ownCompIdx = ownComputorIndicesMapping[i];
+                const auto overallCompIdx = ownComputorIndices[i];
+                unsigned int retCode = 0;
+                do
+                {
+                    retCode = ocEngine.getAuthSignatureTransaction(tx, overallCompIdx, txTick, retCode);
+                    if (!retCode)
+                        break;
+
+                    // Sign each item individually with the computor's key (per-item signature
+                    // over the canonical auth message). The engine left item.signature zeroed.
+                    const unsigned short itemCount = *(const unsigned short*)tx->inputPtr();
+                    auto* items = reinterpret_cast<OcAuthSignatureItem*>(tx->inputPtr() + 2 * sizeof(unsigned short));
+                    m256i itemHash;
+                    for (unsigned short itemIdx = 0; itemIdx < itemCount; ++itemIdx)
+                    {
+                        OcEngine::computeOcAuthMessageHash(
+                            items[itemIdx].epoch,
+                            items[itemIdx].interfaceIndex,
+                            items[itemIdx].invocationId,
+                            items[itemIdx].paramsDigest,
+                            itemHash);
+                        sign(
+                            computorSubseeds[ownCompIdx].m256i_u8,
+                            computorPublicKeys[ownCompIdx].m256i_u8,
+                            (const unsigned char*)&itemHash,
+                            items[itemIdx].signature);
+                    }
+
+                    // Sign and broadcast outer tx
+                    KangarooTwelve(tx, sizeof(Transaction) + tx->inputSize, digest, sizeof(digest));
+                    sign(computorSubseeds[ownCompIdx].m256i_u8, computorPublicKeys[ownCompIdx].m256i_u8, digest, tx->signaturePtr());
+                    enqueueResponse(NULL, tx->totalSize(), BROADCAST_TRANSACTION, 0, tx);
+                }
+                while (retCode != UINT32_MAX);
+            }
+        }
+
         commonBuffers.releaseBuffer(txBuffer);
     }
 
@@ -4249,31 +4396,21 @@ static void processTick(unsigned long long processorNumber)
                 // Compute tick offset, when to publish solution
                 unsigned int publishingTickOffset = MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET;
 
-                // Do not publish if the solution tx would land in the next mining-seed rotation,
-                // preventing loss of security deposit from verifying against a rotated seed.
-                if ((system.tick % MINING_SEED_ROTATION_INTERVAL) + publishingTickOffset >= MINING_SEED_ROTATION_INTERVAL)
-                    continue;
-
-                // Prepare, sign, and broadcast MiningSolutionTransaction
-                struct
-                {
-                    Transaction transaction;
-                    m256i miningSeed;
-                    m256i nonce;
-                    unsigned char signature[SIGNATURE_SIZE];
-                } payload;
-                static_assert(sizeof(payload) == sizeof(Transaction) + 32 + 32 + SIGNATURE_SIZE, "Unexpected struct size!");
-                payload.transaction.sourcePublicKey = computorPublicKeys[i];
-                payload.transaction.destinationPublicKey = m256i::zero();
-                payload.transaction.amount = MiningSolutionTransaction::minAmount();
-                solutionPublicationTicks[solutionIndexToPublish] = payload.transaction.tick = system.tick + publishingTickOffset;
-                payload.transaction.inputType = MiningSolutionTransaction::transactionType();
-                payload.transaction.inputSize = sizeof(payload.miningSeed) + sizeof(payload.nonce);
+                // Prepare, sign, and broadcast the solution transaction
+                MiningSolutionTransaction payload;
+                payload.sourcePublicKey = computorPublicKeys[i];
+                payload.destinationPublicKey = m256i::zero();
+                payload.amount = MiningSolutionTransaction::minAmount();
+                solutionPublicationTicks[solutionIndexToPublish] = payload.tick = system.tick + publishingTickOffset;
+                payload.inputType = MiningSolutionTransaction::transactionType();
+                payload.inputSize = MiningSolutionTransaction::minInputSize();
                 payload.miningSeed = system.solutions[solutionIndexToPublish].miningSeed;
                 payload.nonce = system.solutions[solutionIndexToPublish].nonce;
+                payload.score = system.solutions[solutionIndexToPublish].score;
+                payload.reserved = 0;
 
                 unsigned char digest[32];
-                KangarooTwelve(&payload.transaction, sizeof(payload.transaction) + sizeof(payload.miningSeed) + sizeof(payload.nonce), digest, sizeof(digest));
+                KangarooTwelve(&payload, sizeof(Transaction) + MiningSolutionTransaction::minInputSize(), digest, sizeof(digest));
                 sign(computorSubseeds[i].m256i_u8, computorPublicKeys[i].m256i_u8, digest, payload.signature);
 
                 enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
@@ -4282,18 +4419,28 @@ static void processTick(unsigned long long processorNumber)
 
     }
 
-    // TEST: broadcast random-nonce solution tx(s) to exercise the wrong-solution rollback path on
-    // receiving nodes. Runs in any mode (an AUX can broadcast too), so a lite node can self-inject.
-    // Skip across a mining-seed rotation window (the tx would otherwise verify against a rotated seed).
-    if (forceBroadcastInvalidSolution
-        && computorSeedsCount > 0
-        && (system.tick % MINING_SEED_ROTATION_INTERVAL) + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET < MINING_SEED_ROTATION_INTERVAL)
+    // Keep the test injector available in AUX mode so a rollback node can self-inject.
+    if (forceBroadcastInvalidSolution && computorSeedsCount > 0)
     {
         const unsigned int txTick = system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET;
+        const unsigned int claimedScore =
+            (unsigned int)getSolutionThreshold(score_engine::AlgoType::Bpp9000);
         if (gFbisCount > 1 || gFbisSameComputor)
-            TestInvalidSolution::broadcastN(score->currentRandomSeed, txTick, gFbisCount, gFbisSameComputor);
+        {
+            TestInvalidSolution::broadcastN(
+                score->currentRandomSeed,
+                txTick,
+                gFbisCount,
+                gFbisSameComputor,
+                claimedScore);
+        }
         else
-            TestInvalidSolution::broadcastRandom(score->currentRandomSeed, txTick);
+        {
+            TestInvalidSolution::broadcastRandom(
+                score->currentRandomSeed,
+                txTick,
+                claimedScore);
+        }
     }
 
 #ifndef NDEBUG
@@ -4391,6 +4538,7 @@ static void beginEpoch()
     ts.beginEpoch(system.initialTick);
     pendingTxsPool.beginEpoch(system.initialTick);
     oracleEngine.beginEpoch();
+    ocEngine.beginEpoch();
     voteCounter.init();
 #ifndef NDEBUG
     ts.checkStateConsistencyWithAssert();
@@ -4427,21 +4575,24 @@ static void beginEpoch()
     score->resetTaskQueue();
     setMem(minerSolutionFlags, NUMBER_OF_MINER_SOLUTION_FLAGS / 8, 0);
     setMem((void*)minerPublicKeys, sizeof(minerPublicKeys), 0);
-    setMem((void*)minerScores, sizeof(minerScores), 0);
+    setMem((void*)minerScores, sizeof(minerScores), 0xFF);
+    setMem((void*)minerBestScoreTicks, sizeof(minerBestScoreTicks), 0);
     numberOfMiners = NUMBER_OF_COMPUTORS;
     setMem(competitorPublicKeys, sizeof(competitorPublicKeys), 0);
-    setMem(competitorScores, sizeof(competitorScores), 0);
+    setMem(competitorScores, sizeof(competitorScores), 0xFF);
+    setMem(competitorTicks, sizeof(competitorTicks), 0);
     setMem(competitorComputorStatuses, sizeof(competitorComputorStatuses), 0);
-    minimumComputorScore = 0;
-    minimumCandidateScore = 0;
+    minimumComputorScore = NO_MINER_SCORE;
+    minimumCandidateScore = NO_MINER_SCORE;
 
-    if (system.epoch < MAX_NUMBER_EPOCH && !score_engine::checkAlgoThreshold(solutionThreshold[system.epoch][score_engine::AlgoType::HyperIdentity], score_engine::AlgoType::HyperIdentity))
+    if (system.epoch < MAX_NUMBER_EPOCH && !score_engine::checkAlgoThreshold(solutionThreshold[system.epoch][score_engine::AlgoType::Bpp9000], score_engine::AlgoType::Bpp9000))
     {
-        solutionThreshold[system.epoch][score_engine::AlgoType::HyperIdentity] = HYPERIDENTITY_SOLUTION_THRESHOLD_DEFAULT;
+        solutionThreshold[system.epoch][score_engine::AlgoType::Bpp9000] = BPP9000_SOLUTION_THRESHOLD_DEFAULT;
     }
-    if (system.epoch < MAX_NUMBER_EPOCH && !score_engine::checkAlgoThreshold(solutionThreshold[system.epoch][score_engine::AlgoType::Addition], score_engine::AlgoType::Addition))
+    // Neuraxon slot is reserved (not minable); keep its threshold slot at the placeholder default.
+    if (system.epoch < MAX_NUMBER_EPOCH)
     {
-        solutionThreshold[system.epoch][score_engine::AlgoType::Addition] = ADDITION_SOLUTION_THRESHOLD_DEFAULT;
+        solutionThreshold[system.epoch][score_engine::AlgoType::Neuraxon] = NEURAXON_SOLUTION_THRESHOLD_DEFAULT;
     }
 
     system.latestOperatorNonce = 0;
@@ -4841,8 +4992,10 @@ static bool saveAllNodeStates()
     copyMem(&nodeStateBuffer.etalonTick, &etalonTick, sizeof(etalonTick));
     copyMem(nodeStateBuffer.minerPublicKeys, (void*)minerPublicKeys, sizeof(minerPublicKeys));
     copyMem(nodeStateBuffer.minerScores, (void*)minerScores, sizeof(minerScores));
+    copyMem(nodeStateBuffer.minerBestScoreTicks, (void*)minerBestScoreTicks, sizeof(minerBestScoreTicks));
     copyMem(nodeStateBuffer.competitorPublicKeys, (void*)competitorPublicKeys, sizeof(competitorPublicKeys));
     copyMem(nodeStateBuffer.competitorScores, (void*)competitorScores, sizeof(competitorScores));
+    copyMem(nodeStateBuffer.competitorTicks, (void*)competitorTicks, sizeof(competitorTicks));
     copyMem(nodeStateBuffer.competitorComputorStatuses, (void*)competitorComputorStatuses, sizeof(competitorComputorStatuses));
     copyMem(nodeStateBuffer.solutionPublicationTicks, (void*)solutionPublicationTicks, sizeof(solutionPublicationTicks));
     copyMem(nodeStateBuffer.faultyComputorFlags, (void*)faultyComputorFlags, sizeof(faultyComputorFlags));
@@ -4936,6 +5089,11 @@ static bool saveAllNodeStates()
         return false;
     }
 
+    if (!ocEngine.saveSnapshot(system.epoch, directory))
+    {
+        return false;
+    }
+
 #if ADDON_TX_STATUS_REQUEST
     if (!saveStateTxStatus(numberOfTransactions, directory))
     {
@@ -4944,7 +5102,10 @@ static bool saveAllNodeStates()
     }
 #endif
 #if ENABLED_LOGGING
-    logger.saveCurrentLoggingStates(directory);
+    if (!logger.saveCurrentLoggingStates(directory))
+    {
+        return false;
+    }
 #endif
 
 #if !defined(NDEBUG)
@@ -5049,8 +5210,10 @@ static bool loadAllNodeStates()
     copyMem(&etalonTick, &nodeStateBuffer.etalonTick, sizeof(etalonTick));
     copyMem((void*)minerPublicKeys, nodeStateBuffer.minerPublicKeys, sizeof(minerPublicKeys));
     copyMem((void*)minerScores, nodeStateBuffer.minerScores, sizeof(minerScores));
+    copyMem((void*)minerBestScoreTicks, nodeStateBuffer.minerBestScoreTicks, sizeof(minerBestScoreTicks));
     copyMem((void*)competitorPublicKeys, nodeStateBuffer.competitorPublicKeys, sizeof(competitorPublicKeys));
     copyMem((void*)competitorScores, nodeStateBuffer.competitorScores, sizeof(competitorScores));
+    copyMem((void*)competitorTicks, nodeStateBuffer.competitorTicks, sizeof(competitorTicks));
     copyMem((void*)competitorComputorStatuses, nodeStateBuffer.competitorComputorStatuses, sizeof(competitorComputorStatuses));
     copyMem((void*)solutionPublicationTicks, nodeStateBuffer.solutionPublicationTicks, sizeof(solutionPublicationTicks));
     copyMem((void*)faultyComputorFlags, nodeStateBuffer.faultyComputorFlags, sizeof(faultyComputorFlags));
@@ -5174,6 +5337,11 @@ static bool loadAllNodeStates()
     }
 
     if (!oracleEngine.loadSnapshot(system.epoch, directory))
+    {
+        return false;
+    }
+
+    if (!ocEngine.loadSnapshot(system.epoch, directory))
     {
         return false;
     }
@@ -5941,7 +6109,6 @@ static bool isTickTimeOut()
 {
     return (__rdtsc() - tickTicks[sizeof(tickTicks) / sizeof(tickTicks[0]) - 1] > TARGET_TICK_DURATION * NEXT_TICK_TIMEOUT_THRESHOLD * frequency / 1000);
 }
-
 
 void checkAllContractLocksReleased()
 {
@@ -6846,18 +7013,29 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                     isBeginEpoch = true;
                                     logToConsole(L"EPOCH TRANSITION: beginEpoch() done");
 
+                                    // beginEpoch() called score->initMemory(), which zeroed the scorer, so re-apply
+                                    // the task from the resident buffer. This assumes the task is unchanged across the transition;
+                                    // if a future epoch needs a different task file, branch here on the epoch to reload from file
+                                    // instead of re-applying memory
+                                    if (!applyBpp9000Task())
+                                    {
+                                        ASSERT(false);
+                                    }
+
                                     // Some debug checks that we are ready for the next epoch
                                     ASSERT(system.numberOfSolutions == 0);
                                     ASSERT(numberOfMiners == NUMBER_OF_COMPUTORS);
                                     ASSERT(isZero(system.solutions, sizeof(system.solutions)));
                                     ASSERT(isZero(solutionPublicationTicks, sizeof(solutionPublicationTicks)));
                                     ASSERT(isZero(minerSolutionFlags, NUMBER_OF_MINER_SOLUTION_FLAGS / 8));
-                                    ASSERT(isZero((void*)minerScores, sizeof(minerScores)));
+                                    ASSERT(minerScores[0] == NO_MINER_SCORE && minerScores[MAX_NUMBER_OF_MINERS] == NO_MINER_SCORE);
+                                    ASSERT(isZero((void*)minerBestScoreTicks, sizeof(minerBestScoreTicks)));
                                     ASSERT(isZero((void*)minerPublicKeys, sizeof(minerPublicKeys)));
-                                    ASSERT(isZero(competitorScores, sizeof(competitorScores)));
+                                    ASSERT(competitorScores[0] == NO_MINER_SCORE);
+                                    ASSERT(isZero(competitorTicks, sizeof(competitorTicks)));
                                     ASSERT(isZero(competitorPublicKeys, sizeof(competitorPublicKeys)));
                                     ASSERT(isZero(competitorComputorStatuses, sizeof(competitorComputorStatuses)));
-                                    ASSERT(minimumComputorScore == 0 && minimumCandidateScore == 0);
+                                    ASSERT(minimumComputorScore == NO_MINER_SCORE && minimumCandidateScore == NO_MINER_SCORE);
 
                                     // instruct main loop to save files and wait until it is done
                                     logToConsole(L"EPOCH TRANSITION: saving spectrum/universe/computer...");
@@ -7188,6 +7366,99 @@ static bool saveSystem(CHAR16* directory)
     return false;
 }
 
+// Load and verify the bpp9000 task file (topology + windowed data) and hand it to the scorer
+static bool loadBpp9000Task()
+{
+    const unsigned int N = (unsigned int)BPP9000_NUMBER_OF_INPUT_NEURONS;
+    const unsigned int M = (unsigned int)BPP9000_NUMBER_OF_OUTPUT_NEURONS;
+    const unsigned int P = (unsigned int)BPP9000_POPULATION_THRESHOLD;
+    const unsigned int K = (unsigned int)BPP9000_NUMBER_OF_NEIGHBORS;
+    const unsigned long long T = BPP9000_SEQUENCE_LENGTH;
+
+    const unsigned long long topoBytes = score_task_file::topologyBytes(N, M, P, K);
+    const unsigned long long dataBytes = score_task_file::dataBytes(N, M, T);
+    const unsigned long long headerBytes = sizeof(score_task_file::TaskFileHeader);
+    const unsigned long long totalBytes = headerBytes + topoBytes + dataBytes;
+
+    if (totalBytes != BPP9000_TASK_SIZE
+        || save(SCORE_BPP9000_TASK_FILE_NAME, BPP9000_TASK_SIZE, BPP9000_TASK_BYTES, NULL)
+            != (long long)BPP9000_TASK_SIZE)
+    {
+        logToConsole(L"Failed to extract the embedded bpp9000 task.");
+        return false;
+    }
+
+    if (!allocPoolWithErrorLog(L"bpp9000Task", totalBytes, (void**)&gBpp9000TaskBuffer, __LINE__))
+    {
+        return false;
+    }
+
+    bool ok = false;
+    const long long loadedSize = load(SCORE_BPP9000_TASK_FILE_NAME, totalBytes, gBpp9000TaskBuffer, NULL);
+    if (loadedSize != (long long)totalBytes)
+    {
+        logToConsole(L"bpp9000 task file missing or wrong size - node will not do score verification.");
+    }
+    else
+    {
+        const score_task_file::TaskFileHeader* h = (const score_task_file::TaskFileHeader*)gBpp9000TaskBuffer;
+        const unsigned char* topoBlock = gBpp9000TaskBuffer + headerBytes;
+        const unsigned char* dataBlock = topoBlock + topoBytes;
+
+        unsigned char topoHash[32];
+        unsigned char dataHash[32];
+        KangarooTwelve(topoBlock, (unsigned int)topoBytes, topoHash, 32);
+        KangarooTwelve(dataBlock, (unsigned int)dataBytes, dataHash, 32);
+
+        if (h->magic != score_task_file::MAGIC || h->version != score_task_file::VERSION
+            || h->numInputTrits != N || h->numOutputTrits != M || h->population != P
+            || h->numNeighbors != K || h->numPairs < T)
+        {
+            logToConsole(L"bpp9000 task header does not match configured parameters - node will not do score verification.");
+        }
+        else if (*(const m256i*)topoHash != *(const m256i*)BPP9000_TOPOLOGY_HASH
+              || *(const m256i*)dataHash != *(const m256i*)BPP9000_DATA_HASH)
+        {
+            logToConsole(L"bpp9000 task hash mismatch (not the pinned canonical task) - node will not do score verification.");
+        }
+        else if (!score->loadTask(topoBlock, dataBlock))
+        {
+            logToConsole(L"bpp9000 task failed topology validation - node will not do score verification.");
+        }
+        else
+        {
+            logToConsole(L"Loaded bpp9000 task file");
+            ok = true;
+        }
+    }
+
+    // Keep the verified buffer resident (for applyBpp9000Task) on success; release it on failure.
+    if (!ok)
+    {
+        freePool(gBpp9000TaskBuffer);
+        gBpp9000TaskBuffer = nullptr;
+    }
+    return ok;
+}
+
+// Re-apply the already-verified, resident task to the scorer. Used after beginEpoch() zeroes the scorer:
+// no file I/O and no re-hashing (the blocks were verified once at init), so it cannot fail on a missing or
+// altered file. Returns false only if the task was never loaded.
+static bool applyBpp9000Task()
+{
+    if (gBpp9000TaskBuffer == nullptr)
+    {
+        return false;
+    }
+    const unsigned long long headerBytes = sizeof(score_task_file::TaskFileHeader);
+    const unsigned long long topoBytes = score_task_file::topologyBytes(
+        (unsigned int)BPP9000_NUMBER_OF_INPUT_NEURONS, (unsigned int)BPP9000_NUMBER_OF_OUTPUT_NEURONS,
+        (unsigned int)BPP9000_POPULATION_THRESHOLD, (unsigned int)BPP9000_NUMBER_OF_NEIGHBORS);
+    const unsigned char* topoBlock = gBpp9000TaskBuffer + headerBytes;
+    const unsigned char* dataBlock = topoBlock + topoBytes;
+    return score->loadTask(topoBlock, dataBlock);
+}
+
 static bool initialize()
 {
     enableAVX();
@@ -7306,6 +7577,14 @@ static bool initialize()
             return false;
         }
         if (!oracleEngine.init(broadcastedComputors.computors.publicKeys))
+            return false;
+
+        if (!OCI::initOcInterfaces())
+        {
+            logToConsole(L"initOcInterfaces() failed! Not all interfaces are properly defined!");
+            return false;
+        }
+        if (!ocEngine.init(broadcastedComputors.computors.publicKeys))
             return false;
 
 #if ADDON_TX_STATUS_REQUEST
@@ -7551,6 +7830,12 @@ static bool initialize()
     }    
     score->loadScoreCache(system.epoch);
 
+    // Load + hash-verify the bpp9000 task once at init
+    if (!loadBpp9000Task())
+    {
+        return false;
+    }
+
     logToConsole(L"Allocating buffers ...");
     if ((!allocPoolWithErrorLog(L"dejavu0", DEJAVU_POOL_SIZE, (void**)&dejavu0, __LINE__)) ||
         (!allocPoolWithErrorLog(L"dejavu1", DEJAVU_POOL_SIZE, (void**)&dejavu1, __LINE__)))
@@ -7711,6 +7996,7 @@ static void deinitialize()
 #endif
 
     oracleEngine.deinit();
+    ocEngine.deinit();
 
     customQubicMiningStorage.deinit();
 
@@ -8068,6 +8354,26 @@ static void logInfo()
     logToConsole(message);
 
     oracleEngine.logStatus();
+    ocEngine.logStatus();
+
+    // OC machine connectivity + delivery outcome (sent/dropped counted in pushToOcMachineNodes)
+    unsigned int numberOfConnectedOcPeers = 0;
+    for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
+    {
+        if (peers[i].isOcMachineNode() && peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing)
+        {
+            numberOfConnectedOcPeers++;
+        }
+    }
+    setText(message, L"OC machines: ");
+    appendNumber(message, numberOfConnectedOcPeers, FALSE);
+    appendText(message, L"/");
+    appendNumber(message, numberOfOcPeers, FALSE);
+    appendText(message, L" connected; invocations sent ");
+    appendNumber(message, numberOfOcInvocationsSent, FALSE);
+    appendText(message, L", dropped ");
+    appendNumber(message, numberOfOcInvocationsDropped, FALSE);
+    logToConsole(message);
 }
 
 static void logHealthStatus()
@@ -8456,17 +8762,22 @@ static void processKeyPresses()
         */
         case 0x0D:
         {
-            unsigned int numberOfSolutions = 0;
+            unsigned int numberOfScoredMiners = 0;
             for (unsigned int i = 0; i < numberOfMiners; i++)
             {
-                numberOfSolutions += minerScores[i];
+                if (minerScores[i] != NO_MINER_SCORE)
+                {
+                    numberOfScoredMiners++;
+                }
             }
             setNumber(message, numberOfMiners, TRUE);
-            appendText(message, L" miners with ");
-            appendNumber(message, numberOfSolutions, TRUE);
-            appendText(message, L" solutions (min computor score = ");
+            appendText(message, L" miners, ");
+            appendNumber(message, numberOfScoredMiners, TRUE);
+            appendText(message, L" scored (best error = ");
+            appendNumber(message, minerScores[0], TRUE);
+            appendText(message, L", worst computor error = ");
             appendNumber(message, minimumComputorScore, TRUE);
-            appendText(message, L", min candidate score = ");
+            appendText(message, L", worst candidate error = ");
             appendNumber(message, minimumCandidateScore, TRUE);
             appendText(message, L").");
             logToConsole(message);
@@ -9072,6 +9383,20 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 
                     PROFILE_NAMED_SCOPE("main loop: updateTime()");
                     updateTime();
+
+                    // Report a stalled scorer from the main thread. Anything other than ScoreStatusOk means the
+                    // node cannot verify mining solutions; add a case per new status kind.
+                    switch (score->getLastStatus())
+                    {
+                    case ScoreStatusOk:
+                        break;
+                    case ScoreStatusTaskNotLoaded:
+                        logToConsole(L"ERROR: bpp9000 task not loaded - node cannot verify mining solutions.");
+                        break;
+                    default:
+                        logToConsole(L"ERROR: score engine not ready - node cannot verify mining solutions.");
+                        break;
+                    }
                 }
 
                 // Swap VM pin/cache stats: print one VM per ~second so operators can watch pin
@@ -9486,14 +9811,19 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 
                     logToConsole(L"Saving node state...");
 #ifdef __linux__
-                    if (tickFork::winState() == tickFork::WindowState::Live) tickFork::retireCheckpoint();
+                    if (tickFork::winState() == tickFork::WindowState::Live)
+                    {
+                        tickFork::retireCheckpoint();
+                    }
 #endif
-                    saveAllNodeStates();
+                    const bool savedAllNodeStates = saveAllNodeStates();
 #ifdef ENABLE_PROFILING
                     gProfilingDataCollector.writeToFile();
 #endif
                     ATOMIC_STORE32(requestPersistingNodeState, 0);
-                    logToConsole(L"Complete saving all node states");
+                    logToConsole(savedAllNodeStates
+                        ? L"Complete saving all node states"
+                        : L"Failed to save all node states");
                 }
 #if TICK_STORAGE_AUTOSAVE_MODE == 1
                 if (nextAutoSaveTickUpdated)
@@ -9668,6 +9998,7 @@ unsigned long long getTotalRam()
 
     // score
     add("score+score_qpi", sizeof(*score) + sizeof(*score_qpi));
+    add("ocEngine", OcEngine::getSize());
 
     // dejavu0 & dejavu1
     add("dejavu", DEJAVU_POOL_SIZE * 2);
@@ -9774,7 +10105,7 @@ void processArgs(int argc, const char* argv[]) {
         ("fbis,force-broadcast-invalid-solution", "TEST: broadcast random-nonce solution tx each tick to exercise fork rollback", cxxopts::value<bool>())
         ("fbis-count", "TEST: number of solution txs per tick with --fbis", cxxopts::value<int>()->default_value("1"))
         ("fbis-same", "TEST: inject all --fbis solutions from one computor", cxxopts::value<bool>())
-        ("test-solution-threshold", "TEST: override runtime solution threshold (0=injected validate)", cxxopts::value<int>()->default_value("-1"))
+        ("test-solution-threshold", "TEST: override runtime Bpp9000 solution threshold", cxxopts::value<int>()->default_value("-1"))
         ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
         ("fork-force-match", "TEST: force verdict to match branch", cxxopts::value<bool>())

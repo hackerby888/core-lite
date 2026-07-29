@@ -105,6 +105,27 @@ add_executable(
   ${ASM_OBJ}
 )
 
+# Keep the tracked header used by native MSBuild byte-for-byte in sync with
+# the canonical task without rewriting the source tree during normal builds.
+set(BPP9000_TASK_FILE ${CMAKE_SOURCE_DIR}/data/bpp9000.task)
+set(BPP9000_TASK_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/mining/bpp9000_task.generated.h)
+set(BPP9000_TASK_CHECK_HEADER ${CMAKE_CURRENT_BINARY_DIR}/bpp9000_task.generated.h)
+add_custom_target(
+    bpp9000_task_check
+    COMMAND ${CMAKE_COMMAND}
+            -DINPUT_FILE=${BPP9000_TASK_FILE}
+            -DOUTPUT_FILE=${BPP9000_TASK_CHECK_HEADER}
+            -DEXPECTED_FILE=${BPP9000_TASK_HEADER}
+            -P ${CMAKE_SOURCE_DIR}/cmake/EmbedBinary.cmake
+    DEPENDS
+            ${BPP9000_TASK_FILE}
+            ${BPP9000_TASK_HEADER}
+            ${CMAKE_SOURCE_DIR}/cmake/EmbedBinary.cmake
+    COMMENT "Checking embedded bpp9000 task"
+    VERBATIM
+)
+add_dependencies(Qubic bpp9000_task_check)
+
 # Explorer asset bundling: regen embedded header when HTML/CSS/JS change.
 if(NOT WIN32)
     set(EXPLORER_ASSETS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extensions/http/static/explorer)
@@ -229,4 +250,3 @@ if(IS_MSVC)
 elseif(IS_CLANG)
     # Use default linker settings for Clang
 endif()
-
