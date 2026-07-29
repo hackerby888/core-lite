@@ -78,7 +78,7 @@ In order to develop a contract, follow these steps:
       See for example [how the QVAULT was added](https://github.com/qubic/core/commit/85019c6e41bf05f14460582af5ada782398badde#diff-003724794b2450f069f8246422df93ed2b1a89f2c5c01289834b7a5e31430de7).
     - Do NOT change any other file in the `src` folder without explicit permission of the core team.
     - Design and implement the interfaces of your contract (the user procedures and user functions along with its inputs and outputs).
-      The QPI available for implementing the contract is defined in `src/contracts/qpi.h`.
+      The QPI available for implementing the contract is defined in `src/qpi/qpi.h`.
     - Implement the system procedures needed and remove all the system procedures that are not needed by your contract.
     - Follow the general [qubic style guidelines](https://github.com/qubic/core/blob/main/doc/contributing.md#style-guidelines) when writing your code.
     - Add the short form contract name as a prefix to all global constants, structs and classes (if any).

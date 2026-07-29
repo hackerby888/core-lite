@@ -2,6 +2,7 @@
 
 #include "platform/m256.h"
 #include "mining/mining.h"
+#include "mining/score_common.h"
 #include "spectrum/special_entities.h"
 #include "network_core/peers.h"
 #include "network_messages/network_message_type.h"
@@ -50,7 +51,7 @@ inline void broadcastTransfer(unsigned int sourceComputorIdx,
 
 } // namespace detail
 
-inline bool broadcastRandom(const m256i& currentMiningSeed, unsigned int txTick)
+inline bool broadcastRandom(const m256i& currentMiningSeed, unsigned int txTick, unsigned int claimedScore)
 {
     if (computorSeedsCount == 0)
     {
@@ -64,29 +65,24 @@ inline bool broadcastRandom(const m256i& currentMiningSeed, unsigned int txTick)
 
     // ---- 1) Invalid solution tx ----
     {
-        struct
-        {
-            Transaction transaction;
-            m256i       miningSeed;
-            m256i       nonce;
-            unsigned char signature[SIGNATURE_SIZE];
-        } payload;
-        static_assert(sizeof(payload) == sizeof(Transaction) + 32 + 32 + SIGNATURE_SIZE,
-                      "TestInvalidSolution payload layout drifted");
-
-        payload.transaction.sourcePublicKey      = computorPublicKeys[computorIdx];
-        payload.transaction.destinationPublicKey = m256i::zero();
-        payload.transaction.amount               = MiningSolutionTransaction::minAmount();
-        payload.transaction.tick                 = txTick;
-        payload.transaction.inputType            = MiningSolutionTransaction::transactionType();
-        payload.transaction.inputSize            = sizeof(payload.miningSeed) + sizeof(payload.nonce);
+        MiningSolutionTransaction payload;
+        payload.sourcePublicKey      = computorPublicKeys[computorIdx];
+        payload.destinationPublicKey = m256i::zero();
+        payload.amount               = MiningSolutionTransaction::minAmount();
+        payload.tick                 = txTick;
+        payload.inputType            = MiningSolutionTransaction::transactionType();
+        payload.inputSize            = MiningSolutionTransaction::minInputSize();
 
         payload.miningSeed = currentMiningSeed;
+        payload.miningSeed.m256i_u64[0] ^= 1;
         payload.nonce.setRandomValue();
+        payload.nonce.m256i_u8[0] = (unsigned char)score_engine::AlgoType::Bpp9000;
+        payload.score = claimedScore;
+        payload.reserved = 0;
 
         unsigned char digest[32];
-        KangarooTwelve(&payload.transaction,
-                       sizeof(payload.transaction) + sizeof(payload.miningSeed) + sizeof(payload.nonce),
+        KangarooTwelve(&payload,
+                       sizeof(Transaction) + MiningSolutionTransaction::minInputSize(),
                        digest,
                        sizeof(digest));
         sign(computorSubseeds[computorIdx].m256i_u8,

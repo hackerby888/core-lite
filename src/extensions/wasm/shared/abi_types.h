@@ -155,6 +155,12 @@ struct HostServices
         void* out32);
     void (*initMiningSeed)(const void* ctx, const void* miningSeed32);
     unsigned char (*getOracleQueryStatus)(const void* ctx, long long queryId);
+    unsigned char (*getOcInvocationStatus)(const void* ctx, long long invocationId);
+    long long (*invokeOc)(
+        const void* ctx,
+        unsigned int interfaceIndex,
+        const void* request,
+        unsigned int requestSize);
     unsigned char (*unsubscribeOracle)(const void* ctx, int oracleSubscriptionId);
     long long (*queryOracle)(
         const void* ctx,

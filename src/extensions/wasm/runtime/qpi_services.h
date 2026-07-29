@@ -507,6 +507,42 @@ static unsigned char getOracleQueryStatus(
     return functionContext(context)->getOracleQueryStatus(queryId);
 }
 
+static unsigned char getOcInvocationStatus(
+    const void* context,
+    long long invocationId)
+{
+    return functionContext(context)->getOcInvocationStatus(invocationId);
+}
+
+static long long invokeOc(
+    const void* context,
+    unsigned int interfaceIndex,
+    const void* request,
+    unsigned int requestSize)
+{
+    static_assert(OCI::ocInterfacesCount == 1, "add Wasm OC dispatch case");
+
+    if (!context
+        || !request
+        || interfaceIndex >= OCI::ocInterfacesCount
+        || requestSize != OCI::ocInterfaces[interfaceIndex].requestSize)
+    {
+        return -1;
+    }
+
+    switch (interfaceIndex)
+    {
+    case OCI::Mock::ocInterfaceIndex:
+    {
+        OCI::Mock::OcRequest typedRequest;
+        copyMem(&typedRequest, request, sizeof(typedRequest));
+        return procedureContext(context)->__qpiInvokeOC<OCI::Mock>(typedRequest);
+    }
+    default:
+        return -1;
+    }
+}
+
 static unsigned char unsubscribeOracle(
     const void* context,
     int subscriptionId)
