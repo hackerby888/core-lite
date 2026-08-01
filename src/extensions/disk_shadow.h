@@ -4,7 +4,6 @@
 // read pristine files; commit on match, discard on mismatch.
 
 #include <atomic>
-#include "public_settings.h"
 
 inline volatile bool gForkWindowActive = false;
 inline std::atomic<bool> gReRunStrict{ false };
@@ -18,10 +17,6 @@ inline volatile bool gForkForceMatch = false;
 inline volatile bool gForkForceMismatch = false;
 inline volatile bool gForkBench = false;
 inline unsigned int gForkForceRollbackEvery = 0;
-
-// Even phases run normally; odd phases park request processors at their loop safe point.
-inline std::atomic<unsigned long long> gForkParkPhase{ 0 };
-inline std::atomic<unsigned long long> gForkParkPhaseByProcessor[MAX_NUMBER_OF_PROCESSORS]{};
 
 #ifdef __linux__
 
@@ -37,24 +32,6 @@ inline std::atomic<unsigned long long> gForkParkPhaseByProcessor[MAX_NUMBER_OF_P
 #include <utility>
 #include <cstdlib>
 #include <unistd.h>
-
-static inline void liteForkRequestPark(unsigned long long processorNumber)
-{
-    for (;;)
-    {
-        const unsigned long long parkPhase = gForkParkPhase.load(std::memory_order_acquire);
-        if (!(parkPhase & 1)) // even phase -> no park requested
-            return;
-        gForkParkPhaseByProcessor[processorNumber].store(parkPhase, std::memory_order_release);
-
-        // A worker that misses an even release phase observes the next odd phase here and
-        // acknowledges it before returning to request processing.
-        while (gForkParkPhase.load(std::memory_order_acquire) == parkPhase)
-        {
-            std::this_thread::yield();
-        }
-    }
-}
 
 class DiskShadow
 {
@@ -436,7 +413,6 @@ static inline CHAR16* liteShadowRemoveDir(CHAR16* pageDir, const CHAR16* pageNam
 
 #else
 
-static inline void liteForkRequestPark(unsigned long long) {}
 static inline CHAR16* liteShadowWriteDir(CHAR16* pageDir, const CHAR16* pageName)
 {
     (void)pageName;

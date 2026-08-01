@@ -3,6 +3,8 @@
 // Tick fork-rollback (AUX wrong-solution path): fork on BSP, child keeps networking thread,
 // re-spawns AP loops on promote. Linux-only (fork/pipe/_exit); #else inert stubs.
 
+#include "extensions/tick_fork_barrier.h"
+
 #ifdef __linux__
 
 #include <unistd.h>
@@ -12,6 +14,8 @@
 #include <cstdio>
 #include <ctime>
 #include <atomic>
+#include <mutex>
+#include <thread>
 #include "extensions/tick_fork_control.h"
 
 // Fork-path diagnostics: fprintf/stderr is fork-safe (no log-subsystem locks/buffers).
@@ -47,7 +51,7 @@ static inline long tickForkRssKb()
 }
 // Set by maybeForkBeforeTick / bspForkPoint; consumed by verdict to report one fork's cost.
 inline long long gForkWindowStartNs = 0;
-inline long long gForkQuiesceNs = 0;     // quiesceNetworking() duration (BSP)
+inline long long gForkQuiesceNs = 0;     // BSP writer-quiescence duration
 inline long long gForkSyscallNs = 0;     // fork() syscall duration (BSP)
 inline long gForkRssBeforeKb = 0;        // parent RSS just before fork
 
@@ -103,90 +107,45 @@ namespace tickFork
     // Deadline to hand work to the BSP and quiesce fork writers before a fork / shadow commit.
     inline constexpr int gForkQuiesceTimeoutMs = 5'000;
 
-    // BSP-owned request-processor barrier for a consistent fork snapshot / shadow commit.
-    inline bool parkRequestProcessors(int timeoutMs)
+    inline bool waitForRequestProcessors(RequestProcessorBarrier& barrier, long long deadlineMs)
     {
-        unsigned long long idlePhase = gForkParkPhase.load(std::memory_order_acquire);
-        if ((idlePhase & 1) || !gForkParkPhase.compare_exchange_strong(idlePhase, idlePhase + 1, std::memory_order_acq_rel))
-        {
+        if (!barrier.request())
             return false;
-        }
-        const unsigned long long parkPhase = idlePhase + 1;
-        long long deadline = tickForkNowMs() + timeoutMs;
-        for (;;)
-        {
-            bool allParked = true;
-            for (int i = 0; i < nRequestProcessorIDs; i++)
-            {
-                const unsigned long long processorNumber = requestProcessorIDs[i];
-                if (gForkParkPhaseByProcessor[processorNumber].load(std::memory_order_acquire) != parkPhase)
-                {
-                    allParked = false;
-                    break;
-                }
-            }
-            if (allParked)
-                return true;
 
+        while (!barrier.allAcknowledged(requestProcessorIDs, nRequestProcessorIDs))
+        {
             flushAsyncFileIOBuffer(0);
-            if (tickForkNowMs() > deadline)
+            if (tickForkNowMs() > deadlineMs)
                 return false;
             std::this_thread::yield();
         }
-    }
-    inline void unparkRequestProcessors()
-    {
-        unsigned long long parkPhase = gForkParkPhase.load(std::memory_order_acquire);
-        while ((parkPhase & 1) && !gForkParkPhase.compare_exchange_weak(parkPhase, parkPhase + 1, std::memory_order_acq_rel))
-        {
-        }
+        return true;
     }
 
-    struct RequestProcessorPark
+    class BspRetireQuiescence
     {
-        bool requested = false;
+    public:
+        BspRetireQuiescence()
+#if !defined(NO_RPC)
+            : rpc(gRpcDispatchLock, std::defer_lock)
+#endif
+        {
+        }
 
         bool acquire(int timeoutMs)
         {
-            requested = true;
-            return parkRequestProcessors(timeoutMs);
-        }
-
-        void release()
-        {
-            if (requested)
-            {
-                unparkRequestProcessors();
-                requested = false;
-            }
-        }
-
-        ~RequestProcessorPark()
-        {
-            release();
-        }
-    };
-
-    struct WriterQuiesce
-    {
-        RequestProcessorPark requestProcessors;
-        bool rpcLocked = false;
-
-        bool acquire(int timeoutMs)
-        {
-            const long long deadline = tickForkNowMs() + timeoutMs;
-            if (!requestProcessors.acquire(timeoutMs))
+            const long long deadlineMs = tickForkNowMs() + timeoutMs;
+            if (!waitForRequestProcessors(requestProcessors, deadlineMs))
                 return false;
 
 #if !defined(NO_RPC)
-            while (!gRpcDispatchLock.try_lock())
+            while (!rpc.try_lock())
             {
                 flushAsyncFileIOBuffer(0);
-                if (tickForkNowMs() >= deadline)
+                if (tickForkNowMs() >= deadlineMs)
                     return false;
                 std::this_thread::yield();
             }
-            rpcLocked = true;
 #endif
             return true;
         }
@@ -194,19 +153,122 @@ namespace tickFork
         void release()
         {
 #if !defined(NO_RPC)
-            if (rpcLocked)
-            {
-                gRpcDispatchLock.unlock();
-                rpcLocked = false;
-            }
+            if (rpc.owns_lock())
+                rpc.unlock();
 #endif
             requestProcessors.release();
         }
 
-        ~WriterQuiesce()
+        ~BspRetireQuiescence()
         {
             release();
         }
+
+        BspRetireQuiescence(const BspRetireQuiescence&) = delete;
+        BspRetireQuiescence& operator=(const BspRetireQuiescence&) = delete;
+
+    private:
+        RequestProcessorBarrier requestProcessors;
+#if !defined(NO_RPC)
+        std::unique_lock<SmartSharedMutex> rpc;
+#endif
+    };
+
+    class BspForkQuiescence
+    {
+    public:
+        enum class AcquireResult
+        {
+            Acquired,
+            ParkTimeout,
+            LockTimeout,
+        };
+
+        BspForkQuiescence()
+            : networking(Overload::networkingLock, std::defer_lock)
+#if !defined(NO_RPC)
+            , rpc(gRpcDispatchLock, std::defer_lock)
+#endif
+            , eventMap(Overload::eventMapLock, std::defer_lock)
+        {
+        }
+
+        AcquireResult acquire(int timeoutMs)
+        {
+            if (!waitForRequestProcessors(
+                    requestProcessors, tickForkNowMs() + timeoutMs))
+            {
+                return AcquireResult::ParkTimeout;
+            }
+
+            snapshotDeadlineMs = tickForkNowMs() + timeoutMs;
+            for (;;)
+            {
+                int failedLock;
+#if !defined(NO_RPC)
+                failedLock = std::try_lock(networking, rpc, eventMap);
+#else
+                failedLock = std::try_lock(networking, eventMap);
+#endif
+                if (failedLock == -1)
+                    return AcquireResult::Acquired;
+
+                flushAsyncFileIOBuffer(0);
+                if (tickForkNowMs() >= snapshotDeadlineMs)
+                    return AcquireResult::LockTimeout;
+                std::this_thread::yield();
+            }
+        }
+
+        int remainingDrainMs() const
+        {
+            const long long remainingMs = snapshotDeadlineMs - tickForkNowMs();
+            return remainingMs > 0 ? (int)remainingMs : 0;
+        }
+
+        void release()
+        {
+            if (eventMap.owns_lock())
+                eventMap.unlock();
+#if !defined(NO_RPC)
+            if (rpc.owns_lock())
+                rpc.unlock();
+#endif
+            if (networking.owns_lock())
+                networking.unlock();
+            requestProcessors.release();
+        }
+
+        // Promoted children reconstruct these mutexes instead of unlocking inherited state.
+        void abandonInChild()
+        {
+            if (eventMap.owns_lock())
+                (void)eventMap.release();
+#if !defined(NO_RPC)
+            if (rpc.owns_lock())
+                (void)rpc.release();
+#endif
+            if (networking.owns_lock())
+                (void)networking.release();
+            requestProcessors.release();
+        }
+
+        ~BspForkQuiescence()
+        {
+            release();
+        }
+
+        BspForkQuiescence(const BspForkQuiescence&) = delete;
+        BspForkQuiescence& operator=(const BspForkQuiescence&) = delete;
+
+    private:
+        RequestProcessorBarrier requestProcessors;
+        std::unique_lock<SmartMutex> networking;
+#if !defined(NO_RPC)
+        std::unique_lock<SmartSharedMutex> rpc;
+#endif
+        std::unique_lock<SmartMutex> eventMap;
+        long long snapshotDeadlineMs = 0;
     };
 
     // Establish a fresh checkpoint at system.tick. The tick thread waits here while the BSP parks

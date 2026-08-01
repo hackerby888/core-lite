@@ -2147,7 +2147,7 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
     {
         PinScope _pinScope; // release swap-page pins taken while handling this request
         checkinTime(processorNumber);
-        liteForkRequestPark(processorNumber);
+        tickFork::requestProcessorParkPoint(processorNumber);
         if (shutDownNode)
             break;
         std::this_thread::sleep_for(std::chrono::microseconds(50));
@@ -9081,7 +9081,6 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     tickFork::gForkRequest = false;
     tickFork::gChildPid = -2;
     tickForkControl::gBspRetireHandoff.resetForChild();
-    tickFork::unparkRequestProcessors();
     tickFork::setWinState(tickFork::WindowState::Idle);
     close(tickFork::gPipe[0]);
     tickFork::gPipe[0] = -1;
@@ -9147,69 +9146,6 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     tickForkLog("CHILD: promote done, now the live node");
 }
 
-struct ForkSnapshotLocks
-{
-    bool networkingLocked = false;
-    bool rpcLocked = false;
-    bool eventMapLocked = false;
-
-    bool tryLock()
-    {
-        if (!Overload::networkingLock.try_lock())
-            return false;
-        networkingLocked = true;
-#if !defined(NO_RPC)
-        if (!gRpcDispatchLock.try_lock())
-        {
-            unlock();
-            return false;
-        }
-        rpcLocked = true;
-#endif
-        if (!Overload::eventMapLock.try_lock())
-        {
-            unlock();
-            return false;
-        }
-        eventMapLocked = true;
-        return true;
-    }
-
-    void unlock()
-    {
-        if (eventMapLocked)
-        {
-            Overload::eventMapLock.unlock();
-            eventMapLocked = false;
-        }
-#if !defined(NO_RPC)
-        if (rpcLocked)
-        {
-            gRpcDispatchLock.unlock();
-            rpcLocked = false;
-        }
-#endif
-        if (networkingLocked)
-        {
-            Overload::networkingLock.unlock();
-            networkingLocked = false;
-        }
-    }
-
-    // Child reinitializes these inherited locks during promote; do not unlock them there.
-    void abandonInChild()
-    {
-        networkingLocked = false;
-        rpcLocked = false;
-        eventMapLocked = false;
-    }
-
-    ~ForkSnapshotLocks()
-    {
-        unlock();
-    }
-};
-
 // BSP-only shadow commit. The caller has stopped tick/request/RPC writers, so after the BSP
 // drains its own queued and in-flight IO no thread can create a late shadow write.
 static bool bspCommitCheckpoint()
@@ -9234,7 +9170,7 @@ static bool bspCommitCheckpoint()
 
 static bool bspRetireCheckpoint(bool commitCheckpoint, bool shutDownAfterCommit)
 {
-    tickFork::WriterQuiesce quiesce;
+    tickFork::BspRetireQuiescence quiesce;
     if (!quiesce.acquire(tickFork::gForkQuiesceTimeoutMs))
     {
         ForkStats::onForkSkipped(
@@ -9296,51 +9232,39 @@ static void bspForkPoint()
     // Claim first: the tick thread may time out only while the request is still unclaimed.
     tickFork::gForkRequest = false;
     long long q0 = gForkBench ? tickForkNowNs() : 0;
-    tickFork::RequestProcessorPark requestProcessors;
-    if (!requestProcessors.acquire(tickFork::gForkQuiesceTimeoutMs))
+    tickForkLog("BSP fork: quiescing writers");
+    tickFork::BspForkQuiescence quiesce;
+    const tickFork::BspForkQuiescence::AcquireResult quiesceResult =
+        quiesce.acquire(tickFork::gForkQuiesceTimeoutMs);
+    if (quiesceResult != tickFork::BspForkQuiescence::AcquireResult::Acquired)
     {
-        requestProcessors.release();
-        ForkStats::onForkSkipped(
-            ForkStats::PARK_TIMEOUT, (unsigned)system.tick, "request_processors");
-        tickForkLog("request processor park timeout -> skip fork, run current tick strict");
-        tickFork::gChildPid = -1;
-        tickFork::setWinState(tickFork::WindowState::Idle);
-        return;
-    }
-
-    // Hold networkingLock across fork so child snapshots a consistent map; per-socket workers
-    // are cv-blocked when idle, vanish in child, lazy-respawn on reconnect.
-    tickForkLog("BSP fork: taking locks");
-    ForkSnapshotLocks forkLocks;
-    const long long quiesceDeadline = tickForkNowMs() + tickFork::gForkQuiesceTimeoutMs;
-    while (!forkLocks.tryLock())
-    {
-        // A request may be waiting for the BSP to service blocking async IO before it releases a lock.
-        flushAsyncFileIOBuffer(0);
-        if (tickForkNowMs() >= quiesceDeadline)
+        if (quiesceResult == tickFork::BspForkQuiescence::AcquireResult::ParkTimeout)
+        {
+            ForkStats::onForkSkipped(
+                ForkStats::PARK_TIMEOUT, (unsigned)system.tick, "request_processors");
+            tickForkLog("request processor park timeout -> skip fork, run current tick strict");
+        }
+        else
         {
             ForkStats::onForkSkipped(
                 ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "snapshot_locks");
             tickForkLog("snapshot lock timeout -> skip fork, run current tick strict");
-            requestProcessors.release();
-            tickFork::gChildPid = -1;
-            tickFork::setWinState(tickFork::WindowState::Idle);
-            return;
         }
-        std::this_thread::yield();
+        quiesce.release();
+        tickFork::gChildPid = -1;
+        tickFork::setWinState(tickFork::WindowState::Idle);
+        return;
     }
-
     flushAsyncFileIOBuffer(0);
-    const long long remainingMs = quiesceDeadline - tickForkNowMs();
+    const int remainingMs = quiesce.remainingDrainMs();
     const bool swapDrained = remainingMs > 0
-        && ts.drainSwapIoForFork((int)remainingMs);
+        && ts.drainSwapIoForFork(remainingMs);
     if (!swapDrained)
     {
-        forkLocks.unlock();
         ForkStats::onForkSkipped(
             ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "vm_io");
         tickForkLog("VM IO drain timeout -> skip fork, run current tick strict");
-        requestProcessors.release();
+        quiesce.release();
         tickFork::gChildPid = -1;
         tickFork::setWinState(tickFork::WindowState::Idle);
         return;
@@ -9357,12 +9281,11 @@ static void bspForkPoint()
         if (forkCensusSumExcept() != 0)
         {
             const char* off = forkCensusOffender();
-            forkLocks.unlock();
             ForkStats::onForkSkipped(ForkStats::CENSUS, (unsigned)system.tick, off ? off : "?");
             fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n",
                     off ? off : "?", (unsigned)system.tick);
             fflush(stderr);
-            requestProcessors.release();
+            quiesce.release();
             tickFork::gChildPid = -1;
             tickFork::setWinState(tickFork::WindowState::Idle);
             return;
@@ -9371,11 +9294,10 @@ static void bspForkPoint()
 
     if (!gShadow.arm())
     {
-        forkLocks.unlock();
         ForkStats::onForkSkipped(
             ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "shadow_arm");
         tickForkLog("shadow cleanup failed -> skip fork, run current tick strict");
-        requestProcessors.release();
+        quiesce.release();
         tickFork::gChildPid = -1;
         tickFork::setWinState(tickFork::WindowState::Idle);
         return;
@@ -9388,7 +9310,7 @@ static void bspForkPoint()
     if (pid == 0)
     {
         // CHILD BSP: block until parent's verdict, then become the node.
-        forkLocks.abandonInChild();
+        quiesce.abandonInChild();
         close(tickFork::gPipe[1]);
         const tickForkControl::ChildCommand command = tickForkControl::readChildCommand(
             tickFork::gPipe[0], (unsigned)system.tick + tickFork::gForkWindowK);
@@ -9405,8 +9327,7 @@ static void bspForkPoint()
     tickForkLog("BSP fork: fork() returned to parent");
     if (pid < 0)
         gShadow.discard();
-    forkLocks.unlock();
-    requestProcessors.release();
+    quiesce.release();
     if (pid < 0)
     {
         tickForkLog("fork() failed -> parent strict fallback (no checkpoint)");

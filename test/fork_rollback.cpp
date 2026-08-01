@@ -9,6 +9,7 @@
 #include "platform/concurrency.h"    // fork-eligibility census (forkCensusEnter/Leave/SumExcept/Offender)
 #include "extensions/fork_census.h"  // SmartMutex / SmartSharedMutex
 #include "extensions/fork_stats.h"   // ForkStats (unforkable-tick counters + durable log)
+#include "extensions/tick_fork_barrier.h"
 #include "extensions/tick_fork_control.h"
 
 #include <filesystem>
@@ -246,20 +247,69 @@ bool waitForRetireState(
 
 } // namespace
 
+TEST(RequestProcessorBarrierTest, FailedContenderDoesNotReleaseActiveOwner)
+{
+    tickFork::gRequestProcessorParkPhase.store(0, std::memory_order_release);
+
+    tickFork::RequestProcessorBarrier owner;
+    ASSERT_TRUE(owner.request());
+    const unsigned long long ownerPhase = owner.phase();
+    ASSERT_TRUE(ownerPhase & 1);
+
+    {
+        tickFork::RequestProcessorBarrier contender;
+        EXPECT_FALSE(contender.request());
+    }
+    EXPECT_EQ(
+        tickFork::gRequestProcessorParkPhase.load(std::memory_order_acquire),
+        ownerPhase);
+
+    owner.release();
+    EXPECT_EQ(
+        tickFork::gRequestProcessorParkPhase.load(std::memory_order_acquire),
+        ownerPhase + 1);
+    tickFork::gRequestProcessorParkPhase.store(0, std::memory_order_release);
+}
+
+TEST(RequestProcessorBarrierTest, UnacknowledgedOwnerReleasesOwnedPhase)
+{
+    constexpr unsigned long long processorNumber = 0;
+    const unsigned long long processorIDs[] = { processorNumber };
+    tickFork::gRequestProcessorParkPhase.store(0, std::memory_order_release);
+    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(
+        0, std::memory_order_release);
+
+    unsigned long long ownerPhase;
+    {
+        tickFork::RequestProcessorBarrier owner;
+        ASSERT_TRUE(owner.request());
+        ownerPhase = owner.phase();
+        EXPECT_FALSE(owner.allAcknowledged(processorIDs, 1));
+    }
+    EXPECT_EQ(
+        tickFork::gRequestProcessorParkPhase.load(std::memory_order_acquire),
+        ownerPhase + 1);
+
+    tickFork::gRequestProcessorParkPhase.store(0, std::memory_order_release);
+    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(
+        0, std::memory_order_release);
+}
+
 TEST(ForkRollbackControl, ParkWorkerAcknowledgesNextPhaseWithoutReleaseObservation)
 {
     constexpr unsigned long long processorNumber = 0;
     constexpr unsigned long long firstParkPhase = 1;
     constexpr unsigned long long secondParkPhase = 3;
-    gForkParkPhaseByProcessor[processorNumber].store(0, std::memory_order_release);
-    gForkParkPhase.store(firstParkPhase, std::memory_order_release);
+    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(
+        0, std::memory_order_release);
+    tickFork::gRequestProcessorParkPhase.store(firstParkPhase, std::memory_order_release);
 
-    std::thread worker([processorNumber] { liteForkRequestPark(processorNumber); });
+    std::thread worker([processorNumber] { tickFork::requestProcessorParkPoint(processorNumber); });
     const auto waitForPark = [processorNumber](unsigned long long expectedPhase) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         while (std::chrono::steady_clock::now() < deadline)
         {
-            if (gForkParkPhaseByProcessor[processorNumber].load(
+            if (tickFork::gRequestProcessorParkAcknowledgement[processorNumber].load(
                     std::memory_order_acquire) == expectedPhase)
                 return true;
             std::this_thread::yield();
@@ -272,14 +322,15 @@ TEST(ForkRollbackControl, ParkWorkerAcknowledgesNextPhaseWithoutReleaseObservati
     if (firstParked)
     {
         // Model a worker missing the even release phase between consecutive BSP park requests.
-        gForkParkPhase.store(secondParkPhase, std::memory_order_release);
+        tickFork::gRequestProcessorParkPhase.store(secondParkPhase, std::memory_order_release);
         EXPECT_TRUE(waitForPark(secondParkPhase));
     }
 
-    gForkParkPhase.store(secondParkPhase + 1, std::memory_order_release);
+    tickFork::gRequestProcessorParkPhase.store(secondParkPhase + 1, std::memory_order_release);
     worker.join();
-    gForkParkPhase.store(0, std::memory_order_release);
-    gForkParkPhaseByProcessor[processorNumber].store(0, std::memory_order_release);
+    tickFork::gRequestProcessorParkPhase.store(0, std::memory_order_release);
+    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(
+        0, std::memory_order_release);
 }
 
 TEST(ForkRollbackControl, RetireRequestWaitsForBspCompletion)
