@@ -25,9 +25,11 @@
 #include <cstdlib>   // posix_memalign, free
 #include <cstring>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -745,3 +747,76 @@ TEST(ForkStatsTest, CountersAndDurableLog)
 
     std::filesystem::remove(ForkStats::kLogPath);
 }
+
+#if defined(__linux__)
+TEST(ForkStatsTest, ParentUpdatesAreVisibleToForkChild)
+{
+    const unsigned long long ok0 = ForkStats::forksOk.load();
+    const unsigned long long mismatch0 = ForkStats::mismatches.load();
+    int releasePipe[2];
+    ASSERT_EQ(pipe(releasePipe), 0);
+
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        close(releasePipe[1]);
+        char release = 0;
+        ssize_t readSize;
+        do
+        {
+            readSize = read(releasePipe[0], &release, 1);
+        }
+        while (readSize < 0 && errno == EINTR);
+        close(releasePipe[0]);
+
+        const bool countersVisible =
+            ForkStats::forksOk.load() == ok0 + 1
+            && ForkStats::mismatches.load() == mismatch0 + 1;
+        _exit(readSize == 1 && countersVisible ? 0 : 1);
+    }
+
+    if (child < 0)
+    {
+        close(releasePipe[0]);
+        close(releasePipe[1]);
+        FAIL() << "fork failed: " << strerror(errno);
+        return;
+    }
+    close(releasePipe[0]);
+    ForkStats::onForkOk();
+    ForkStats::onVerdict(true);
+    const char release = 1;
+    EXPECT_EQ(write(releasePipe[1], &release, 1), 1);
+    close(releasePipe[1]);
+
+    int status = 0;
+    pid_t waited = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    for (;;)
+    {
+        do
+        {
+            waited = waitpid(child, &status, WNOHANG);
+        }
+        while (waited < 0 && errno == EINTR);
+        if (waited != 0 || std::chrono::steady_clock::now() >= deadline)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (waited == 0)
+    {
+        kill(child, SIGKILL);
+        do
+        {
+            waited = waitpid(child, &status, 0);
+        }
+        while (waited < 0 && errno == EINTR);
+        FAIL() << "fork stats child timed out";
+        return;
+    }
+
+    ASSERT_EQ(waited, child);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+}
+#endif

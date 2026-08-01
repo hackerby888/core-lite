@@ -1,14 +1,19 @@
 #pragma once
 
-// Fork-rollback degrade-to-strict observability: in-mem counters (GET /v1/fork-stats) +
-// durable on-disk log of every unforkable tick (GET /v1/unforkable-ticks). RAM bounded.
+// Fork-rollback degrade-to-strict observability: process-shared counters on Linux
+// (GET /v1/fork-stats) + durable unforkable-tick log (GET /v1/unforkable-ticks).
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <ctime>
 #include <mutex>
+#include <new>
 #include <string>
+#if defined(__linux__)
+#include <sys/mman.h>
+#endif
 
 namespace ForkStats
 {
@@ -27,15 +32,53 @@ inline const char* reasonName(int r)
     }
 }
 
-inline std::atomic<unsigned long long> forksRequested{ 0 };
-inline std::atomic<unsigned long long> forksOk{ 0 };
-inline std::atomic<unsigned long long> forksSkippedTotal{ 0 };
-inline std::atomic<unsigned long long> skipByReason[REASON_COUNT];
-inline std::atomic<unsigned long long> matches{ 0 };
-inline std::atomic<unsigned long long> mismatches{ 0 };
-inline std::atomic<unsigned int> lastSkipTick{ 0 };
-inline std::atomic<int> lastSkipReason{ -1 };
-inline std::atomic<const char*> lastOffender{ nullptr };   // stable __FILE__/literal name from the census
+struct State
+{
+    std::atomic<unsigned long long> forksRequested{ 0 };
+    std::atomic<unsigned long long> forksOk{ 0 };
+    std::atomic<unsigned long long> forksSkippedTotal{ 0 };
+    std::atomic<unsigned long long> skipByReason[REASON_COUNT]{};
+    std::atomic<unsigned long long> matches{ 0 };
+    std::atomic<unsigned long long> mismatches{ 0 };
+    std::atomic<unsigned int> lastSkipTick{ 0 };
+    std::atomic<int> lastSkipReason{ -1 };
+    std::atomic<const char*> lastOffender{ nullptr };   // stable __FILE__/literal name from the census
+};
+
+inline State& state()
+{
+#if defined(__linux__)
+    static_assert(std::atomic<unsigned long long>::is_always_lock_free);
+    static_assert(std::atomic<unsigned int>::is_always_lock_free);
+    static_assert(std::atomic<int>::is_always_lock_free);
+    static_assert(std::atomic<const char*>::is_always_lock_free);
+
+    static State* state = [] {
+        void* mapping = mmap(nullptr, sizeof(State), PROT_READ | PROT_WRITE,
+                             MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        if (mapping == MAP_FAILED)
+        {
+            perror("[FORK] shared stats mmap failed");
+            abort();
+        }
+        return new (mapping) State{};
+    }();
+    return *state;
+#else
+    static State state;
+    return state;
+#endif
+}
+
+inline auto& forksRequested = state().forksRequested;
+inline auto& forksOk = state().forksOk;
+inline auto& forksSkippedTotal = state().forksSkippedTotal;
+inline auto& skipByReason = state().skipByReason;
+inline auto& matches = state().matches;
+inline auto& mismatches = state().mismatches;
+inline auto& lastSkipTick = state().lastSkipTick;
+inline auto& lastSkipReason = state().lastSkipReason;
+inline auto& lastOffender = state().lastOffender;
 
 inline const char* kLogPath = "unforkable_ticks.log";   // node CWD, like logging_health_bad_ticks.log
 inline std::mutex gLogMtx;   // SMARTMUTEX-EXEMPT: stats-file append only; never held over node state nor across fork()
