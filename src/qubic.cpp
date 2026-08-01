@@ -2147,7 +2147,9 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
     {
         PinScope _pinScope; // release swap-page pins taken while handling this request
         checkinTime(processorNumber);
-        liteForkRequestPark();
+        liteForkRequestPark(processorNumber);
+        if (shutDownNode)
+            break;
         std::this_thread::sleep_for(std::chrono::microseconds(50));
         // in epoch transition, wait here
         if (epochTransitionState)
@@ -9079,7 +9081,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     tickFork::gForkRequest = false;
     tickFork::gChildPid = -2;
     tickForkControl::gBspRetireHandoff.resetForChild();
-    gForkQuiesceRequest = false;
+    tickFork::unparkRequestProcessors();
     tickFork::setWinState(tickFork::WindowState::Idle);
     close(tickFork::gPipe[0]);
     tickFork::gPipe[0] = -1;
@@ -9230,17 +9232,44 @@ static bool bspCommitCheckpoint()
     return true;
 }
 
-static void bspServiceRetireRequest()
+static bool bspRetireCheckpoint(bool commitCheckpoint, bool shutDownAfterCommit)
 {
-    if (!tickForkControl::gBspRetireHandoff.tryStart())
-        return;
+    tickFork::WriterQuiesce quiesce;
+    if (!quiesce.acquire(tickFork::gForkQuiesceTimeoutMs))
+    {
+        ForkStats::onForkSkipped(
+            ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "retire_writers");
+        tickForkLog("BSP retire failed: writer quiesce timeout");
+        return false;
+    }
 
-    const bool succeeded = bspCommitCheckpoint();
+    const bool succeeded = !commitCheckpoint || bspCommitCheckpoint();
+    if (succeeded && shutDownAfterCommit)
+    {
+#if !defined(NO_RPC)
+        gRpcNodeReady.store(false, std::memory_order_release);
+#endif
+        shutDownNode = 1;
+    }
+    quiesce.release();
+    return succeeded;
+}
+
+static bool bspServiceRetireRequest()
+{
+    bool shutDownAfterCommit = false;
+    if (!tickForkControl::gBspRetireHandoff.tryStart(shutDownAfterCommit))
+        return false;
+
+    const bool commitCheckpoint =
+        !shutDownAfterCommit || tickFork::winState() == tickFork::WindowState::Retiring;
+    const bool succeeded = bspRetireCheckpoint(commitCheckpoint, shutDownAfterCommit);
     if (!tickForkControl::gBspRetireHandoff.finish(succeeded))
     {
         tickForkLog("BSP retire acknowledgement failed -> supervisor restart");
         _exit(70);
     }
+    return succeeded && shutDownAfterCommit;
 }
 
 // Autosave already runs on the BSP while the tick processor waits, so it commits directly.
@@ -9250,8 +9279,7 @@ static void bspRetireCheckpointForAutosave()
         return;
 
     tickFork::setWinState(tickFork::WindowState::Retiring);
-    tickFork::WriterQuiesce quiesce;
-    if (quiesce.acquire(tickFork::gForkQuiesceTimeoutMs) && bspCommitCheckpoint())
+    if (bspRetireCheckpoint(true, false))
         return;
 
     const char tag = tickForkControl::promoteTag;
@@ -9265,10 +9293,24 @@ static void bspRetireCheckpointForAutosave()
 // Called from the BSP main-loop top (no networkingLock held) when a fork is requested.
 static void bspForkPoint()
 {
+    // Claim first: the tick thread may time out only while the request is still unclaimed.
+    tickFork::gForkRequest = false;
+    long long q0 = gForkBench ? tickForkNowNs() : 0;
+    tickFork::RequestProcessorPark requestProcessors;
+    if (!requestProcessors.acquire(tickFork::gForkQuiesceTimeoutMs))
+    {
+        requestProcessors.release();
+        ForkStats::onForkSkipped(
+            ForkStats::PARK_TIMEOUT, (unsigned)system.tick, "request_processors");
+        tickForkLog("request processor park timeout -> skip fork, run current tick strict");
+        tickFork::gChildPid = -1;
+        tickFork::setWinState(tickFork::WindowState::Idle);
+        return;
+    }
+
     // Hold networkingLock across fork so child snapshots a consistent map; per-socket workers
     // are cv-blocked when idle, vanish in child, lazy-respawn on reconnect.
     tickForkLog("BSP fork: taking locks");
-    long long q0 = gForkBench ? tickForkNowNs() : 0;
     ForkSnapshotLocks forkLocks;
     const long long quiesceDeadline = tickForkNowMs() + tickFork::gForkQuiesceTimeoutMs;
     while (!forkLocks.tryLock())
@@ -9280,8 +9322,8 @@ static void bspForkPoint()
             ForkStats::onForkSkipped(
                 ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "snapshot_locks");
             tickForkLog("snapshot lock timeout -> skip fork, run current tick strict");
+            requestProcessors.release();
             tickFork::gChildPid = -1;
-            tickFork::gForkRequest = false;
             tickFork::setWinState(tickFork::WindowState::Idle);
             return;
         }
@@ -9298,8 +9340,8 @@ static void bspForkPoint()
         ForkStats::onForkSkipped(
             ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "vm_io");
         tickForkLog("VM IO drain timeout -> skip fork, run current tick strict");
+        requestProcessors.release();
         tickFork::gChildPid = -1;
-        tickFork::gForkRequest = false;
         tickFork::setWinState(tickFork::WindowState::Idle);
         return;
     }
@@ -9320,8 +9362,8 @@ static void bspForkPoint()
             fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n",
                     off ? off : "?", (unsigned)system.tick);
             fflush(stderr);
+            requestProcessors.release();
             tickFork::gChildPid = -1;
-            tickFork::gForkRequest = false;
             tickFork::setWinState(tickFork::WindowState::Idle);
             return;
         }
@@ -9333,8 +9375,8 @@ static void bspForkPoint()
         ForkStats::onForkSkipped(
             ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "shadow_arm");
         tickForkLog("shadow cleanup failed -> skip fork, run current tick strict");
+        requestProcessors.release();
         tickFork::gChildPid = -1;
-        tickFork::gForkRequest = false;
         tickFork::setWinState(tickFork::WindowState::Idle);
         return;
     }
@@ -9364,13 +9406,13 @@ static void bspForkPoint()
     if (pid < 0)
         gShadow.discard();
     forkLocks.unlock();
+    requestProcessors.release();
     if (pid < 0)
     {
         tickForkLog("fork() failed -> parent strict fallback (no checkpoint)");
         ForkStats::onForkSkipped(ForkStats::FORK_FAIL, (unsigned)system.tick, "");
     }
     tickFork::gChildPid = pid;
-    tickFork::gForkRequest = false;
     if (pid < 0)
     {
         tickFork::setWinState(tickFork::WindowState::Idle);
@@ -9490,7 +9532,8 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 #endif
                 PinScope _pinScope; // release swap-page pins taken during this main-loop iteration
 #ifdef __linux__
-                bspServiceRetireRequest();
+                if (bspServiceRetireRequest())
+                    break;
                 if (tickFork::gForkRequest) bspForkPoint();
 #endif
                 if (criticalSituation == 1)

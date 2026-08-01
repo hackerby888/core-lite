@@ -4,6 +4,7 @@
 // read pristine files; commit on match, discard on mismatch.
 
 #include <atomic>
+#include "public_settings.h"
 
 inline volatile bool gForkWindowActive = false;
 inline std::atomic<bool> gReRunStrict{ false };
@@ -18,9 +19,9 @@ inline volatile bool gForkForceMismatch = false;
 inline volatile bool gForkBench = false;
 inline unsigned int gForkForceRollbackEvery = 0;
 
-inline std::atomic<bool> gForkQuiesceRequest{ false };
-inline std::atomic<int> gForkParked{ 0 };
-inline std::atomic<unsigned> gForkParkGen{ 0 };   // bumped per fork window; see liteForkRequestPark
+// Even phases run normally; odd phases park request processors at their loop safe point.
+inline std::atomic<unsigned long long> gForkParkPhase{ 0 };
+inline std::atomic<unsigned long long> gForkParkPhaseByProcessor[MAX_NUMBER_OF_PROCESSORS]{};
 
 #ifdef __linux__
 
@@ -37,22 +38,22 @@ inline std::atomic<unsigned> gForkParkGen{ 0 };   // bumped per fork window; see
 #include <cstdlib>
 #include <unistd.h>
 
-static inline void liteForkRequestPark()
+static inline void liteForkRequestPark(unsigned long long processorNumber)
 {
-    if (!gForkQuiesceRequest.load(std::memory_order_acquire))
-        return;
-
-    // Count once per fork window; there is no decrement-on-release to race the next reset.
-    static thread_local unsigned localParkGeneration = (unsigned)-1;
-    const unsigned requestedParkGeneration = gForkParkGen.load(std::memory_order_acquire);
-    if (localParkGeneration != requestedParkGeneration)
+    for (;;)
     {
-        localParkGeneration = requestedParkGeneration;
-        gForkParked.fetch_add(1, std::memory_order_acq_rel);
-    }
+        const unsigned long long parkPhase = gForkParkPhase.load(std::memory_order_acquire);
+        if (!(parkPhase & 1)) // even phase -> no park requested
+            return;
+        gForkParkPhaseByProcessor[processorNumber].store(parkPhase, std::memory_order_release);
 
-    while (gForkQuiesceRequest.load(std::memory_order_acquire))
-        std::this_thread::yield();
+        // A worker that misses an even release phase observes the next odd phase here and
+        // acknowledges it before returning to request processing.
+        while (gForkParkPhase.load(std::memory_order_acquire) == parkPhase)
+        {
+            std::this_thread::yield();
+        }
+    }
 }
 
 class DiskShadow
@@ -435,7 +436,7 @@ static inline CHAR16* liteShadowRemoveDir(CHAR16* pageDir, const CHAR16* pageNam
 
 #else
 
-static inline void liteForkRequestPark() {}
+static inline void liteForkRequestPark(unsigned long long) {}
 static inline CHAR16* liteShadowWriteDir(CHAR16* pageDir, const CHAR16* pageName)
 {
     (void)pageName;

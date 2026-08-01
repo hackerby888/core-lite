@@ -244,6 +244,42 @@ bool waitForRetireState(
 
 } // namespace
 
+TEST(ForkRollbackControl, ParkWorkerAcknowledgesNextPhaseWithoutReleaseObservation)
+{
+    constexpr unsigned long long processorNumber = 0;
+    constexpr unsigned long long firstParkPhase = 1;
+    constexpr unsigned long long secondParkPhase = 3;
+    gForkParkPhaseByProcessor[processorNumber].store(0, std::memory_order_release);
+    gForkParkPhase.store(firstParkPhase, std::memory_order_release);
+
+    std::thread worker([processorNumber] { liteForkRequestPark(processorNumber); });
+    const auto waitForPark = [processorNumber](unsigned long long expectedPhase) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (gForkParkPhaseByProcessor[processorNumber].load(
+                    std::memory_order_acquire) == expectedPhase)
+                return true;
+            std::this_thread::yield();
+        }
+        return false;
+    };
+
+    const bool firstParked = waitForPark(firstParkPhase);
+    EXPECT_TRUE(firstParked);
+    if (firstParked)
+    {
+        // Model a worker missing the even release phase between consecutive BSP park requests.
+        gForkParkPhase.store(secondParkPhase, std::memory_order_release);
+        EXPECT_TRUE(waitForPark(secondParkPhase));
+    }
+
+    gForkParkPhase.store(secondParkPhase + 1, std::memory_order_release);
+    worker.join();
+    gForkParkPhase.store(0, std::memory_order_release);
+    gForkParkPhaseByProcessor[processorNumber].store(0, std::memory_order_release);
+}
+
 TEST(ForkRollbackControl, RetireRequestWaitsForBspCompletion)
 {
     tickForkControl::BspRetireHandoff handoff;
@@ -258,6 +294,25 @@ TEST(ForkRollbackControl, RetireRequestWaitsForBspCompletion)
     ASSERT_TRUE(handoff.tryStart());
     EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
 
+    ASSERT_TRUE(handoff.finish(true));
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_TRUE(result.get());
+    EXPECT_EQ(handoff.state(), tickForkControl::BspRetireHandoff::State::Idle);
+}
+
+TEST(ForkRollbackControl, ShutdownIntentIsDeliveredToBsp)
+{
+    tickForkControl::BspRetireHandoff handoff;
+    auto result = std::async(std::launch::async, [&] {
+        return handoff.requestAndWait(1000, true);
+    });
+
+    ASSERT_TRUE(waitForRetireState(
+        handoff,
+        tickForkControl::BspRetireHandoff::State::ShutdownRequested));
+    bool shutDownAfterCommit = false;
+    ASSERT_TRUE(handoff.tryStart(shutDownAfterCommit));
+    EXPECT_TRUE(shutDownAfterCommit);
     ASSERT_TRUE(handoff.finish(true));
     ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
     EXPECT_TRUE(result.get());

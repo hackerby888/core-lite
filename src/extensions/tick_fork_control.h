@@ -38,17 +38,20 @@ namespace tickForkControl
         {
             Idle,
             Requested,
+            ShutdownRequested,
             Running,
             Succeeded,
             Failed,
         };
 
-        bool requestAndWait(unsigned int timeoutMs)
+        bool requestAndWait(unsigned int timeoutMs, bool shutDownAfterCommit = false)
         {
+            const State requestState =
+                shutDownAfterCommit ? State::ShutdownRequested : State::Requested;
             State expected = State::Idle;
             if (!_state.compare_exchange_strong(
                     expected,
-                    State::Requested,
+                    requestState,
                     std::memory_order_acq_rel))
             {
                 return false;
@@ -65,10 +68,10 @@ namespace tickForkControl
                     return state == State::Succeeded;
                 }
 
-                if (state == State::Requested
+                if (state == requestState
                     && std::chrono::steady_clock::now() >= deadline)
                 {
-                    expected = State::Requested;
+                    expected = requestState;
                     if (_state.compare_exchange_strong(
                             expected,
                             State::Idle,
@@ -81,13 +84,34 @@ namespace tickForkControl
             }
         }
 
-        bool tryStart()
+        bool tryStart(bool& shutDownAfterCommit)
         {
             State expected = State::Requested;
-            return _state.compare_exchange_strong(
-                expected,
-                State::Running,
-                std::memory_order_acq_rel);
+            if (_state.compare_exchange_strong(
+                    expected,
+                    State::Running,
+                    std::memory_order_acq_rel))
+            {
+                shutDownAfterCommit = false;
+                return true;
+            }
+
+            expected = State::ShutdownRequested;
+            if (_state.compare_exchange_strong(
+                    expected,
+                    State::Running,
+                    std::memory_order_acq_rel))
+            {
+                shutDownAfterCommit = true;
+                return true;
+            }
+            return false;
+        }
+
+        bool tryStart()
+        {
+            bool shutDownAfterCommit;
+            return tryStart(shutDownAfterCommit);
         }
 
         bool finish(bool succeeded)
