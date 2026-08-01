@@ -18,11 +18,14 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <future>
+#include <chrono>
 #if defined(__linux__)
 #include <cerrno>
 #include <cstdlib>   // posix_memalign, free
 #include <cstring>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -186,7 +189,130 @@ TEST_F(ForkRollback, PurgeOrphansDropsShadow)
     EXPECT_FALSE(gShadow.active.load());
 }
 
+// The child inherits this registration at fork time. Parent-created files are not in the child's
+// written-page set, so cleanup must use the retained directory list.
+TEST_F(ForkRollback, RegisteredDirSurvivesArmForChildPurge)
+{
+    std::filesystem::create_directories(std::string(kBase) + "/registered");
+    CHAR16 dir[256]; setText(dir, L"fork_rollback_test/registered");
+    gShadow.registerDir(dir);
+
+    ASSERT_TRUE(gShadow.arm());
+    std::filesystem::create_directories(std::string(kBase) + "/registered/s");
+    writeFileUtf8("fork_rollback_test/registered/s/late.pg", "optimistic");
+
+    EXPECT_TRUE(gShadow.purgeOrphans());
+    EXPECT_FALSE(std::filesystem::exists("fork_rollback_test/registered/s"));
+    EXPECT_FALSE(gShadow.active.load());
+    EXPECT_FALSE(gForkWindowActive);
+}
+
+TEST_F(ForkRollback, CleanupFailureStaysInactive)
+{
+    writeFileUtf8(std::string(kBase) + "/not-a-directory", "x");
+    CHAR16 dir[256]; setText(dir, L"fork_rollback_test/not-a-directory");
+    DiskShadow shadow;
+    shadow.registerDir(dir);
+
+    EXPECT_FALSE(shadow.arm());
+    EXPECT_FALSE(shadow.active.load());
+    EXPECT_FALSE(gForkWindowActive);
+    EXPECT_FALSE(shadow.purgeOrphans());
+    EXPECT_FALSE(shadow.active.load());
+    EXPECT_FALSE(gForkWindowActive);
+
+    gShadowPoisoned.store(false, std::memory_order_release);
+}
+
 #if defined(__linux__)
+
+namespace {
+
+bool waitForRetireState(
+    tickForkControl::BspRetireHandoff& handoff,
+    tickForkControl::BspRetireHandoff::State expected)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (handoff.state() == expected)
+            return true;
+        std::this_thread::yield();
+    }
+    return handoff.state() == expected;
+}
+
+} // namespace
+
+TEST(ForkRollbackControl, RetireRequestWaitsForBspCompletion)
+{
+    tickForkControl::BspRetireHandoff handoff;
+    auto result = std::async(std::launch::async, [&] {
+        return handoff.requestAndWait(1000);
+    });
+
+    ASSERT_TRUE(waitForRetireState(
+        handoff,
+        tickForkControl::BspRetireHandoff::State::Requested));
+    EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    ASSERT_TRUE(handoff.tryStart());
+    EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+
+    ASSERT_TRUE(handoff.finish(true));
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_TRUE(result.get());
+    EXPECT_EQ(handoff.state(), tickForkControl::BspRetireHandoff::State::Idle);
+}
+
+TEST(ForkRollbackControl, RetireRequestTimeoutCancels)
+{
+    tickForkControl::BspRetireHandoff handoff;
+
+    EXPECT_FALSE(handoff.requestAndWait(1));
+    EXPECT_EQ(handoff.state(), tickForkControl::BspRetireHandoff::State::Idle);
+    EXPECT_FALSE(handoff.tryStart());
+}
+
+TEST(ForkRollbackControl, RunningRetireIgnoresRequestTimeout)
+{
+    tickForkControl::BspRetireHandoff handoff;
+    auto result = std::async(std::launch::async, [&] {
+        return handoff.requestAndWait(10);
+    });
+
+    ASSERT_TRUE(waitForRetireState(
+        handoff,
+        tickForkControl::BspRetireHandoff::State::Requested));
+    ASSERT_TRUE(handoff.tryStart());
+    const auto afterTimeout =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+    while (std::chrono::steady_clock::now() < afterTimeout)
+        std::this_thread::yield();
+
+    EXPECT_EQ(handoff.state(), tickForkControl::BspRetireHandoff::State::Running);
+    EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    ASSERT_TRUE(handoff.finish(true));
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_TRUE(result.get());
+    EXPECT_EQ(handoff.state(), tickForkControl::BspRetireHandoff::State::Idle);
+}
+
+TEST(ForkRollbackControl, FailedRetireReturnsFailure)
+{
+    tickForkControl::BspRetireHandoff handoff;
+    auto result = std::async(std::launch::async, [&] {
+        return handoff.requestAndWait(1000);
+    });
+
+    ASSERT_TRUE(waitForRetireState(
+        handoff,
+        tickForkControl::BspRetireHandoff::State::Requested));
+    ASSERT_TRUE(handoff.tryStart());
+    ASSERT_TRUE(handoff.finish(false));
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_FALSE(result.get());
+    EXPECT_EQ(handoff.state(), tickForkControl::BspRetireHandoff::State::Idle);
+}
 
 TEST(ForkRollbackControl, ExplicitRetireDoesNotPromote)
 {
@@ -223,12 +349,59 @@ TEST(ForkRollbackControl, PromoteCommandCarriesTargetTick)
 
     const char tag = tickForkControl::promoteTag;
     const unsigned int targetTick = 5678;
+    const char sentinel = 'x';
     ASSERT_EQ(write(pipeFds[1], &tag, 1), 1);
     ASSERT_EQ(write(pipeFds[1], &targetTick, sizeof(targetTick)), (ssize_t)sizeof(targetTick));
+    ASSERT_EQ(write(pipeFds[1], &sentinel, 1), 1);
     close(pipeFds[1]);
 
     const auto command = tickForkControl::readChildCommand(pipeFds[0], 1234);
     close(pipeFds[0]);
+
+    EXPECT_EQ(command.action, tickForkControl::ChildAction::Promote);
+    EXPECT_EQ(command.targetTick, targetTick);
+}
+
+TEST(ForkRollbackControl, PromoteWaitsForParentEof)
+{
+    int pipeFds[2];
+    ASSERT_EQ(pipe(pipeFds), 0);
+
+    const char tag = tickForkControl::promoteTag;
+    const unsigned int targetTick = 5678;
+    ASSERT_EQ(write(pipeFds[1], &tag, 1), 1);
+    ASSERT_EQ(write(pipeFds[1], &targetTick, sizeof(targetTick)), (ssize_t)sizeof(targetTick));
+
+    std::promise<tickForkControl::ChildCommand> commandPromise;
+    std::future<tickForkControl::ChildCommand> commandFuture = commandPromise.get_future();
+    std::thread reader([&] {
+        commandPromise.set_value(tickForkControl::readChildCommand(pipeFds[0], 1234));
+        close(pipeFds[0]);
+    });
+
+    bool drained = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (std::chrono::steady_clock::now() < deadline
+           && commandFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+    {
+        int bytesAvailable = -1;
+        if (ioctl(pipeFds[0], FIONREAD, &bytesAvailable) == 0 && bytesAvailable == 0)
+        {
+            drained = true;
+            break;
+        }
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(drained);
+    EXPECT_EQ(commandFuture.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+
+    close(pipeFds[1]);
+    const bool ready = commandFuture.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+    EXPECT_TRUE(ready);
+    reader.join();
+    if (!ready)
+        return;
+    const auto command = commandFuture.get();
 
     EXPECT_EQ(command.action, tickForkControl::ChildAction::Promote);
     EXPECT_EQ(command.targetTick, targetTick);
@@ -512,6 +685,7 @@ TEST(ForkStatsTest, CountersAndDurableLog)
     // summary JSON reflects the counters
     std::string js = ForkStats::summaryJson();
     EXPECT_NE(js.find("\"forksSkippedTotal\""), std::string::npos);
+    EXPECT_NE(js.find("\"quiesceTimeout\""), std::string::npos);
     EXPECT_NE(js.find("\"lastUnforkable\""), std::string::npos);
 
     std::filesystem::remove(ForkStats::kLogPath);

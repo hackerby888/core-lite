@@ -2,13 +2,16 @@
 
 #ifdef __linux__
 
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <thread>
 #include <unistd.h>
 
 namespace tickForkControl
@@ -27,6 +30,90 @@ namespace tickForkControl
         ChildAction action;
         unsigned int targetTick;
     };
+
+    class BspRetireHandoff
+    {
+    public:
+        enum class State
+        {
+            Idle,
+            Requested,
+            Running,
+            Succeeded,
+            Failed,
+        };
+
+        bool requestAndWait(unsigned int timeoutMs)
+        {
+            State expected = State::Idle;
+            if (!_state.compare_exchange_strong(
+                    expected,
+                    State::Requested,
+                    std::memory_order_acq_rel))
+            {
+                return false;
+            }
+
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+            for (;;)
+            {
+                const State state = _state.load(std::memory_order_acquire);
+                if (state == State::Succeeded || state == State::Failed)
+                {
+                    _state.store(State::Idle, std::memory_order_release);
+                    return state == State::Succeeded;
+                }
+
+                if (state == State::Requested
+                    && std::chrono::steady_clock::now() >= deadline)
+                {
+                    expected = State::Requested;
+                    if (_state.compare_exchange_strong(
+                            expected,
+                            State::Idle,
+                            std::memory_order_acq_rel))
+                    {
+                        return false;
+                    }
+                }
+                std::this_thread::yield();
+            }
+        }
+
+        bool tryStart()
+        {
+            State expected = State::Requested;
+            return _state.compare_exchange_strong(
+                expected,
+                State::Running,
+                std::memory_order_acq_rel);
+        }
+
+        bool finish(bool succeeded)
+        {
+            State expected = State::Running;
+            return _state.compare_exchange_strong(
+                expected,
+                succeeded ? State::Succeeded : State::Failed,
+                std::memory_order_acq_rel);
+        }
+
+        State state() const
+        {
+            return _state.load(std::memory_order_acquire);
+        }
+
+        void resetForChild()
+        {
+            _state.store(State::Idle, std::memory_order_release);
+        }
+
+    private:
+        std::atomic<State> _state{ State::Idle };
+    };
+
+    inline BspRetireHandoff gBspRetireHandoff;
 
     // Accepted node-side RPC sockets retain the listener path after fork.
     inline unsigned int closeInheritedRpcUnixSocketsForPromote(
@@ -114,6 +201,16 @@ namespace tickForkControl
         return readSize;
     }
 
+    inline bool waitForPipeEof(int pipeFd)
+    {
+        char discarded[64];
+        ssize_t readSize;
+        while ((readSize = readRetryOnInterrupt(pipeFd, discarded, sizeof(discarded))) > 0)
+        {
+        }
+        return readSize == 0;
+    }
+
     inline bool writeRetireCommand(int pipeFd)
     {
         ssize_t writeSize;
@@ -143,6 +240,8 @@ namespace tickForkControl
         // EOF, a short frame, or an unknown tag means the parent failed unexpectedly.
         if (targetTick == 0)
             targetTick = crashTargetTick;
+        if (!waitForPipeEof(pipeFd))
+            _exit(72);
         return { ChildAction::Promote, targetTick };
     }
 }

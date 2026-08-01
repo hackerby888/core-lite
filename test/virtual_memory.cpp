@@ -4,14 +4,19 @@
 #include "../src/network_messages/tick.h"
 #include "../src/public_settings.h"
 #include "../src/platform/virtual_memory.h"
+#include "../src/extensions/tick_fork_control.h"
 
 #include <cstring>
+#include <chrono>
+#include <filesystem>
 #include <random>
 #include <thread>
 #include <atomic>
 #include <vector>
 #if defined(__linux__)
 #include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #include "network_messages/transactions.h"
@@ -499,6 +504,23 @@ TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_TestCacheBuffer)
 
 namespace {
 struct E16 { unsigned long long a, b; }; // 16 bytes; pageCapacity 256 -> pageSize 4096 (one OS page)
+#if defined(__linux__)
+struct SwapCompressionTestScope
+{
+    bool previousCompression = gSwapCompressionEnabled;
+
+    SwapCompressionTestScope()
+    {
+        gShadow.discard();
+        gSwapCompressionEnabled = true;
+    }
+    ~SwapCompressionTestScope()
+    {
+        gShadow.discard();
+        gSwapCompressionEnabled = previousCompression;
+    }
+};
+#endif
 }
 
 // Every page must survive eviction+reload even though the working set (64 pages) far
@@ -584,6 +606,123 @@ TEST(TestSwapVirtualMemory, ConcurrentHitsDuringMiss) {
 }
 
 #if defined(__linux__)
+TEST(TestSwapVirtualMemory, CompressedShadowCommitReloadsNewData)
+{
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    SwapCompressionTestScope scope;
+    SwapVirtualMemory<E16, wcharToNumber(L"cmit"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+    ASSERT_TRUE(vm.init());
+
+    constexpr unsigned long long cap = 256;
+    for (unsigned long long page = 0; page < 16; ++page)
+    {
+        PinScope pins;
+        vm.getRef(page * cap).a = 1000 + page;
+    }
+    {
+        PinScope pins;
+        ASSERT_EQ(vm.getRef(0).a, 1000U);
+        vm.getRef(0).a = 9000;
+    }
+
+    ASSERT_TRUE(gShadow.arm());
+    for (unsigned long long page = 16; page < 40; ++page)
+    {
+        PinScope pins;
+        vm.getRef(page * cap).a = 1000 + page;
+    }
+    gShadow.commit();
+
+    {
+        PinScope pins;
+        EXPECT_EQ(vm.getRef(0).a, 9000U);
+    }
+}
+
+TEST(TestSwapVirtualMemory, CompressedShadowPromotionReadsPristine)
+{
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    SwapCompressionTestScope scope;
+    SwapVirtualMemory<E16, wcharToNumber(L"prom"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+    ASSERT_TRUE(vm.init());
+
+    constexpr unsigned long long cap = 256;
+    for (unsigned long long page = 0; page < 16; ++page)
+    {
+        PinScope pins;
+        vm.getRef(page * cap).a = 1000 + page;
+    }
+    {
+        PinScope pins;
+        ASSERT_EQ(vm.getRef(0).a, 1000U);
+    }
+
+    int pipeFds[2];
+    ASSERT_EQ(pipe(pipeFds), 0);
+    ASSERT_TRUE(gShadow.arm());
+
+    const pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0)
+    {
+        close(pipeFds[1]);
+        tickForkControl::readChildCommand(pipeFds[0], 64);
+        close(pipeFds[0]);
+
+        gShadow.reinitForChildPromote();
+        const bool clean = gShadow.purgeOrphans();
+        vm.resetPinsForChildPromote();
+
+        for (unsigned long long page = 1; page < 16; ++page)
+        {
+            PinScope pins;
+            (void)vm.getRef(page * cap).a;
+        }
+        unsigned long long restored = 0;
+        {
+            PinScope pins;
+            restored = vm.getRef(0).a;
+        }
+        _exit(clean && restored == 1000 ? 0 : 1);
+    }
+
+    close(pipeFds[0]);
+    {
+        PinScope pins;
+        vm.getRef(0).a = 9000;
+    }
+    for (unsigned long long page = 16; page < 40; ++page)
+    {
+        PinScope pins;
+        vm.getRef(page * cap).a = 1000 + page;
+    }
+
+    bool compressedShadowPage = false;
+    for (const auto& entry : std::filesystem::directory_iterator("promdata000/s"))
+    {
+        if (entry.is_regular_file() && entry.file_size() < sizeof(E16) * cap)
+        {
+            compressedShadowPage = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(compressedShadowPage);
+
+    const char tag = tickForkControl::promoteTag;
+    const unsigned int targetTick = 40;
+    EXPECT_EQ(write(pipeFds[1], &tag, 1), 1);
+    EXPECT_EQ(write(pipeFds[1], &targetTick, sizeof(targetTick)), (ssize_t)sizeof(targetTick));
+    close(pipeFds[1]);
+
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+    EXPECT_FALSE(std::filesystem::exists("promdata000/s"));
+}
+
 // With dirty tracking on, a page only read since load is evicted without a writeback
 // (clean), while a written page is written back and survives. Tests install the SIGSEGV fast path
 // that the node installs in signalHandler (the test binary has no handler of its own).

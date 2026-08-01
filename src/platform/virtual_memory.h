@@ -415,6 +415,9 @@ public:
                 addDebugMessage(dbg);
 #endif
             }
+#ifdef __linux__
+            gShadow.registerDir(pageDir);
+#endif
         }
 
         reset();

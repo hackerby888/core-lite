@@ -178,7 +178,7 @@ class DiskShadow
         std::filesystem::remove(shadowPagePath(page), ec);
     }
 
-    CHAR16* ensureShadowDir(const std::string& realDirPath, const CHAR16* realDir)
+    ShadowDirBuffer& registerDirUnlocked(const std::string& realDirPath, const CHAR16* realDir)
     {
         auto it = shadowDirByRealDirPath.find(realDirPath);
         if (it == shadowDirByRealDirPath.end())
@@ -193,18 +193,41 @@ class DiskShadow
             shadowDirBuffer[realDirLength + 1] = (CHAR16)'s';
             shadowDirBuffer[realDirLength + 2] = 0;
 
-            if (!createDir(shadowDirBuffer.data()))
-            {
-                gShadowPoisoned.store(true, std::memory_order_release);
-                fprintf(stderr, "[SHADOW] createDir failed for %s/s -> poison (force strict replay)\n",
-                        realDirPath.c_str());
-                fflush(stderr);
-            }
-
             it = shadowDirByRealDirPath.emplace(realDirPath, std::move(shadowDirBuffer)).first;
         }
 
-        return it->second.data();
+        return it->second;
+    }
+
+    CHAR16* ensureShadowDir(const std::string& realDirPath, const CHAR16* realDir)
+    {
+        ShadowDirBuffer& shadowDir = registerDirUnlocked(realDirPath, realDir);
+        if (!createDir(shadowDir.data()))
+        {
+            gShadowPoisoned.store(true, std::memory_order_release);
+            fprintf(stderr, "[SHADOW] createDir failed for %s/s -> poison (force strict replay)\n",
+                    realDirPath.c_str());
+            fflush(stderr);
+        }
+        return shadowDir.data();
+    }
+
+    bool removeRegisteredShadowDirs()
+    {
+        bool success = true;
+        for (const auto& entry : shadowDirByRealDirPath)
+        {
+            std::error_code ec;
+            std::filesystem::remove_all(entry.first + "/s", ec);
+            if (ec)
+            {
+                success = false;
+                fprintf(stderr, "[SHADOW] cleanup failed for %s/s: %s\n",
+                        entry.first.c_str(), ec.message().c_str());
+                fflush(stderr);
+            }
+        }
+        return success;
     }
 
     void clearWindow()
@@ -218,22 +241,27 @@ class DiskShadow
 public:
     std::atomic<bool> active{ false };
 
-    void arm()
+    void registerDir(const CHAR16* realDir)
     {
         std::lock_guard<std::mutex> guard(shadowMutex);
-        // Start each fork window from a clean shadow dir.
-        for (const auto& entry : shadowDirByRealDirPath)
+        const std::string realDirPath = wchar_to_string(realDir);
+        registerDirUnlocked(realDirPath, realDir);
+    }
+
+    bool arm()
+    {
+        std::lock_guard<std::mutex> guard(shadowMutex);
+        clearWindow();
+        if (!removeRegisteredShadowDirs())
         {
-            std::error_code ec;
-            std::filesystem::remove_all(entry.first + "/s", ec);
+            gShadowPoisoned.store(true, std::memory_order_release);
+            return false;
         }
 
-        shadowDirByRealDirPath.clear();
-        writtenPages.clear();
-        removedPages.clear();
         gShadowPoisoned.store(false, std::memory_order_release);
         active.store(true, std::memory_order_release);
         gForkWindowActive = true;
+        return true;
     }
 
     CHAR16* dirForWrite(CHAR16* realDir, const CHAR16* pageName)
@@ -372,7 +400,7 @@ public:
         new (&shadowMutex) std::mutex();
     }
 
-    void purgeOrphans()
+    bool purgeOrphans()
     {
         std::lock_guard<std::mutex> guard(shadowMutex);
 
@@ -382,15 +410,11 @@ public:
             fflush(stderr);
         }
 
-        for (const auto& entry : shadowDirByRealDirPath)
-        {
-            std::error_code ec;
-            std::filesystem::remove_all(entry.first + "/s", ec);
-        }
-
-        writtenPages.clear();
-        removedPages.clear();
-        active.store(false, std::memory_order_release);
+        clearWindow();
+        const bool success = removeRegisteredShadowDirs();
+        if (!success)
+            gShadowPoisoned.store(true, std::memory_order_release);
+        return success;
     }
 };
 

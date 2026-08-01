@@ -12,7 +12,7 @@
 
 namespace ForkStats
 {
-enum Reason { CENSUS = 0, PARK_TIMEOUT, PIPE_FAIL, FORK_FAIL, REASON_COUNT };
+enum Reason { CENSUS = 0, PARK_TIMEOUT, PIPE_FAIL, FORK_FAIL, QUIESCE_TIMEOUT, REASON_COUNT };
 
 inline const char* reasonName(int r)
 {
@@ -22,6 +22,7 @@ inline const char* reasonName(int r)
     case PARK_TIMEOUT: return "park_timeout";
     case PIPE_FAIL:    return "pipe_fail";
     case FORK_FAIL:    return "fork_fail";
+    case QUIESCE_TIMEOUT: return "quiesce_timeout";
     default:           return "unknown";
     }
 }
@@ -77,7 +78,8 @@ inline std::string summaryJson()
     char buf[768];
     snprintf(buf, sizeof(buf),
         "{\"forksRequested\":%llu,\"forksOk\":%llu,\"forksSkippedTotal\":%llu,"
-        "\"skip\":{\"census\":%llu,\"parkTimeout\":%llu,\"pipeFail\":%llu,\"forkFail\":%llu},"
+        "\"skip\":{\"census\":%llu,\"parkTimeout\":%llu,\"pipeFail\":%llu,\"forkFail\":%llu,"
+        "\"quiesceTimeout\":%llu},"
         "\"matches\":%llu,\"mismatches\":%llu,"
         "\"lastUnforkable\":{\"tick\":%u,\"reason\":\"%s\",\"offender\":\"%s\"}}",
         forksRequested.load(std::memory_order_relaxed),
@@ -87,6 +89,7 @@ inline std::string summaryJson()
         skipByReason[PARK_TIMEOUT].load(std::memory_order_relaxed),
         skipByReason[PIPE_FAIL].load(std::memory_order_relaxed),
         skipByReason[FORK_FAIL].load(std::memory_order_relaxed),
+        skipByReason[QUIESCE_TIMEOUT].load(std::memory_order_relaxed),
         matches.load(std::memory_order_relaxed),
         mismatches.load(std::memory_order_relaxed),
         lastSkipTick.load(std::memory_order_relaxed),

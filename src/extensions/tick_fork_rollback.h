@@ -100,12 +100,17 @@ namespace tickFork
     // stays alive across the window; match keeps it, mismatch rewinds+replays strict, staleness commits.
     inline unsigned int gForkWindowK = 64;
     inline unsigned int gCheckpointTick = 0;
-    // Deadline to quiesce fork writers (park request processors + drain in-flight swap IO) before a fork
-    // snapshot / shadow commit. Shared by establish/retire/verdict + bspForkPoint.
+    // Deadline to hand work to the BSP and quiesce fork writers before a fork / shadow commit.
     inline constexpr int gForkQuiesceTimeoutMs = 5'000;
 
     // Park request processors for a consistent fork snapshot / shadow commit.
     // Returns false on timeout; caller releases via unparkRequestProcessors().
+    inline void pumpAsyncIoIfBsp()
+    {
+        if (gAsyncFileIO && gAsyncFileIO->isMainThread())
+            flushAsyncFileIOBuffer(0);
+    }
+
     inline bool parkRequestProcessors(int timeoutMs)
     {
         gForkParked.store(0, std::memory_order_release);
@@ -114,6 +119,7 @@ namespace tickFork
         long long deadline = tickForkNowMs() + timeoutMs;
         while (gForkParked.load(std::memory_order_acquire) < nRequestProcessorIDs)
         {
+            pumpAsyncIoIfBsp();
             if (tickForkNowMs() > deadline)
                 return false;
             std::this_thread::yield();
@@ -125,49 +131,55 @@ namespace tickFork
         gForkQuiesceRequest = false;
     }
 
-    enum class QuiesceMode { Shared, Exclusive, TryExclusive };
-
-    inline bool quiesceWriters(QuiesceMode mode, int timeoutMs)
+    struct WriterQuiesce
     {
-        bool ok = parkRequestProcessors(timeoutMs);
-        switch (mode)
-        {
-        case QuiesceMode::Shared:
-            break;
-        case QuiesceMode::Exclusive:
-#if !defined(NO_RPC)
-            gRpcDispatchLock.lock();
-#endif
-            ok &= ts.drainSwapIoForFork(timeoutMs);
-            break;
-        case QuiesceMode::TryExclusive:
-#if !defined(NO_RPC)
-            gRpcDispatchLock.try_lock();
-#endif
-            ok &= ts.drainSwapIoForFork(timeoutMs);
-            break;
-        }
-        return ok;
-    }
+        bool parkRequested = false;
+        bool rpcLocked = false;
 
-    inline void releaseQuiesce(QuiesceMode mode)
-    {
-        switch (mode)
+        bool acquire(int timeoutMs)
         {
-        case QuiesceMode::Shared:
-            break;
-        case QuiesceMode::Exclusive:
-#if !defined(NO_RPC)
-            gRpcDispatchLock.unlock();
-#endif
-            break;
-        case QuiesceMode::TryExclusive:
-            break;
-        }
-        unparkRequestProcessors();
-    }
+            const long long deadline = tickForkNowMs() + timeoutMs;
+            parkRequested = true;
+            if (!parkRequestProcessors(timeoutMs))
+                return false;
 
-    // Establish a fresh checkpoint at system.tick: park request procs, pipe, arm shadow, ask BSP to fork.
+#if !defined(NO_RPC)
+            while (!gRpcDispatchLock.try_lock())
+            {
+                pumpAsyncIoIfBsp();
+                if (tickForkNowMs() >= deadline)
+                    return false;
+                std::this_thread::yield();
+            }
+            rpcLocked = true;
+#endif
+            return true;
+        }
+
+        void release()
+        {
+#if !defined(NO_RPC)
+            if (rpcLocked)
+            {
+                gRpcDispatchLock.unlock();
+                rpcLocked = false;
+            }
+#endif
+            if (parkRequested)
+            {
+                unparkRequestProcessors();
+                parkRequested = false;
+            }
+        }
+
+        ~WriterQuiesce()
+        {
+            release();
+        }
+    };
+
+    // Establish a fresh checkpoint at system.tick: park request procs, create the pipe, ask BSP to
+    // quiesce VM IO, arm the shadow, and fork.
     inline void establishCheckpoint()
     {
         if (gForkBench)
@@ -178,9 +190,9 @@ namespace tickFork
         tickForkLog("checkpoint -> request BSP fork");
         setWinState(WindowState::Checkpointing);
         ForkStats::onForkRequested();
-        if (!quiesceWriters(QuiesceMode::Shared, gForkQuiesceTimeoutMs))
+        if (!parkRequestProcessors(gForkQuiesceTimeoutMs))
         {
-            releaseQuiesce(QuiesceMode::Shared);
+            unparkRequestProcessors();
             gReRunStrict = true;
             gReRunStrictUntilTick = (unsigned)system.tick;
             ForkStats::onForkSkipped(ForkStats::PARK_TIMEOUT, (unsigned)system.tick, "");
@@ -193,7 +205,7 @@ namespace tickFork
         // from quorum: no child is needed and the no-fork verdict won't stall.
         if (pipe(gPipe) != 0)
         {
-            releaseQuiesce(QuiesceMode::Shared);
+            unparkRequestProcessors();
             gReRunStrict = true;
             gReRunStrictUntilTick = (unsigned)system.tick;
             ForkStats::onForkSkipped(ForkStats::PIPE_FAIL, (unsigned)system.tick, "");
@@ -204,7 +216,6 @@ namespace tickFork
         // O_CLOEXEC: a fork+exec helper must not hold the write end open — child needs EOF on parent crash.
         fcntl(gPipe[0], F_SETFD, fcntl(gPipe[0], F_GETFD) | FD_CLOEXEC);
         fcntl(gPipe[1], F_SETFD, fcntl(gPipe[1], F_GETFD) | FD_CLOEXEC);
-        gShadow.arm();                              // parent disk writes -> shadow for the whole window
         gChildPid = -2;
         gForkRequest = true;                        // BSP forks at its loop-top
         // BSP handoff is synchronous; a stall means the main loop is dead and timed-out reclaim
@@ -222,11 +233,10 @@ namespace tickFork
 
         if (gChildPid < 0)                          // fork failed
         {
-            gShadow.discard();
             close(gPipe[0]);
             close(gPipe[1]);
             gPipe[0] = gPipe[1] = -1;
-            releaseQuiesce(QuiesceMode::Shared);
+            unparkRequestProcessors();
             gReRunStrict = true;
             gReRunStrictUntilTick = (unsigned)system.tick;
             tickForkLog("fork() failed -> scoring this tick strict (no fork)");
@@ -234,15 +244,33 @@ namespace tickFork
             return;
         }
         close(gPipe[0]);
-        releaseQuiesce(QuiesceMode::Shared);
+        unparkRequestProcessors();
         gCheckpointTick = (unsigned)system.tick;
         ForkStats::onForkOk();
         tickForkLog("parent: checkpoint forked, optimistic processTick ahead");
         setWinState(WindowState::Live);
     }
 
-    // Close out a window that completed with no mismatch (we are still alive): commit its diverted
-    // disk writes into the real files and reap the checkpoint child.
+    inline void reapCheckpointChild()
+    {
+        const pid_t child = gChildPid.load();
+        if (child <= 0)
+        {
+            tickForkLog("checkpoint child missing before commit -> supervisor restart");
+            _exit(70);
+        }
+        if (!tickForkControl::writeRetireCommand(gPipe[1]))
+            kill(child, SIGKILL);
+        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR)
+        {
+        }
+        close(gPipe[1]);
+        gPipe[1] = -1;
+        gChildPid = -2;
+    }
+
+    // Close out a window that completed with no mismatch. The tick thread stops other writers, then
+    // the BSP drains its own VM IO and commits; this keeps the BSP out of TickStorage during commit.
     inline void retireCheckpoint()
     {
         if (winState() != WindowState::Live)
@@ -251,7 +279,9 @@ namespace tickFork
         }
         tickForkLog("window complete -> commit shadow + reap checkpoint");
         setWinState(WindowState::Retiring);
-        if (!quiesceWriters(QuiesceMode::Exclusive, gForkQuiesceTimeoutMs))
+        WriterQuiesce quiesce;
+        if (!quiesce.acquire(gForkQuiesceTimeoutMs)
+            || !tickForkControl::gBspRetireHandoff.requestAndWait(gForkQuiesceTimeoutMs))
         {
             // Tell the child to promote — its state is at the checkpoint, it replays the window strict.
             char tag = tickForkControl::promoteTag;
@@ -261,15 +291,6 @@ namespace tickFork
             tickForkLog("FATAL: swap writers did not quiesce before commit -> child promoted");
             _exit(70);
         }
-        gShadow.commit();
-        releaseQuiesce(QuiesceMode::Exclusive);
-        pid_t child = gChildPid.load();
-        kill(child, SIGKILL);
-        waitpid(child, nullptr, 0);
-        close(gPipe[1]);
-        gPipe[1] = -1;
-        gChildPid = -2;
-        setWinState(WindowState::Idle);
     }
 
     // A deliberate node shutdown must not look like a parent crash to the checkpoint child.
@@ -282,26 +303,19 @@ namespace tickFork
 
         tickForkLog("graceful shutdown -> commit shadow + reap checkpoint");
         setWinState(WindowState::Retiring);
-        while (!quiesceWriters(QuiesceMode::Exclusive, gForkQuiesceTimeoutMs))
+        for (;;)
         {
-            releaseQuiesce(QuiesceMode::Exclusive);
-            tickForkLog("graceful shutdown quiesce timed out -> retrying without promoting child");
+            WriterQuiesce quiesce;
+            if (quiesce.acquire(gForkQuiesceTimeoutMs)
+                && tickForkControl::gBspRetireHandoff.requestAndWait(gForkQuiesceTimeoutMs))
+            {
+                shutDownNode = 1;
+                quiesce.release();
+                return;
+            }
+            quiesce.release();
+            tickForkLog("graceful shutdown retirement failed -> retrying without promoting child");
         }
-
-        gShadow.commit();
-
-        const pid_t child = gChildPid.load();
-        if (!tickForkControl::writeRetireCommand(gPipe[1]))
-            kill(child, SIGKILL);
-        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR)
-        {
-        }
-        close(gPipe[1]);
-        gPipe[1] = -1;
-        gChildPid = -2;
-        setWinState(WindowState::Idle);
-        shutDownNode = 1;
-        releaseQuiesce(QuiesceMode::Exclusive);
     }
 
     // tickProcessor, before processTick(system.tick). Maintains the checkpoint window.
@@ -410,13 +424,9 @@ namespace tickFork
             return true;
         }
 
-        // Mismatch: rewind to the checkpoint and replay [gCheckpointTick, system.tick] strict (target
-        // sent to the child); discard the window's diverts so the child reads pristine pages.
+        // Mismatch: leave shadowing active and exit. The child waits for pipe EOF before purging the
+        // registered shadow directories, so a late compressed write can never fall through to real.
         tickForkLog("verdict MISMATCH: rewind to checkpoint + parent _exit");
-        // Stop swap writers before discard()+_exit: an unparked eviction could land an optimistic
-        // page on a REAL file shared with the child and tear it on _exit.
-        quiesceWriters(QuiesceMode::TryExclusive, gForkQuiesceTimeoutMs);
-        gShadow.discard();
         unsigned int target = (unsigned)system.tick;
         const char tag = tickForkControl::promoteTag;
         ssize_t w = write(gPipe[1], &tag, 1);

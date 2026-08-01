@@ -9078,6 +9078,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     tickFork::gIsForkChild = true;
     tickFork::gForkRequest = false;
     tickFork::gChildPid = -2;
+    tickForkControl::gBspRetireHandoff.resetForChild();
     gForkQuiesceRequest = false;
     tickFork::setWinState(tickFork::WindowState::Idle);
     close(tickFork::gPipe[0]);
@@ -9093,9 +9094,14 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     // ── Stage 2: disk shadow + swap pin recovery ──
     // Inherited structures may be mid-operation in a non-surviving parent thread.
     gShadow.reinitForChildPromote();
-    gShadow.purgeOrphans();
+    const bool shadowClean = gShadow.purgeOrphans();
     ts.resetSwapPinsForChildPromote();
     forkCensusResetForChildPromote();
+    if (!shadowClean)
+    {
+        forceVerifySolutions = true;
+        tickForkLog("CHILD: shadow cleanup failed -> disabling future checkpoints");
+    }
 
     // ── Stage 3: strict-replay window ──
     gReRunStrict = true;
@@ -9141,36 +9147,59 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
 
 struct ForkSnapshotLocks
 {
-    bool armed = false;
+    bool networkingLocked = false;
+    bool rpcLocked = false;
+    bool eventMapLocked = false;
 
-    void lock()
+    bool tryLock()
     {
-        Overload::networkingLock.lock();
+        if (!Overload::networkingLock.try_lock())
+            return false;
+        networkingLocked = true;
 #if !defined(NO_RPC)
-        gRpcDispatchLock.lock();   // drain in-flight RPC dispatches so no handler holds a node lock at fork
+        if (!gRpcDispatchLock.try_lock())
+        {
+            unlock();
+            return false;
+        }
+        rpcLocked = true;
 #endif
-        Overload::eventMapLock.lock();
-        armed = true;
+        if (!Overload::eventMapLock.try_lock())
+        {
+            unlock();
+            return false;
+        }
+        eventMapLocked = true;
+        return true;
     }
 
     void unlock()
     {
-        if (!armed)
+        if (eventMapLocked)
         {
-            return;
+            Overload::eventMapLock.unlock();
+            eventMapLocked = false;
         }
-        Overload::networkingLock.unlock();
 #if !defined(NO_RPC)
-        gRpcDispatchLock.unlock();
+        if (rpcLocked)
+        {
+            gRpcDispatchLock.unlock();
+            rpcLocked = false;
+        }
 #endif
-        Overload::eventMapLock.unlock();
-        armed = false;
+        if (networkingLocked)
+        {
+            Overload::networkingLock.unlock();
+            networkingLocked = false;
+        }
     }
 
     // Child reinitializes these inherited locks during promote; do not unlock them there.
     void abandonInChild()
     {
-        armed = false;
+        networkingLocked = false;
+        rpcLocked = false;
+        eventMapLocked = false;
     }
 
     ~ForkSnapshotLocks()
@@ -9178,6 +9207,60 @@ struct ForkSnapshotLocks
         unlock();
     }
 };
+
+// BSP-only shadow commit. The caller has stopped tick/request/RPC writers, so after the BSP
+// drains its own queued and in-flight IO no thread can create a late shadow write.
+static bool bspCommitCheckpoint()
+{
+    tickForkLog("BSP retire begin");
+    flushAsyncFileIOBuffer(0);
+    if (!ts.drainSwapIoForFork(tickFork::gForkQuiesceTimeoutMs))
+    {
+        ForkStats::onForkSkipped(
+            ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "retire_vm_io");
+        tickForkLog("BSP retire failed: VM IO drain timeout");
+        return false;
+    }
+
+    // Once the donor is gone, a partial disk commit can only restart from a saved snapshot.
+    tickFork::reapCheckpointChild();
+    gShadow.commit();
+    tickFork::setWinState(tickFork::WindowState::Idle);
+    tickForkLog("BSP retire complete");
+    return true;
+}
+
+static void bspServiceRetireRequest()
+{
+    if (!tickForkControl::gBspRetireHandoff.tryStart())
+        return;
+
+    const bool succeeded = bspCommitCheckpoint();
+    if (!tickForkControl::gBspRetireHandoff.finish(succeeded))
+    {
+        tickForkLog("BSP retire acknowledgement failed -> supervisor restart");
+        _exit(70);
+    }
+}
+
+// Autosave already runs on the BSP while the tick processor waits, so it commits directly.
+static void bspRetireCheckpointForAutosave()
+{
+    if (tickFork::winState() != tickFork::WindowState::Live)
+        return;
+
+    tickFork::setWinState(tickFork::WindowState::Retiring);
+    tickFork::WriterQuiesce quiesce;
+    if (quiesce.acquire(tickFork::gForkQuiesceTimeoutMs) && bspCommitCheckpoint())
+        return;
+
+    const char tag = tickForkControl::promoteTag;
+    const unsigned int target = (unsigned)system.tick;
+    write(tickFork::gPipe[1], &tag, 1);
+    write(tickFork::gPipe[1], &target, sizeof(target));
+    tickForkLog("FATAL: BSP autosave retirement failed -> child promoted");
+    _exit(70);
+}
 
 // Called from the BSP main-loop top (no networkingLock held) when a fork is requested.
 static void bspForkPoint()
@@ -9187,9 +9270,39 @@ static void bspForkPoint()
     tickForkLog("BSP fork: taking locks");
     long long q0 = gForkBench ? tickForkNowNs() : 0;
     ForkSnapshotLocks forkLocks;
-    forkLocks.lock();   // eventDataMap is covered so child snapshots a consistent map.
-    // Drain in-flight swap IO so child doesn't inherit an orphan LOADING cache slot.
-    if (!ts.drainSwapIoForFork(tickFork::gForkQuiesceTimeoutMs)) tickForkLog("warn: swap in-flight IO drain timed out before fork");
+    const long long quiesceDeadline = tickForkNowMs() + tickFork::gForkQuiesceTimeoutMs;
+    while (!forkLocks.tryLock())
+    {
+        // A request may be waiting for the BSP to service blocking async IO before it releases a lock.
+        flushAsyncFileIOBuffer(0);
+        if (tickForkNowMs() >= quiesceDeadline)
+        {
+            ForkStats::onForkSkipped(
+                ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "snapshot_locks");
+            tickForkLog("snapshot lock timeout -> skip fork, run current tick strict");
+            tickFork::gChildPid = -1;
+            tickFork::gForkRequest = false;
+            tickFork::setWinState(tickFork::WindowState::Idle);
+            return;
+        }
+        std::this_thread::yield();
+    }
+
+    flushAsyncFileIOBuffer(0);
+    const long long remainingMs = quiesceDeadline - tickForkNowMs();
+    const bool swapDrained = remainingMs > 0
+        && ts.drainSwapIoForFork((int)remainingMs);
+    if (!swapDrained)
+    {
+        forkLocks.unlock();
+        ForkStats::onForkSkipped(
+            ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "vm_io");
+        tickForkLog("VM IO drain timeout -> skip fork, run current tick strict");
+        tickFork::gChildPid = -1;
+        tickFork::gForkRequest = false;
+        tickFork::setWinState(tickFork::WindowState::Idle);
+        return;
+    }
     if (gForkBench) gForkQuiesceNs = tickForkNowNs() - q0;
 
     // Fork-eligibility gate: if another thread holds a lock, child inherits it deadlocked.
@@ -9214,6 +9327,18 @@ static void bspForkPoint()
         }
     }
 
+    if (!gShadow.arm())
+    {
+        forkLocks.unlock();
+        ForkStats::onForkSkipped(
+            ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "shadow_arm");
+        tickForkLog("shadow cleanup failed -> skip fork, run current tick strict");
+        tickFork::gChildPid = -1;
+        tickFork::gForkRequest = false;
+        tickFork::setWinState(tickFork::WindowState::Idle);
+        return;
+    }
+
     tickForkLog("BSP fork: locks held, calling fork() now");   // if no 'fork() returned' follows -> fork() itself stalled
     long long f0 = gForkBench ? tickForkNowNs() : 0;
     pid_t pid = fork();
@@ -9236,7 +9361,8 @@ static void bspForkPoint()
     }
 
     tickForkLog("BSP fork: fork() returned to parent");
-    // PARENT BSP: release locks; child carries frozen snapshot.
+    if (pid < 0)
+        gShadow.discard();
     forkLocks.unlock();
     if (pid < 0)
     {
@@ -9364,6 +9490,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 #endif
                 PinScope _pinScope; // release swap-page pins taken during this main-loop iteration
 #ifdef __linux__
+                bspServiceRetireRequest();
                 if (tickFork::gForkRequest) bspForkPoint();
 #endif
                 if (criticalSituation == 1)
@@ -9813,7 +9940,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 #ifdef __linux__
                     if (tickFork::winState() == tickFork::WindowState::Live)
                     {
-                        tickFork::retireCheckpoint();
+                        bspRetireCheckpointForAutosave();
                     }
 #endif
                     const bool savedAllNodeStates = saveAllNodeStates();
