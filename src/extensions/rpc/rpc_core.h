@@ -110,7 +110,12 @@ using RpcHandler = std::function<RpcResp(const RpcReq&)>;
 
 class RpcRouter
 {
-    struct Route { std::string method; std::vector<std::string> segs; RpcHandler h; };
+    struct Route
+    {
+        std::string method;
+        std::vector<std::string> segments;
+        RpcHandler handler;
+    };
     std::vector<Route> routes_;
 
     static std::vector<std::string> split(const std::string& p)
@@ -136,21 +141,35 @@ public:
 
     RpcResp dispatch(RpcReq req) const
     {
-        auto segs = split(req.path);
-        for (const auto& r : routes_)
+        auto segments = split(req.path);
+        for (const auto& route : routes_)
         {
-            if (r.method != req.method || r.segs.size() != segs.size()) continue;
+            if (route.method != req.method || route.segments.size() != segments.size())
+                continue;
             std::map<std::string, std::string> params;
             bool ok = true;
-            for (size_t i = 0; i < segs.size(); i++)
+            for (size_t i = 0; i < segments.size(); i++)
             {
-                if (!r.segs[i].empty() && r.segs[i][0] == ':') params[r.segs[i].substr(1)] = segs[i];
-                else if (r.segs[i] != segs[i]) { ok = false; break; }
+                if (!route.segments[i].empty() && route.segments[i][0] == ':')
+                {
+                    params[route.segments[i].substr(1)] = segments[i];
+                }
+                else if (route.segments[i] != segments[i])
+                {
+                    ok = false;
+                    break;
+                }
             }
             if (!ok) continue;
             req.params = std::move(params);
-            try { return r.h(req); }
-            catch (...) { return { 500, "application/json", "{\"error\":\"handler exception\"}", "", "" }; }
+            try
+            {
+                return route.handler(req);
+            }
+            catch (...)
+            {
+                return { 500, "application/json", "{\"error\":\"handler exception\"}", "", "" };
+            }
         }
         return { 404, "application/json", "{\"error\":\"not found\"}", "", "" };
     }
@@ -171,14 +190,30 @@ inline RpcRouter gRpc;
 // ---------------- wire framing: [u32 metaLen][meta json][u32 bodyLen][body] ----------------
 namespace rpcwire
 {
-    inline bool writeAll(int fd, const char* p, size_t n)
+    inline bool writeAll(int fd, const char* data, size_t remainingBytes)
     {
-        while (n) { ssize_t w = ::write(fd, p, n); if (w <= 0) return false; p += w; n -= (size_t)w; }
+        while (remainingBytes)
+        {
+            const ssize_t bytesWritten = ::write(fd, data, remainingBytes);
+            if (bytesWritten <= 0)
+                return false;
+
+            data += bytesWritten;
+            remainingBytes -= (size_t)bytesWritten;
+        }
         return true;
     }
-    inline bool readAll(int fd, char* p, size_t n)
+    inline bool readAll(int fd, char* data, size_t remainingBytes)
     {
-        while (n) { ssize_t r = ::read(fd, p, n); if (r <= 0) return false; p += r; n -= (size_t)r; }
+        while (remainingBytes)
+        {
+            const ssize_t bytesRead = ::read(fd, data, remainingBytes);
+            if (bytesRead <= 0)
+                return false;
+
+            data += bytesRead;
+            remainingBytes -= (size_t)bytesRead;
+        }
         return true;
     }
     inline bool writeFrame(int fd, const std::string& meta, const std::string& body)
@@ -187,7 +222,7 @@ namespace rpcwire
         return writeAll(fd, (char*)&ml, 4) && writeAll(fd, meta.data(), ml)
             && writeAll(fd, (char*)&bl, 4) && writeAll(fd, body.data(), bl);
     }
-    inline bool readFrame(int fd, std::string &meta, std::string &body)
+    inline bool readFrame(int fd, std::string& meta, std::string& body)
     {
         uint32_t ml = 0, bl = 0;
         if (!readAll(fd, (char *)&ml, 4))
@@ -206,7 +241,7 @@ namespace rpcwire
             return false;
         return true;
     }
-    } // namespace rpcwire
+} // namespace rpcwire
 
 // ---------------- node-side unix-socket server ----------------
 inline std::atomic<bool> gRpcUnixRunning{ false };
@@ -226,7 +261,11 @@ inline SmartSharedMutex gRpcDispatchLock{ "gRpcDispatchLock" };
 inline void rpcUnixHandleConn(int c)
 {
     std::string meta, body;
-    if (!rpcwire::readFrame(c, meta, body)) { close(c); return; }
+    if (!rpcwire::readFrame(c, meta, body))
+    {
+        close(c);
+        return;
+    }
 
     Json::Value m;
     {
@@ -263,11 +302,14 @@ inline void rpcUnixHandleConn(int c)
     Json::Value hdrs(Json::arrayValue);
     for (const auto& kv : resp.headers)
     {
-        Json::Value h; h["k"] = kv.first; h["v"] = kv.second;
+        Json::Value h;
+        h["k"] = kv.first;
+        h["v"] = kv.second;
         hdrs.append(h);
     }
     rm["headers"] = hdrs;
-    Json::StreamWriterBuilder wb; wb["indentation"] = "";
+    Json::StreamWriterBuilder wb;
+    wb["indentation"] = "";
     rpcwire::writeFrame(c, Json::writeString(wb, rm), resp.body);
     close(c);
 }
@@ -374,7 +416,10 @@ inline void rpcUnixServe(std::string path)
 inline void rpcUnixStart(const std::string& path)
 {
     bool expected = false;
-    if (!gRpcUnixRunning.compare_exchange_strong(expected, true)) return;
+    if (!gRpcUnixRunning.compare_exchange_strong(expected, true))
+    {
+        return;
+    }
     std::thread(rpcUnixServe, path).detach();
 }
 

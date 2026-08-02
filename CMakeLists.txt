@@ -102,8 +102,7 @@ if(BUILD_BENCHMARK)
     add_subdirectory(benchmark_uefi)
 endif()
 
-# Fork-eligibility census enforcement (tick fork-rollback): fail the build on a bare
-# std::mutex declaration that would escape the lock census. Linux-only (the fork machinery + bash).
+# Reject bare std::mutex declarations that escape the fork lock census on Unix builds.
 if(UNIX)
     add_custom_target(check_smart_mutex ALL
         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_smart_mutex.sh

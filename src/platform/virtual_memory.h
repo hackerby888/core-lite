@@ -1524,32 +1524,37 @@ public:
     unsigned long long getDirtyEvicts() const { return dirtyEvicts; }
     static constexpr unsigned long long getNumCachePage() { return numCachePage; }
 
-    // Fork child: dead parent threads' pins would starve eviction forever. Single-threaded here:
-    // force-clear memLock (inherited-locked), reset all pinCounts, mark stale LOADING slots invalid.
+    // Clear inherited locks and dead parent-thread pins before the promoted child starts workers.
     void resetPinsForChildPromote()
     {
         memLock = 0;
-        memReaders = 0;   // dead parent threads' shared (reader) holds would starve writers in the child
-        for (int i = 0; i <= numCachePage; i++) pinCount[i] = 0;   // volatile -> element-wise, not setMem
-        // Orphan LOADING slot at fork → dedup-wait hang / reset-drain exit / capacity leak.
+        memReaders = 0;
+        // pinCount is volatile, so clear it element by element.
         for (int i = 0; i <= numCachePage; i++)
-            if (cachePageId[i] == LOADING_PAGE_ID) cachePageId[i] = INVALID_PAGE_ID;
+            pinCount[i] = 0;
+
+        // Orphan loading slots have no surviving worker and would block later dedup waits.
+        for (int i = 0; i <= numCachePage; i++)
+        {
+            if (cachePageId[i] == LOADING_PAGE_ID)
+                cachePageId[i] = INVALID_PAGE_ID;
+        }
         setMem(loadingTarget, sizeof(loadingTarget), 0xff);   // INVALID_PAGE_ID
         setMem(evictingPage, sizeof(evictingPage), 0xff);
         pinnedNow = 0;
     }
 
-    // Bounded wait for in-flight unlocked miss-IO to finish before a teardown that won't drain via
-    // reset() (the fork()/commit path). New-IO sources must already be parked/locked by the caller;
-    // any straggler is still handled by resetPinsForChildPromote. Returns false on timeout.
+    // Wait for unlocked miss I/O before fork or commit after callers have blocked new I/O sources.
+    // A timeout leaves recovery to resetPinsForChildPromote().
     bool drainInflightIO(int timeoutMs)
     {
-        for (int ms = 0; ms <= timeoutMs; ms++)
+        for (int elapsedMs = 0; elapsedMs <= timeoutMs; elapsedMs++)
         {
             acquireMemLock();
-            bool busy = anyInflightIO();
+            const bool hasInflightIO = anyInflightIO();
             RELEASE(memLock);
-            if (!busy) return true;
+            if (!hasInflightIO)
+                return true;
             sleepMilliseconds(1);
         }
         return false;

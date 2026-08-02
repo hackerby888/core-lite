@@ -19,35 +19,40 @@
 #include "extensions/tick_fork_control.h"
 
 // Fork-path diagnostics: fprintf/stderr is fork-safe (no log-subsystem locks/buffers).
-static inline void tickForkLog(const char* msg)
+static inline void tickForkLog(const char* message)
 {
-    fprintf(stderr, "[FORK] %s (pid=%d tick=%u)\n", msg, (int)getpid(), (unsigned)system.tick);
+    fprintf(
+        stderr,
+        "[FORK] %s (pid=%d tick=%u)\n",
+        message,
+        (int)getpid(),
+        (unsigned)system.tick);
     fflush(stderr);
 }
 
 // Benchmark helpers (--fork-bench): monotonic ns + parent RSS from /proc/self/status.
 static inline long long tickForkNowNs()
 {
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+    struct timespec timestamp;
+    clock_gettime(CLOCK_MONOTONIC, &timestamp);
+    return (long long)timestamp.tv_sec * 1000000000LL + timestamp.tv_nsec;
 }
 // Monotonic ms for timeouts (the ns above is for bench precision).
 static inline long long tickForkNowMs() { return tickForkNowNs() / 1'000'000LL; }
 static inline long tickForkRssKb()
 {
-    FILE* f = fopen("/proc/self/status", "r");
-    if (!f)
+    FILE* statusFile = fopen("/proc/self/status", "r");
+    if (!statusFile)
         return -1;
     char line[256];
-    long kb = -1;
-    while (fgets(line, sizeof(line), f))
+    long rssKb = -1;
+    while (fgets(line, sizeof(line), statusFile))
     {
-        if (sscanf(line, "VmRSS: %ld kB", &kb) == 1)
+        if (sscanf(line, "VmRSS: %ld kB", &rssKb) == 1)
             break;
     }
-    fclose(f);
-    return kb;
+    fclose(statusFile);
+    return rssKb;
 }
 // Set by maybeForkBeforeTick / bspForkPoint; consumed by verdict to report one fork's cost.
 inline long long gForkWindowStartNs = 0;
@@ -62,39 +67,45 @@ namespace tickFork
     inline int gPipe[2] = { -1, -1 };                // verdict channel: parent writes [1], child reads [0]
     inline std::atomic<bool> gIsForkChild{ false };  // set in the promoted child
 
-    enum class WindowState { Idle, Checkpointing, Live, Retiring };
+    enum class WindowState
+    {
+        Idle,
+        Checkpointing,
+        Live,
+        Retiring,
+    };
     inline std::atomic<int> gWinState{ (int)WindowState::Idle };
 
     inline WindowState winState()
     {
         return (WindowState)gWinState.load(std::memory_order_acquire);
     }
-    inline void setWinState(WindowState s)
+    inline void setWinState(WindowState state)
     {
-        gWinState.store((int)s, std::memory_order_release);
+        gWinState.store((int)state, std::memory_order_release);
     }
 
     // Only ticks carrying a mining-solution tx can mismatch quorum.
     inline bool tickHasSolution(unsigned int tick)
     {
-        TickData td;
+        TickData tickDataCopy;
         ts.tickData.acquireLock();
-        const TickData* src = ts.tickData.getByTickIfNotEmpty(tick);
-        if (src)
-            copyMem(&td, src, sizeof(TickData));
+        const TickData* storedTickData = ts.tickData.getByTickIfNotEmpty(tick);
+        if (storedTickData)
+            copyMem(&tickDataCopy, storedTickData, sizeof(TickData));
         ts.tickData.releaseLock();
-        if (!src)
+        if (!storedTickData)
             return false;
 
         auto offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
         for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
         {
-            if (isZero(td.transactionDigests[i]) || !offsets[i])
+            if (isZero(tickDataCopy.transactionDigests[i]) || !offsets[i])
                 continue;
-            Transaction* t = ts.tickTransactions(offsets[i]);
-            if (!t->checkValidity())
+            Transaction* transaction = ts.tickTransactions(offsets[i]);
+            if (!transaction->checkValidity())
                 continue;
-            if (MiningSolutionTransaction::isSolutionTransaction(t))
+            if (MiningSolutionTransaction::isSolutionTransaction(transaction))
                 return true;
         }
         return false;
@@ -127,7 +138,7 @@ namespace tickFork
     public:
         BspRetireQuiescence()
 #if !defined(NO_RPC)
-            : rpc(gRpcDispatchLock, std::defer_lock)
+            : rpcLock(gRpcDispatchLock, std::defer_lock)
 #endif
         {
         }
@@ -135,11 +146,11 @@ namespace tickFork
         bool acquire(int timeoutMs)
         {
             const long long deadlineMs = tickForkNowMs() + timeoutMs;
-            if (!waitForRequestProcessors(requestProcessors, deadlineMs))
+            if (!waitForRequestProcessors(requestProcessorBarrier, deadlineMs))
                 return false;
 
 #if !defined(NO_RPC)
-            while (!rpc.try_lock())
+            while (!rpcLock.try_lock())
             {
                 flushAsyncFileIOBuffer(0);
                 if (tickForkNowMs() >= deadlineMs)
@@ -153,10 +164,10 @@ namespace tickFork
         void release()
         {
 #if !defined(NO_RPC)
-            if (rpc.owns_lock())
-                rpc.unlock();
+            if (rpcLock.owns_lock())
+                rpcLock.unlock();
 #endif
-            requestProcessors.release();
+            requestProcessorBarrier.release();
         }
 
         ~BspRetireQuiescence()
@@ -168,9 +179,9 @@ namespace tickFork
         BspRetireQuiescence& operator=(const BspRetireQuiescence&) = delete;
 
     private:
-        RequestProcessorBarrier requestProcessors;
+        RequestProcessorBarrier requestProcessorBarrier;
 #if !defined(NO_RPC)
-        std::unique_lock<SmartSharedMutex> rpc;
+        std::unique_lock<SmartSharedMutex> rpcLock;
 #endif
     };
 
@@ -185,18 +196,17 @@ namespace tickFork
         };
 
         BspForkQuiescence()
-            : networking(Overload::networkingLock, std::defer_lock)
+            : networkingLock(Overload::networkingLock, std::defer_lock)
 #if !defined(NO_RPC)
-            , rpc(gRpcDispatchLock, std::defer_lock)
+            , rpcLock(gRpcDispatchLock, std::defer_lock)
 #endif
-            , eventMap(Overload::eventMapLock, std::defer_lock)
+            , eventMapLock(Overload::eventMapLock, std::defer_lock)
         {
         }
 
         AcquireResult acquire(int timeoutMs)
         {
-            if (!waitForRequestProcessors(
-                    requestProcessors, tickForkNowMs() + timeoutMs))
+            if (!waitForRequestProcessors(requestProcessorBarrier, tickForkNowMs() + timeoutMs))
             {
                 return AcquireResult::ParkTimeout;
             }
@@ -204,13 +214,13 @@ namespace tickFork
             snapshotDeadlineMs = tickForkNowMs() + timeoutMs;
             for (;;)
             {
-                int failedLock;
+                int failedLockIndex;
 #if !defined(NO_RPC)
-                failedLock = std::try_lock(networking, rpc, eventMap);
+                failedLockIndex = std::try_lock(networkingLock, rpcLock, eventMapLock);
 #else
-                failedLock = std::try_lock(networking, eventMap);
+                failedLockIndex = std::try_lock(networkingLock, eventMapLock);
 #endif
-                if (failedLock == -1)
+                if (failedLockIndex == -1)
                     return AcquireResult::Acquired;
 
                 flushAsyncFileIOBuffer(0);
@@ -228,29 +238,29 @@ namespace tickFork
 
         void release()
         {
-            if (eventMap.owns_lock())
-                eventMap.unlock();
+            if (eventMapLock.owns_lock())
+                eventMapLock.unlock();
 #if !defined(NO_RPC)
-            if (rpc.owns_lock())
-                rpc.unlock();
+            if (rpcLock.owns_lock())
+                rpcLock.unlock();
 #endif
-            if (networking.owns_lock())
-                networking.unlock();
-            requestProcessors.release();
+            if (networkingLock.owns_lock())
+                networkingLock.unlock();
+            requestProcessorBarrier.release();
         }
 
         // Promoted children reconstruct these mutexes instead of unlocking inherited state.
         void abandonInChild()
         {
-            if (eventMap.owns_lock())
-                (void)eventMap.release();
+            if (eventMapLock.owns_lock())
+                (void)eventMapLock.release();
 #if !defined(NO_RPC)
-            if (rpc.owns_lock())
-                (void)rpc.release();
+            if (rpcLock.owns_lock())
+                (void)rpcLock.release();
 #endif
-            if (networking.owns_lock())
-                (void)networking.release();
-            requestProcessors.release();
+            if (networkingLock.owns_lock())
+                (void)networkingLock.release();
+            requestProcessorBarrier.release();
         }
 
         ~BspForkQuiescence()
@@ -262,12 +272,12 @@ namespace tickFork
         BspForkQuiescence& operator=(const BspForkQuiescence&) = delete;
 
     private:
-        RequestProcessorBarrier requestProcessors;
-        std::unique_lock<SmartMutex> networking;
+        RequestProcessorBarrier requestProcessorBarrier;
+        std::unique_lock<SmartMutex> networkingLock;
 #if !defined(NO_RPC)
-        std::unique_lock<SmartSharedMutex> rpc;
+        std::unique_lock<SmartSharedMutex> rpcLock;
 #endif
-        std::unique_lock<SmartMutex> eventMap;
+        std::unique_lock<SmartMutex> eventMapLock;
         long long snapshotDeadlineMs = 0;
     };
 
@@ -299,10 +309,10 @@ namespace tickFork
         fcntl(gPipe[0], F_SETFD, fcntl(gPipe[0], F_GETFD) | FD_CLOEXEC);
         fcntl(gPipe[1], F_SETFD, fcntl(gPipe[1], F_GETFD) | FD_CLOEXEC);
         gChildPid = -2;
-        gForkRequest = true;                        // BSP forks at its loop-top
+        gForkRequest = true;
         // Before the BSP claims this request, a stalled main loop requires supervisor recovery.
         // After it claims the request, wait through the non-cancellable fork critical section.
-        long long forkDeadlineMs = tickForkNowMs() + 30'000;
+        const long long forkDeadlineMs = tickForkNowMs() + 30'000;
         while (gChildPid == -2)
         {
             // The timeout may cancel only before the BSP claims the request. Once claimed, exiting
@@ -316,7 +326,7 @@ namespace tickFork
             std::this_thread::yield();
         }
 
-        if (gChildPid < 0)                          // fork failed
+        if (gChildPid < 0)
         {
             close(gPipe[0]);
             close(gPipe[1]);
@@ -365,10 +375,10 @@ namespace tickFork
         if (!tickForkControl::gBspRetireHandoff.requestAndWait(gForkQuiesceTimeoutMs))
         {
             // Tell the child to promote — its state is at the checkpoint, it replays the window strict.
-            char tag = tickForkControl::promoteTag;
-            unsigned int target = (unsigned)system.tick;
+            const char tag = tickForkControl::promoteTag;
+            const unsigned int targetTick = (unsigned)system.tick;
             write(gPipe[1], &tag, 1);
-            write(gPipe[1], &target, sizeof(target));
+            write(gPipe[1], &targetTick, sizeof(targetTick));
             tickForkLog("FATAL: swap writers did not quiesce before commit -> child promoted");
             _exit(70);
         }
@@ -478,14 +488,15 @@ namespace tickFork
 
         if (gForkBench)
         {
-            long long windowNs = tickForkNowNs() - gForkWindowStartNs;
-            long rssNow = tickForkRssKb();
+            const long long windowDurationNs = tickForkNowNs() - gForkWindowStartNs;
+            const long rssAfterKb = tickForkRssKb();
             fprintf(stderr,
                 "[FORK-BENCH] tick=%u %s ckpt=%u window=%.2fms quiesce=%.2fms fork()=%.3fms "
                 "rss: before=%ldMB after=%ldMB cow_delta=%ldMB\n",
                 (unsigned)system.tick, mismatch ? "MISMATCH" : "MATCH", gCheckpointTick,
-                windowNs / 1e6, gForkQuiesceNs / 1e6, gForkSyscallNs / 1e6,
-                gForkRssBeforeKb / 1024, rssNow / 1024, (rssNow - gForkRssBeforeKb) / 1024);
+                windowDurationNs / 1e6, gForkQuiesceNs / 1e6, gForkSyscallNs / 1e6,
+                gForkRssBeforeKb / 1024, rssAfterKb / 1024,
+                (rssAfterKb - gForkRssBeforeKb) / 1024);
             fflush(stderr);
         }
 
@@ -504,12 +515,12 @@ namespace tickFork
         // Mismatch: leave shadowing active and exit. The child waits for pipe EOF before purging the
         // registered shadow directories, so a late compressed write can never fall through to real.
         tickForkLog("verdict MISMATCH: rewind to checkpoint + parent _exit");
-        unsigned int target = (unsigned)system.tick;
+        const unsigned int targetTick = (unsigned)system.tick;
         const char tag = tickForkControl::promoteTag;
-        ssize_t w = write(gPipe[1], &tag, 1);
-        (void)w;
-        w = write(gPipe[1], &target, sizeof(target));
-        (void)w;
+        ssize_t writeSize = write(gPipe[1], &tag, 1);
+        (void)writeSize;
+        writeSize = write(gPipe[1], &targetTick, sizeof(targetTick));
+        (void)writeSize;
         _exit(0);
     }
 }

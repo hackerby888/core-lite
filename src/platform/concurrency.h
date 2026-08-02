@@ -29,10 +29,8 @@ static long _InterlockedCompareExchange(volatile long *target, long exchange, lo
 #define _InterlockedIncrement(target) __atomic_add_fetch(target, 1, __ATOMIC_SEQ_CST)
 #endif
 
-// ---- Fork-eligibility census (tick fork-rollback) ------------------------------------------------
-// Counts node locks held per thread via ACQUIRE/RELEASE/TRY_ACQUIRE + SmartMutex. bspForkPoint
-// verifies no other thread holds a lock before fork() (else skips fork → strict); child never
-// inherits a held lock. Global slots so short-lived threads don't dangle the gate read.
+// Track per-thread node-lock depth so bspForkPoint can reject forks with locks held elsewhere.
+// Global slots keep short-lived thread records valid through thread-exit cleanup.
 inline thread_local int tlLockSlot = -1;   // this thread's census slot; -1 until first acquire
 
 namespace ForkCensus
@@ -70,42 +68,48 @@ namespace ForkCensus
     {
         for (;;)
         {
-            int n = gCount.load(std::memory_order_acquire);
-            for (int i = 0; i < n; i++) // reuse a slot freed by an exited thread
+            const int slotCount = gCount.load(std::memory_order_acquire);
+            for (int slotIndex = 0; slotIndex < slotCount; slotIndex++)
             {
-                int e = 0;
-                if (gSlots[i].live.compare_exchange_strong(e, 1, std::memory_order_acq_rel))
+                int expectedFree = 0;
+                if (gSlots[slotIndex].live.compare_exchange_strong(
+                        expectedFree, 1, std::memory_order_acq_rel))
                 {
-                    tlLockSlot = i;
+                    tlLockSlot = slotIndex;
                     (void)&tlUnreg;
                     return;
                 }
             }
-            int i = gCount.fetch_add(1, std::memory_order_acq_rel);
-            if (i >= MAX_THREADS)   // more lock-holding threads than slots: latch overflow, fail safe (not silent)
+            const int newSlot = gCount.fetch_add(1, std::memory_order_acq_rel);
+            if (newSlot >= MAX_THREADS)
             {
                 gCount.fetch_sub(1, std::memory_order_acq_rel);
                 if (!gOverflow.exchange(true, std::memory_order_acq_rel))
                 {
-                    fprintf(stderr, "[FORKCENSUS] slot overflow (>%d lock-holding threads) -> forks degrade to strict\n", MAX_THREADS);
+                    fprintf(
+                        stderr,
+                        "[FORKCENSUS] slot overflow (>%d lock-holding threads) -> forks degrade to strict\n",
+                        MAX_THREADS);
                     fflush(stderr);
                 }
                 return;
             }
-            int e = 0;
-            if (gSlots[i].live.compare_exchange_strong(e, 1, std::memory_order_acq_rel))
+            int expectedFree = 0;
+            if (gSlots[newSlot].live.compare_exchange_strong(
+                    expectedFree, 1, std::memory_order_acq_rel))
             {
-                tlLockSlot = i;
+                tlLockSlot = newSlot;
                 (void)&tlUnreg;
                 return;
             }
-            // a reuse-scan claimed our fresh index in the tiny window above; retry
+            // A reuse scan claimed the fresh slot before this thread could publish it.
         }
     }
 
     inline void enter(const char* what)
     {
-        if (tlLockSlot < 0) claimSlot();
+        if (tlLockSlot < 0)
+            claimSlot();
         if (tlLockSlot < 0)
             return;   // registry full (>MAX_THREADS live): best-effort, this thread uncounted
         gSlots[tlLockSlot].what.store(what, std::memory_order_relaxed);
@@ -122,37 +126,39 @@ namespace ForkCensus
     {
         if (gOverflow.load(std::memory_order_acquire))
             return MAX_THREADS;   // unreliable -> force the gate to skip the fork
-        int self = tlLockSlot;
-        int n = gCount.load(std::memory_order_acquire);
-        if (n > MAX_THREADS)
-            n = MAX_THREADS;
-        int s = 0;
-        for (int i = 0; i < n; i++)
+        const int selfSlot = tlLockSlot;
+        int slotCount = gCount.load(std::memory_order_acquire);
+        if (slotCount > MAX_THREADS)
+            slotCount = MAX_THREADS;
+        int heldDepth = 0;
+        for (int slotIndex = 0; slotIndex < slotCount; slotIndex++)
         {
-            if (i != self)
-                s += gSlots[i].depth.load(std::memory_order_relaxed);
+            if (slotIndex != selfSlot)
+                heldDepth += gSlots[slotIndex].depth.load(std::memory_order_relaxed);
         }
-        return s < 0 ? 0 : s;
+        return heldDepth < 0 ? 0 : heldDepth;
     }
     inline const char* offenderName()
     {
         if (gOverflow.load(std::memory_order_acquire))
             return "fork-census-slot-overflow";
-        int self = tlLockSlot;
-        int n = gCount.load(std::memory_order_acquire);
-        if (n > MAX_THREADS)
-            n = MAX_THREADS;
-        for (int i = 0; i < n; i++)
+        const int selfSlot = tlLockSlot;
+        int slotCount = gCount.load(std::memory_order_acquire);
+        if (slotCount > MAX_THREADS)
+            slotCount = MAX_THREADS;
+        for (int slotIndex = 0; slotIndex < slotCount; slotIndex++)
         {
-            if (i != self && gSlots[i].depth.load(std::memory_order_relaxed) > 0)
-                return gSlots[i].what.load(std::memory_order_relaxed);
+            if (slotIndex != selfSlot
+                && gSlots[slotIndex].depth.load(std::memory_order_relaxed) > 0)
+            {
+                return gSlots[slotIndex].what.load(std::memory_order_relaxed);
+            }
         }
         return nullptr;
     }
 
-    // Fork child: dead parent threads' slots are never freed (Unreg runs only on a real thread exit), so
-    // reset the registry — else gCount grows per promote into a permanent gOverflow latch that kills all
-    // future forks. Single-threaded here (before spawnAPs).
+    // Promotion clears dead parent-thread slots before new workers start; otherwise they accumulate
+    // into a permanent overflow that disables future forks.
     inline void resetForChildPromote()
     {
         for (int i = 0; i < MAX_THREADS; i++)
@@ -167,18 +173,42 @@ namespace ForkCensus
     }
 }
 
-inline void forkCensusEnter(const char* what) { ForkCensus::enter(what); }
-inline void forkCensusLeave() { ForkCensus::leave(); }
-inline int forkCensusSumExcept() { return ForkCensus::sumExceptSelf(); }
-inline const char* forkCensusOffender() { return ForkCensus::offenderName(); }
-inline void forkCensusResetForChildPromote() { ForkCensus::resetForChildPromote(); }
+inline void forkCensusEnter(const char* what)
+{
+    ForkCensus::enter(what);
+}
+
+inline void forkCensusLeave()
+{
+    ForkCensus::leave();
+}
+
+inline int forkCensusSumExcept()
+{
+    return ForkCensus::sumExceptSelf();
+}
+
+inline const char* forkCensusOffender()
+{
+    return ForkCensus::offenderName();
+}
+
+inline void forkCensusResetForChildPromote()
+{
+    ForkCensus::resetForChildPromote();
+}
 
 // Gates the fork-eligibility enforcement in bspForkPoint (counting itself is always on, ~free).
 // Disable with --no-fork-census.
 inline bool gForkCensus = true;
 
 // Acquire lock, may block
-#define ACQUIRE_WITHOUT_DEBUG_LOGGING(lock) do { while (_InterlockedCompareExchange8(&lock, 1, 0)) _mm_pause(); forkCensusEnter(#lock " @ " __FILE__); } while (0)
+#define ACQUIRE_WITHOUT_DEBUG_LOGGING(lock) \
+    do { \
+        while (_InterlockedCompareExchange8(&lock, 1, 0)) \
+            _mm_pause(); \
+        forkCensusEnter(#lock " @ " __FILE__); \
+    } while (0)
 
 #ifdef NDEBUG
 
@@ -216,13 +246,24 @@ public:
 #endif
 
 // Try to acquire lock and return if successful (without blocking)
-#define TRY_ACQUIRE(lock) (_InterlockedCompareExchange8(&lock, 1, 0) == 0 ? (forkCensusEnter(#lock " @ " __FILE__), true) : false)
+#define TRY_ACQUIRE(lock) \
+    (_InterlockedCompareExchange8(&lock, 1, 0) == 0 \
+        ? (forkCensusEnter(#lock " @ " __FILE__), true) \
+        : false)
 
 // Release lock
 #ifdef _MSC_VER
-#define RELEASE(lock) do { forkCensusLeave(); lock = 0; } while (0)
+#define RELEASE(lock) \
+    do { \
+        forkCensusLeave(); \
+        lock = 0; \
+    } while (0)
 #else
-#define RELEASE(lock) do { forkCensusLeave(); __atomic_store_n(&lock, 0, __ATOMIC_RELEASE); } while (0)
+#define RELEASE(lock) \
+    do { \
+        forkCensusLeave(); \
+        __atomic_store_n(&lock, 0, __ATOMIC_RELEASE); \
+    } while (0)
 #endif
 
 // Create an object of this class to lock until the end of the life-time of this object.

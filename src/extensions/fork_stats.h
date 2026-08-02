@@ -17,11 +17,19 @@
 
 namespace ForkStats
 {
-enum Reason { CENSUS = 0, PARK_TIMEOUT, PIPE_FAIL, FORK_FAIL, QUIESCE_TIMEOUT, REASON_COUNT };
-
-inline const char* reasonName(int r)
+enum Reason
 {
-    switch (r)
+    CENSUS = 0,
+    PARK_TIMEOUT,
+    PIPE_FAIL,
+    FORK_FAIL,
+    QUIESCE_TIMEOUT,
+    REASON_COUNT,
+};
+
+inline const char* reasonName(int reason)
+{
+    switch (reason)
     {
     case CENSUS:       return "census";
     case PARK_TIMEOUT: return "park_timeout";
@@ -92,34 +100,42 @@ inline void onVerdict(bool mismatch) { (mismatch ? mismatches : matches).fetch_a
 inline void onForkSkipped(int reason, unsigned int tick, const char* offender)
 {
     forksSkippedTotal.fetch_add(1, std::memory_order_relaxed);
-    if (reason >= 0 && reason < REASON_COUNT) skipByReason[reason].fetch_add(1, std::memory_order_relaxed);
+    if (reason >= 0 && reason < REASON_COUNT)
+        skipByReason[reason].fetch_add(1, std::memory_order_relaxed);
     lastSkipTick.store(tick, std::memory_order_relaxed);
     lastSkipReason.store(reason, std::memory_order_relaxed);
     lastOffender.store(offender ? offender : "", std::memory_order_relaxed);
 
-    std::lock_guard<std::mutex> g(gLogMtx);
-    FILE* f = fopen(kLogPath, "a");
-    if (!f) return;
-    char ts[32] = { 0 };
+    std::lock_guard<std::mutex> guard(gLogMtx);
+    FILE* logFile = fopen(kLogPath, "a");
+    if (!logFile)
+        return;
+    char timestamp[32] = { 0 };
     time_t now = time(nullptr);
-    struct tm tmv;
+    struct tm utcTime;
 #if defined(_WIN32)
-    gmtime_s(&tmv, &now);
+    gmtime_s(&utcTime, &now);
 #else
-    gmtime_r(&now, &tmv);
+    gmtime_r(&now, &utcTime);
 #endif
-    strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmv);
-    fprintf(f, "%s tick=%u reason=%s offender=%s\n", ts, tick, reasonName(reason), offender ? offender : "");
-    fclose(f);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utcTime);
+    fprintf(
+        logFile,
+        "%s tick=%u reason=%s offender=%s\n",
+        timestamp,
+        tick,
+        reasonName(reason),
+        offender ? offender : "");
+    fclose(logFile);
 }
 
 // JSON summary for GET /v1/fork-stats.
 inline std::string summaryJson()
 {
-    const char* off = lastOffender.load(std::memory_order_relaxed);
-    int lr = lastSkipReason.load(std::memory_order_relaxed);
-    char buf[768];
-    snprintf(buf, sizeof(buf),
+    const char* offender = lastOffender.load(std::memory_order_relaxed);
+    int lastReason = lastSkipReason.load(std::memory_order_relaxed);
+    char json[768];
+    snprintf(json, sizeof(json),
         "{\"forksRequested\":%llu,\"forksOk\":%llu,\"forksSkippedTotal\":%llu,"
         "\"skip\":{\"census\":%llu,\"parkTimeout\":%llu,\"pipeFail\":%llu,\"forkFail\":%llu,"
         "\"quiesceTimeout\":%llu},"
@@ -136,22 +152,24 @@ inline std::string summaryJson()
         matches.load(std::memory_order_relaxed),
         mismatches.load(std::memory_order_relaxed),
         lastSkipTick.load(std::memory_order_relaxed),
-        lr >= 0 ? reasonName(lr) : "",
-        off ? off : "");
-    return std::string(buf);
+        lastReason >= 0 ? reasonName(lastReason) : "",
+        offender ? offender : "");
+    return std::string(json);
 }
 
 // Whole durable log for GET /v1/unforkable-ticks (the complete record).
 inline std::string readLogAll()
 {
-    std::string out;
-    std::lock_guard<std::mutex> g(gLogMtx);
-    FILE* f = fopen(kLogPath, "r");
-    if (!f) return out;
-    char buf[4096];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
-    fclose(f);
-    return out;
+    std::string contents;
+    std::lock_guard<std::mutex> guard(gLogMtx);
+    FILE* logFile = fopen(kLogPath, "r");
+    if (!logFile)
+        return contents;
+    char buffer[4096];
+    size_t bytesRead;
+    while ((bytesRead = fread(buffer, 1, sizeof(buffer), logFile)) > 0)
+        contents.append(buffer, bytesRead);
+    fclose(logFile);
+    return contents;
 }
 }

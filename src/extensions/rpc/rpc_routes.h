@@ -18,9 +18,13 @@
 static std::shared_ptr<Json::Value> rpcJsonBody(const std::string& body)
 {
     auto j = std::make_shared<Json::Value>();
-    Json::CharReaderBuilder rb; std::string err;
+    Json::CharReaderBuilder rb;
+    std::string err;
     const std::unique_ptr<Json::CharReader> rd(rb.newCharReader());
-    if (!rd->parse(body.data(), body.data() + body.size(), j.get(), &err)) return nullptr;
+    if (!rd->parse(body.data(), body.data() + body.size(), j.get(), &err))
+    {
+        return nullptr;
+    }
     return j;
 }
 
@@ -57,7 +61,8 @@ static RpcResp rpcEpochFile(const RpcReq& req, const std::string& kind)
         std::string command = "zip -j " + path + " " + base;
         if (exec(command.c_str()) != 0)
         {
-            Json::Value e; e["error"] = "Failed to create zip file";
+            Json::Value e;
+            e["error"] = "Failed to create zip file";
             return jsonResp(e, 500);
         }
     }
@@ -160,7 +165,8 @@ RPC_ROUTE("GET", "/request-save-snapshot")
 {
     (void)req;
     requestPersistingNodeState = 1;
-    Json::Value json; json["status"] = "ok";
+    Json::Value json;
+    json["status"] = "ok";
     return jsonResp(json);
 }
 
@@ -180,7 +186,8 @@ RPC_ROUTE("GET", "/shutdown")
 {
     if (!rpcPasscodeOk(req)) return rpcUnauthorized();
     requestGracefulShutdown();
-    Json::Value json; json["status"] = "ok";
+    Json::Value json;
+    json["status"] = "ok";
     return jsonResp(json);
 }
 

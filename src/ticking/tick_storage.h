@@ -781,9 +781,8 @@ public:
 #endif
     }
 
-    // Fork child promote: drop swapVM pins leaked by parent threads that didn't survive the fork
-    // (their pinCount is inherited via COW but never released since the holder threads are gone).
-    // Keeps cached pages (the strict re-run reads them). Single-threaded at the promote point.
+    // In the promoted child, clear inherited pins from dead parent threads while retaining cache pages.
+    // This runs single-threaded before strict replay.
     static void resetSwapPinsForChildPromote()
     {
 #ifdef USE_SWAP
@@ -792,7 +791,8 @@ public:
         tickTransactionsSwapVM.resetPinsForChildPromote();
         tickTransactionOffsetsSwapVM.resetPinsForChildPromote();
         tickTransactionsDigestSwapVM.resetPinsForChildPromote();
-        releaseThreadPins();   // clear the surviving thread's stale arena (pinCount now 0 -> guarded no-op)
+        // Clear the surviving thread's stale pin arena after resetting every pin count.
+        releaseThreadPins();
 #endif
     }
 
@@ -801,13 +801,13 @@ public:
     static bool drainSwapIoForFork(int timeoutMs)
     {
 #ifdef USE_SWAP
-        bool ok = true;
-        ok &= tickDataSwapVM.drainInflightIO(timeoutMs);
-        ok &= ticksSwapVM.drainInflightIO(timeoutMs);
-        ok &= tickTransactionsSwapVM.drainInflightIO(timeoutMs);
-        ok &= tickTransactionOffsetsSwapVM.drainInflightIO(timeoutMs);
-        ok &= tickTransactionsDigestSwapVM.drainInflightIO(timeoutMs);
-        return ok;
+        bool allDrained = true;
+        allDrained &= tickDataSwapVM.drainInflightIO(timeoutMs);
+        allDrained &= ticksSwapVM.drainInflightIO(timeoutMs);
+        allDrained &= tickTransactionsSwapVM.drainInflightIO(timeoutMs);
+        allDrained &= tickTransactionOffsetsSwapVM.drainInflightIO(timeoutMs);
+        allDrained &= tickTransactionsDigestSwapVM.drainInflightIO(timeoutMs);
+        return allDrained;
 #else
         (void)timeoutMs;
         return true;

@@ -36,18 +36,19 @@
 
 namespace {
 
-const char* kBase = "fork_rollback_test";
+const char* kTestDirectory = "fork_rollback_test";
 
 void writeFileUtf8(const std::string& path, const std::string& content)
 {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    f << content;
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file << content;
 }
 std::string readFileUtf8(const std::string& path)
 {
-    std::ifstream f(path, std::ios::binary);
-    std::stringstream ss; ss << f.rdbuf();
-    return ss.str();
+    std::ifstream file(path, std::ios::binary);
+    std::stringstream contents;
+    contents << file.rdbuf();
+    return contents.str();
 }
 
 // gShadow is a process-global; reset it between tests so writtenPages/shadow dirs/active don't leak.
@@ -56,50 +57,56 @@ class ForkRollback : public ::testing::Test
 protected:
     void SetUp() override
     {
-        std::filesystem::remove_all(kBase);
-        std::filesystem::create_directories(kBase);
+        std::filesystem::remove_all(kTestDirectory);
+        std::filesystem::create_directories(kTestDirectory);
         gShadow.discard();   // clear active + writtenPages from any prior test
     }
     void TearDown() override
     {
         gShadow.discard();
-        std::filesystem::remove_all(kBase);
+        std::filesystem::remove_all(kTestDirectory);
     }
 };
 
 } // namespace
 
-// 1. arm + dirForWrite diverts the page to <dir>/s and records it; the real file is untouched.
+// arm + dirForWrite diverts the page to <dir>/s and records it; the real file is untouched.
 TEST_F(ForkRollback, WriteDirDivertsToShadow)
 {
-    std::filesystem::create_directories(std::string(kBase) + "/divert");
-    CHAR16 dir[256]; setText(dir, L"fork_rollback_test/divert");
-    CHAR16 page[64]; setText(page, L"pg0");
+    std::filesystem::create_directories(std::string(kTestDirectory) + "/divert");
+    CHAR16 dir[256];
+    setText(dir, L"fork_rollback_test/divert");
+    CHAR16 page[64];
+    setText(page, L"pg0");
 
     gShadow.arm();
-    CHAR16* sd = gShadow.dirForWrite(dir, page);
+    CHAR16* shadowDir = gShadow.dirForWrite(dir, page);
 
-    EXPECT_EQ(wchar_to_string(sd), std::string("fork_rollback_test/divert/s"));
+    EXPECT_EQ(wchar_to_string(shadowDir), std::string("fork_rollback_test/divert/s"));
     EXPECT_TRUE(std::filesystem::exists("fork_rollback_test/divert/s"));   // ensure() created it
     EXPECT_FALSE(std::filesystem::exists("fork_rollback_test/divert/pg0")); // real not written
 }
 
-// 2. dirForRead serves /s ONLY for a written page whose /s file exists; otherwise real.
+// dirForRead serves /s ONLY for a written page whose /s file exists; otherwise real.
 //    Guards the orphan-gate fix: a stale /s file alone must not divert a read.
 TEST_F(ForkRollback, ReadDirWrittenGate)
 {
-    std::filesystem::create_directories(std::string(kBase) + "/gate");
-    CHAR16 dir[256]; setText(dir, L"fork_rollback_test/gate");
-    CHAR16 pageA[64]; setText(pageA, L"pgA");
-    CHAR16 pageB[64]; setText(pageB, L"pgB");
-    CHAR16 pageC[64]; setText(pageC, L"pgC");
+    std::filesystem::create_directories(std::string(kTestDirectory) + "/gate");
+    CHAR16 dir[256];
+    setText(dir, L"fork_rollback_test/gate");
+    CHAR16 pageA[64];
+    setText(pageA, L"pgA");
+    CHAR16 pageB[64];
+    setText(pageB, L"pgB");
+    CHAR16 pageC[64];
+    setText(pageC, L"pgC");
 
     gShadow.arm();
-    CHAR16* sd = gShadow.dirForWrite(dir, pageA);       // shadow dir registered, writtenPages={pgA}
+    CHAR16* shadowDir = gShadow.dirForWrite(dir, pageA); // shadow dir registered, writtenPages={pgA}
     writeFileUtf8("fork_rollback_test/gate/s/pgA", "NEW");
 
     // pgA: written + /s file exists -> diverts to /s
-    EXPECT_EQ(wchar_to_string(gShadow.dirForRead(dir, pageA)), wchar_to_string(sd));
+    EXPECT_EQ(wchar_to_string(gShadow.dirForRead(dir, pageA)), wchar_to_string(shadowDir));
     // pgB: dir has a shadow dir but pgB was not written -> real (the orphan gate)
     EXPECT_EQ(wchar_to_string(gShadow.dirForRead(dir, pageB)), wchar_to_string(dir));
     // pgC: written but its /s file is absent -> real (getFileSize gate)
@@ -107,12 +114,14 @@ TEST_F(ForkRollback, ReadDirWrittenGate)
     EXPECT_EQ(wchar_to_string(gShadow.dirForRead(dir, pageC)), wchar_to_string(dir));
 }
 
-// 3. commit renames /s/<page> over an EXISTING real file (atomic replace).
+// commit renames /s/<page> over an EXISTING real file (atomic replace).
 TEST_F(ForkRollback, CommitOverExistingRealFile)
 {
-    std::filesystem::create_directories(std::string(kBase) + "/commit");
-    CHAR16 dir[256]; setText(dir, L"fork_rollback_test/commit");
-    CHAR16 page[64]; setText(page, L"pg0");
+    std::filesystem::create_directories(std::string(kTestDirectory) + "/commit");
+    CHAR16 dir[256];
+    setText(dir, L"fork_rollback_test/commit");
+    CHAR16 page[64];
+    setText(page, L"pg0");
 
     writeFileUtf8("fork_rollback_test/commit/pg0", "OLD");
     gShadow.arm();
@@ -125,25 +134,29 @@ TEST_F(ForkRollback, CommitOverExistingRealFile)
     EXPECT_FALSE(std::filesystem::exists("fork_rollback_test/commit/s/pg0")); // moved out
 }
 
-// 4. (#4) commit retries then exit(1) when a written page can't be renamed (here: /s file missing).
+// commit retries then exit(1) when a written page can't be renamed (here: /s file missing).
 TEST_F(ForkRollback, CommitRetryThenFatalOnRenameFailure)
 {
     EXPECT_EXIT({
         std::filesystem::create_directories("fork_rollback_test/fatal");
-        CHAR16 dir[256]; setText(dir, L"fork_rollback_test/fatal");
-        CHAR16 page[64]; setText(page, L"pg0");
+        CHAR16 dir[256];
+        setText(dir, L"fork_rollback_test/fatal");
+        CHAR16 page[64];
+        setText(page, L"pg0");
         gShadow.arm();
         gShadow.dirForWrite(dir, page);   // registers pg0 in `writtenPages`; /s/pg0 is never created
         gShadow.commit();              // rename(/s/pg0 -> /pg0) ENOENTs every retry -> exit(1)
     }, ::testing::ExitedWithCode(1), "FATAL: commit could not persist");
 }
 
-// 5. discard drops the /s page; the real file stays pristine (pre-window).
+// discard drops the /s page; the real file stays pristine (pre-window).
 TEST_F(ForkRollback, DiscardKeepsRealPristine)
 {
-    std::filesystem::create_directories(std::string(kBase) + "/discard");
-    CHAR16 dir[256]; setText(dir, L"fork_rollback_test/discard");
-    CHAR16 page[64]; setText(page, L"pg0");
+    std::filesystem::create_directories(std::string(kTestDirectory) + "/discard");
+    CHAR16 dir[256];
+    setText(dir, L"fork_rollback_test/discard");
+    CHAR16 page[64];
+    setText(page, L"pg0");
 
     writeFileUtf8("fork_rollback_test/discard/pg0", "OLD");
     gShadow.arm();
@@ -156,12 +169,14 @@ TEST_F(ForkRollback, DiscardKeepsRealPristine)
     EXPECT_EQ(readFileUtf8("fork_rollback_test/discard/pg0"), "OLD");
 }
 
-// 6. arm() purges a prior window's diverted /s pages so the next window starts clean.
+// arm() purges a prior window's diverted /s pages so the next window starts clean.
 TEST_F(ForkRollback, ArmPurgesPriorWindowShadow)
 {
-    std::filesystem::create_directories(std::string(kBase) + "/armpurge");
-    CHAR16 dir[256]; setText(dir, L"fork_rollback_test/armpurge");
-    CHAR16 page[64]; setText(page, L"pg0");
+    std::filesystem::create_directories(std::string(kTestDirectory) + "/armpurge");
+    CHAR16 dir[256];
+    setText(dir, L"fork_rollback_test/armpurge");
+    CHAR16 page[64];
+    setText(page, L"pg0");
 
     gShadow.arm();
     gShadow.dirForWrite(dir, page);
@@ -173,12 +188,14 @@ TEST_F(ForkRollback, ArmPurgesPriorWindowShadow)
     EXPECT_FALSE(std::filesystem::exists("fork_rollback_test/armpurge/s/pg0"));
 }
 
-// 7. purgeOrphans (child path): drop /s, real pristine, window inactive.
+// purgeOrphans (child path): drop /s, real pristine, window inactive.
 TEST_F(ForkRollback, PurgeOrphansDropsShadow)
 {
-    std::filesystem::create_directories(std::string(kBase) + "/purge");
-    CHAR16 dir[256]; setText(dir, L"fork_rollback_test/purge");
-    CHAR16 page[64]; setText(page, L"pg0");
+    std::filesystem::create_directories(std::string(kTestDirectory) + "/purge");
+    CHAR16 dir[256];
+    setText(dir, L"fork_rollback_test/purge");
+    CHAR16 page[64];
+    setText(page, L"pg0");
 
     writeFileUtf8("fork_rollback_test/purge/pg0", "OLD");
     gShadow.arm();
@@ -196,12 +213,13 @@ TEST_F(ForkRollback, PurgeOrphansDropsShadow)
 // written-page set, so cleanup must use the retained directory list.
 TEST_F(ForkRollback, RegisteredDirSurvivesArmForChildPurge)
 {
-    std::filesystem::create_directories(std::string(kBase) + "/registered");
-    CHAR16 dir[256]; setText(dir, L"fork_rollback_test/registered");
+    std::filesystem::create_directories(std::string(kTestDirectory) + "/registered");
+    CHAR16 dir[256];
+    setText(dir, L"fork_rollback_test/registered");
     gShadow.registerDir(dir);
 
     ASSERT_TRUE(gShadow.arm());
-    std::filesystem::create_directories(std::string(kBase) + "/registered/s");
+    std::filesystem::create_directories(std::string(kTestDirectory) + "/registered/s");
     writeFileUtf8("fork_rollback_test/registered/s/late.pg", "optimistic");
 
     EXPECT_TRUE(gShadow.purgeOrphans());
@@ -212,8 +230,9 @@ TEST_F(ForkRollback, RegisteredDirSurvivesArmForChildPurge)
 
 TEST_F(ForkRollback, CleanupFailureStaysInactive)
 {
-    writeFileUtf8(std::string(kBase) + "/not-a-directory", "x");
-    CHAR16 dir[256]; setText(dir, L"fork_rollback_test/not-a-directory");
+    writeFileUtf8(std::string(kTestDirectory) + "/not-a-directory", "x");
+    CHAR16 dir[256];
+    setText(dir, L"fork_rollback_test/not-a-directory");
     DiskShadow shadow;
     shadow.registerDir(dir);
 
@@ -518,169 +537,169 @@ TEST(ForkRollbackControl, PromoteWaitsForParentEof)
 TEST(ForkRollbackControl, PromoteClosesOnlyInheritedRpcUnixSockets)
 {
     EXPECT_EXIT(
-    {
-        const std::string rpcPath =
-            "/tmp/qubic-rpc-promote-" + std::to_string(getpid()) + ".sock";
-        unlink(rpcPath.c_str());
-
-        const int listenerFd = socket(AF_UNIX, SOCK_STREAM, 0);
-        sockaddr_un rpcAddress{};
-        rpcAddress.sun_family = AF_UNIX;
-        std::strncpy(rpcAddress.sun_path, rpcPath.c_str(), sizeof(rpcAddress.sun_path) - 1);
-        if (listenerFd < 0
-            || bind(listenerFd, (sockaddr*)&rpcAddress, sizeof(rpcAddress)) != 0
-            || listen(listenerFd, 1) != 0)
         {
+            const std::string rpcPath =
+                "/tmp/qubic-rpc-promote-" + std::to_string(getpid()) + ".sock";
             unlink(rpcPath.c_str());
-            _exit(1);
-        }
 
-        const int clientFd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (clientFd < 0
-            || connect(clientFd, (sockaddr*)&rpcAddress, sizeof(rpcAddress)) != 0)
-        {
+            const int listenerFd = socket(AF_UNIX, SOCK_STREAM, 0);
+            sockaddr_un rpcAddress{};
+            rpcAddress.sun_family = AF_UNIX;
+            std::strncpy(rpcAddress.sun_path, rpcPath.c_str(), sizeof(rpcAddress.sun_path) - 1);
+            if (listenerFd < 0
+                || bind(listenerFd, (sockaddr*)&rpcAddress, sizeof(rpcAddress)) != 0
+                || listen(listenerFd, 1) != 0)
+            {
+                unlink(rpcPath.c_str());
+                _exit(1);
+            }
+
+            const int clientFd = socket(AF_UNIX, SOCK_STREAM, 0);
+            if (clientFd < 0
+                || connect(clientFd, (sockaddr*)&rpcAddress, sizeof(rpcAddress)) != 0)
+            {
+                unlink(rpcPath.c_str());
+                _exit(1);
+            }
+
+            const int acceptedFd = accept(listenerFd, nullptr, nullptr);
+            int unrelatedUnixFds[2];
+            int pipeFds[2];
+            if (acceptedFd < 0
+                || socketpair(AF_UNIX, SOCK_STREAM, 0, unrelatedUnixFds) != 0
+                || pipe(pipeFds) != 0)
+            {
+                unlink(rpcPath.c_str());
+                _exit(1);
+            }
+
+            const int inetFd = socket(AF_INET, SOCK_STREAM, 0);
+            if (inetFd < 0)
+            {
+                unlink(rpcPath.c_str());
+                _exit(1);
+            }
+
+            const unsigned int closedCount =
+                tickForkControl::closeInheritedRpcUnixSocketsForPromote(
+                    listenerFd,
+                    rpcPath.c_str());
             unlink(rpcPath.c_str());
-            _exit(1);
-        }
 
-        const int acceptedFd = accept(listenerFd, nullptr, nullptr);
-        int unrelatedUnixFds[2];
-        int pipeFds[2];
-        if (acceptedFd < 0
-            || socketpair(AF_UNIX, SOCK_STREAM, 0, unrelatedUnixFds) != 0
-            || pipe(pipeFds) != 0)
-        {
-            unlink(rpcPath.c_str());
-            _exit(1);
-        }
+            errno = 0;
+            const bool listenerClosed =
+                fcntl(listenerFd, F_GETFD) == -1 && errno == EBADF;
+            errno = 0;
+            const bool acceptedConnectionClosed =
+                fcntl(acceptedFd, F_GETFD) == -1 && errno == EBADF;
+            const bool clientOpen = fcntl(clientFd, F_GETFD) != -1;
+            const bool unrelatedUnixOpen =
+                fcntl(unrelatedUnixFds[0], F_GETFD) != -1
+                && fcntl(unrelatedUnixFds[1], F_GETFD) != -1;
+            const bool inetOpen = fcntl(inetFd, F_GETFD) != -1;
+            const bool pipeOpen =
+                fcntl(pipeFds[0], F_GETFD) != -1
+                && fcntl(pipeFds[1], F_GETFD) != -1;
 
-        const int inetFd = socket(AF_INET, SOCK_STREAM, 0);
-        if (inetFd < 0)
-        {
-            unlink(rpcPath.c_str());
-            _exit(1);
-        }
-
-        const unsigned int closedCount =
-            tickForkControl::closeInheritedRpcUnixSocketsForPromote(
-                listenerFd,
-                rpcPath.c_str());
-        unlink(rpcPath.c_str());
-
-        errno = 0;
-        const bool listenerClosed =
-            fcntl(listenerFd, F_GETFD) == -1 && errno == EBADF;
-        errno = 0;
-        const bool acceptedConnectionClosed =
-            fcntl(acceptedFd, F_GETFD) == -1 && errno == EBADF;
-        const bool clientOpen = fcntl(clientFd, F_GETFD) != -1;
-        const bool unrelatedUnixOpen =
-            fcntl(unrelatedUnixFds[0], F_GETFD) != -1
-            && fcntl(unrelatedUnixFds[1], F_GETFD) != -1;
-        const bool inetOpen = fcntl(inetFd, F_GETFD) != -1;
-        const bool pipeOpen =
-            fcntl(pipeFds[0], F_GETFD) != -1
-            && fcntl(pipeFds[1], F_GETFD) != -1;
-
-        _exit(closedCount == 2
-                  && listenerClosed
-                  && acceptedConnectionClosed
-                  && clientOpen
-                  && unrelatedUnixOpen
-                  && inetOpen
-                  && pipeOpen
-              ? 0
-              : 2);
-    },
-    ::testing::ExitedWithCode(0),
-    "");
+            _exit(closedCount == 2
+                      && listenerClosed
+                      && acceptedConnectionClosed
+                      && clientOpen
+                      && unrelatedUnixOpen
+                      && inetOpen
+                      && pipeOpen
+                  ? 0
+                  : 2);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
 }
 
-// 8. registerPool + tryMarkDirty: in-range address marks its slot dirty; out-of-range is ignored.
+// registerPool + tryMarkDirty marks in-range slots dirty and ignores out-of-range addresses.
 TEST(ForkRollbackDirtyTrack, MarkDirtyInRange)
 {
-    const int N = 4;
+    const int slotCount = 4;
     const unsigned long long stride = 4096;
-    unsigned char* buf = nullptr;
-    ASSERT_EQ(posix_memalign((void**)&buf, 4096, stride * N), 0);
-    unsigned char* poolBase = buf;
-    volatile unsigned char dirty[N] = {0};
+    unsigned char* buffer = nullptr;
+    ASSERT_EQ(posix_memalign((void**)&buffer, 4096, stride * slotCount), 0);
+    unsigned char* poolBase = buffer;
+    volatile unsigned char dirty[slotCount] = {0};
 
     gSwapDirtyTrackEnabled = true;
-    SwapDirtyTrack::registerPool(&poolBase, stride, N, dirty);
+    SwapDirtyTrack::registerPool(&poolBase, stride, slotCount, dirty);
 
-    EXPECT_TRUE(SwapDirtyTrack::tryMarkDirty(buf + 2 * stride + 100));
+    EXPECT_TRUE(SwapDirtyTrack::tryMarkDirty(buffer + 2 * stride + 100));
     EXPECT_EQ(dirty[2], 1);
-    EXPECT_FALSE(SwapDirtyTrack::tryMarkDirty(buf + N * stride + 10));   // past the pool
+    EXPECT_FALSE(SwapDirtyTrack::tryMarkDirty(buffer + slotCount * stride + 10)); // past the pool
 
     SwapDirtyTrack::unregisterPool(&poolBase);
     gSwapDirtyTrackEnabled = false;
-    free(buf);
+    free(buffer);
 }
 
-// 9. unregisterPool stops the fault path for that pool; a later register reuses the dead slot.
+// unregisterPool stops the fault path for that pool; a later register reuses the dead slot.
 TEST(ForkRollbackDirtyTrack, UnregisterSkipsAndReusesSlot)
 {
-    const int N = 4;
+    const int slotCount = 4;
     const unsigned long long stride = 4096;
-    unsigned char* buf = nullptr;
-    ASSERT_EQ(posix_memalign((void**)&buf, 4096, stride * N), 0);
+    unsigned char* buffer = nullptr;
+    ASSERT_EQ(posix_memalign((void**)&buffer, 4096, stride * slotCount), 0);
     gSwapDirtyTrackEnabled = true;
 
-    unsigned char* poolBase = buf;
-    volatile unsigned char dirty1[N] = {0};
-    SwapDirtyTrack::registerPool(&poolBase, stride, N, dirty1);
+    unsigned char* poolBase = buffer;
+    volatile unsigned char dirty1[slotCount] = {0};
+    SwapDirtyTrack::registerPool(&poolBase, stride, slotCount, dirty1);
     SwapDirtyTrack::unregisterPool(&poolBase);
-    EXPECT_FALSE(SwapDirtyTrack::tryMarkDirty(buf + 100));   // basePtr -> gDeadBase -> skipped
+    EXPECT_FALSE(SwapDirtyTrack::tryMarkDirty(buffer + 100)); // basePtr -> gDeadBase -> skipped
 
     const int countBeforeReuse = SwapDirtyTrack::gPoolCount.load();
-    unsigned char* poolBase2 = buf;
-    volatile unsigned char dirty2[N] = {0};
-    SwapDirtyTrack::registerPool(&poolBase2, stride, N, dirty2);
+    unsigned char* poolBase2 = buffer;
+    volatile unsigned char dirty2[slotCount] = {0};
+    SwapDirtyTrack::registerPool(&poolBase2, stride, slotCount, dirty2);
     EXPECT_EQ(SwapDirtyTrack::gPoolCount.load(), countBeforeReuse);   // reused the dead slot, no growth
-    EXPECT_TRUE(SwapDirtyTrack::tryMarkDirty(buf + 2 * stride + 1));
+    EXPECT_TRUE(SwapDirtyTrack::tryMarkDirty(buffer + 2 * stride + 1));
     EXPECT_EQ(dirty2[2], 1);
 
     SwapDirtyTrack::unregisterPool(&poolBase2);
     gSwapDirtyTrackEnabled = false;
-    free(buf);
+    free(buffer);
 }
 
-// 10. the registry never grows past MAX_POOLS no matter how many pools are registered.
+// The registry never grows past MAX_POOLS no matter how many pools are registered.
 TEST(ForkRollbackDirtyTrack, OverflowGuardCapsPoolCount)
 {
-    const int MAXP = SwapDirtyTrack::MAX_POOLS;
-    const int N = 4;
+    const int maxPools = SwapDirtyTrack::MAX_POOLS;
+    const int slotCount = 4;
     const unsigned long long stride = 4096;
-    unsigned char* buf = nullptr;
-    ASSERT_EQ(posix_memalign((void**)&buf, 4096, stride * N), 0);
+    unsigned char* buffer = nullptr;
+    ASSERT_EQ(posix_memalign((void**)&buffer, 4096, stride * slotCount), 0);
     gSwapDirtyTrackEnabled = true;
 
-    const int over = MAXP + 4;
-    std::vector<unsigned char*> poolBases(over);
-    std::vector<std::vector<unsigned char>> dirty(over, std::vector<unsigned char>(N, 0));
-    for (int i = 0; i < over; i++)
+    const int registrationCount = maxPools + 4;
+    std::vector<unsigned char*> poolBases(registrationCount);
+    std::vector<std::vector<unsigned char>> dirty(
+        registrationCount,
+        std::vector<unsigned char>(slotCount, 0));
+    for (int i = 0; i < registrationCount; i++)
     {
-        poolBases[i] = buf;
-        SwapDirtyTrack::registerPool(&poolBases[i], stride, N, (volatile unsigned char*)dirty[i].data());
-        EXPECT_LE(SwapDirtyTrack::gPoolCount.load(), MAXP);   // guard holds at every step
+        poolBases[i] = buffer;
+        SwapDirtyTrack::registerPool(
+            &poolBases[i],
+            stride,
+            slotCount,
+            (volatile unsigned char*)dirty[i].data());
+        EXPECT_LE(SwapDirtyTrack::gPoolCount.load(), maxPools); // guard holds at every step
     }
-    for (int i = 0; i < over; i++)
+    for (int i = 0; i < registrationCount; i++)
         SwapDirtyTrack::unregisterPool(&poolBases[i]);
 
     gSwapDirtyTrackEnabled = false;
-    free(buf);
+    free(buffer);
 }
 
 #endif // __linux__
 
-// ---------------------------------------------------------------------------------------------------
-// Fork-eligibility census: the choke-point that replaces a hand-maintained lock list.
-// ---------------------------------------------------------------------------------------------------
-
-// 11. A lock held by the CALLING thread is excluded (BSP self-exclusion); a lock held by ANOTHER
-//     thread is counted and named; once that thread exits, its slot frees and the count returns to 0
-//     (proves the global-slot design does not dangle on a short-lived thread).
+// The caller's lock is excluded; another thread's lock is counted and released on thread exit.
 TEST(ForkCensus, SelfExcludedOtherCounted)
 {
     forkCensusEnter("selfHeld");
@@ -688,8 +707,9 @@ TEST(ForkCensus, SelfExcludedOtherCounted)
     forkCensusLeave();
     EXPECT_EQ(forkCensusSumExcept(), 0);
 
-    std::atomic<bool> held{ false }, release{ false };
-    std::thread t([&] {
+    std::atomic<bool> held{ false };
+    std::atomic<bool> release{ false };
+    std::thread holder([&] {
         forkCensusEnter("otherThreadLock");
         held.store(true, std::memory_order_release);
         while (!release.load(std::memory_order_acquire))
@@ -700,28 +720,28 @@ TEST(ForkCensus, SelfExcludedOtherCounted)
         std::this_thread::yield();
 
     EXPECT_GE(forkCensusSumExcept(), 1);                 // the other thread's held lock is visible
-    const char* off = forkCensusOffender();
-    ASSERT_NE(off, nullptr);
-    EXPECT_NE(std::string(off).find("otherThreadLock"), std::string::npos);
+    const char* offender = forkCensusOffender();
+    ASSERT_NE(offender, nullptr);
+    EXPECT_NE(std::string(offender).find("otherThreadLock"), std::string::npos);
 
     release.store(true, std::memory_order_release);
-    t.join();
+    holder.join();
     EXPECT_EQ(forkCensusSumExcept(), 0);                 // slot freed at thread exit; no dangling read
     EXPECT_EQ(forkCensusOffender(), nullptr);
 }
 
-// 12. SmartMutex / SmartSharedMutex (incl. the shared path RPC handlers take) feed the same census, so
-//     a non-AP mutex holder trips the gate exactly like a spin-lock. Verified cross-thread.
+// SmartMutex and SmartSharedMutex feed the same census, including the shared RPC path.
 TEST(ForkCensus, SmartMutexCounted)
 {
-    SmartMutex sm{ "smTest" };
-    SmartSharedMutex ss{ "ssTest" };
+    SmartMutex mutex{ "smTest" };
+    SmartSharedMutex sharedMutex{ "ssTest" };
 
     // exclusive SmartMutex held by another thread is counted
     {
-        std::atomic<bool> held{ false }, release{ false };
-        std::thread t([&] {
-            std::lock_guard<SmartMutex> g(sm);
+        std::atomic<bool> held{ false };
+        std::atomic<bool> release{ false };
+        std::thread holder([&] {
+            std::lock_guard<SmartMutex> guard(mutex);
             held.store(true, std::memory_order_release);
             while (!release.load(std::memory_order_acquire))
             std::this_thread::yield();
@@ -730,14 +750,15 @@ TEST(ForkCensus, SmartMutexCounted)
         std::this_thread::yield();
         EXPECT_GE(forkCensusSumExcept(), 1);
         release.store(true, std::memory_order_release);
-        t.join();
+        holder.join();
         EXPECT_EQ(forkCensusSumExcept(), 0);
     }
     // shared SmartSharedMutex held by another thread is counted (the gRpcDispatchLock shared path)
     {
-        std::atomic<bool> held{ false }, release{ false };
-        std::thread t([&] {
-            std::shared_lock<SmartSharedMutex> g(ss);
+        std::atomic<bool> held{ false };
+        std::atomic<bool> release{ false };
+        std::thread holder([&] {
+            std::shared_lock<SmartSharedMutex> guard(sharedMutex);
             held.store(true, std::memory_order_release);
             while (!release.load(std::memory_order_acquire))
             std::this_thread::yield();
@@ -746,55 +767,56 @@ TEST(ForkCensus, SmartMutexCounted)
         std::this_thread::yield();
         EXPECT_GE(forkCensusSumExcept(), 1);
         release.store(true, std::memory_order_release);
-        t.join();
+        holder.join();
         EXPECT_EQ(forkCensusSumExcept(), 0);
     }
 }
 
-// 13. ForkStats: recorders move the counters and append the COMPLETE record (one durable line per
-//     unforkable tick, not a ring).
+// ForkStats records every unforkable tick as a durable log line, not a bounded ring.
 TEST(ForkStatsTest, CountersAndDurableLog)
 {
     std::filesystem::remove(ForkStats::kLogPath);
 
-    unsigned long long total0 = ForkStats::forksSkippedTotal.load();
-    unsigned long long census0 = ForkStats::skipByReason[ForkStats::CENSUS].load();
-    unsigned long long ok0 = ForkStats::forksOk.load();
-    unsigned long long mm0 = ForkStats::mismatches.load();
+    unsigned long long initialSkippedTotal = ForkStats::forksSkippedTotal.load();
+    unsigned long long initialCensusSkips = ForkStats::skipByReason[ForkStats::CENSUS].load();
+    unsigned long long initialForksOk = ForkStats::forksOk.load();
+    unsigned long long initialMismatches = ForkStats::mismatches.load();
 
     ForkStats::onForkOk();
-    ForkStats::onVerdict(true);   // mismatch
+    ForkStats::onVerdict(true);
     ForkStats::onForkSkipped(ForkStats::CENSUS, 1001, "spectrumLock @ x");
     ForkStats::onForkSkipped(ForkStats::CENSUS, 1002, "tickDataLock @ y");
     ForkStats::onForkSkipped(ForkStats::PARK_TIMEOUT, 1003, "");
 
-    EXPECT_EQ(ForkStats::forksOk.load() - ok0, 1u);
-    EXPECT_EQ(ForkStats::mismatches.load() - mm0, 1u);
-    EXPECT_EQ(ForkStats::forksSkippedTotal.load() - total0, 3u);
-    EXPECT_EQ(ForkStats::skipByReason[ForkStats::CENSUS].load() - census0, 2u);
+    EXPECT_EQ(ForkStats::forksOk.load() - initialForksOk, 1u);
+    EXPECT_EQ(ForkStats::mismatches.load() - initialMismatches, 1u);
+    EXPECT_EQ(ForkStats::forksSkippedTotal.load() - initialSkippedTotal, 3u);
+    EXPECT_EQ(
+        ForkStats::skipByReason[ForkStats::CENSUS].load() - initialCensusSkips,
+        2u);
     EXPECT_EQ(ForkStats::lastSkipTick.load(), 1003u);
     EXPECT_EQ(ForkStats::lastSkipReason.load(), (int)ForkStats::PARK_TIMEOUT);
 
     // durable log holds every skipped tick (3 lines), with tick + reason
-    std::string all = ForkStats::readLogAll();
-    int lines = 0;
-    for (char c : all)
+    std::string logContents = ForkStats::readLogAll();
+    int lineCount = 0;
+    for (char character : logContents)
     {
-        if (c == '\n')
-            lines++;
+        if (character == '\n')
+            lineCount++;
     }
-    EXPECT_EQ(lines, 3);
-    EXPECT_NE(all.find("tick=1001"), std::string::npos);
-    EXPECT_NE(all.find("tick=1002"), std::string::npos);
-    EXPECT_NE(all.find("tick=1003"), std::string::npos);
-    EXPECT_NE(all.find("reason=census"), std::string::npos);
-    EXPECT_NE(all.find("reason=park_timeout"), std::string::npos);
+    EXPECT_EQ(lineCount, 3);
+    EXPECT_NE(logContents.find("tick=1001"), std::string::npos);
+    EXPECT_NE(logContents.find("tick=1002"), std::string::npos);
+    EXPECT_NE(logContents.find("tick=1003"), std::string::npos);
+    EXPECT_NE(logContents.find("reason=census"), std::string::npos);
+    EXPECT_NE(logContents.find("reason=park_timeout"), std::string::npos);
 
     // summary JSON reflects the counters
-    std::string js = ForkStats::summaryJson();
-    EXPECT_NE(js.find("\"forksSkippedTotal\""), std::string::npos);
-    EXPECT_NE(js.find("\"quiesceTimeout\""), std::string::npos);
-    EXPECT_NE(js.find("\"lastUnforkable\""), std::string::npos);
+    std::string summary = ForkStats::summaryJson();
+    EXPECT_NE(summary.find("\"forksSkippedTotal\""), std::string::npos);
+    EXPECT_NE(summary.find("\"quiesceTimeout\""), std::string::npos);
+    EXPECT_NE(summary.find("\"lastUnforkable\""), std::string::npos);
 
     std::filesystem::remove(ForkStats::kLogPath);
 }
@@ -802,8 +824,8 @@ TEST(ForkStatsTest, CountersAndDurableLog)
 #if defined(__linux__)
 TEST(ForkStatsTest, ParentUpdatesAreVisibleToForkChild)
 {
-    const unsigned long long ok0 = ForkStats::forksOk.load();
-    const unsigned long long mismatch0 = ForkStats::mismatches.load();
+    const unsigned long long initialForksOk = ForkStats::forksOk.load();
+    const unsigned long long initialMismatches = ForkStats::mismatches.load();
     int releasePipe[2];
     ASSERT_EQ(pipe(releasePipe), 0);
 
@@ -821,8 +843,8 @@ TEST(ForkStatsTest, ParentUpdatesAreVisibleToForkChild)
         close(releasePipe[0]);
 
         const bool countersVisible =
-            ForkStats::forksOk.load() == ok0 + 1
-            && ForkStats::mismatches.load() == mismatch0 + 1;
+            ForkStats::forksOk.load() == initialForksOk + 1
+            && ForkStats::mismatches.load() == initialMismatches + 1;
         _exit(readSize == 1 && countersVisible ? 0 : 1);
     }
 

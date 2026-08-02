@@ -1,8 +1,7 @@
 #pragma once
 
-// Supervisor shim: a tiny subreaper parent that keeps a stable PID across fork-rollback promotes
-// (the promoted child reparents to it, not init). Forks the RPC proxy as a sibling
-// that survives promotes + restarts it on death. Linux-only; opt out QUBIC_NO_SUPERVISOR=1 (no shim).
+// Linux subreaper keeps a stable parent PID and restartable RPC sidecar across rollback promotions.
+// Set QUBIC_NO_SUPERVISOR=1 to run without the shim or sidecar.
 
 #ifdef __linux__
 
@@ -31,12 +30,14 @@ static pid_t shimForkSidecar()
 #ifdef NO_RPC
     return -1;
 #else
-    pid_t p = fork();
-    if (p != 0) return p;                 // shim: child pid (or -1)
+    pid_t sidecarPid = fork();
+    if (sidecarPid != 0)
+        return sidecarPid;                // shim: child pid (or -1)
     char self[512];
-    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
-    if (n <= 0) _exit(127);
-    self[n] = 0;
+    ssize_t pathLength = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (pathLength <= 0)
+        _exit(127);
+    self[pathLength] = 0;
     execl(self, "qubic-rpc-sidecar", "--rpc-proxy",
           "--rpc-listen", gSidecarPort, "--rpc-node", gSidecarPort, (char*)nullptr);
     _exit(127);                           // execl failed
@@ -48,21 +49,29 @@ static bool shimHasNodeChild(pid_t sidecar)
 {
     char path[64];
     snprintf(path, sizeof(path), "/proc/self/task/%d/children", (int)getpid());
-    FILE* f = fopen(path, "r");
-    if (!f) return true;                  // can't tell -> assume yes (never exit prematurely)
-    int c;
-    bool any = false;
-    while (fscanf(f, "%d", &c) == 1)
-        if (c != (int)sidecar) { any = true; break; }
-    fclose(f);
-    return any;
+    FILE* childrenFile = fopen(path, "r");
+    if (!childrenFile)
+        return true;                      // can't tell -> assume yes (never exit prematurely)
+    int childPid;
+    bool hasNodeChild = false;
+    while (fscanf(childrenFile, "%d", &childPid) == 1)
+    {
+        if (childPid != (int)sidecar)
+        {
+            hasNodeChild = true;
+            break;
+        }
+    }
+    fclose(childrenFile);
+    return hasNodeChild;
 }
 
 // Returns ONLY in the node child. The supervisor parent loops here and _exit()s when the node drains.
 static inline void runUnderSupervisor(int argc, const char** argv)
 {
     // No shim -> no sidecar, no RPC at all (dev / screen). Node runs bare.
-    if (getenv("QUBIC_NO_SUPERVISOR")) return;
+    if (getenv("QUBIC_NO_SUPERVISOR"))
+        return;
 
     for (int i = 1; i < argc; i++)
     {
@@ -79,35 +88,41 @@ static inline void runUnderSupervisor(int argc, const char** argv)
     pid_t sidecar = shimForkSidecar();
 
     pid_t node = fork();
-    if (node < 0) return;                                  // fork failed: run node inline
-    if (node == 0) return;                                 // CHILD: become the node
+    if (node < 0)
+        return;                                            // fork failed: run node inline
+    if (node == 0)
+        return;                                            // CHILD: become the node
 
     // SUPERVISOR (stable PID). Reap everything + forward stop signals.
     signal(SIGTERM, shimForwardSignal);
     signal(SIGINT, shimForwardSignal);
 
-    int lastSt = 0;
+    int lastStatus = 0;
     bool sawSignal = false;
     for (;;)
     {
-        int st = 0;
-        pid_t dead = waitpid(-1, &st, 0);
-        if (dead < 0)
+        int status = 0;
+        pid_t reapedPid = waitpid(-1, &status, 0);
+        if (reapedPid < 0)
         {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             break;                                         // ECHILD: nothing left
         }
-        if (sidecar > 0 && dead == sidecar)
+        if (sidecar > 0 && reapedPid == sidecar)
         {
             sidecar = shimForkSidecar();                   // RPC must not stay down: restart it
             continue;
         }
-        lastSt = st;
-        if (WIFSIGNALED(st)) sawSignal = true;
-        if (!shimHasNodeChild(sidecar)) break;             // node lineage drained -> shim exits
+        lastStatus = status;
+        if (WIFSIGNALED(status))
+            sawSignal = true;
+        if (!shimHasNodeChild(sidecar))
+            break;                                         // node lineage drained -> shim exits
     }
-    if (sidecar > 0) kill(sidecar, SIGTERM);
-    _exit(sawSignal ? 1 : (WIFEXITED(lastSt) ? WEXITSTATUS(lastSt) : 1));
+    if (sidecar > 0)
+        kill(sidecar, SIGTERM);
+    _exit(sawSignal ? 1 : (WIFEXITED(lastStatus) ? WEXITSTATUS(lastStatus) : 1));
 }
 
 #else

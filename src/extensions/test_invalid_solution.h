@@ -90,14 +90,19 @@ inline bool broadcastN(const m256i& currentMiningSeed,
                        bool sameComputor,
                        unsigned int claimedScore)
 {
-    if (computorSeedsCount == 0) return false;
-    m256i rnd;
-    rnd.setRandomValue();
-    const unsigned int base = (unsigned int)(rnd.m256i_u64[0] % computorSeedsCount);
-    for (unsigned int k = 0; k < count; k++)
+    if (computorSeedsCount == 0)
+        return false;
+
+    m256i randomValue;
+    randomValue.setRandomValue();
+    const unsigned int firstComputorIndex =
+        (unsigned int)(randomValue.m256i_u64[0] % computorSeedsCount);
+    for (unsigned int solutionIndex = 0; solutionIndex < count; solutionIndex++)
     {
-        const unsigned int idx = sameComputor ? base : (unsigned int)((base + k) % computorSeedsCount);
-        detail::broadcastSolution(idx, currentMiningSeed, txTick, claimedScore);
+        const unsigned int computorIndex = sameComputor
+            ? firstComputorIndex
+            : (unsigned int)((firstComputorIndex + solutionIndex) % computorSeedsCount);
+        detail::broadcastSolution(computorIndex, currentMiningSeed, txTick, claimedScore);
     }
     return true;
 }
@@ -109,36 +114,33 @@ inline bool broadcastRandom(const m256i& currentMiningSeed, unsigned int txTick,
         return false;
     }
 
-    // Pick a random one of our computors.
-    m256i rnd;
-    rnd.setRandomValue();
-    const unsigned int computorIdx = (unsigned int)(rnd.m256i_u64[0] % computorSeedsCount);
+    m256i randomValue;
+    randomValue.setRandomValue();
+    const unsigned int computorIndex =
+        (unsigned int)(randomValue.m256i_u64[0] % computorSeedsCount);
 
-    // ---- 1) Invalid solution tx ----
-    detail::broadcastSolution(computorIdx, currentMiningSeed, txTick, claimedScore);
+    // Exercise rollback with an invalid solution followed by ordinary transfers that must survive.
+    detail::broadcastSolution(computorIndex, currentMiningSeed, txTick, claimedScore);
 
-    // ---- 2) Standard QU transfer to the id that signed the wrong sol ----
     const long long transferAmount = 1;
-    detail::broadcastTransfer(computorIdx,
-                              computorPublicKeys[computorIdx],
+    detail::broadcastTransfer(computorIndex,
+                              computorPublicKeys[computorIndex],
                               transferAmount,
                               txTick);
 
-    // ---- 3) Standard QU transfer to a random network computor ----
-    m256i randomComputorRnd;
-    randomComputorRnd.setRandomValue();
-    const unsigned int randomComputorIdx =
-        (unsigned int)(randomComputorRnd.m256i_u64[0] % NUMBER_OF_COMPUTORS);
-    detail::broadcastTransfer(computorIdx,
-                              broadcastedComputors.computors.publicKeys[randomComputorIdx],
+    m256i randomComputorSelector;
+    randomComputorSelector.setRandomValue();
+    const unsigned int randomComputorIndex =
+        (unsigned int)(randomComputorSelector.m256i_u64[0] % NUMBER_OF_COMPUTORS);
+    detail::broadcastTransfer(computorIndex,
+                              broadcastedComputors.computors.publicKeys[randomComputorIndex],
                               transferAmount,
                               txTick);
 
-    // ---- 4) Standard QU transfer to a fully random id ----
-    m256i randomId;
-    randomId.setRandomValue();
-    detail::broadcastTransfer(computorIdx,
-                              randomId,
+    m256i randomDestination;
+    randomDestination.setRandomValue();
+    detail::broadcastTransfer(computorIndex,
+                              randomDestination,
                               transferAmount,
                               txTick);
 

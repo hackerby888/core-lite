@@ -52,7 +52,7 @@ add_executable(
 		custom_qubic_mining_storage.cpp
 		fast_tx_window.cpp
    		file_io.cpp
-   		fork_rollback.cpp
+		fork_rollback.cpp
    		# fourq.cpp
    		kangaroo_twelve.cpp
    		m256.cpp

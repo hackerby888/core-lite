@@ -576,11 +576,11 @@ static inline bool isMainMode()
     return (mainAuxStatus & 1) == 1;
 }
 
-// tick_fork_rollback.h's maybeForkBeforeTick needs isLastTickInEpoch (defined below) -> forward-declare.
+// Fork rollback uses isLastTickInEpoch() before its definition.
 static bool isLastTickInEpoch();
-// These headers reference logToConsole/isMainMode (above), so include them after.
+// These headers depend on logToConsole() and isMainMode() above.
 #include "extensions/supervisor_shim.h"
-#include "extensions/fork_stats.h"          // unforkable-tick counters + durable log
+#include "extensions/fork_stats.h"
 #include "extensions/tick_fork_rollback.h"
 #include "extensions/rpc/rpc_routes.h"
 #include "extensions/missing_tx_debug.h"
@@ -2149,7 +2149,7 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
     RequestResponseHeader* header = (RequestResponseHeader*)processor->buffer;
     while (!shutDownNode)
     {
-        PinScope _pinScope; // release swap-page pins taken while handling this request
+        PinScope pinScope;
         checkinTime(processorNumber);
         tickFork::requestProcessorParkPoint(processorNumber);
         if (shutDownNode)
@@ -6413,7 +6413,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 logToConsole(pinLeakMsg);
             }
         }
-        PinScope _pinScope; // release swap-page pins taken during this tick-processing iteration
+        PinScope pinScope;
 
         checkinTime(processorNumber);
 
@@ -6512,8 +6512,9 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 spamThread.detach();
                 tickFork::maybeForkBeforeTick(processorNumber);
                 processTick(processorNumber);
-                // Strict re-run spans the whole replay window [checkpoint, target]; clear once past it.
-                if ((unsigned)system.tick >= gReRunStrictUntilTick) gReRunStrict = false;
+                // Strict replay spans the complete checkpoint window.
+                if ((unsigned)system.tick >= gReRunStrictUntilTick)
+                    gReRunStrict = false;
                 latestProcessedTick = system.tick;
 
                 // safety check for contract locks
@@ -6605,17 +6606,16 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     int status = findCurrentDigestsFromNextTickVotes(spectrumDigestFromQuorum, resourceTestingDigestFromQuorum);
                     if (status == 1)
                     {
-                        bool tickForkMismatch = (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum);
-                        if (tickFork::verdict(tickForkMismatch, spectrumDigestFromQuorum, processorNumber))
+                        const bool spectrumMismatch =
+                            etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum;
+                        if (tickFork::verdict(spectrumMismatch, spectrumDigestFromQuorum, processorNumber))
                         {
                             resourceTestingDigest = resourceTestingDigestFromQuorum;
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
                         }
                         else
                         {
-                            // No fork this tick (non-solution tick, or the strict re-run): the local
-                            // spectrum digest must already match quorum. fork is the only rollback path,
-                            // so a mismatch here is unrecoverable.
+                            // Without a usable checkpoint, child promotion cannot recover a mismatch.
                             if (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum)
                             {
                                 while (true)
@@ -9158,8 +9158,7 @@ static bool bspCommitCheckpoint()
     flushAsyncFileIOBuffer(0);
     if (!ts.drainSwapIoForFork(tickFork::gForkQuiesceTimeoutMs))
     {
-        ForkStats::onForkSkipped(
-            ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "retire_vm_io");
+        ForkStats::onForkSkipped(ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "retire_vm_io");
         tickForkLog("BSP retire failed: VM IO drain timeout");
         return false;
     }
@@ -9174,11 +9173,10 @@ static bool bspCommitCheckpoint()
 
 static bool bspRetireCheckpoint(bool commitCheckpoint, bool shutDownAfterCommit)
 {
-    tickFork::BspRetireQuiescence quiesce;
-    if (!quiesce.acquire(tickFork::gForkQuiesceTimeoutMs))
+    tickFork::BspRetireQuiescence quiescence;
+    if (!quiescence.acquire(tickFork::gForkQuiesceTimeoutMs))
     {
-        ForkStats::onForkSkipped(
-            ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "retire_writers");
+        ForkStats::onForkSkipped(ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "retire_writers");
         tickForkLog("BSP retire failed: writer quiesce timeout");
         return false;
     }
@@ -9191,7 +9189,7 @@ static bool bspRetireCheckpoint(bool commitCheckpoint, bool shutDownAfterCommit)
 #endif
         shutDownNode = 1;
     }
-    quiesce.release();
+    quiescence.release();
     return succeeded;
 }
 
@@ -9222,10 +9220,10 @@ static void bspRetireCheckpointForAutosave()
     if (bspRetireCheckpoint(true, false))
         return;
 
-    const char tag = tickForkControl::promoteTag;
-    const unsigned int target = (unsigned)system.tick;
-    write(tickFork::gPipe[1], &tag, 1);
-    write(tickFork::gPipe[1], &target, sizeof(target));
+    const char commandTag = tickForkControl::promoteTag;
+    const unsigned int targetTick = (unsigned)system.tick;
+    write(tickFork::gPipe[1], &commandTag, 1);
+    write(tickFork::gPipe[1], &targetTick, sizeof(targetTick));
     tickForkLog("FATAL: BSP autosave retirement failed -> child promoted");
     _exit(70);
 }
@@ -9235,61 +9233,64 @@ static void bspForkPoint()
 {
     // Claim first: the tick thread may time out only while the request is still unclaimed.
     tickFork::gForkRequest = false;
-    long long q0 = gForkBench ? tickForkNowNs() : 0;
+    const long long quiesceStartedNs = gForkBench ? tickForkNowNs() : 0;
     tickForkLog("BSP fork: quiescing writers");
-    tickFork::BspForkQuiescence quiesce;
-    const tickFork::BspForkQuiescence::AcquireResult quiesceResult =
-        quiesce.acquire(tickFork::gForkQuiesceTimeoutMs);
-    if (quiesceResult != tickFork::BspForkQuiescence::AcquireResult::Acquired)
+    tickFork::BspForkQuiescence quiescence;
+    const auto quiescenceResult = quiescence.acquire(tickFork::gForkQuiesceTimeoutMs);
+    if (quiescenceResult != tickFork::BspForkQuiescence::AcquireResult::Acquired)
     {
-        if (quiesceResult == tickFork::BspForkQuiescence::AcquireResult::ParkTimeout)
+        if (quiescenceResult == tickFork::BspForkQuiescence::AcquireResult::ParkTimeout)
         {
-            ForkStats::onForkSkipped(
-                ForkStats::PARK_TIMEOUT, (unsigned)system.tick, "request_processors");
+            ForkStats::onForkSkipped(ForkStats::PARK_TIMEOUT, (unsigned)system.tick, "request_processors");
             tickForkLog("request processor park timeout -> skip fork, run current tick strict");
         }
         else
         {
-            ForkStats::onForkSkipped(
-                ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "snapshot_locks");
+            ForkStats::onForkSkipped(ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "snapshot_locks");
             tickForkLog("snapshot lock timeout -> skip fork, run current tick strict");
         }
-        quiesce.release();
+        quiescence.release();
         tickFork::gChildPid = -1;
         tickFork::setWinState(tickFork::WindowState::Idle);
         return;
     }
     flushAsyncFileIOBuffer(0);
-    const int remainingMs = quiesce.remainingDrainMs();
-    const bool swapDrained = remainingMs > 0
-        && ts.drainSwapIoForFork(remainingMs);
-    if (!swapDrained)
+    const int remainingDrainMs = quiescence.remainingDrainMs();
+    const bool swapIoDrained =
+        remainingDrainMs > 0 && ts.drainSwapIoForFork(remainingDrainMs);
+    if (!swapIoDrained)
     {
-        ForkStats::onForkSkipped(
-            ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "vm_io");
+        ForkStats::onForkSkipped(ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "vm_io");
         tickForkLog("VM IO drain timeout -> skip fork, run current tick strict");
-        quiesce.release();
+        quiescence.release();
         tickFork::gChildPid = -1;
         tickFork::setWinState(tickFork::WindowState::Idle);
         return;
     }
-    if (gForkBench) gForkQuiesceNs = tickForkNowNs() - q0;
+    if (gForkBench)
+        gForkQuiesceNs = tickForkNowNs() - quiesceStartedNs;
 
     // Fork-eligibility gate: if another thread holds a lock, child inherits it deadlocked.
     // Skip fork → strict (degrade, never crash). Brief grace for a handler about to release.
     if (gForkCensus)
     {
-        long long censusDeadlineMs = tickForkNowMs() + 50;   // 50ms grace for a transient holder
+        const long long censusDeadlineMs = tickForkNowMs() + 50; // Grace for a transient holder.
         while (forkCensusSumExcept() != 0 && tickForkNowMs() < censusDeadlineMs)
             _mm_pause();
         if (forkCensusSumExcept() != 0)
         {
-            const char* off = forkCensusOffender();
-            ForkStats::onForkSkipped(ForkStats::CENSUS, (unsigned)system.tick, off ? off : "?");
-            fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n",
-                    off ? off : "?", (unsigned)system.tick);
+            const char* offendingLock = forkCensusOffender();
+            ForkStats::onForkSkipped(
+                ForkStats::CENSUS,
+                (unsigned)system.tick,
+                offendingLock ? offendingLock : "?");
+            fprintf(
+                stderr,
+                "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n",
+                offendingLock ? offendingLock : "?",
+                (unsigned)system.tick);
             fflush(stderr);
-            quiesce.release();
+            quiescence.release();
             tickFork::gChildPid = -1;
             tickFork::setWinState(tickFork::WindowState::Idle);
             return;
@@ -9298,47 +9299,48 @@ static void bspForkPoint()
 
     if (!gShadow.arm())
     {
-        ForkStats::onForkSkipped(
-            ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "shadow_arm");
+        ForkStats::onForkSkipped(ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "shadow_arm");
         tickForkLog("shadow cleanup failed -> skip fork, run current tick strict");
-        quiesce.release();
+        quiescence.release();
         tickFork::gChildPid = -1;
         tickFork::setWinState(tickFork::WindowState::Idle);
         return;
     }
 
-    tickForkLog("BSP fork: locks held, calling fork() now");   // if no 'fork() returned' follows -> fork() itself stalled
-    long long f0 = gForkBench ? tickForkNowNs() : 0;
-    pid_t pid = fork();
-    if (gForkBench && pid != 0) gForkSyscallNs = tickForkNowNs() - f0;
-    if (pid == 0)
+    // If the matching return log is absent, fork() itself stalled.
+    tickForkLog("BSP fork: locks held, calling fork() now");
+    const long long forkStartedNs = gForkBench ? tickForkNowNs() : 0;
+    const pid_t childPid = fork();
+    if (gForkBench && childPid != 0)
+        gForkSyscallNs = tickForkNowNs() - forkStartedNs;
+    if (childPid == 0)
     {
         // CHILD BSP: block until parent's verdict, then become the node.
-        quiesce.abandonInChild();
+        quiescence.abandonInChild();
         close(tickFork::gPipe[1]);
-        const tickForkControl::ChildCommand command = tickForkControl::readChildCommand(
+        const auto childCommand = tickForkControl::readChildCommand(
             tickFork::gPipe[0], (unsigned)system.tick + tickFork::gForkWindowK);
-        if (command.action == tickForkControl::ChildAction::Retire)
+        if (childCommand.action == tickForkControl::ChildAction::Retire)
         {
             close(tickFork::gPipe[0]);
             tickFork::gPipe[0] = -1;
             _exit(0);
         }
-        tickForkChildPromote(command.targetTick);
+        tickForkChildPromote(childCommand.targetTick);
         return;
     }
 
     tickForkLog("BSP fork: fork() returned to parent");
-    if (pid < 0)
+    if (childPid < 0)
         gShadow.discard();
-    quiesce.release();
-    if (pid < 0)
+    quiescence.release();
+    if (childPid < 0)
     {
         tickForkLog("fork() failed -> parent strict fallback (no checkpoint)");
         ForkStats::onForkSkipped(ForkStats::FORK_FAIL, (unsigned)system.tick, "");
     }
-    tickFork::gChildPid = pid;
-    if (pid < 0)
+    tickFork::gChildPid = childPid;
+    if (childPid < 0)
     {
         tickFork::setWinState(tickFork::WindowState::Idle);
     }
@@ -9455,11 +9457,12 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 #ifdef TESTNET
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
 #endif
-                PinScope _pinScope; // release swap-page pins taken during this main-loop iteration
+                PinScope pinScope;
 #ifdef __linux__
                 if (bspServiceRetireRequest())
                     break;
-                if (tickFork::gForkRequest) bspForkPoint();
+                if (tickFork::gForkRequest)
+                    bspForkPoint();
 #endif
                 if (criticalSituation == 1)
                 {
@@ -10238,51 +10241,74 @@ void processArgs(int argc, const char* argv[]) {
     }
 #endif
 
-    if (result.count("rollback-mode")) {
-        std::string rbm = result["rollback-mode"].as<std::string>();
-        if (rbm != "fork")
+    if (result.count("rollback-mode"))
+    {
+        const std::string rollbackMode = result["rollback-mode"].as<std::string>();
+        if (rollbackMode != "fork")
             logColorToScreen("WARNING", "rollback-mode is deprecated; tick rollback is always fork-on-BSP child-promote now");
     }
     logColorToScreen("INFO", "Tick rollback: fork-on-BSP child-promote");
-    if (result.count("verify-fork-rollback")) {
+    if (result.count("verify-fork-rollback"))
+    {
         gVerifyForkRollback = true;
         logColorToScreen("INFO", "Fork rollback self-verify enabled");
     }
-    if (result.count("fork-force-fork")) {
+    if (result.count("fork-force-fork"))
+    {
         gForkForceFork = true;
         logColorToScreen("INFO", "TEST: fork every tick (MATCH path on clean ticks)");
     }
-    if (result.count("fork-force-match")) {
+    if (result.count("fork-force-match"))
+    {
         gForkForceMatch = true;
         logColorToScreen("INFO", "TEST: fork verdict forced to match");
     }
-    if (result.count("fork-force-mismatch")) {
+    if (result.count("fork-force-mismatch"))
+    {
         gForkForceMismatch = true;
         logColorToScreen("INFO", "TEST: fork verdict forced to mismatch (promote every fork)");
     }
-    if (result.count("fork-bench")) {
+    if (result.count("fork-bench"))
+    {
         gForkBench = true;
         logColorToScreen("INFO", "TEST: per-fork timing + RSS benchmark enabled");
     }
 
-    if (result.count("fork-force-rollback-every")) {
+    if (result.count("fork-force-rollback-every"))
+    {
         gForkForceRollbackEvery = result["fork-force-rollback-every"].as<unsigned int>();
         if (gForkForceRollbackEvery)
-            logColorToScreen("INFO", "TEST: forcing a fork + single-tick rollback every " + std::to_string(gForkForceRollbackEvery) + " ticks");
+        {
+            logColorToScreen(
+                "INFO",
+                "TEST: forcing a fork + single-tick rollback every "
+                    + std::to_string(gForkForceRollbackEvery) + " ticks");
+        }
     }
-    if (result.count("fbis-count")) {
-        int c = result["fbis-count"].as<int>();
-        if (c > 0) gFbisCount = (unsigned int)c;
-        logColorToScreen("INFO", std::string("TEST: fbis solutions per tick = ") + std::to_string(gFbisCount));
+    if (result.count("fbis-count"))
+    {
+        const int solutionCount = result["fbis-count"].as<int>();
+        if (solutionCount > 0)
+            gFbisCount = (unsigned int)solutionCount;
+        logColorToScreen(
+            "INFO",
+            std::string("TEST: fbis solutions per tick = ") + std::to_string(gFbisCount));
     }
-    if (result.count("fbis-same")) {
+    if (result.count("fbis-same"))
+    {
         gFbisSameComputor = true;
         logColorToScreen("INFO", "TEST: fbis solutions all from one computor (out-of-qus)");
     }
-    if (result.count("test-solution-threshold")) {
+    if (result.count("test-solution-threshold"))
+    {
         gTestSolutionThreshold = result["test-solution-threshold"].as<int>();
         if (gTestSolutionThreshold >= 0)
-            logColorToScreen("INFO", std::string("TEST: solution threshold override = ") + std::to_string(gTestSolutionThreshold));
+        {
+            logColorToScreen(
+                "INFO",
+                std::string("TEST: solution threshold override = ")
+                    + std::to_string(gTestSolutionThreshold));
+        }
     }
 
     if (result.count("peers")) {
@@ -10718,7 +10744,8 @@ static void processStartupArgs(int argc, const char* argv[])
     logColorToScreen("INFO", "================== ~~~~~~~~~~~~~~~ ==================\n");
 }
 
-int main(int argc, const char* argv[]) {
+int main(int argc, const char* argv[])
+{
     setvbuf(stdout, nullptr, _IOLBF, 0);
 #if defined(__linux__) && !defined(NO_RPC)
     int rpcProxyExitCode = 0;
@@ -10738,10 +10765,3 @@ int main(int argc, const char* argv[]) {
     std::raise(SIGTERM);
     return status;
 }
-
-
-
-
-
-
-

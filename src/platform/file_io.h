@@ -949,9 +949,8 @@ public:
         }
     }
 
-    // Promoted fork child: re-init the queues (drop entries inherited from the parent) reusing the
-    // existing save buffer. No alloc/free/flush, so it is safe after fork() (no worker threads on the
-    // OS port) and never replays the parent's pending writes.
+    // In a promoted child, drop inherited queues without allocating, flushing, or replaying writes.
+    // Reuse the save buffer because no file worker survives fork on the OS port.
     void reinitForChildPromote()
     {
         mIsStop = false;

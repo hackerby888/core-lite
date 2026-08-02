@@ -122,7 +122,8 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
             m["method"] = req->getMethodString();
             m["path"]   = req->getPath();
             m["query"]  = std::string(req->getQuery());
-            Json::StreamWriterBuilder wb; wb["indentation"] = "";
+            Json::StreamWriterBuilder wb;
+            wb["indentation"] = "";
             rpcwire::writeFrame(s, Json::writeString(wb, m), std::string(req->getBody()));
 
             std::string meta, body;
@@ -181,10 +182,13 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
             std::chrono::steady_clock::time_point start;
             try
             {
-                start = req->getAttributes()
-                    ->get<std::chrono::steady_clock::time_point>("qubic_start");
+                start = req->getAttributes()->get<std::chrono::steady_clock::time_point>(
+                    "qubic_start");
             }
-            catch (...) { return; }
+            catch (...)
+            {
+                return;
+            }
 
             uint64_t ms = (uint64_t)std::chrono::duration_cast<
                 std::chrono::milliseconds>(end - start).count();

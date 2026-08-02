@@ -382,10 +382,8 @@ struct Overload {
     inline static SmartMutex networkingLock{ "networkingLock" };   // census-aware: a non-AP holder at fork trips the gate
     inline static SmartMutex eventMapLock{ "eventMapLock" };       // guards eventDataMap (CreateEvent/CloseEvent on main vs callback lookup on AP worker threads)
 
-    // After a fork the promoted child inherits the parent's TCP maps + socket fds but none of the
-    // per-socket worker threads (only the calling thread survives fork). Drop the per-peer state
-    // (reconnect lazily re-spawns workers on the first Transmit/Receive) but keep the global listen
-    // socket: it is still bound, so the child keeps accepting once it re-arms Accept().
+    // Only the calling thread survives fork. Keep the inherited listening socket, but drop
+    // per-peer sockets and stale worker references so reconnects spawn fresh workers lazily.
     static void resetForChildPromote()
     {
         const unsigned long long listenKey = (unsigned long long)peerTcp4Protocol;
@@ -417,19 +415,22 @@ struct Overload {
         new (&eventMapLock) SmartMutex("eventMapLock");
     }
 
-    // Signal a TcpData's per-socket send/recv workers to exit. Each worker holds its own shared_ptr,
-    // so PerSocketIo lives until it returns; the caller then drops the map's reference (erase/reassign).
-    static void signalPerSocketWorkers(TcpData& tcpData) {
-        auto signalIo = [](std::shared_ptr<PerSocketIo>& io) {
-            if (!io) return;
+    // Stop a socket's workers; each worker's shared_ptr keeps its state alive until exit.
+    static void signalPerSocketWorkers(TcpData& tcpData)
+    {
+        auto signalWorker = [](std::shared_ptr<PerSocketIo>& worker)
+        {
+            if (!worker)
+                return;
+
             {
-                std::lock_guard<std::mutex> lk(io->mtx);
-                io->stop.store(true, std::memory_order_release);
+                std::lock_guard<std::mutex> lock(worker->mtx);
+                worker->stop.store(true, std::memory_order_release);
             }
-            io->cv.notify_all();
+            worker->cv.notify_all();
         };
-        signalIo(tcpData.sendIo);
-        signalIo(tcpData.recvIo);
+        signalWorker(tcpData.sendIo);
+        signalWorker(tcpData.recvIo);
     }
 
     // Directly call the setup function without using custom stack.
@@ -799,30 +800,22 @@ struct Overload {
         return EFI_SUCCESS;
     }
 
-    static EFI_STATUS DestroyChild(IN void* This, IN EFI_HANDLE ChildHandle) {
-		// Remove tcp4Protocol data from handle
-        unsigned long long key = *(unsigned long long*)ChildHandle;
-		if (tcpDataMap.contains(key)) {
-			TcpData& tcpData = *tcpDataMap[key];
-			// Signal per-socket workers to exit; shared_ptr keeps PerSocketIo alive until they do.
-			auto signalIo = [](std::shared_ptr<PerSocketIo>& io) {
-				if (!io) return;
-				{
-					std::lock_guard<std::mutex> lk(io->mtx);
-					io->stop.store(true, std::memory_order_release);
-				}
-				io->cv.notify_all();
-			};
-			signalIo(tcpData.sendIo);
-			signalIo(tcpData.recvIo);
-			if (tcpData.socket != INVALID_SOCKET) {
-				closesocket(tcpData.socket);
-				tcpData.socket = INVALID_SOCKET;
-			}
-			tcpDataMap.erase(key);
-		    isReceiveThreadSetupMap.erase(key);
+    static EFI_STATUS DestroyChild(IN void* This, IN EFI_HANDLE ChildHandle)
+    {
+        const unsigned long long key = *(unsigned long long*)ChildHandle;
+        if (tcpDataMap.contains(key))
+        {
+            TcpData& tcpData = *tcpDataMap[key];
+            signalPerSocketWorkers(tcpData);
+            if (tcpData.socket != INVALID_SOCKET)
+            {
+                closesocket(tcpData.socket);
+                tcpData.socket = INVALID_SOCKET;
+            }
+            tcpDataMap.erase(key);
+            isReceiveThreadSetupMap.erase(key);
             isSendThreadSetupMap.erase(key);
-		}
+        }
         freePool(ChildHandle);
         return EFI_SUCCESS;
     }

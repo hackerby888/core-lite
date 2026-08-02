@@ -53,19 +53,19 @@ class DiskShadow
     static constexpr int ioMaxAttempts = 5;
     static constexpr unsigned int ioInitialDelayMs = 100;
 
-    std::mutex shadowMutex;   // SMARTMUTEX-EXEMPT: shadow-dir lock, owner-reinit in reinitForChildPromote; provably not held across fork()
+    std::mutex shadowMutex; // SMARTMUTEX-EXEMPT: reinitialized after promotion; never held across fork()
     std::map<std::string, ShadowDirBuffer> shadowDirByRealDirPath;
     std::set<PageKey> writtenPages;
     std::set<PageKey> removedPages;
 
     // 2-byte safe length; keep clang from rewriting this into libc wcslen.
-    static size_t len16(const CHAR16* s)
+    static size_t char16Length(const CHAR16* text)
     {
-        const volatile CHAR16* p = s;
-        size_t n = 0;
-        while (p[n])
-            ++n;
-        return n;
+        const volatile CHAR16* volatileText = text;
+        size_t length = 0;
+        while (volatileText[length])
+            ++length;
+        return length;
     }
 
     static std::string realPagePath(const PageKey& page)
@@ -161,7 +161,7 @@ class DiskShadow
         auto it = shadowDirByRealDirPath.find(realDirPath);
         if (it == shadowDirByRealDirPath.end())
         {
-            const size_t realDirLength = len16(realDir);
+            const size_t realDirLength = char16Length(realDir);
             ShadowDirBuffer shadowDirBuffer(realDirLength + 3);
 
             for (size_t i = 0; i < realDirLength; i++)
@@ -384,7 +384,10 @@ public:
 
         if (gForkBench && !writtenPages.empty())
         {
-            fprintf(stderr, "[SHADOW] child purgeOrphans: drop %zu diverted page(s); real pristine\n", writtenPages.size());
+            fprintf(
+                stderr,
+                "[SHADOW] child purgeOrphans: drop %zu diverted page(s); real pristine\n",
+                writtenPages.size());
             fflush(stderr);
         }
 
