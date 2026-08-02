@@ -868,7 +868,8 @@ static void processBroadcastMessage(const unsigned long long processorNumber, Re
                                         }
                                         if (k == system.numberOfSolutions)
                                         {
-                                            unsigned int solutionScore = (*score)(processorNumber, request->destinationPublicKey, solution_miningSeed, solution_nonce);
+                                            unsigned int solutionScore = (system.tick >= BPP9000_NONCE_CANONICAL_ACTIVATION_TICK && !score_engine::isCanonicalBpp9000Nonce(solution_nonce.m256i_u8)) ?
+                                                score_engine::INVALID_SCORE_VALUE : (*score)(processorNumber, request->destinationPublicKey, solution_miningSeed, solution_nonce);
                                             score_engine::AlgoType selectedAlgo = score_engine::getAlgoType(solution_nonce.m256i_u8);
                                             const int threshold = getSolutionThreshold(selectedAlgo);
                                             if (system.numberOfSolutions < MAX_NUMBER_OF_SOLUTIONS
@@ -1286,9 +1287,12 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
                 {
                     if (isMainMode() || forceVerifySolutions)
                     {
-                        const m256i& solutionMiningSeed = *(m256i*)request->inputPtr();
-                        const m256i& solutionNonce = *(m256i*)(request->inputPtr() + 32);
-                        (*score)(processorNumber, request->sourcePublicKey, solutionMiningSeed, solutionNonce);
+                        const m256i &solutionMiningSeed = *(m256i *)request->inputPtr();
+                        const m256i &solutionNonce = *(m256i *)(request->inputPtr() + 32);
+                        if (system.tick < BPP9000_NONCE_CANONICAL_ACTIVATION_TICK || score_engine::isCanonicalBpp9000Nonce(solutionNonce.m256i_u8))
+                        {
+                            (*score)(processorNumber, request->sourcePublicKey, solutionMiningSeed, solutionNonce);
+                        }
                     }
                 }
             }
@@ -2810,11 +2814,11 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
         unsigned int solutionScore;
         if (isMainMode() || gReRunStrict || isLastTickInEpoch() || forceVerifySolutions)
         {
-            solutionScore = (*::score)(processorNumber, transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce);
+            solutionScore = (system.tick >= BPP9000_NONCE_CANONICAL_ACTIVATION_TICK && !score_engine::isCanonicalBpp9000Nonce(transaction->nonce.m256i_u8)) ? score_engine::INVALID_SCORE_VALUE : (*::score)(processorNumber, transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce);
         }
         else
         {
-            solutionScore = transaction->score;
+            solutionScore = (system.tick >= BPP9000_NONCE_CANONICAL_ACTIVATION_TICK && !score_engine::isCanonicalBpp9000Nonce(transaction->nonce.m256i_u8)) ? score_engine::INVALID_SCORE_VALUE : transaction->score;
         }
 
         if (score->isValidScore(solutionScore, selectedAlgo))
