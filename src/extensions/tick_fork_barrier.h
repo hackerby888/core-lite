@@ -25,9 +25,7 @@ namespace tickFork
                 return false;
 
             unsigned long long idlePhase = gRequestProcessorParkPhase.load(std::memory_order_acquire);
-            if ((idlePhase & 1)
-                || !gRequestProcessorParkPhase.compare_exchange_strong(
-                    idlePhase, idlePhase + 1, std::memory_order_acq_rel))
+            if ((idlePhase & 1) || !gRequestProcessorParkPhase.compare_exchange_strong(idlePhase, idlePhase + 1, std::memory_order_acq_rel))
             {
                 return false;
             }
@@ -41,8 +39,7 @@ namespace tickFork
                 return false;
             for (int i = 0; i < processorCount; i++)
             {
-                if (gRequestProcessorParkAcknowledgement[processorIDs[i]].load(
-                        std::memory_order_acquire) != _phase)
+                if (gRequestProcessorParkAcknowledgement[processorIDs[i]].load(std::memory_order_acquire) != _phase)
                 {
                     return false;
                 }

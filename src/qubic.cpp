@@ -9274,7 +9274,7 @@ static void bspForkPoint()
     // Skip fork → strict (degrade, never crash). Brief grace for a handler about to release.
     if (gForkCensus)
     {
-        const long long censusDeadlineMs = tickForkNowMs() + 50; // Grace for a transient holder.
+        const long long censusDeadlineMs = tickForkNowMs() + 500; // Grace for a transient holder.
         while (forkCensusSumExcept() != 0 && tickForkNowMs() < censusDeadlineMs)
             _mm_pause();
         if (forkCensusSumExcept() != 0)

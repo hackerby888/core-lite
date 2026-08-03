@@ -35,10 +35,8 @@ inline thread_local int tlLockSlot = -1;   // this thread's census slot; -1 unti
 
 namespace ForkCensus
 {
-    // Headroom for every thread that can hold a node lock: BSP + APs + per-socket workers + RPC
-    // handlers (detached, one per unix conn -> can flood). 64 B/slot, so 2048 = 128 KB static.
     inline constexpr int MAX_THREADS = 2048;
-    struct alignas(64) Slot   // 64-byte aligned: no false sharing between threads' depth counters
+    struct alignas(64) Slot
     {
         std::atomic<int> depth{ 0 };
         std::atomic<const char*> what{ nullptr };
