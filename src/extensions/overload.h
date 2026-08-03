@@ -1054,23 +1054,9 @@ struct Overload {
         }
 
         unsigned long long key = (unsigned long long)This;
-        if (auto it = tcpDataMap.find(key); it != tcpDataMap.end()) {
-            // Key already present. The listen/global entry is one-time setup (bound socket) -> keep it.
-            // A peer key here means the slot was reused without DestroyChild erasing it: tear down the
-            // stale per-socket workers + old socket, then install the fresh config so the next
-            // Transmit/Receive lazy-spawns workers bound to the NEW socket (emplace alone would no-op).
-            if (key == (unsigned long long)peerTcp4Protocol)
-                return EFI_SUCCESS;
-            signalPerSocketWorkers(*it->second);
-            if (it->second->socket != INVALID_SOCKET) {
-                closesocket(it->second->socket);
-                it->second->socket = INVALID_SOCKET;
-            }
-            // New shared_ptr (not in-place assign): a detached thread still holding the old one keeps
-            // the old TcpData alive until it exits.
-            it->second = std::make_shared<TcpData>(data);
-            return EFI_SUCCESS;
-        }
+        if (tcpDataMap.contains(key))
+            return EFI_ACCESS_DENIED;
+
         tcpDataMap.emplace(key, std::make_shared<TcpData>(data));
         return EFI_SUCCESS;
     }
