@@ -9071,7 +9071,7 @@ static void spawnAPs()
 }
 
 #ifdef __linux__
-#if !defined(NO_RPC)
+#if !defined(NO_RPC) && !defined(TESTNET)
 void watchAndCheckin();
 #endif
 
@@ -9140,7 +9140,9 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
 #if defined(__linux__) && !defined(NO_RPC)
     new (&gRpcDispatchLock) SmartSharedMutex("gRpcDispatchLock");
     rpcUnixStart(rpcPath);
+#ifndef TESTNET
     watchAndCheckin();
+#endif
 #endif
     if (gForkBench)
     {
@@ -10568,7 +10570,7 @@ void processArgs(int argc, const char* argv[]) {
     }
 }
 
-#if defined(__linux__) && !defined(NO_RPC)
+#if defined(__linux__) && !defined(NO_RPC) && !defined(TESTNET)
 void watchAndCheckin()
 {
     // start watch thread
@@ -10725,7 +10727,9 @@ static bool runRpcProxyIfRequested(int argc, const char* argv[], int& exitCode)
 static void startRpcServices()
 {
     rpcUnixStart(rpcUnixPath(httpPort));
+#ifndef TESTNET
     watchAndCheckin();
+#endif
 }
 #endif
 
