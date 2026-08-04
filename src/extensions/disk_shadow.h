@@ -177,10 +177,11 @@ class DiskShadow
         return it->second;
     }
 
-    CHAR16* ensureShadowDir(const std::string& realDirPath, const CHAR16* realDir)
+    const CHAR16* ensureShadowDir(const std::string& realDirPath, ShadowDirBuffer& shadowDir)
     {
-        ShadowDirBuffer& shadowDir = registerDirUnlocked(realDirPath, realDir);
-        if (!createDir(shadowDir.data()))
+        std::error_code error;
+        std::filesystem::create_directory(realDirPath + "/s", error);
+        if (error)
         {
             gShadowPoisoned.store(true, std::memory_order_release);
             fprintf(stderr, "[SHADOW] createDir failed for %s/s -> poison (force strict replay)\n",
@@ -221,6 +222,9 @@ public:
 
     void registerDir(const CHAR16* realDir)
     {
+        if (!realDir || !realDir[0])
+            return;
+
         std::lock_guard<std::mutex> guard(shadowMutex);
         const std::string realDirPath = wchar_to_string(realDir);
         registerDirUnlocked(realDirPath, realDir);
@@ -242,9 +246,11 @@ public:
         return true;
     }
 
-    CHAR16* dirForWrite(CHAR16* realDir, const CHAR16* pageName)
+    const CHAR16* dirForWrite(const CHAR16* realDir, const CHAR16* pageName)
     {
-        if (!active.load(std::memory_order_acquire))
+        if (!active.load(std::memory_order_acquire)
+            || !realDir || !realDir[0]
+            || !pageName || !pageName[0])
             return realDir;
 
         std::lock_guard<std::mutex> guard(shadowMutex);
@@ -252,9 +258,13 @@ public:
             return realDir;
 
         const std::string realDirPath = wchar_to_string(realDir);
+        auto shadowDirEntry = shadowDirByRealDirPath.find(realDirPath);
+        if (shadowDirEntry == shadowDirByRealDirPath.end())
+            return realDir;
+
         const std::string pageFileName = wchar_to_string(pageName);
         const PageKey page{ realDirPath, pageFileName };
-        CHAR16* shadowDirForPage = ensureShadowDir(realDirPath, realDir);
+        const CHAR16* shadowDirForPage = ensureShadowDir(realDirPath, shadowDirEntry->second);
 
         removedPages.erase(page);
         writtenPages.insert(page);
@@ -268,9 +278,11 @@ public:
         return shadowDirForPage;
     }
 
-    CHAR16* dirForRemove(CHAR16* realDir, const CHAR16* pageName)
+    const CHAR16* dirForRemove(const CHAR16* realDir, const CHAR16* pageName)
     {
-        if (!active.load(std::memory_order_acquire))
+        if (!active.load(std::memory_order_acquire)
+            || !realDir || !realDir[0]
+            || !pageName || !pageName[0])
             return realDir;
 
         std::lock_guard<std::mutex> guard(shadowMutex);
@@ -278,9 +290,13 @@ public:
             return realDir;
 
         const std::string realDirPath = wchar_to_string(realDir);
+        auto shadowDirEntry = shadowDirByRealDirPath.find(realDirPath);
+        if (shadowDirEntry == shadowDirByRealDirPath.end())
+            return realDir;
+
         const std::string pageFileName = wchar_to_string(pageName);
         const PageKey page{ realDirPath, pageFileName };
-        CHAR16* shadowDirForPage = ensureShadowDir(realDirPath, realDir);
+        const CHAR16* shadowDirForPage = ensureShadowDir(realDirPath, shadowDirEntry->second);
 
         writtenPages.erase(page);
         removedPages.insert(page);
@@ -294,9 +310,11 @@ public:
         return shadowDirForPage;
     }
 
-    CHAR16* dirForRead(CHAR16* realDir, const CHAR16* pageName)
+    const CHAR16* dirForRead(const CHAR16* realDir, const CHAR16* pageName)
     {
-        if (!active.load(std::memory_order_acquire))
+        if (!active.load(std::memory_order_acquire)
+            || !realDir || !realDir[0]
+            || !pageName || !pageName[0])
             return realDir;
 
         std::lock_guard<std::mutex> guard(shadowMutex);
@@ -304,24 +322,26 @@ public:
             return realDir;
 
         const std::string realDirPath = wchar_to_string(realDir);
+        auto shadowDirEntry = shadowDirByRealDirPath.find(realDirPath);
+        if (shadowDirEntry == shadowDirByRealDirPath.end())
+            return realDir;
+
         const std::string pageFileName = wchar_to_string(pageName);
         const PageKey page{ realDirPath, pageFileName };
 
         if (removedPages.count(page))
-            return ensureShadowDir(realDirPath, realDir);
-
-        auto it = shadowDirByRealDirPath.find(realDirPath);
-        if (it == shadowDirByRealDirPath.end())
-            return realDir;
+            return ensureShadowDir(realDirPath, shadowDirEntry->second);
 
         // Only this window's writes may read from /s/; stale orphan files must be ignored.
         if (!writtenPages.count(page))
             return realDir;
 
-        if (getFileSize((CHAR16*)pageName, it->second.data()) < 0)
+        std::error_code error;
+        std::filesystem::file_size(shadowPagePath(page), error);
+        if (error)
             return realDir;
 
-        return it->second.data();
+        return shadowDirEntry->second.data();
     }
 
     // On commit, failed rename can lose the only copy of an evicted page; exit for restart.
@@ -401,32 +421,32 @@ public:
 
 inline DiskShadow gShadow;
 
-static inline CHAR16* liteShadowWriteDir(CHAR16* pageDir, const CHAR16* pageName)
+static inline const CHAR16* liteShadowWriteDir(const CHAR16* pageDir, const CHAR16* pageName)
 {
     return gShadow.dirForWrite(pageDir, pageName);
 }
-static inline CHAR16* liteShadowReadDir(CHAR16* pageDir, const CHAR16* pageName)
+static inline const CHAR16* liteShadowReadDir(const CHAR16* pageDir, const CHAR16* pageName)
 {
     return gShadow.dirForRead(pageDir, pageName);
 }
-static inline CHAR16* liteShadowRemoveDir(CHAR16* pageDir, const CHAR16* pageName)
+static inline const CHAR16* liteShadowRemoveDir(const CHAR16* pageDir, const CHAR16* pageName)
 {
     return gShadow.dirForRemove(pageDir, pageName);
 }
 
 #else
 
-static inline CHAR16* liteShadowWriteDir(CHAR16* pageDir, const CHAR16* pageName)
+static inline const CHAR16* liteShadowWriteDir(const CHAR16* pageDir, const CHAR16* pageName)
 {
     (void)pageName;
     return pageDir;
 }
-static inline CHAR16* liteShadowReadDir(CHAR16* pageDir, const CHAR16* pageName)
+static inline const CHAR16* liteShadowReadDir(const CHAR16* pageDir, const CHAR16* pageName)
 {
     (void)pageName;
     return pageDir;
 }
-static inline CHAR16* liteShadowRemoveDir(CHAR16* pageDir, const CHAR16* pageName)
+static inline const CHAR16* liteShadowRemoveDir(const CHAR16* pageDir, const CHAR16* pageName)
 {
     (void)pageName;
     return pageDir;

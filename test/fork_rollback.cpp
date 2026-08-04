@@ -79,8 +79,9 @@ TEST_F(ForkRollback, WriteDirDivertsToShadow)
     CHAR16 page[64];
     setText(page, L"pg0");
 
+    gShadow.registerDir(dir);
     gShadow.arm();
-    CHAR16* shadowDir = gShadow.dirForWrite(dir, page);
+    const CHAR16* shadowDir = gShadow.dirForWrite(dir, page);
 
     EXPECT_EQ(wchar_to_string(shadowDir), std::string("fork_rollback_test/divert/s"));
     EXPECT_TRUE(std::filesystem::exists("fork_rollback_test/divert/s"));   // ensure() created it
@@ -101,17 +102,70 @@ TEST_F(ForkRollback, ReadDirWrittenGate)
     CHAR16 pageC[64];
     setText(pageC, L"pgC");
 
+    gShadow.registerDir(dir);
     gShadow.arm();
-    CHAR16* shadowDir = gShadow.dirForWrite(dir, pageA); // shadow dir registered, writtenPages={pgA}
+    const CHAR16* shadowDir = gShadow.dirForWrite(dir, pageA); // shadow dir registered, writtenPages={pgA}
     writeFileUtf8("fork_rollback_test/gate/s/pgA", "NEW");
 
     // pgA: written + /s file exists -> diverts to /s
     EXPECT_EQ(wchar_to_string(gShadow.dirForRead(dir, pageA)), wchar_to_string(shadowDir));
     // pgB: dir has a shadow dir but pgB was not written -> real (the orphan gate)
     EXPECT_EQ(wchar_to_string(gShadow.dirForRead(dir, pageB)), wchar_to_string(dir));
-    // pgC: written but its /s file is absent -> real (getFileSize gate)
+    // pgC: written but its /s file is absent -> real.
     gShadow.dirForWrite(dir, pageC);
     EXPECT_EQ(wchar_to_string(gShadow.dirForRead(dir, pageC)), wchar_to_string(dir));
+}
+
+TEST_F(ForkRollback, FileIoRoutesRegisteredDirectory)
+{
+    std::filesystem::create_directories(std::string(kTestDirectory) + "/file_io");
+    CHAR16 directory[256];
+    setText(directory, L"fork_rollback_test/file_io");
+    CHAR16 fileName[64];
+    setText(fileName, L"pg0");
+
+    writeFileUtf8("fork_rollback_test/file_io/pg0", "OLD");
+    gShadow.registerDir(directory);
+    ASSERT_TRUE(gShadow.arm());
+
+    const unsigned char newContents[] = { 'N', 'E', 'W' };
+    ASSERT_EQ(save(fileName, sizeof(newContents), newContents, directory), sizeof(newContents));
+    EXPECT_EQ(readFileUtf8("fork_rollback_test/file_io/pg0"), "OLD");
+    EXPECT_EQ(getFileSize(fileName, directory), sizeof(newContents));
+
+    unsigned char loadedContents[sizeof(newContents)]{};
+    ASSERT_EQ(load(fileName, sizeof(loadedContents), loadedContents, directory), sizeof(loadedContents));
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(loadedContents), sizeof(loadedContents)), "NEW");
+
+    EXPECT_TRUE(removeFile(directory, fileName));
+    EXPECT_EQ(getFileSize(fileName, directory), -1);
+    EXPECT_EQ(readFileUtf8("fork_rollback_test/file_io/pg0"), "OLD");
+
+    gShadow.discard();
+    EXPECT_EQ(readFileUtf8("fork_rollback_test/file_io/pg0"), "OLD");
+}
+
+TEST_F(ForkRollback, FileIoLeavesUnregisteredDirectoryUnchanged)
+{
+    std::filesystem::create_directories(std::string(kTestDirectory) + "/unregistered");
+    CHAR16 directory[256];
+    setText(directory, L"fork_rollback_test/unregistered");
+    CHAR16 fileName[64];
+    setText(fileName, L"plain");
+
+    ASSERT_TRUE(gShadow.arm());
+
+    const unsigned char contents[] = { 'L', 'I', 'V', 'E' };
+    ASSERT_EQ(save(fileName, sizeof(contents), contents, directory), sizeof(contents));
+    EXPECT_EQ(readFileUtf8("fork_rollback_test/unregistered/plain"), "LIVE");
+    EXPECT_FALSE(std::filesystem::exists("fork_rollback_test/unregistered/s"));
+
+    unsigned char loadedContents[sizeof(contents)]{};
+    ASSERT_EQ(load(fileName, sizeof(loadedContents), loadedContents, directory), sizeof(loadedContents));
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(loadedContents), sizeof(loadedContents)), "LIVE");
+
+    EXPECT_TRUE(removeFile(directory, fileName));
+    EXPECT_FALSE(std::filesystem::exists("fork_rollback_test/unregistered/plain"));
 }
 
 // commit renames /s/<page> over an EXISTING real file (atomic replace).
@@ -124,6 +178,7 @@ TEST_F(ForkRollback, CommitOverExistingRealFile)
     setText(page, L"pg0");
 
     writeFileUtf8("fork_rollback_test/commit/pg0", "OLD");
+    gShadow.registerDir(dir);
     gShadow.arm();
     gShadow.dirForWrite(dir, page);
     writeFileUtf8("fork_rollback_test/commit/s/pg0", "NEW");
@@ -143,8 +198,9 @@ TEST_F(ForkRollback, CommitRetryThenFatalOnRenameFailure)
         setText(dir, L"fork_rollback_test/fatal");
         CHAR16 page[64];
         setText(page, L"pg0");
+        gShadow.registerDir(dir);
         gShadow.arm();
-        gShadow.dirForWrite(dir, page);   // registers pg0 in `writtenPages`; /s/pg0 is never created
+        gShadow.dirForWrite(dir, page);   // /s/pg0 is intentionally never created.
         gShadow.commit();              // rename(/s/pg0 -> /pg0) ENOENTs every retry -> exit(1)
     }, ::testing::ExitedWithCode(1), "FATAL: commit could not persist");
 }
@@ -159,6 +215,7 @@ TEST_F(ForkRollback, DiscardKeepsRealPristine)
     setText(page, L"pg0");
 
     writeFileUtf8("fork_rollback_test/discard/pg0", "OLD");
+    gShadow.registerDir(dir);
     gShadow.arm();
     gShadow.dirForWrite(dir, page);
     writeFileUtf8("fork_rollback_test/discard/s/pg0", "NEW");
@@ -178,6 +235,7 @@ TEST_F(ForkRollback, ArmPurgesPriorWindowShadow)
     CHAR16 page[64];
     setText(page, L"pg0");
 
+    gShadow.registerDir(dir);
     gShadow.arm();
     gShadow.dirForWrite(dir, page);
     writeFileUtf8("fork_rollback_test/armpurge/s/pg0", "X");   // window 1 divert, no commit/discard
@@ -198,6 +256,7 @@ TEST_F(ForkRollback, PurgeOrphansDropsShadow)
     setText(page, L"pg0");
 
     writeFileUtf8("fork_rollback_test/purge/pg0", "OLD");
+    gShadow.registerDir(dir);
     gShadow.arm();
     gShadow.dirForWrite(dir, page);
     writeFileUtf8("fork_rollback_test/purge/s/pg0", "NEW");

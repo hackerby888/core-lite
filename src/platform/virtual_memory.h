@@ -185,9 +185,9 @@ protected:
         CHAR16 pageName[64];
         generatePageName(pageName, currentPageId);
 #if defined(NO_UEFI) && !defined(REAL_NODE)
-        auto sz = save(pageName, pageSize, (unsigned char*)currentPage, liteShadowWriteDir(pageDir, pageName));
+        auto sz = save(pageName, pageSize, (unsigned char*)currentPage, pageDir);
 #else
-        auto sz = asyncSave(pageName, pageSize, (unsigned char*)currentPage, liteShadowWriteDir(pageDir, pageName), true);
+        auto sz = asyncSave(pageName, pageSize, (unsigned char*)currentPage, pageDir, true);
 #endif
 
 #if !defined(NDEBUG)
@@ -290,7 +290,7 @@ protected:
         generatePageName(pageName, pageId);
         cache_page_id = getMostOutdatedCachePage();
 #if defined(NO_UEFI) && !defined(REAL_NODE)
-        auto sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], liteShadowReadDir(pageDir, pageName));
+        auto sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
         lastAccessedTimestamp[cache_page_id] = now_ms();
 #else
 #if !defined(NDEBUG)
@@ -301,7 +301,7 @@ protected:
             addDebugMessage(debugMsg);
         }
 #endif
-        auto sz = asyncLoad(pageName, pageSize, (unsigned char*)cache[cache_page_id], liteShadowReadDir(pageDir, pageName));
+        auto sz = asyncLoad(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
         if (sz != pageSize)
         {
 #if !defined(NDEBUG)
@@ -674,7 +674,7 @@ public:
         CHAR16 pageName[64];
         generatePageName(pageName, pageId);
         acquireMemLock();
-        bool success = (asyncRemoveFile(pageName, liteShadowRemoveDir(pageDir, pageName))) == 0;
+        bool success = (asyncRemoveFile(pageName, pageDir)) == 0;
         RELEASE(memLock);
         return success;
     }
@@ -930,7 +930,7 @@ private:
         unsigned int delayMs = SWAPVM_IO_INITIAL_DELAY_MS;
         for (int attempt = 0; attempt < SWAPVM_IO_MAX_ATTEMPTS; attempt++)
         {
-            sz = save(pageName, expectedSize, saveBuffer, liteShadowWriteDir(pageDir, pageName));
+            sz = save(pageName, expectedSize, saveBuffer, pageDir);
             if (sz == expectedSize)
                 break;
 
@@ -1080,11 +1080,11 @@ private:
                 if (gSwapCompressionEnabled)
                 {
                     sz = 0;
-                    long long compressedSize = getFileSize((CHAR16*)pageName, liteShadowReadDir(pageDir, pageName));
+                    long long compressedSize = getFileSize((CHAR16*)pageName, pageDir);
                     if (compressedSize > 0)
                     {
                         std::vector<unsigned char> tmp((size_t)compressedSize);
-                        long long readBytes = load(pageName, (unsigned long long)compressedSize, tmp.data(), liteShadowReadDir(pageDir, pageName));
+                        long long readBytes = load(pageName, (unsigned long long)compressedSize, tmp.data(), pageDir);
                         if (readBytes == compressedSize)
                         {
                             std::vector<unsigned char> decompressed = Zipper::unzip(tmp.data(), (size_t)compressedSize, 4);
@@ -1099,14 +1099,14 @@ private:
                 else
 #endif
                 {
-                    sz = load(pageName, pageSize, (unsigned char*)cache[slot], liteShadowReadDir(pageDir, pageName));
+                    sz = load(pageName, pageSize, (unsigned char*)cache[slot], pageDir);
                 }
                 if (sz == pageSize)
                     break;
 
                 // Loud exact cause (missing vs size-mismatch + full path) so a torn/missing .pg is hand-recoverable.
-                CHAR16* diagnosticDir = liteShadowReadDir(pageDir, pageName);
-                long long onDiskSize = getFileSize((CHAR16*)pageName, diagnosticDir);
+                long long onDiskSize = getFileSize((CHAR16*)pageName, pageDir);
+                const CHAR16* diagnosticDir = liteShadowReadDir(pageDir, pageName);
                 bool compOn = false;
 #ifdef __linux__
                 compOn = gSwapCompressionEnabled;
