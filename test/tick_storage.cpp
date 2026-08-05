@@ -8,6 +8,7 @@
 #undef TICKS_TO_KEEP_FROM_PRIOR_EPOCH
 #define TICKS_TO_KEEP_FROM_PRIOR_EPOCH 5
 #include "../src/ticking/tick_storage.h"
+#include "../src/extensions/tick_storage_scan.h"
 
 #include <random>
 
@@ -128,6 +129,53 @@ public:
         }
     }
 };
+
+
+TEST(TickStorageScan, CleanAndDetectsTransactionCorruption)
+{
+    constexpr unsigned short epoch = 1234;
+    constexpr unsigned int tick = 1000;
+
+    ASSERT_TRUE(ts.init());
+    ts.beginEpoch(tick);
+
+    TickData& tickData = ts.tickData.getByTickInCurrentEpoch(tick);
+    setMem(&tickData, sizeof(tickData), 0);
+    tickData.epoch = INVALIDATED_TICK_DATA;
+
+    const unsigned long long transactionOffset = ts.nextTickTransactionOffset;
+    Transaction* transaction = ts.tickTransactions(transactionOffset);
+    setMem(transaction, sizeof(Transaction) + SIGNATURE_SIZE, 0);
+    transaction->amount = 1;
+    transaction->tick = tick;
+
+    const unsigned int transactionSize = transaction->totalSize();
+    ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick)[0] = transactionOffset;
+    ts.nextTickTransactionOffset += transactionSize;
+
+    Tick* tickVotes = ts.ticks.getByTickInCurrentEpoch(tick);
+    setMem(tickVotes, sizeof(Tick) * NUMBER_OF_COMPUTORS, 0);
+    for (unsigned int computor = 0; computor < QUORUM; computor++)
+    {
+        tickVotes[computor].epoch = epoch;
+        tickVotes[computor].tick = tick;
+        tickVotes[computor].computorIndex = computor;
+    }
+
+    tickStorageScan::Progress progress(false);
+    const tickStorageScan::ScanResult cleanResult =
+        tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
+    EXPECT_EQ(cleanResult.issues.total, 0ULL);
+    EXPECT_EQ(cleanResult.transactionsChecked, 1ULL);
+
+    transaction->tick++;
+    const tickStorageScan::ScanResult corruptedResult =
+        tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
+    EXPECT_EQ(corruptedResult.issues.total, 1ULL);
+    EXPECT_EQ(corruptedResult.issues.categoryTotals.at("transaction-tick"), 1ULL);
+
+    ts.beginEpoch(0);
+}
 
 
 TEST(TestCoreTickStorage, EpochTransition)

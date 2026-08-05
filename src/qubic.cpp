@@ -186,12 +186,15 @@ static void requestGracefulShutdown()
 static volatile char enableBadBoySpammer = 0;
 static volatile bool spammerWithRpc = false;
 
+static void enableAVX();
+
 #include "extensions/global_data.h"
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
 #include "extensions/test_invalid_solution.h"
 #include "extensions/k12_state_digest_cache.h"
+#include "extensions/tick_storage_scan.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
 #ifdef _WIN32
@@ -10751,6 +10754,12 @@ static void processStartupArgs(int argc, const char* argv[])
 int main(int argc, const char* argv[])
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
+#ifdef __linux__
+    if (tickStorageScan::requested(argc, argv))
+    {
+        return tickStorageScan::scan();
+    }
+#endif
 #if defined(__linux__) && !defined(NO_RPC)
     int rpcProxyExitCode = 0;
     if (runRpcProxyIfRequested(argc, argv, rpcProxyExitCode))

@@ -1756,10 +1756,10 @@ public:
         setMem(loadingTarget, sizeof(loadingTarget), 0xff);
         setMem(evictingPage, sizeof(evictingPage), 0xff);
 
-        // Arm restored occupied slots so dirty-track faults their first post-restore write; else a
-        // clean-flagged restored slot is evicted with no writeback -> silent loss (mirrors miss-load).
+        // Snapshot cache bytes may be newer than or absent from their .pg backing.
         for (int i = 0; i <= numCachePage; i++)
-            if (cachePageId[i] != INVALID_PAGE_ID) armSlotAfterLoad(i);
+            if (cachePageId[i] != INVALID_PAGE_ID)
+                dirtyFlags[i] = 1;
 
         currentPageId = *((unsigned long long*)buffer);
         buffer += 8;

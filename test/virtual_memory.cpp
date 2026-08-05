@@ -520,6 +520,37 @@ struct SwapCompressionTestScope
         gSwapCompressionEnabled = previousCompression;
     }
 };
+
+void handleSwapDirtyTrackSignal(int signalNumber, siginfo_t* signalInfo, void*)
+{
+    if (signalNumber == SIGSEGV && signalInfo && SwapDirtyTrack::tryMarkDirty(signalInfo->si_addr))
+        return;
+
+    signal(SIGSEGV, SIG_DFL);
+    raise(SIGSEGV);
+}
+
+struct SwapDirtyTrackTestScope
+{
+    bool previousDirtyTracking = gSwapDirtyTrackEnabled;
+    struct sigaction previousSignalAction {};
+
+    SwapDirtyTrackTestScope()
+    {
+        struct sigaction action {};
+        action.sa_sigaction = handleSwapDirtyTrackSignal;
+        action.sa_flags = SA_SIGINFO;
+        sigemptyset(&action.sa_mask);
+        sigaction(SIGSEGV, &action, &previousSignalAction);
+        gSwapDirtyTrackEnabled = true;
+    }
+
+    ~SwapDirtyTrackTestScope()
+    {
+        gSwapDirtyTrackEnabled = previousDirtyTracking;
+        sigaction(SIGSEGV, &previousSignalAction, nullptr);
+    }
+};
 #endif
 }
 
@@ -729,17 +760,7 @@ TEST(TestSwapVirtualMemory, CompressedShadowPromotionReadsPristine)
 TEST(TestSwapVirtualMemory, DirtyTrackSkipsCleanWriteback) {
     initFilesystem();
     registerAsynFileIO(NULL);
-
-    struct sigaction sa, oldSa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = [](int sig, siginfo_t* si, void*) {
-        if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr)) return;
-        signal(SIGSEGV, SIG_DFL); raise(SIGSEGV);
-    };
-    sa.sa_flags = SA_SIGINFO;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, &oldSa);
-    gSwapDirtyTrackEnabled = true;
+    SwapDirtyTrackTestScope dirtyTrackScope;
 
     {
         SwapVirtualMemory<E16, wcharToNumber(L"dtyt"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
@@ -760,8 +781,36 @@ TEST(TestSwapVirtualMemory, DirtyTrackSkipsCleanWriteback) {
             else EXPECT_EQ(e.a, 0u);                  // clean page never written -> reloads as zero
         }
     }
+}
 
-    gSwapDirtyTrackEnabled = false;
-    sigaction(SIGSEGV, &oldSa, nullptr);
+TEST(TestSwapVirtualMemory, RestoredCachedPageSurvivesEviction)
+{
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    SwapDirtyTrackTestScope dirtyTrackScope;
+
+    constexpr unsigned long long pageCapacity = 256;
+    SwapVirtualMemory<E16, wcharToNumber(L"rstr"), wcharToNumber(L"data"), pageCapacity, 4, INDEX_MODE, 0> vm;
+    ASSERT_TRUE(vm.init());
+
+    {
+        PinScope pins;
+        vm.getRef(pageCapacity).a = 0x12345678;
+    }
+
+    std::vector<unsigned char> snapshot(vm.getVmStateSize());
+    ASSERT_EQ(vm.dumpVMState(snapshot.data()), snapshot.size());
+
+    vm.reset();
+    ASSERT_EQ(vm.loadVMState(snapshot.data()), snapshot.size());
+
+    for (unsigned long long page = 2; page < 16; ++page)
+    {
+        PinScope pins;
+        (void)vm.getRef(page * pageCapacity).a;
+    }
+
+    PinScope pins;
+    EXPECT_EQ(vm.getRef(pageCapacity).a, 0x12345678U);
 }
 #endif
