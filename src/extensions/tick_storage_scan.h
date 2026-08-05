@@ -315,13 +315,22 @@ namespace tickStorageScan
                     "%u matching votes, need %u", matchingVotes, (unsigned int)QUORUM);
             }
 
+            if (!tickDataValid)
+            {
+                progress.update(
+                    (unsigned long long)tick - initialTick + 1,
+                    tickCount,
+                    result.transactionsChecked,
+                    issues.total);
+                continue;
+            }
+
             const unsigned long long* offsets =
                 storage.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
             for (unsigned int slot = 0; slot < NUMBER_OF_TRANSACTIONS_PER_TICK; slot++)
             {
                 const unsigned long long offset = offsets[slot];
-                const bool hasDigest = tickDataValid
-                    && !isZero(tickData.transactionDigests[slot]);
+                const bool hasDigest = !isZero(tickData.transactionDigests[slot]);
                 if (offset == 0)
                 {
                     if (hasDigest)
@@ -342,7 +351,7 @@ namespace tickStorageScan
                 reference.hasExpectedDigest = hasDigest;
                 transactionReferences.push_back(reference);
 
-                if (tickDataValid && !hasDigest)
+                if (!hasDigest)
                 {
                     issues.add(
                         "transaction-pair", tick, slot,

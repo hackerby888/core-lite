@@ -131,7 +131,7 @@ public:
 };
 
 
-TEST(TickStorageScan, CleanAndDetectsTransactionCorruption)
+TEST(TickStorageScan, SkipsInvalidatedAndDetectsTransactionCorruption)
 {
     constexpr unsigned short epoch = 1234;
     constexpr unsigned int tick = 1000;
@@ -147,7 +147,7 @@ TEST(TickStorageScan, CleanAndDetectsTransactionCorruption)
     Transaction* transaction = ts.tickTransactions(transactionOffset);
     setMem(transaction, sizeof(Transaction) + SIGNATURE_SIZE, 0);
     transaction->amount = 1;
-    transaction->tick = tick;
+    transaction->tick = tick + 1;
 
     const unsigned int transactionSize = transaction->totalSize();
     ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick)[0] = transactionOffset;
@@ -163,6 +163,27 @@ TEST(TickStorageScan, CleanAndDetectsTransactionCorruption)
     }
 
     tickStorageScan::Progress progress(false);
+
+    const tickStorageScan::ScanResult invalidatedResult =
+        tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
+    EXPECT_EQ(invalidatedResult.issues.total, 0ULL);
+    EXPECT_EQ(invalidatedResult.transactionsChecked, 0ULL);
+
+    transaction->tick = tick;
+    tickData.epoch = epoch;
+    tickData.tick = tick;
+    tickData.computorIndex = tick % NUMBER_OF_COMPUTORS;
+    KangarooTwelve(
+        transaction,
+        transactionSize,
+        &tickData.transactionDigests[0],
+        sizeof(tickData.transactionDigests[0]));
+
+    m256i tickDataDigest;
+    KangarooTwelve(&tickData, sizeof(tickData), &tickDataDigest, sizeof(tickDataDigest));
+    for (unsigned int computor = 0; computor < QUORUM; computor++)
+        tickVotes[computor].transactionDigest = tickDataDigest;
+
     const tickStorageScan::ScanResult cleanResult =
         tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
     EXPECT_EQ(cleanResult.issues.total, 0ULL);
@@ -171,8 +192,9 @@ TEST(TickStorageScan, CleanAndDetectsTransactionCorruption)
     transaction->tick++;
     const tickStorageScan::ScanResult corruptedResult =
         tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
-    EXPECT_EQ(corruptedResult.issues.total, 1ULL);
+    EXPECT_EQ(corruptedResult.issues.total, 2ULL);
     EXPECT_EQ(corruptedResult.issues.categoryTotals.at("transaction-tick"), 1ULL);
+    EXPECT_EQ(corruptedResult.issues.categoryTotals.at("transaction-digest"), 1ULL);
 
     ts.beginEpoch(0);
 }
