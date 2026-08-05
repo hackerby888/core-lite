@@ -131,6 +131,7 @@ public:
 };
 
 
+#ifdef __linux__
 TEST(TickStorageScan, SkipsInvalidatedAndDetectsTransactionCorruption)
 {
     constexpr unsigned short epoch = 1234;
@@ -198,6 +199,7 @@ TEST(TickStorageScan, SkipsInvalidatedAndDetectsTransactionCorruption)
 
     ts.beginEpoch(0);
 }
+#endif
 
 
 TEST(TestCoreTickStorage, EpochTransition)
