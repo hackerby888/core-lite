@@ -16,7 +16,7 @@
 
 #ifdef __linux__
 // Runtime toggle for SwapVM page compression (blosc2); off unless --swap-compression is passed.
-inline bool gSwapCompressionEnabled = false;
+inline bool gSwapCompressionEnabled = true;
 #endif
 
 template <class T>

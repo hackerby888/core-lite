@@ -429,6 +429,28 @@ static uint32_t w_getOracleQueryStatus(wasm_exec_env_t execEnv, int64_t queryId)
     return hostServices.getOracleQueryStatus(callContext->ctx, queryId);
 }
 
+static int64_t w_invokeOc(
+    wasm_exec_env_t execEnv,
+    uint32_t interfaceIndex,
+    uint32_t requestOffset,
+    uint32_t requestSize)
+{
+    CallContext* callContext = activeCallContext(execEnv);
+    wasm_module_inst_t moduleInstance = wasm_runtime_get_module_inst(execEnv);
+
+    if (!callContext
+        || !wasm_runtime_validate_app_addr(moduleInstance, requestOffset, requestSize))
+    {
+        return -1;
+    }
+
+    return hostServices.invokeOc(
+        callContext->ctx,
+        interfaceIndex,
+        nativeAddress(execEnv, requestOffset),
+        requestSize);
+}
+
 static uint32_t w_unsubscribeOracle(wasm_exec_env_t execEnv, int32_t subscriptionId)
 {
     CallContext* callContext = activeCallContext(execEnv);

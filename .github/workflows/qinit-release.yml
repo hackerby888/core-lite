@@ -41,16 +41,46 @@ jobs:
           repository: ${{ needs.ci.outputs.qinit_repository }}
           ref: ${{ needs.ci.outputs.qinit_sha }}
           path: qinit
+      - name: Read qinit toolchains
+        id: toolchains
+        shell: bash
+        run: |
+          node -e '
+            const config = require("./qinit/config/toolchains.json");
+            const bunVersion = config?.bun?.version;
+            const wasiRepository = config?.wasiSdk?.repository;
+            const wasiReleaseTag = config?.wasiSdk?.releaseTag;
+            const wasiAssetVersion = config?.wasiSdk?.assetVersion;
+            const valuePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+            const repositoryPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+            if (
+              ![bunVersion, wasiReleaseTag, wasiAssetVersion].every(
+                (value) => typeof value === "string" && valuePattern.test(value),
+              ) ||
+              typeof wasiRepository !== "string" ||
+              !repositoryPattern.test(wasiRepository)
+            ) {
+              throw new Error("invalid qinit toolchain configuration");
+            }
+            console.log(`bun_version=${bunVersion}`);
+            console.log(`wasi_repository=${wasiRepository}`);
+            console.log(`wasi_release_tag=${wasiReleaseTag}`);
+            console.log(`wasi_asset_version=${wasiAssetVersion}`);
+          ' >> "$GITHUB_OUTPUT"
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.14"
+          bun-version: ${{ steps.toolchains.outputs.bun_version }}
       - name: Install qinit dependencies
         working-directory: qinit
         run: bun install
-      - name: Fetch wasi-sdk-29
+      - name: Fetch wasi-sdk
+        env:
+          WASI_SDK_REPOSITORY: ${{ steps.toolchains.outputs.wasi_repository }}
+          WASI_SDK_RELEASE_TAG: ${{ steps.toolchains.outputs.wasi_release_tag }}
+          WASI_SDK_ASSET_VERSION: ${{ steps.toolchains.outputs.wasi_asset_version }}
         run: |
           curl -fsSL -o wasi-sdk.tar.gz \
-            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-29/wasi-sdk-29.0-x86_64-linux.tar.gz
+            "https://github.com/$WASI_SDK_REPOSITORY/releases/download/$WASI_SDK_RELEASE_TAG/wasi-sdk-$WASI_SDK_ASSET_VERSION-x86_64-linux.tar.gz"
           mkdir -p wasi-sdk
           tar -xzf wasi-sdk.tar.gz -C wasi-sdk --strip-components=1
       - name: Build header snapshot
@@ -101,7 +131,6 @@ jobs:
           QINIT_REPOSITORY: ${{ needs.ci.outputs.qinit_repository }}
           QINIT_SHA: ${{ needs.ci.outputs.qinit_sha }}
         run: |
-          BASE_URL="https://github.com/${{ github.repository }}/releases/download/$TAG"
           LINUX_X64_SHA=$(cat Qubic-linux-x64.sha256)
           LINUX_ARM64_SHA=$(cat Qubic-linux-arm64.sha256)
           DARWIN_ARM64_SHA=$(cat Qubic-darwin-arm64.sha256)
@@ -115,15 +144,15 @@ jobs:
               "coreLite": { "repository": "$CORE_REPOSITORY", "commit": "$CORE_SHA" },
               "qinit": { "repository": "$QINIT_REPOSITORY", "commit": "$QINIT_SHA" }
             },
-            "node": { "url": "$BASE_URL/Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
+            "node": { "url": "Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
             "nodes": {
-              "linux-x64": { "url": "$BASE_URL/Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
-              "linux-arm64": { "url": "$BASE_URL/Qubic-linux-arm64", "sha256": "$LINUX_ARM64_SHA" },
-              "darwin-arm64": { "url": "$BASE_URL/Qubic-darwin-arm64", "sha256": "$DARWIN_ARM64_SHA" },
-              "darwin-x64": { "url": "$BASE_URL/Qubic-darwin-x64", "sha256": "$DARWIN_X64_SHA" },
-              "windows-x64": { "url": "$BASE_URL/Qubic-windows-x64.exe", "sha256": "$WINDOWS_X64_SHA" }
+              "linux-x64": { "url": "Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
+              "linux-arm64": { "url": "Qubic-linux-arm64", "sha256": "$LINUX_ARM64_SHA" },
+              "darwin-arm64": { "url": "Qubic-darwin-arm64", "sha256": "$DARWIN_ARM64_SHA" },
+              "darwin-x64": { "url": "Qubic-darwin-x64", "sha256": "$DARWIN_X64_SHA" },
+              "windows-x64": { "url": "Qubic-windows-x64.exe", "sha256": "$WINDOWS_X64_SHA" }
             },
-            "headers": { "url": "$BASE_URL/core-headers.tar.gz", "sha256": "$HEADERS_SHA" }
+            "headers": { "url": "core-headers.tar.gz", "sha256": "$HEADERS_SHA" }
           }
           EOF
           cat qinit-manifest.json

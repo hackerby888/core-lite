@@ -308,6 +308,26 @@ unsigned char QPI::QpiContextFunctionCall::getOracleQueryStatus(
     return (unsigned char)lh_getOracleQueryStatus(queryId);
 }
 
+unsigned char QPI::QpiContextFunctionCall::getOcInvocationStatus(
+    long long invocationId) const
+{
+    return (unsigned char)lh_getOcInvocationStatus(invocationId);
+}
+
+template <typename OcInterface>
+QPI::sint64 QPI::QpiContextProcedureCall::__qpiInvokeOC(
+    const typename OcInterface::OcRequest& request) const
+{
+    static_assert(OcInterface::ocInterfaceIndex < OCI::ocInterfacesCount);
+    static_assert(
+        OCI::ocInterfaces[OcInterface::ocInterfaceIndex].requestSize
+        == sizeof(typename OcInterface::OcRequest));
+    return lh_invokeOc(
+        OcInterface::ocInterfaceIndex,
+        &request,
+        (unsigned int)sizeof(typename OcInterface::OcRequest));
+}
+
 bool QPI::QpiContextProcedureCall::unsubscribeOracle(
     int oracleSubscriptionId) const
 {

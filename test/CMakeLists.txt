@@ -28,12 +28,15 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_efi) # Currently
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../src)
 include_directories(${PROJECT_ROOT_DIR})
 
+file(COPY data/example_task_bpp9000.bin data/samples_bpp9000.csv data/scores_bpp9000.csv
+     DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/data)
 
 add_executable(
   qubic_core_tests
 		assets.cpp
    		common_def.cpp
    		contract_core.cpp
+		contract_invocation_alignment.cpp
    		contract_gqmprop.cpp
    		contract_msvault.cpp
    		contract_nostromo.cpp
@@ -79,6 +82,7 @@ add_executable(
    		vote_counter.cpp
 		read_write_lock.cpp
 		setjump.cpp
+		oc_engine.cpp
 		oracle_engine.cpp
 		windows_lazy_memory.cpp
 )
