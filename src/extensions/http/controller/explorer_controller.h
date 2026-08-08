@@ -50,8 +50,8 @@ public:
         out["header"]["ticksInCurrentEpoch"] = system.tick - system.initialTick;
         out["header"]["latestCreatedTick"]   = latestCreatedTickInfo.tick;
 
-        // recentTicks: last 20 ticks within current epoch only (oldest → newest)
-        constexpr unsigned int N = 20;
+        // recentTicks: last N ticks within current epoch only (oldest → newest)
+        constexpr unsigned int N = 200;
         Json::Value recent(Json::arrayValue);
         TickStorage::tickData.acquireLock();
         unsigned int start = (system.tick >= N) ? (system.tick - N + 1) : 0;
