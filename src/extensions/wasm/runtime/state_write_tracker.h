@@ -25,8 +25,11 @@ static bool writeFaultHandlerInstalled = false;
 static thread_local bool stateWriteTrackingActive = false;
 static thread_local unsigned char* t_liteWasmProtLo = nullptr;
 static thread_local unsigned char* t_liteWasmProtHi = nullptr;
+// Both buffers are sized to the contract's own state in beginStateWriteTracking: the fault handler runs
+// under SIGSEGV and must not allocate, so every page it can dirty needs a slot before the call starts.
 static thread_local unsigned char* dirtyPageSnapshots = nullptr;
-static thread_local unsigned char* dirtyPages[WASM_MAX_DIRTY_PAGES];
+static thread_local unsigned char** dirtyPages = nullptr;
+static thread_local unsigned int dirtyPageCapacity = 0;
 static thread_local unsigned int dirtyPageCount = 0;
 static thread_local bool t_liteWasmDirtyTrunc = false;
 
@@ -43,7 +46,7 @@ static LONG WINAPI handleStateWriteException(EXCEPTION_POINTERS* exceptionPointe
     {
         unsigned char* page = alignPointerDown(faultAddress, systemPageSize);
 
-        if (dirtyPageCount < WASM_MAX_DIRTY_PAGES && dirtyPageSnapshots)
+        if (dirtyPageCount < dirtyPageCapacity && dirtyPageSnapshots)
         {
             memcpy(dirtyPageSnapshots + (size_t)dirtyPageCount * systemPageSize, page, systemPageSize);
             dirtyPages[dirtyPageCount++] = page;
@@ -68,7 +71,7 @@ static void handleStateWriteFault(int signalNumber, siginfo_t* info, void* conte
     {
         unsigned char* page = alignPointerDown(faultAddress, systemPageSize);
 
-        if (dirtyPageCount < WASM_MAX_DIRTY_PAGES && dirtyPageSnapshots)
+        if (dirtyPageCount < dirtyPageCapacity && dirtyPageSnapshots)
         {
             memcpy(dirtyPageSnapshots + (size_t)dirtyPageCount * systemPageSize, page, systemPageSize);
             dirtyPages[dirtyPageCount++] = page;
@@ -130,14 +133,48 @@ static inline void setTraceEnabled(bool enabled)
     traceActive.store(enabled, std::memory_order_relaxed);
 }
 
-static inline void beginStateWriteTracking(unsigned char* stateStart, unsigned int stateSize)
+// Grow both buffers so every page of this contract's state has a slot. Grow-only, so a big contract
+// pays once and later calls reuse the allocation.
+static inline void reserveDirtyPages(unsigned int pageCount)
 {
-    if (!dirtyPageSnapshots)
+    if (pageCount <= dirtyPageCapacity)
     {
-        dirtyPageSnapshots = (unsigned char*)malloc((size_t)WASM_MAX_DIRTY_PAGES * systemPageSize);
+        return;
     }
 
-    if (!dirtyPageSnapshots || !stateStart || !stateSize)
+    unsigned char* snapshots = (unsigned char*)realloc(
+        dirtyPageSnapshots,
+        (size_t)pageCount * systemPageSize);
+    if (!snapshots)
+    {
+        return;
+    }
+    dirtyPageSnapshots = snapshots;
+
+    unsigned char** pages = (unsigned char**)realloc(
+        dirtyPages,
+        (size_t)pageCount * sizeof(unsigned char*));
+    if (!pages)
+    {
+        return;
+    }
+    dirtyPages = pages;
+
+    dirtyPageCapacity = pageCount;
+}
+
+static inline void beginStateWriteTracking(unsigned char* stateStart, unsigned int stateSize)
+{
+    if (!stateStart || !stateSize)
+    {
+        return;
+    }
+
+    unsigned char* protectionLow = alignPointerDown(stateStart, systemPageSize);
+    unsigned char* protectionHigh = alignPointerUp(stateStart + stateSize, systemPageSize);
+    reserveDirtyPages((unsigned int)((protectionHigh - protectionLow) / systemPageSize));
+
+    if (!dirtyPageSnapshots || !dirtyPages)
     {
         return;
     }
@@ -192,36 +229,70 @@ static inline void finishStateWriteTracking(
     traceEntry.stateTruncated = t_liteWasmDirtyTrunc;
 
     unsigned char* stateEnd = stateStart + stateSize;
-    for (unsigned int pageIndex = 0; pageIndex < dirtyPageCount && traceEntry.stateDiff.size() < 256; pageIndex++)
+    for (unsigned int pageIndex = 0; pageIndex < dirtyPageCount; pageIndex++)
     {
         unsigned char* page = dirtyPages[pageIndex];
         const unsigned char* before = dirtyPageSnapshots + (size_t)pageIndex * systemPageSize;
         unsigned char* rangeStart = page > stateStart ? page : stateStart;
         unsigned char* rangeEnd = (page + systemPageSize) < stateEnd ? page + systemPageSize : stateEnd;
 
+        // Adjacent windows merge, so a value straddling a window boundary still arrives whole.
+        unsigned char* pendingStart = nullptr;
+        unsigned char* pendingEnd = nullptr;
+        auto flushPending = [&]()
+        {
+            if (!pendingStart)
+            {
+                return;
+            }
+
+            const unsigned int size = (unsigned int)(pendingEnd - pendingStart);
+            traceEntry.stateDiff.push_back({
+                (unsigned int)(pendingStart - stateStart),
+                hex(before + (unsigned int)(pendingStart - page), size),
+                hex(pendingStart, size),
+            });
+            pendingStart = nullptr;
+        };
+
         for (unsigned char* current = rangeStart; current < rangeEnd;)
         {
-            const unsigned int beforeIndex = (unsigned int)(current - page);
-            if (before[beforeIndex] == *current)
+            if (before[(unsigned int)(current - page)] == *current)
             {
                 current++;
                 continue;
             }
 
-            unsigned char* changedEnd = current;
-            while (changedEnd < rangeEnd && before[(unsigned int)(changedEnd - page)] != *changedEnd)
+            // Report the aligned window holding the change, not the changed bytes alone: writing a small
+            // number into a zeroed field dirties too few bytes to decode the value it landed in.
+            const size_t stateOffset = (size_t)(current - stateStart);
+            unsigned char* windowStart = current - (stateOffset % WASM_TRACE_DIFF_WINDOW);
+            unsigned char* windowEnd = windowStart + WASM_TRACE_DIFF_WINDOW;
+
+            if (windowStart < rangeStart)
             {
-                changedEnd++;
+                windowStart = rangeStart;
+            }
+            if (windowEnd > rangeEnd)
+            {
+                windowEnd = rangeEnd;
             }
 
-            const unsigned int changedSize = (unsigned int)(changedEnd - current);
-            traceEntry.stateDiff.push_back({
-                (unsigned int)(current - stateStart),
-                hex(before + beforeIndex, changedSize),
-                hex(current, changedSize),
-            });
-            current = changedEnd;
+            if (pendingStart && pendingEnd == windowStart)
+            {
+                pendingEnd = windowEnd;
+            }
+            else
+            {
+                flushPending();
+                pendingStart = windowStart;
+                pendingEnd = windowEnd;
+            }
+
+            current = windowEnd;
         }
+
+        flushPending();
     }
 }
 

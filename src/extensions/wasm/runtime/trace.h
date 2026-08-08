@@ -14,11 +14,10 @@
 #ifndef WASM_TRACE_RING_CAPACITY
 #define WASM_TRACE_RING_CAPACITY 256u
 #endif
-#ifndef WASM_TRACE_CAPTURE_SIZE
-#define WASM_TRACE_CAPTURE_SIZE 256u
-#endif
-#ifndef WASM_MAX_DIRTY_PAGES
-#define WASM_MAX_DIRTY_PAGES 4096u
+// Changed bytes are reported in aligned windows of this size, so a reader can decode the value the
+// change landed in rather than the bytes that happened to differ.
+#ifndef WASM_TRACE_DIFF_WINDOW
+#define WASM_TRACE_DIFF_WINDOW 256u
 #endif
 
 namespace Wasm::Runtime
@@ -127,7 +126,7 @@ static inline void recordHostCall(
     const char* name,
     const std::string& detail)
 {
-    if (entry && entry->hostCalls.size() < 64)
+    if (entry)
     {
         entry->hostCalls.push_back({
             name,
@@ -224,11 +223,10 @@ static inline void recordLog(
         return;
     }
 
-    const unsigned int capturedSize = size > WASM_TRACE_CAPTURE_SIZE ? WASM_TRACE_CAPTURE_SIZE : size;
     entry->logs.push_back(LogTrace{
         type,
         size,
-        hex(bytes, capturedSize),
+        hex(bytes, size),
     });
 }
 
