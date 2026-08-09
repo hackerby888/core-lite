@@ -102,9 +102,11 @@ static void handleStateWriteFault(int signalNumber, siginfo_t* info, void* conte
 }
 #endif
 
-static inline void setTraceEnabled(bool enabled)
+// Capture is on from boot, so the handler cannot wait for setTraceEnabled(): without it the read-only
+// state protection faults into the crash path instead of being repaired.
+static inline void ensureWriteFaultHandler()
 {
-    if (enabled && !writeFaultHandlerInstalled)
+    if (!writeFaultHandlerInstalled)
     {
 #ifdef _WIN32
         SYSTEM_INFO systemInfo;
@@ -128,6 +130,14 @@ static inline void setTraceEnabled(bool enabled)
         sigaction(SIGSEGV, &action, &previousSegvAction);
 #endif
         writeFaultHandlerInstalled = true;
+    }
+}
+
+static inline void setTraceEnabled(bool enabled)
+{
+    if (enabled)
+    {
+        ensureWriteFaultHandler();
     }
 
     traceActive.store(enabled, std::memory_order_relaxed);
@@ -169,6 +179,9 @@ static inline void beginStateWriteTracking(unsigned char* stateStart, unsigned i
     {
         return;
     }
+
+    // Also settles systemPageSize, which the alignment below depends on.
+    ensureWriteFaultHandler();
 
     unsigned char* protectionLow = alignPointerDown(stateStart, systemPageSize);
     unsigned char* protectionHigh = alignPointerUp(stateStart + stateSize, systemPageSize);

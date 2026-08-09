@@ -11,8 +11,10 @@
 #include <cstdlib>
 #include <cstdint>
 
+// One slot per dispatch, not per tick — a contract registering BEGIN_TICK/END_TICK spends two of these
+// every tick whether or not anything happened, so the depth is what a reader can still scroll back to.
 #ifndef WASM_TRACE_RING_CAPACITY
-#define WASM_TRACE_RING_CAPACITY 256u
+#define WASM_TRACE_RING_CAPACITY 8192u
 #endif
 // Changed bytes are reported in aligned windows of this size, so a reader can decode the value the
 // change landed in rather than the bytes that happened to differ.
@@ -67,7 +69,9 @@ struct TraceEntry
     std::vector<LogTrace> logs;
 };
 
-static std::atomic<bool> traceActive{ false };
+// On by default so a debugger attached after the fact still finds the calls that mattered. This header
+// is testnet-only (LITE_WASM_SC), so the choice cannot reach a production node.
+static std::atomic<bool> traceActive{ true };
 
 static inline bool traceEnabled()
 {
