@@ -43,6 +43,7 @@ static volatile bool listOfPeersIsStaticLiteNode = false;
 #undef CreateEvent
 #define CreateEvent CreateEvent
 #include "platform/console_logging.h"
+#include "platform/processor_count.h"
 
 // Use a high-resolution Windows timer for the network retry loops.
 #ifdef _MSC_VER
@@ -874,7 +875,9 @@ struct Overload {
     ////////////// MP Services Protocol Implementation //////////////
 
     static EFI_STATUS GetNumberOfProcessors(IN void* This, OUT unsigned long long* NumberOfProcessors, OUT unsigned long long* NumberOfEnabledProcessors) {
-        *NumberOfProcessors = (unsigned long long)std::thread::hardware_concurrency();
+        // Counted before the main thread pinned itself — hardware_concurrency() answers 1 after that on
+        // builds whose libc reads the affinity mask.
+        *NumberOfProcessors = (unsigned long long)totalProcessorCount();
         *NumberOfEnabledProcessors = *NumberOfProcessors; // Assume all processors are enabled
         return EFI_SUCCESS;
     }
@@ -1401,7 +1404,7 @@ struct Overload {
     }
 
     static void initializeUefi() {
-        const unsigned int hwConcurrency = std::thread::hardware_concurrency();
+        const unsigned int hwConcurrency = totalProcessorCount();
         const unsigned int lastCpu = hwConcurrency > 0 ? hwConcurrency - 1 : 0;
         #ifndef _MSC_VER
         setNonBlockingInput(true);
