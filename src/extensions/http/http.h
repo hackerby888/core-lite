@@ -1,6 +1,5 @@
 #pragma once
 
-#include "../../platform/processor_count.h"
 #include "../tx_stats.h"
 #include "../tx_slot_index.h"
 #include "../tick_bench.h"
@@ -771,7 +770,7 @@ private:
                 callback(resp);
             }, {drogon::Get});
 
-        app.setThreadNum(totalProcessorCount()).run();
+        app.setThreadNum(std::thread::hardware_concurrency()).run();
     }
 public:
     static void start(int port = 41841)

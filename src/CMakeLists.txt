@@ -361,7 +361,10 @@ else()
         rt
         m
     )
-    target_link_options(Qubic PRIVATE -static)
+    # Processor threads run on the libc default thread stack (see Overload::startThread), and processTick
+    # alone needs about 132 KB of it. glibc gives 8 MB, musl 128 KB — so a musl build faults in its own
+    # prologue on the first tick, with no crash report, the handler having no stack left to run on either.
+    target_link_options(Qubic PRIVATE -static -Wl,-z,stack-size=8388608)
 endif()
 
 # qubic-cli: standalone debug tool binary (eg. read-entity, read-score-cache).

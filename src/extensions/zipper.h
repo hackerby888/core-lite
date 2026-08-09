@@ -10,15 +10,13 @@
 #include <thread>
 #include <vector>
 
-#include "../platform/processor_count.h"
-
 class Zipper
 {
 public:
     static std::vector<unsigned char> zip(unsigned char* src, size_t srcSize, int nthreads = 0) {
         // set nthreads to max if not specified
         if (nthreads <= 0) {
-            nthreads = totalProcessorCount();
+            nthreads = std::thread::hardware_concurrency();
         }
         // 1. Initialize the library (once per app)
         blosc2_init();
@@ -46,7 +44,7 @@ public:
     static std::vector<unsigned char> unzip(unsigned char *compressed_data, size_t compressed_data_size, int nthreads = 0) {
         // set nthreads to max if not specified
         if (nthreads <= 0) {
-            nthreads = totalProcessorCount();
+            nthreads = std::thread::hardware_concurrency();
         }
         // 1. Initialize
         blosc2_init();
