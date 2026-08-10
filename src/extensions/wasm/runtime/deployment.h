@@ -16,15 +16,17 @@ namespace Wasm::Runtime
     unsigned int chunkCount,
     const unsigned char* finalHash)
 {
-    if (!moduleUpload.active && totalSize > WASM_MAX_MODULE_SIZE)
-    {
-        return;
-    }
-
     const bool retry = moduleUpload.active;
     if (!tryBeginModuleUpload(sessionId, totalSize, chunkCount, finalHash))
     {
-        logColorToScreen("WARN", "LITEDYN: UploadBegin rejected; session " + std::to_string(moduleUpload.sessionId) + " is active");
+        if (moduleUpload.active)
+        {
+            logColorToScreen("WARN", "LITEDYN: UploadBegin rejected; session " + std::to_string(moduleUpload.sessionId) + " is active");
+        }
+        else
+        {
+            logColorToScreen("WARN", "LITEDYN: UploadBegin rejected; invalid size or chunk count");
+        }
         return;
     }
 
@@ -37,31 +39,7 @@ namespace Wasm::Runtime
     const unsigned char* data,
     unsigned int dataLength)
 {
-    if (!moduleUpload.active || sessionId != moduleUpload.sessionId)
-    {
-        return;
-    }
-
-    const unsigned long long destinationOffset = (unsigned long long)sequence * 1008ull;
-    if (destinationOffset + dataLength > WASM_MAX_MODULE_SIZE)
-    {
-        return;
-    }
-
-    if (sequence >= moduleUpload.chunkCount)
-    {
-        return;
-    }
-
-    const unsigned int sequenceByte = sequence >> 3;
-    const unsigned int sequenceBit = 1u << (sequence & 7);
-    if (!(receivedChunkBits[sequenceByte] & sequenceBit))
-    {
-        receivedChunkBits[sequenceByte] |= sequenceBit;
-        moduleUpload.receivedCount++;
-    }
-
-    copyMem(moduleUploadBuffer + destinationOffset, data, dataLength);
+    tryReceiveModuleChunk(sessionId, sequence, data, dataLength);
 }
 
 static bool moduleUploadComplete()
@@ -157,13 +135,13 @@ static void runPendingMigration(unsigned int contractIndex);
     }
 
     slot.armed = true;
-    slot.constructed = slot.everInitialized;
     slot.version++;
     logToConsole(L"LITEDYN: Deploy accepted, slot armed");
 
-    if (hasPendingMigration(targetSlot))
+    slot.needsMigrate = hasPendingMigration(targetSlot);
+    slot.constructed = slot.everInitialized && !slot.needsMigrate;
+    if (slot.needsMigrate)
     {
-        slot.needsMigrate = true;
         logToConsole(L"LITEDYN: migrate scheduled for next tick");
     }
 
@@ -265,6 +243,7 @@ static bool hasPendingActivation(unsigned int /*tick*/)
         {
             runPendingMigration(contractIndex);
             slot.needsMigrate = false;
+            slot.constructed = true;
             continue;
         }
 

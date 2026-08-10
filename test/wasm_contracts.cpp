@@ -156,31 +156,306 @@ TEST(WasmContracts, UploadBeginPreservesTheActiveSession)
     std::memset(firstHash, 0x11, sizeof(firstHash));
     std::memset(otherHash, 0x22, sizeof(otherHash));
 
-    ASSERT_TRUE(tryBeginModuleUpload(11, 2016, 2, firstHash));
+    ASSERT_TRUE(tryBeginModuleUpload(
+        11,
+        WASM_UPLOAD_CHUNK_SIZE * 2u,
+        2,
+        firstHash));
     moduleUploadBuffer[0] = 0xab;
-    moduleUploadBuffer[1008] = 0xcd;
+    moduleUploadBuffer[WASM_UPLOAD_CHUNK_SIZE] = 0xcd;
     receivedChunkBits[0] = 1;
     moduleUpload.receivedCount = 1;
 
-    EXPECT_TRUE(tryBeginModuleUpload(11, 1008, 1, otherHash));
+    EXPECT_TRUE(tryBeginModuleUpload(
+        11,
+        WASM_UPLOAD_CHUNK_SIZE,
+        1,
+        otherHash));
     EXPECT_EQ(moduleUpload.sessionId, 11u);
-    EXPECT_EQ(moduleUpload.totalSize, 2016u);
+    EXPECT_EQ(moduleUpload.totalSize, WASM_UPLOAD_CHUNK_SIZE * 2u);
     EXPECT_EQ(moduleUpload.chunkCount, 2u);
     EXPECT_EQ(moduleUpload.receivedCount, 1u);
     EXPECT_EQ(std::memcmp(moduleUpload.finalHash, firstHash, sizeof(firstHash)), 0);
     EXPECT_EQ(receivedChunkBits[0], 1u);
     EXPECT_EQ(moduleUploadBuffer[0], 0xab);
-    EXPECT_EQ(moduleUploadBuffer[1008], 0xcd);
+    EXPECT_EQ(moduleUploadBuffer[WASM_UPLOAD_CHUNK_SIZE], 0xcd);
 
-    EXPECT_FALSE(tryBeginModuleUpload(22, 1008, 1, otherHash));
+    EXPECT_FALSE(tryBeginModuleUpload(
+        22,
+        WASM_UPLOAD_CHUNK_SIZE,
+        1,
+        otherHash));
     EXPECT_EQ(moduleUpload.sessionId, 11u);
-    EXPECT_EQ(moduleUpload.totalSize, 2016u);
+    EXPECT_EQ(moduleUpload.totalSize, WASM_UPLOAD_CHUNK_SIZE * 2u);
     EXPECT_EQ(moduleUpload.chunkCount, 2u);
     EXPECT_EQ(moduleUpload.receivedCount, 1u);
     EXPECT_EQ(std::memcmp(moduleUpload.finalHash, firstHash, sizeof(firstHash)), 0);
     EXPECT_EQ(receivedChunkBits[0], 1u);
     EXPECT_EQ(moduleUploadBuffer[0], 0xab);
-    EXPECT_EQ(moduleUploadBuffer[1008], 0xcd);
+    EXPECT_EQ(moduleUploadBuffer[WASM_UPLOAD_CHUNK_SIZE], 0xcd);
+}
+
+TEST(WasmContracts, UploadBeginRejectsInvalidShapesWithoutMutation)
+{
+    using namespace Wasm::Runtime;
+
+    struct InvalidShape
+    {
+        const char* name;
+        unsigned int totalSize;
+        unsigned int chunkCount;
+    };
+    const InvalidShape cases[] = {
+        { "empty", 0, 0 },
+        { "zero chunks", 1, 0 },
+        { "too many chunks", 1, 2 },
+        { "extra full chunk", WASM_UPLOAD_CHUNK_SIZE, 2 },
+        { "missing final chunk", WASM_UPLOAD_CHUNK_SIZE + 1, 1 },
+        {
+            "above module limit",
+            WASM_MAX_MODULE_SIZE + 1u,
+            WASM_MAX_UPLOAD_CHUNKS,
+        },
+    };
+    unsigned char finalHash[32];
+    std::memset(finalHash, 0x11, sizeof(finalHash));
+
+    for (const InvalidShape& testCase : cases)
+    {
+        SCOPED_TRACE(testCase.name);
+        moduleUpload = ModuleUpload{};
+        std::memset(moduleUploadBuffer, 0x5a, 64);
+        std::memset(receivedChunkBits, 0xa5, sizeof(receivedChunkBits));
+
+        EXPECT_FALSE(tryBeginModuleUpload(
+            17,
+            testCase.totalSize,
+            testCase.chunkCount,
+            finalHash));
+        EXPECT_FALSE(moduleUpload.active);
+        EXPECT_EQ(moduleUpload.sessionId, 0u);
+        EXPECT_EQ(moduleUpload.totalSize, 0u);
+        EXPECT_EQ(moduleUpload.chunkCount, 0u);
+        EXPECT_EQ(moduleUpload.receivedCount, 0u);
+        EXPECT_EQ(moduleUploadBuffer[0], 0x5a);
+        EXPECT_EQ(receivedChunkBits[0], 0xa5);
+    }
+}
+
+TEST(WasmContracts, UploadChunksRejectInvalidSequenceOrLengthWithoutMutation)
+{
+    using namespace Wasm::Runtime;
+
+    struct RejectedChunk
+    {
+        const char* name;
+        unsigned int totalSize;
+        bool receiveFirst;
+        unsigned long long sessionId;
+        unsigned int sequence;
+        unsigned int dataLength;
+    };
+    const unsigned long long activeSessionId = 31;
+    const unsigned int twoFullChunksSizeBytes = WASM_UPLOAD_CHUNK_SIZE * 2u;
+    const unsigned int threeFullChunksSizeBytes = WASM_UPLOAD_CHUNK_SIZE * 3u;
+    const unsigned int finalChunkSizeBytes = 92;
+    const unsigned int partialFinalSizeBytes =
+        WASM_UPLOAD_CHUNK_SIZE + finalChunkSizeBytes;
+    const RejectedChunk cases[] = {
+        {
+            "short first",
+            twoFullChunksSizeBytes,
+            false,
+            activeSessionId,
+            0,
+            WASM_UPLOAD_CHUNK_SIZE - 1u,
+        },
+        {
+            "oversized first",
+            twoFullChunksSizeBytes,
+            false,
+            activeSessionId,
+            0,
+            WASM_UPLOAD_CHUNK_SIZE + 1u,
+        },
+        {
+            "gap",
+            twoFullChunksSizeBytes,
+            false,
+            activeSessionId,
+            1,
+            WASM_UPLOAD_CHUNK_SIZE,
+        },
+        {
+            "out of order",
+            threeFullChunksSizeBytes,
+            true,
+            activeSessionId,
+            2,
+            WASM_UPLOAD_CHUNK_SIZE,
+        },
+        {
+            "duplicate",
+            twoFullChunksSizeBytes,
+            true,
+            activeSessionId,
+            0,
+            WASM_UPLOAD_CHUNK_SIZE,
+        },
+        {
+            "short final",
+            partialFinalSizeBytes,
+            true,
+            activeSessionId,
+            1,
+            finalChunkSizeBytes - 1u,
+        },
+        {
+            "oversized final",
+            partialFinalSizeBytes,
+            true,
+            activeSessionId,
+            1,
+            finalChunkSizeBytes + 1u,
+        },
+        {
+            "stale session",
+            twoFullChunksSizeBytes,
+            false,
+            activeSessionId + 1,
+            0,
+            WASM_UPLOAD_CHUNK_SIZE,
+        },
+    };
+    unsigned char finalHash[32];
+    std::memset(finalHash, 0x22, sizeof(finalHash));
+    std::vector<unsigned char> firstChunk(WASM_UPLOAD_CHUNK_SIZE, 0x33);
+    std::vector<unsigned char> rejectedChunk(WASM_UPLOAD_CHUNK_SIZE + 1, 0x44);
+
+    for (const RejectedChunk& testCase : cases)
+    {
+        SCOPED_TRACE(testCase.name);
+        moduleUpload = ModuleUpload{};
+        std::memset(moduleUploadBuffer, 0x5a, testCase.totalSize);
+        std::memset(receivedChunkBits, 0, sizeof(receivedChunkBits));
+        const unsigned int chunkCount =
+            expectedModuleUploadChunkCount(testCase.totalSize);
+        ASSERT_TRUE(tryBeginModuleUpload(
+            activeSessionId,
+            testCase.totalSize,
+            chunkCount,
+            finalHash));
+        if (testCase.receiveFirst)
+        {
+            ASSERT_TRUE(tryReceiveModuleChunk(
+                activeSessionId,
+                0,
+                firstChunk.data(),
+                WASM_UPLOAD_CHUNK_SIZE));
+        }
+
+        const ModuleUpload uploadBefore = moduleUpload;
+        const std::vector<unsigned char> bufferBefore(
+            moduleUploadBuffer,
+            moduleUploadBuffer + testCase.totalSize);
+        const std::vector<unsigned char> chunkBitsBefore(
+            receivedChunkBits,
+            receivedChunkBits + sizeof(receivedChunkBits));
+
+        EXPECT_FALSE(tryReceiveModuleChunk(
+            testCase.sessionId,
+            testCase.sequence,
+            rejectedChunk.data(),
+            testCase.dataLength));
+        EXPECT_EQ(moduleUpload.active, uploadBefore.active);
+        EXPECT_EQ(moduleUpload.sessionId, uploadBefore.sessionId);
+        EXPECT_EQ(moduleUpload.totalSize, uploadBefore.totalSize);
+        EXPECT_EQ(moduleUpload.chunkCount, uploadBefore.chunkCount);
+        EXPECT_EQ(moduleUpload.receivedCount, uploadBefore.receivedCount);
+        EXPECT_EQ(
+            std::memcmp(
+                moduleUpload.finalHash,
+                uploadBefore.finalHash,
+                sizeof(moduleUpload.finalHash)),
+            0);
+        EXPECT_EQ(
+            std::memcmp(
+                moduleUploadBuffer,
+                bufferBefore.data(),
+                bufferBefore.size()),
+            0);
+        EXPECT_EQ(
+            std::memcmp(
+                receivedChunkBits,
+                chunkBitsBefore.data(),
+                chunkBitsBefore.size()),
+            0);
+    }
+}
+
+TEST(WasmContracts, UploadChunksAcceptExactSequentialPayloads)
+{
+    using namespace Wasm::Runtime;
+
+    const unsigned int totalSize = WASM_UPLOAD_CHUNK_SIZE * 2u + 1u;
+    unsigned char finalHash[32];
+    std::memset(finalHash, 0x66, sizeof(finalHash));
+    std::vector<unsigned char> fullChunk(WASM_UPLOAD_CHUNK_SIZE, 0x77);
+    const unsigned char lastByte = 0x88;
+    moduleUpload = ModuleUpload{};
+    std::memset(moduleUploadBuffer, 0, totalSize);
+    std::memset(receivedChunkBits, 0, sizeof(receivedChunkBits));
+
+    ASSERT_TRUE(tryBeginModuleUpload(
+        41,
+        totalSize,
+        expectedModuleUploadChunkCount(totalSize),
+        finalHash));
+    EXPECT_TRUE(tryReceiveModuleChunk(
+        41,
+        0,
+        fullChunk.data(),
+        WASM_UPLOAD_CHUNK_SIZE));
+    EXPECT_TRUE(tryReceiveModuleChunk(
+        41,
+        1,
+        fullChunk.data(),
+        WASM_UPLOAD_CHUNK_SIZE));
+    EXPECT_TRUE(tryReceiveModuleChunk(41, 2, &lastByte, 1));
+
+    EXPECT_EQ(
+        moduleUpload.receivedCount,
+        expectedModuleUploadChunkCount(totalSize));
+    EXPECT_EQ(moduleUploadBuffer[0], 0x77);
+    EXPECT_EQ(moduleUploadBuffer[WASM_UPLOAD_CHUNK_SIZE], 0x77);
+    EXPECT_EQ(moduleUploadBuffer[totalSize - 1], 0x88);
+}
+
+TEST(WasmContracts, ReservedSlotOffsetRejectsNonDynamicContractSlots)
+{
+    using namespace Wasm::Runtime;
+
+    struct SlotCase
+    {
+        unsigned int contractIndex;
+        int expectedOffset;
+    };
+    const SlotCase cases[] = {
+        { WASM_RESERVED_SLOT_BASE - 1u, -1 },
+        { WASM_RESERVED_SLOT_BASE, 0 },
+        {
+            WASM_RESERVED_SLOT_BASE + WASM_RESERVED_SLOT_COUNT - 1u,
+            (int)WASM_RESERVED_SLOT_COUNT - 1,
+        },
+        { WASM_RESERVED_SLOT_BASE + WASM_RESERVED_SLOT_COUNT, -1 },
+    };
+
+    for (const SlotCase& testCase : cases)
+    {
+        EXPECT_EQ(
+            reservedSlotOffset(testCase.contractIndex),
+            testCase.expectedOffset);
+    }
 }
 
 TEST(WasmContracts, NestedCallUsesIsolatedFrame)
@@ -553,7 +828,23 @@ TEST(WasmContracts, CrossHostStateEquivalence)
     a[4] = LOCALS;
     call("dispatch", a, 5);
 
+    auto stateHex = [&]()
+    {
+        const unsigned char* state =
+            (const unsigned char*)wasm_runtime_addr_app_to_native(inst, st);
+        std::string encoded;
+        encoded.reserve(ss * 2);
+        char byteHex[3];
+        for (uint32_t i = 0; i < ss; i++)
+        {
+            snprintf(byteHex, sizeof(byteHex), "%02x", state[i]);
+            encoded += byteHex;
+        }
+        return encoded;
+    };
+
     const char* script = getenv("QINIT_SCRIPT");
+    const bool captureCheckpoints = getenv("QINIT_CAPTURE_CHECKPOINTS") != nullptr;
     if (script && *script)
     {
         std::string scriptText(script);
@@ -591,7 +882,15 @@ TEST(WasmContracts, CrossHostStateEquivalence)
             call("dispatch", a, 5, false);
             if (trapped)
             {
-                printf("CROSSHOST_OP=%u:trap\n", operationIndex++);
+                printf("CROSSHOST_OP=%u:trap\n", operationIndex);
+                if (captureCheckpoints)
+                {
+                    printf(
+                        "CROSSHOST_CHECKPOINT=%u:%s\n",
+                        operationIndex,
+                        stateHex().c_str());
+                }
+                operationIndex++;
                 break;
             }
             const unsigned char* nativeOutput = (const unsigned char*)wasm_runtime_addr_app_to_native(inst, OUT);
@@ -603,7 +902,15 @@ TEST(WasmContracts, CrossHostStateEquivalence)
                 snprintf(byteHex, sizeof(byteHex), "%02x", nativeOutput[i]);
                 outHex += byteHex;
             }
-            printf("CROSSHOST_OP=%u:ok:%s\n", operationIndex++, outHex.c_str());
+            printf("CROSSHOST_OP=%u:ok:%s\n", operationIndex, outHex.c_str());
+            if (captureCheckpoints)
+            {
+                printf(
+                    "CROSSHOST_CHECKPOINT=%u:%s\n",
+                    operationIndex,
+                    stateHex().c_str());
+            }
+            operationIndex++;
         }
     }
     else
@@ -619,16 +926,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
         }
     }
 
-    const unsigned char* state = (const unsigned char*)wasm_runtime_addr_app_to_native(inst, st);
-    std::string stateHex;
-    stateHex.reserve(ss * 2);
-    char byteHex[3];
-    for (uint32_t i = 0; i < ss; i++)
-    {
-        snprintf(byteHex, sizeof(byteHex), "%02x", state[i]);
-        stateHex += byteHex;
-    }
-    printf("CROSSHOST_STATE=%s\n", stateHex.c_str());
+    printf("CROSSHOST_STATE=%s\n", stateHex().c_str());
 
     wasm_runtime_destroy_exec_env(env);
     wasm_runtime_deinstantiate(inst);

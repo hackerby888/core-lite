@@ -12,6 +12,7 @@ namespace Wasm::Runtime
 struct EnvironmentScope
 {
     wasm_exec_env_t execEnv = nullptr;
+    wasm_exec_env_t parentExecEnv = nullptr;
     bool ownsExecEnv = false;
     bool ready = false;
     wasm_module_inst_t savedInstance = nullptr;
@@ -19,7 +20,9 @@ struct EnvironmentScope
 
     explicit EnvironmentScope(const EngineSlot& slot)
     {
-        if (currentEnvironment)
+        // WAMR trap backtraces require every frame in an environment to belong to one module.
+        if (currentEnvironment
+            && wasm_runtime_get_module_inst(currentEnvironment) == slot.instance)
         {
             execEnv = currentEnvironment;
             savedInstance = wasm_runtime_get_module_inst(execEnv);
@@ -30,6 +33,7 @@ struct EnvironmentScope
         }
 
         ensureThreadEnvironment();
+        parentExecEnv = currentEnvironment;
         execEnv = wasm_runtime_create_exec_env(slot.instance, 64 * 1024);
         if (!execEnv)
         {
@@ -52,7 +56,7 @@ struct EnvironmentScope
         {
             wasm_runtime_set_user_data(execEnv, nullptr);
             wasm_runtime_destroy_exec_env(execEnv);
-            currentEnvironment = nullptr;
+            currentEnvironment = parentExecEnv;
             return;
         }
 
