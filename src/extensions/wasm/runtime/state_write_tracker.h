@@ -4,7 +4,7 @@
 #ifdef LITE_WASM_SC
 
 #include "extensions/wasm/runtime/trace.h"
-#include "platform/memory_util.h"
+#include "platform/pointer_align.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -20,13 +20,14 @@ namespace Wasm::Runtime
 static long systemPageSize = 4096;
 #ifndef _WIN32
 static struct sigaction previousSegvAction;
+static struct sigaction previousBusAction;
 #endif
 static bool writeFaultHandlerInstalled = false;
 static thread_local bool stateWriteTrackingActive = false;
 static thread_local unsigned char* t_liteWasmProtLo = nullptr;
 static thread_local unsigned char* t_liteWasmProtHi = nullptr;
 // Both buffers are sized to the contract's own state in beginStateWriteTracking: the fault handler runs
-// under SIGSEGV and must not allocate, so every page it can dirty needs a slot before the call starts.
+// under a signal and must not allocate, so every page it can dirty needs a slot before the call starts.
 static thread_local unsigned char* dirtyPageSnapshots = nullptr;
 static thread_local unsigned char** dirtyPages = nullptr;
 static thread_local unsigned int dirtyPageCapacity = 0;
@@ -85,15 +86,17 @@ static void handleStateWriteFault(int signalNumber, siginfo_t* info, void* conte
         return;
     }
 
-    if ((previousSegvAction.sa_flags & SA_SIGINFO) && previousSegvAction.sa_sigaction)
+    const struct sigaction& previous = signalNumber == SIGBUS ? previousBusAction : previousSegvAction;
+
+    if ((previous.sa_flags & SA_SIGINFO) && previous.sa_sigaction)
     {
-        previousSegvAction.sa_sigaction(signalNumber, info, context);
+        previous.sa_sigaction(signalNumber, info, context);
         return;
     }
 
-    if (previousSegvAction.sa_handler && previousSegvAction.sa_handler != SIG_DFL && previousSegvAction.sa_handler != SIG_IGN)
+    if (previous.sa_handler && previous.sa_handler != SIG_DFL && previous.sa_handler != SIG_IGN)
     {
-        previousSegvAction.sa_handler(signalNumber);
+        previous.sa_handler(signalNumber);
         return;
     }
 
@@ -127,7 +130,11 @@ static inline void ensureWriteFaultHandler()
         action.sa_sigaction = handleStateWriteFault;
         action.sa_flags = SA_SIGINFO | SA_RESTART;
         sigemptyset(&action.sa_mask);
+        // A write to a read-only mapping raises SIGSEGV on Linux and SIGBUS on Darwin, which keeps SIGSEGV
+        // for unmapped addresses. Both are registered so the page is repaired instead of reaching the crash
+        // path; a signal carrying an address outside the protected range chains on to the previous handler.
         sigaction(SIGSEGV, &action, &previousSegvAction);
+        sigaction(SIGBUS, &action, &previousBusAction);
 #endif
         writeFaultHandlerInstalled = true;
     }

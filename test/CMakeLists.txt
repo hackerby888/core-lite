@@ -167,7 +167,7 @@ if(LITE_WASM_SC)
         add_library(vmlib STATIC ${WAMR_RUNTIME_LIB_SOURCE})
     endif()
 
-    add_executable(qubic_wasm_tests wasm_contracts.cpp)
+    add_executable(qubic_wasm_tests wasm_contracts.cpp wasm_state_write.cpp)
     target_compile_definitions(qubic_wasm_tests PRIVATE
         LITE_WASM_SC
         TESTNET
