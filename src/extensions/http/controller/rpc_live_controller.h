@@ -24,6 +24,7 @@ class RpcLiveController : public HttpController<RpcLiveController>
     ADD_METHOD_TO(RpcLiveController::balancesId, "/live/v1/balances/{id}", Get);
     ADD_METHOD_TO(RpcLiveController::tickInfo, "/live/v1/block-height", Get);
     ADD_METHOD_TO(RpcLiveController::tickInfo, "/live/v1/tick-info", Get);
+    ADD_METHOD_TO(RpcLiveController::whoami, "/live/v1/whoami", Get);
     ADD_METHOD_TO(RpcLiveController::broadcastTransaction, "/live/v1/broadcast-transaction", Post);
     ADD_METHOD_TO(RpcLiveController::iposActive, "/live/v1/ipos/active", Get);
     ADD_METHOD_TO(RpcLiveController::querySmartContract, "/live/v1/querySmartContract", Post);
@@ -518,6 +519,15 @@ class RpcLiveController : public HttpController<RpcLiveController>
             }
         }
         result["ipos"] = iposArray;
+        cb(HttpResponse::newHttpJsonResponse(result));
+    }
+
+    inline void whoami(const HttpRequestPtr &req,
+                       std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        (void)req;
+        Json::Value result;
+        result["backend"] = "core";
         cb(HttpResponse::newHttpJsonResponse(result));
     }
 
