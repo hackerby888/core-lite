@@ -9122,6 +9122,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
         peers[i].transmitToken.CompletionToken.Status = -1;
         peers[i].receiveData.FragmentTable[0].FragmentBuffer = peers[i].receiveBuffer;
     }
+    PeerReaper::resetForChildPromote();
     if (gAsyncFileIO)
     {
         gAsyncFileIO->reinitForChildPromote();
