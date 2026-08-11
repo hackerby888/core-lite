@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(LITE_WASM_SC)
 
 #include <atomic>
 #include <cerrno>

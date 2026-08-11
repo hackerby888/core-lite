@@ -3,7 +3,7 @@
 // Linux subreaper keeps a stable parent PID and restartable RPC sidecar across rollback promotions.
 // Set QUBIC_NO_SUPERVISOR=1 to run without the shim or sidecar.
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(LITE_WASM_SC)
 
 #include <sys/prctl.h>
 #include <sys/wait.h>
@@ -126,5 +126,5 @@ static inline void runUnderSupervisor(int argc, const char** argv)
 }
 
 #else
-static inline void runUnderSupervisor(int, const char**) {}   // non-Linux: no fork rollback, no shim
+static inline void runUnderSupervisor(int, const char**) {}   // non-Linux or Wasm build: no fork rollback, no shim
 #endif

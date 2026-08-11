@@ -1,11 +1,12 @@
 #pragma once
 
 // Tick fork-rollback (AUX wrong-solution path): fork on BSP, child keeps networking thread,
-// re-spawns AP loops on promote. Linux-only (fork/pipe/_exit); #else inert stubs.
+// re-spawns AP loops on promote. Linux-only (fork/pipe/_exit) and excluded from Wasm-contract
+// builds (Wasm testnet never forks); #else inert stubs.
 
 #include "extensions/tick_fork_barrier.h"
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(LITE_WASM_SC)
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -525,7 +526,7 @@ namespace tickFork
     }
 }
 
-#else  // !__linux__ : fork-based rollback is Linux-only; inert stubs keep qubic.cpp building.
+#else  // non-Linux or Wasm build: rollback disabled; inert stubs keep qubic.cpp building.
 
 #include <atomic>
 namespace tickFork
@@ -542,4 +543,4 @@ namespace tickFork
     }
 }
 
-#endif // __linux__
+#endif // __linux__ && !LITE_WASM_SC

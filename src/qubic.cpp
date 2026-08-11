@@ -6388,7 +6388,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
     {
         if (gracefulShutdownRequested.load(std::memory_order_acquire))
         {
-#ifdef __linux__
+#if defined(__linux__) && !defined(LITE_WASM_SC)
             tickFork::retireCheckpointForShutdown();
 #endif
             shutDownNode = 1;
@@ -9069,7 +9069,7 @@ static void spawnAPs()
     }
 }
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(LITE_WASM_SC)
 #if !defined(NO_RPC) && !defined(TESTNET)
 void watchAndCheckin();
 #endif
@@ -9346,7 +9346,7 @@ static void bspForkPoint()
         tickFork::setWinState(tickFork::WindowState::Idle);
     }
 }
-#endif // __linux__
+#endif // __linux__ && !LITE_WASM_SC
 
 EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 {
@@ -9459,7 +9459,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
 #endif
                 PinScope pinScope;
-#ifdef __linux__
+#if defined(__linux__) && !defined(LITE_WASM_SC)
                 if (bspServiceRetireRequest())
                     break;
                 if (tickFork::gForkRequest)
@@ -9909,7 +9909,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     closeAllPeers(true);
 
                     logToConsole(L"Saving node state...");
-#ifdef __linux__
+#if defined(__linux__) && !defined(LITE_WASM_SC)
                     if (tickFork::winState() == tickFork::WindowState::Live)
                     {
                         bspRetireCheckpointForAutosave();
@@ -10194,7 +10194,9 @@ void processArgs(int argc, const char* argv[]) {
         ("swap-compression", "Compress SwapVM disk pages with blosc2 (Linux only)")
         ("swap-dirty-track", "Track dirty SwapVM pages via mprotect+SIGSEGV (Linux only)")
         ("auto-flush-stuck-seconds", "Seconds stuck on same tick before auto-rewipe tickData and re-fetch from peers (0=off)", cxxopts::value<int>()->default_value("0"))
+#if defined(__linux__) && !defined(LITE_WASM_SC)
         ("rollback-mode", "DEPRECATED: accepted but ignored", cxxopts::value<std::string>()->default_value("fork"))
+#endif
         ("max-inbound-per-ip", "Max inbound connections per IP (0=unlimited)", cxxopts::value<int>()->default_value("0"))
         ("max-inbound", "Max inbound connection slots (0=none, -1=all)", cxxopts::value<int>()->default_value("-1"))
         ("no-k12-state-cache", "Disable K12 state-digest incremental cache (Linux)")
@@ -10205,12 +10207,14 @@ void processArgs(int argc, const char* argv[]) {
         ("fbis-count", "TEST: number of solution txs per tick with --fbis", cxxopts::value<int>()->default_value("1"))
         ("fbis-same", "TEST: inject all --fbis solutions from one computor", cxxopts::value<bool>())
         ("test-solution-threshold", "TEST: override runtime Bpp9000 solution threshold", cxxopts::value<int>()->default_value("-1"))
+#if defined(__linux__) && !defined(LITE_WASM_SC)
         ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
         ("fork-force-match", "TEST: force verdict to match branch", cxxopts::value<bool>())
         ("fork-force-mismatch", "TEST: force verdict to mismatch branch (promote child)", cxxopts::value<bool>())
         ("fork-bench", "TEST: print per-fork timing + RSS", cxxopts::value<bool>())
         ("fork-force-rollback-every", "TEST: force fork + rollback every N ticks (0=off)", cxxopts::value<unsigned int>()->default_value("0"))
+#endif
 
         // ── internal ──
         ("rpc-proxy", "INTERNAL: run as the RPC sidecar", cxxopts::value<bool>())
@@ -10242,6 +10246,7 @@ void processArgs(int argc, const char* argv[]) {
     }
 #endif
 
+#if defined(__linux__) && !defined(LITE_WASM_SC)
     if (result.count("rollback-mode"))
     {
         const std::string rollbackMode = result["rollback-mode"].as<std::string>();
@@ -10286,6 +10291,7 @@ void processArgs(int argc, const char* argv[]) {
                     + std::to_string(gForkForceRollbackEvery) + " ticks");
         }
     }
+#endif
     if (result.count("fbis-count"))
     {
         const int solutionCount = result["fbis-count"].as<int>();

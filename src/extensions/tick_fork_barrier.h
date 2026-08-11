@@ -2,7 +2,7 @@
 
 #include <atomic>
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(LITE_WASM_SC)
 
 #include <thread>
 #include "public_settings.h"
