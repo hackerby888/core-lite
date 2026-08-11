@@ -15,6 +15,7 @@
 #define MSG_NOSIGNAL 0
 #elif defined(__linux__) || defined(__APPLE__)
 #include <sched.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -43,6 +44,7 @@ static volatile bool listOfPeersIsStaticLiteNode = false;
 #undef CreateEvent
 #define CreateEvent CreateEvent
 #include "platform/console_logging.h"
+#include "platform/processor_count.h"
 
 // Use a high-resolution Windows timer for the network retry loops.
 #ifdef _MSC_VER
@@ -540,59 +542,96 @@ struct Overload {
     // Guards event callbacks shared with application-processor threads.
     inline static std::mutex eventMapLock;
 
+#ifndef _MSC_VER
+    // std::thread cannot size its stack, and the linker flag that gives the Linux build 8 MB has no ld64
+    // equivalent reaching a secondary thread — Darwin hands one 512 KB. processTick's own frame is about
+    // 144 KB before the Wasm interpreter runs on top of it, so the size is asked for outright.
+    static constexpr size_t PROCESSOR_THREAD_STACK_SIZE = 8u * 1024u * 1024u;
+
+    struct ProcessorThreadArgs
+    {
+        void* data;
+        unsigned long long processorNumber;
+        std::shared_ptr<std::atomic<bool>> finished;
+    };
+
+    static void* processorThreadEntry(void* argument) {
+        ProcessorThreadArgs* args = (ProcessorThreadArgs*)argument;
+        CustomStack* me = reinterpret_cast<CustomStack*>(args->data);
+        me->setupFuncToCall(me->setupDataToPass, args->processorNumber);
+        args->finished->store(true);
+        delete args;
+        return nullptr;
+    }
+#endif
+
     // Directly call the setup function without using custom stack.
     static void startThread(EFI_AP_PROCEDURE procedure, void* data, unsigned long long ProcessorNumber, EFI_EVENT WaitEvent, unsigned long long TimeoutInMicroseconds) {
-		bool isThreadFinished = false;
-        std::thread thread([&isThreadFinished, procedure, data, ProcessorNumber]() {
-           /* while (true) {
-                unsigned long long currentProcessorNumber;
-                WhoAmI(NULL, &currentProcessorNumber);
-                if (currentProcessorNumber == ProcessorNumber) {
-                    break;
-                } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-            }*/
-            CustomStack* me = reinterpret_cast<CustomStack*>(data);
-            me->setupFuncToCall(me->setupDataToPass, ProcessorNumber);
-            isThreadFinished = true;
-            });
+        (void)procedure;
+        // Shared with the thread because the timeout path below detaches and then reads this flag.
+        auto isThreadFinished = std::make_shared<std::atomic<bool>>(false);
 
         #ifdef _MSC_VER
+        std::thread thread([isThreadFinished, data, ProcessorNumber]() {
+            CustomStack* me = reinterpret_cast<CustomStack*>(data);
+            me->setupFuncToCall(me->setupDataToPass, ProcessorNumber);
+            isThreadFinished->store(true);
+            });
         HANDLE hThread = (HANDLE)thread.native_handle();
         SetThreadAffinityMask(hThread, 1ULL << ProcessorNumber);
-        #elif defined(__linux__)
+        #else
+        pthread_attr_t attributes;
+        pthread_attr_init(&attributes);
+        pthread_attr_setstacksize(&attributes, PROCESSOR_THREAD_STACK_SIZE);
+
+        pthread_t thread{};
+        ProcessorThreadArgs* args = new ProcessorThreadArgs{ data, ProcessorNumber, isThreadFinished };
+        const int startError = pthread_create(&thread, &attributes, processorThreadEntry, args);
+        pthread_attr_destroy(&attributes);
+        if (startError != 0) {
+            delete args;
+            logToConsole(L"Error calling pthread_create");
+            return;
+        }
+        #ifdef __linux__
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(ProcessorNumber, &cpuset);
-        int rc = pthread_setaffinity_np(thread.native_handle(),
-                                    sizeof(cpu_set_t),
-                                    &cpuset);
+        int rc = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
         if (rc != 0) {
             logToConsole(L"Error calling pthread_setaffinity_np");
         }
         #endif // macOS: no cpu affinity API (scheduler handles placement)
+        #endif
 
         if (TimeoutInMicroseconds > 0) {
+            #ifdef _MSC_VER
             thread.detach();
+            #else
+            pthread_detach(thread);
+            #endif
         }
         else {
-			thread.join(); // Wait for the thread to finish if no timeout is specified
-			isThreadFinished = true; // Mark the thread as finished
+            #ifdef _MSC_VER
+            thread.join(); // Wait for the thread to finish if no timeout is specified
+            #else
+            pthread_join(thread, nullptr);
+            #endif
+            isThreadFinished->store(true); // Mark the thread as finished
         }
 
         if (TimeoutInMicroseconds > 0) {
-            while (!isThreadFinished && TimeoutInMicroseconds > 0) {
+            while (!isThreadFinished->load() && TimeoutInMicroseconds > 0) {
                 // Sleep for a short duration to avoid busy waiting
                 preciseSleepMicros(100);
                 TimeoutInMicroseconds -= 100;
             }
 
-            if (!isThreadFinished) {
+            if (!isThreadFinished->load()) {
                 #ifdef _MSC_VER
                 TerminateThread(hThread, 0); // Forcefully terminate the thread if it doesn't finish
                 #else
-                pthread_cancel(thread.native_handle());
+                pthread_cancel(thread);
                 #endif
             }
         }
@@ -874,7 +913,9 @@ struct Overload {
     ////////////// MP Services Protocol Implementation //////////////
 
     static EFI_STATUS GetNumberOfProcessors(IN void* This, OUT unsigned long long* NumberOfProcessors, OUT unsigned long long* NumberOfEnabledProcessors) {
-        *NumberOfProcessors = (unsigned long long)std::thread::hardware_concurrency();
+        // Counted before the main thread pinned itself — hardware_concurrency() answers 1 after that on
+        // builds whose libc reads the affinity mask.
+        *NumberOfProcessors = (unsigned long long)totalProcessorCount();
         *NumberOfEnabledProcessors = *NumberOfProcessors; // Assume all processors are enabled
         return EFI_SUCCESS;
     }
@@ -891,8 +932,8 @@ struct Overload {
         return EFI_SUCCESS;
     }
 
-    // Use custom stack in std:thread will break the runtime because it expectes the OS-provided stack
-    // so we can bypass the custom stack because stack size in window/linux already is large enough
+    // Using the custom stack here breaks the runtime, which expects the OS-provided one — startThread asks
+    // the OS for a stack large enough instead, so the custom stack can be bypassed.
     static EFI_STATUS StartupThisAP(IN void* This, IN EFI_AP_PROCEDURE Procedure, IN unsigned long long ProcessorNumber, IN EFI_EVENT WaitEvent OPTIONAL, IN unsigned long long TimeoutInMicroseconds, IN void* ProcedureArgument OPTIONAL, OUT BOOLEAN* Finished OPTIONAL) {
         std::thread thread(startThread, Procedure, ProcedureArgument, ProcessorNumber, WaitEvent, TimeoutInMicroseconds);
         thread.detach();
@@ -1401,7 +1442,7 @@ struct Overload {
     }
 
     static void initializeUefi() {
-        const unsigned int hwConcurrency = std::thread::hardware_concurrency();
+        const unsigned int hwConcurrency = totalProcessorCount();
         const unsigned int lastCpu = hwConcurrency > 0 ? hwConcurrency - 1 : 0;
         #ifndef _MSC_VER
         setNonBlockingInput(true);

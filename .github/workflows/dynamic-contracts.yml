@@ -116,12 +116,25 @@ jobs:
             --workdir /smoke \
             alpine:3.22 \
             sh -euxc '
-              set +e
-              timeout -k 2 5 /Qubic >node-smoke.log 2>&1
-              status=$?
-              set -e
-              if [ "$status" -ne 124 ] && [ "$status" -ne 137 ] &&
-                 [ "$status" -ne 143 ]; then
+              # A tick past the initial one is the only proof that matters: it means the node reached its
+              # main loop, serves RPC, and is producing ticks. An exit status cannot say that — the node
+              # raises SIGTERM on its own way out, so "killed by a signal" is what failure looks like too.
+              # The flags match how qinit launches a node; a bare /Qubic never creates a tick.
+              /Qubic --peers 127.0.0.1 --node-mode 3 --ticking-delay 1000 >node-smoke.log 2>&1 &
+              node_pid=$!
+              ticked=0
+              for _ in $(seq 1 40); do
+                json=$(wget -qO- http://127.0.0.1:41841/live/v1/tick-info 2>/dev/null) || true
+                tick=$(printf "%s" "$json" | sed -n "s/.*\"tick\":\([0-9]*\).*/\1/p")
+                initial=$(printf "%s" "$json" | sed -n "s/.*\"initialTick\":\([0-9]*\).*/\1/p")
+                if [ -n "$tick" ] && [ -n "$initial" ] && [ "$tick" -gt "$initial" ]; then
+                  ticked=1
+                  break
+                fi
+                sleep 2
+              done
+              kill "$node_pid" 2>/dev/null || true
+              if [ "$ticked" -ne 1 ]; then
                 cat node-smoke.log
                 exit 1
               fi
@@ -482,9 +495,11 @@ jobs:
             jq -c '{platform, skipped, sources, stateDigest, qpiDigests, reason}' "$result_file"
           done
 
+          # Every platform has to run. A floor of three let both Linux results excuse themselves for
+          # months while macOS and Windows carried the gate, and Linux is what the release ships.
           RUNNABLE_COUNT=$(jq -s '[.[] | select(.skipped == false)] | length' compat-*.json)
-          if [ "$RUNNABLE_COUNT" -lt 3 ]; then
-            echo "need at least 3 runnable platform results, got $RUNNABLE_COUNT"
+          if [ "$RUNNABLE_COUNT" -ne 5 ]; then
+            echo "need all 5 platform results runnable, got $RUNNABLE_COUNT"
             exit 1
           fi
 

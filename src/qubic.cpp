@@ -9390,6 +9390,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
         if (numberOfProcessors < 3)
         {
             logToConsole(L"At least 4 healthy enabled processors are required! Exiting...");
+            // main() raises SIGTERM before returning, so a status returned from here is never
+            // observed — without this the node lingers on its HTTP threads and reads as a clean exit.
+            std::exit(1);
         }
         else
         {

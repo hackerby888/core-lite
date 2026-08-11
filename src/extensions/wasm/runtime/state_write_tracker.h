@@ -4,7 +4,7 @@
 #ifdef LITE_WASM_SC
 
 #include "extensions/wasm/runtime/trace.h"
-#include "platform/memory_util.h"
+#include "platform/pointer_align.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -12,6 +12,8 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #endif
+#include <cstdlib>
+#include <mutex>
 
 namespace Wasm::Runtime
 {
@@ -20,42 +22,90 @@ namespace Wasm::Runtime
 static long systemPageSize = 4096;
 #ifndef _WIN32
 static struct sigaction previousSegvAction;
+static struct sigaction previousBusAction;
 #endif
+static std::once_flag writeFaultHandlerOnce;
 static bool writeFaultHandlerInstalled = false;
-static thread_local bool stateWriteTrackingActive = false;
-static thread_local unsigned char* t_liteWasmProtLo = nullptr;
-static thread_local unsigned char* t_liteWasmProtHi = nullptr;
-static thread_local unsigned char* dirtyPageSnapshots = nullptr;
-static thread_local unsigned char* dirtyPages[WASM_MAX_DIRTY_PAGES];
-static thread_local unsigned int dirtyPageCount = 0;
-static thread_local bool t_liteWasmDirtyTrunc = false;
+// One top-level dispatch plus Core's maximum of ten nested contract calls.
+static constexpr unsigned int STATE_WRITE_FRAME_CAPACITY = 11u;
+
+struct StateWriteFrame
+{
+    unsigned char* stateStart = nullptr;
+    unsigned char* stateEnd = nullptr;
+    unsigned char* protectionLow = nullptr;
+    unsigned char* protectionHigh = nullptr;
+    unsigned char* pageSnapshots = nullptr;
+    unsigned char* dirtyPageBits = nullptr;
+    unsigned int pageCapacity = 0;
+    unsigned int pageCount = 0;
+    bool captureFailed = false;
+};
+
+static thread_local StateWriteFrame stateWriteFrames[STATE_WRITE_FRAME_CAPACITY];
+static thread_local unsigned int stateWriteFrameCount = 0;
+
+// The fault handler cannot allocate. Each active frame reserves one snapshot slot per protected page
+// before the contract starts, then overlapping frames independently capture the same write.
+static inline bool captureStateWrite(unsigned char* faultAddress, unsigned char* page)
+{
+    bool matched = false;
+
+    for (unsigned int frameIndex = 0; frameIndex < stateWriteFrameCount; frameIndex++)
+    {
+        StateWriteFrame& frame = stateWriteFrames[frameIndex];
+        if (faultAddress < frame.protectionLow || faultAddress >= frame.protectionHigh)
+        {
+            continue;
+        }
+
+        matched = true;
+        const unsigned int pageIndex =
+            (unsigned int)((page - frame.protectionLow) / systemPageSize);
+        if (pageIndex >= frame.pageCount || !frame.pageSnapshots || !frame.dirtyPageBits)
+        {
+            frame.captureFailed = true;
+            continue;
+        }
+
+        if (!frame.dirtyPageBits[pageIndex])
+        {
+            memcpy(
+                frame.pageSnapshots + (size_t)pageIndex * systemPageSize,
+                page,
+                systemPageSize);
+            frame.dirtyPageBits[pageIndex] = 1;
+        }
+    }
+
+    return matched;
+}
 
 #ifdef _WIN32
 static LONG WINAPI handleStateWriteException(EXCEPTION_POINTERS* exceptionPointers)
 {
-    if (exceptionPointers->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+    EXCEPTION_RECORD* record = exceptionPointers ? exceptionPointers->ExceptionRecord : nullptr;
+    if (!record
+        || record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION
+        || record->NumberParameters < 2
+        || record->ExceptionInformation[0] != 1)
     {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    unsigned char* faultAddress = (unsigned char*)exceptionPointers->ExceptionRecord->ExceptionInformation[1];
-    if (stateWriteTrackingActive && faultAddress >= t_liteWasmProtLo && faultAddress < t_liteWasmProtHi)
+    unsigned char* faultAddress = (unsigned char*)record->ExceptionInformation[1];
+    unsigned char* page = alignPointerDown(faultAddress, systemPageSize);
+    if (captureStateWrite(faultAddress, page))
     {
-        unsigned char* page = alignPointerDown(faultAddress, systemPageSize);
-
-        if (dirtyPageCount < WASM_MAX_DIRTY_PAGES && dirtyPageSnapshots)
-        {
-            memcpy(dirtyPageSnapshots + (size_t)dirtyPageCount * systemPageSize, page, systemPageSize);
-            dirtyPages[dirtyPageCount++] = page;
-        }
-        else
-        {
-            t_liteWasmDirtyTrunc = true;
-        }
-
         DWORD oldProtection;
-        VirtualProtect(page, (SIZE_T)systemPageSize, PAGE_READWRITE, &oldProtection);
-        return EXCEPTION_CONTINUE_EXECUTION;
+        if (VirtualProtect(
+                page,
+                (SIZE_T)systemPageSize,
+                PAGE_READWRITE,
+                &oldProtection))
+        {
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
     }
 
     return EXCEPTION_CONTINUE_SEARCH;
@@ -64,33 +114,24 @@ static LONG WINAPI handleStateWriteException(EXCEPTION_POINTERS* exceptionPointe
 static void handleStateWriteFault(int signalNumber, siginfo_t* info, void* context)
 {
     unsigned char* faultAddress = (unsigned char*)info->si_addr;
-    if (stateWriteTrackingActive && faultAddress >= t_liteWasmProtLo && faultAddress < t_liteWasmProtHi)
+    unsigned char* page = alignPointerDown(faultAddress, systemPageSize);
+    if (captureStateWrite(faultAddress, page)
+        && mprotect(page, systemPageSize, PROT_READ | PROT_WRITE) == 0)
     {
-        unsigned char* page = alignPointerDown(faultAddress, systemPageSize);
-
-        if (dirtyPageCount < WASM_MAX_DIRTY_PAGES && dirtyPageSnapshots)
-        {
-            memcpy(dirtyPageSnapshots + (size_t)dirtyPageCount * systemPageSize, page, systemPageSize);
-            dirtyPages[dirtyPageCount++] = page;
-        }
-        else
-        {
-            t_liteWasmDirtyTrunc = true;
-        }
-
-        mprotect(page, systemPageSize, PROT_READ | PROT_WRITE);
         return;
     }
 
-    if ((previousSegvAction.sa_flags & SA_SIGINFO) && previousSegvAction.sa_sigaction)
+    const struct sigaction& previous = signalNumber == SIGBUS ? previousBusAction : previousSegvAction;
+
+    if ((previous.sa_flags & SA_SIGINFO) && previous.sa_sigaction)
     {
-        previousSegvAction.sa_sigaction(signalNumber, info, context);
+        previous.sa_sigaction(signalNumber, info, context);
         return;
     }
 
-    if (previousSegvAction.sa_handler && previousSegvAction.sa_handler != SIG_DFL && previousSegvAction.sa_handler != SIG_IGN)
+    if (previous.sa_handler && previous.sa_handler != SIG_DFL && previous.sa_handler != SIG_IGN)
     {
-        previousSegvAction.sa_handler(signalNumber);
+        previous.sa_handler(signalNumber);
         return;
     }
 
@@ -99,83 +140,208 @@ static void handleStateWriteFault(int signalNumber, siginfo_t* info, void* conte
 }
 #endif
 
+// Capture is on from boot, so the handler cannot wait for setTraceEnabled(): without it the read-only
+// state protection faults into the crash path instead of being repaired.
+static void installWriteFaultHandler()
+{
+#ifdef _WIN32
+    SYSTEM_INFO systemInfo;
+
+    GetSystemInfo(&systemInfo);
+    systemPageSize = systemInfo.dwPageSize ? (long)systemInfo.dwPageSize : 4096;
+    writeFaultHandlerInstalled =
+        AddVectoredExceptionHandler(1, handleStateWriteException) != nullptr;
+#else
+    systemPageSize = sysconf(_SC_PAGESIZE);
+    if (systemPageSize <= 0)
+    {
+        systemPageSize = 4096;
+    }
+
+    struct sigaction action;
+
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = handleStateWriteFault;
+    action.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&action.sa_mask);
+    // A write to a read-only mapping raises SIGSEGV on Linux and SIGBUS on Darwin. Both are registered so
+    // an owned page is repaired and every other signal still reaches the previous handler.
+    if (sigaction(SIGSEGV, &action, &previousSegvAction) != 0)
+    {
+        return;
+    }
+    if (sigaction(SIGBUS, &action, &previousBusAction) != 0)
+    {
+        sigaction(SIGSEGV, &previousSegvAction, nullptr);
+        return;
+    }
+    writeFaultHandlerInstalled = true;
+#endif
+}
+
+static inline bool ensureWriteFaultHandler()
+{
+    std::call_once(writeFaultHandlerOnce, installWriteFaultHandler);
+    return writeFaultHandlerInstalled;
+}
+
 static inline void setTraceEnabled(bool enabled)
 {
-    if (enabled && !writeFaultHandlerInstalled)
+    if (enabled)
     {
-#ifdef _WIN32
-        SYSTEM_INFO systemInfo;
-
-        GetSystemInfo(&systemInfo);
-        systemPageSize = systemInfo.dwPageSize ? (long)systemInfo.dwPageSize : 4096;
-        AddVectoredExceptionHandler(1, handleStateWriteException);
-#else
-        systemPageSize = sysconf(_SC_PAGESIZE);
-        if (systemPageSize <= 0)
-        {
-            systemPageSize = 4096;
-        }
-
-        struct sigaction action;
-
-        memset(&action, 0, sizeof(action));
-        action.sa_sigaction = handleStateWriteFault;
-        action.sa_flags = SA_SIGINFO | SA_RESTART;
-        sigemptyset(&action.sa_mask);
-        sigaction(SIGSEGV, &action, &previousSegvAction);
-#endif
-        writeFaultHandlerInstalled = true;
+        ensureWriteFaultHandler();
     }
 
     traceActive.store(enabled, std::memory_order_relaxed);
 }
 
-static inline void beginStateWriteTracking(unsigned char* stateStart, unsigned int stateSize)
+// Grow both buffers so every page in this frame has a slot. Storage is reused by later calls at the
+// same nesting depth.
+static inline bool reserveDirtyPages(StateWriteFrame& frame, unsigned int pageCount)
 {
-    if (!dirtyPageSnapshots)
+    if (pageCount <= frame.pageCapacity)
     {
-        dirtyPageSnapshots = (unsigned char*)malloc((size_t)WASM_MAX_DIRTY_PAGES * systemPageSize);
+        return true;
     }
 
-    if (!dirtyPageSnapshots || !stateStart || !stateSize)
+    unsigned char* snapshots = (unsigned char*)realloc(
+        frame.pageSnapshots,
+        (size_t)pageCount * systemPageSize);
+    if (!snapshots)
     {
-        return;
+        return false;
     }
+    frame.pageSnapshots = snapshots;
 
-    dirtyPageCount = 0;
-    t_liteWasmDirtyTrunc = false;
-    t_liteWasmProtLo = stateStart;
-    t_liteWasmProtHi = alignPointerUp(stateStart + stateSize, systemPageSize);
+    unsigned char* dirtyBits = (unsigned char*)realloc(
+        frame.dirtyPageBits,
+        pageCount);
+    if (!dirtyBits)
+    {
+        return false;
+    }
+    frame.dirtyPageBits = dirtyBits;
+    frame.pageCapacity = pageCount;
+    return true;
+}
+
+static inline bool setStatePageProtection(
+    unsigned char* protectionLow,
+    unsigned char* protectionHigh,
+    bool readOnly)
+{
+    if (!protectionLow || protectionHigh <= protectionLow)
+    {
+        return false;
+    }
 
 #ifdef _WIN32
     DWORD oldProtection;
-    if (VirtualProtect(t_liteWasmProtLo, (SIZE_T)(t_liteWasmProtHi - t_liteWasmProtLo), PAGE_READONLY, &oldProtection))
-    {
-        stateWriteTrackingActive = true;
-    }
+    return VirtualProtect(
+        protectionLow,
+        (SIZE_T)(protectionHigh - protectionLow),
+        readOnly ? PAGE_READONLY : PAGE_READWRITE,
+        &oldProtection) != 0;
 #else
-    if (mprotect(t_liteWasmProtLo, t_liteWasmProtHi - t_liteWasmProtLo, PROT_READ) == 0)
-    {
-        stateWriteTrackingActive = true;
-    }
+    return mprotect(
+        protectionLow,
+        protectionHigh - protectionLow,
+        readOnly ? PROT_READ : PROT_READ | PROT_WRITE) == 0;
 #endif
 }
 
-static inline void restoreStatePageProtection()
+static inline bool beginStateWriteTracking(unsigned char* stateStart, unsigned int stateSize)
 {
-    if (!stateWriteTrackingActive)
+    if (!stateStart || !stateSize)
     {
-        return;
+        return false;
     }
 
-    stateWriteTrackingActive = false;
+    if (!ensureWriteFaultHandler() || stateWriteFrameCount >= STATE_WRITE_FRAME_CAPACITY)
+    {
+        return false;
+    }
 
-#ifdef _WIN32
-    DWORD oldProtection;
-    VirtualProtect(t_liteWasmProtLo, (SIZE_T)(t_liteWasmProtHi - t_liteWasmProtLo), PAGE_READWRITE, &oldProtection);
-#else
-    mprotect(t_liteWasmProtLo, t_liteWasmProtHi - t_liteWasmProtLo, PROT_READ | PROT_WRITE);
-#endif
+    unsigned char* protectionLow = alignPointerDown(stateStart, systemPageSize);
+    unsigned char* protectionHigh = alignPointerUp(stateStart + stateSize, systemPageSize);
+    const unsigned int pageCount =
+        (unsigned int)((protectionHigh - protectionLow) / systemPageSize);
+    StateWriteFrame& frame = stateWriteFrames[stateWriteFrameCount];
+
+    if (!reserveDirtyPages(frame, pageCount))
+    {
+        return false;
+    }
+
+    frame.stateStart = stateStart;
+    frame.stateEnd = stateStart + stateSize;
+    frame.protectionLow = protectionLow;
+    frame.protectionHigh = protectionHigh;
+    frame.pageCount = pageCount;
+    frame.captureFailed = false;
+    memset(frame.dirtyPageBits, 0, pageCount);
+
+    if (!setStatePageProtection(protectionLow, protectionHigh, true))
+    {
+        return false;
+    }
+
+    stateWriteFrameCount++;
+    return true;
+}
+
+static inline void rearmParentStateWriteFrames()
+{
+    for (unsigned int frameIndex = 0; frameIndex < stateWriteFrameCount; frameIndex++)
+    {
+        StateWriteFrame& frame = stateWriteFrames[frameIndex];
+        if (!setStatePageProtection(frame.protectionLow, frame.protectionHigh, true))
+        {
+            frame.captureFailed = true;
+        }
+    }
+}
+
+static inline StateWriteFrame* popStateWriteFrame(
+    unsigned char* stateStart,
+    unsigned int stateSize)
+{
+    if (!stateWriteFrameCount)
+    {
+        return nullptr;
+    }
+
+    StateWriteFrame& frame = stateWriteFrames[stateWriteFrameCount - 1];
+    if (frame.stateStart != stateStart || frame.stateEnd != stateStart + stateSize)
+    {
+        return nullptr;
+    }
+
+    if (!setStatePageProtection(frame.protectionLow, frame.protectionHigh, false))
+    {
+        // Continuing would leave read-only pages without an owning tracker frame.
+        for (unsigned int frameIndex = 0; frameIndex < stateWriteFrameCount; frameIndex++)
+        {
+            StateWriteFrame& activeFrame = stateWriteFrames[frameIndex];
+            for (unsigned char* page = activeFrame.protectionLow;
+                 page < activeFrame.protectionHigh;
+                 page += systemPageSize)
+            {
+                setStatePageProtection(page, page + systemPageSize, false);
+            }
+        }
+        std::abort();
+    }
+    stateWriteFrameCount--;
+    rearmParentStateWriteFrames();
+    return &frame;
+}
+
+static inline void discardStateWriteTracking(
+    unsigned char* stateStart,
+    unsigned int stateSize)
+{
+    popStateWriteFrame(stateStart, stateSize);
 }
 
 static inline void finishStateWriteTracking(
@@ -183,45 +349,86 @@ static inline void finishStateWriteTracking(
     unsigned char* stateStart,
     unsigned int stateSize)
 {
-    if (!stateWriteTrackingActive)
+    StateWriteFrame* frame = popStateWriteFrame(stateStart, stateSize);
+    if (!frame)
     {
+        traceEntry.stateTruncated = true;
         return;
     }
 
-    restoreStatePageProtection();
-    traceEntry.stateTruncated = t_liteWasmDirtyTrunc;
+    traceEntry.stateTruncated = traceEntry.stateTruncated || frame->captureFailed;
 
     unsigned char* stateEnd = stateStart + stateSize;
-    for (unsigned int pageIndex = 0; pageIndex < dirtyPageCount && traceEntry.stateDiff.size() < 256; pageIndex++)
+    for (unsigned int pageIndex = 0; pageIndex < frame->pageCount; pageIndex++)
     {
-        unsigned char* page = dirtyPages[pageIndex];
-        const unsigned char* before = dirtyPageSnapshots + (size_t)pageIndex * systemPageSize;
+        if (!frame->dirtyPageBits[pageIndex])
+        {
+            continue;
+        }
+
+        unsigned char* page = frame->protectionLow + (size_t)pageIndex * systemPageSize;
+        const unsigned char* before =
+            frame->pageSnapshots + (size_t)pageIndex * systemPageSize;
         unsigned char* rangeStart = page > stateStart ? page : stateStart;
         unsigned char* rangeEnd = (page + systemPageSize) < stateEnd ? page + systemPageSize : stateEnd;
 
+        // Adjacent windows merge, so a value straddling a window boundary still arrives whole.
+        unsigned char* pendingStart = nullptr;
+        unsigned char* pendingEnd = nullptr;
+        auto flushPending = [&]()
+        {
+            if (!pendingStart)
+            {
+                return;
+            }
+
+            const unsigned int size = (unsigned int)(pendingEnd - pendingStart);
+            traceEntry.stateDiff.push_back({
+                (unsigned int)(pendingStart - stateStart),
+                hex(before + (unsigned int)(pendingStart - page), size),
+                hex(pendingStart, size),
+            });
+            pendingStart = nullptr;
+        };
+
         for (unsigned char* current = rangeStart; current < rangeEnd;)
         {
-            const unsigned int beforeIndex = (unsigned int)(current - page);
-            if (before[beforeIndex] == *current)
+            if (before[(unsigned int)(current - page)] == *current)
             {
                 current++;
                 continue;
             }
 
-            unsigned char* changedEnd = current;
-            while (changedEnd < rangeEnd && before[(unsigned int)(changedEnd - page)] != *changedEnd)
+            // Report the aligned window holding the change, not the changed bytes alone: writing a small
+            // number into a zeroed field dirties too few bytes to decode the value it landed in.
+            const size_t stateOffset = (size_t)(current - stateStart);
+            unsigned char* windowStart = current - (stateOffset % WASM_TRACE_DIFF_WINDOW);
+            unsigned char* windowEnd = windowStart + WASM_TRACE_DIFF_WINDOW;
+
+            if (windowStart < rangeStart)
             {
-                changedEnd++;
+                windowStart = rangeStart;
+            }
+            if (windowEnd > rangeEnd)
+            {
+                windowEnd = rangeEnd;
             }
 
-            const unsigned int changedSize = (unsigned int)(changedEnd - current);
-            traceEntry.stateDiff.push_back({
-                (unsigned int)(current - stateStart),
-                hex(before + beforeIndex, changedSize),
-                hex(current, changedSize),
-            });
-            current = changedEnd;
+            if (pendingStart && pendingEnd == windowStart)
+            {
+                pendingEnd = windowEnd;
+            }
+            else
+            {
+                flushPending();
+                pendingStart = windowStart;
+                pendingEnd = windowEnd;
+            }
+
+            current = windowEnd;
         }
+
+        flushPending();
     }
 }
 
@@ -230,6 +437,7 @@ struct StateWriteScope
     unsigned char* stateStart = nullptr;
     unsigned int stateSize = 0;
     bool engaged = false;
+    bool captureFailed = false;
     bool finished = false;
 
     StateWriteScope(
@@ -244,15 +452,15 @@ struct StateWriteScope
 
         stateStart = protectedStateStart;
         stateSize = protectedStateSize;
-        engaged = true;
-        beginStateWriteTracking(stateStart, stateSize);
+        engaged = beginStateWriteTracking(stateStart, stateSize);
+        captureFailed = stateStart && stateSize && !engaged;
     }
 
     ~StateWriteScope()
     {
         if (engaged && !finished)
         {
-            restoreStatePageProtection();
+            discardStateWriteTracking(stateStart, stateSize);
         }
     }
 
@@ -266,6 +474,10 @@ struct StateWriteScope
         if (engaged)
         {
             finishStateWriteTracking(traceEntry, stateStart, stateSize);
+        }
+        else if (captureFailed)
+        {
+            traceEntry.stateTruncated = true;
         }
 
         finished = true;

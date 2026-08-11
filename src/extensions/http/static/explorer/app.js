@@ -304,7 +304,8 @@ async function renderOverview() {
   const modeClass = h.mainAuxStatus ? 'value mode' : 'value mode aux';
 
   // hero block
-  const ticksTbl = (r.recentTicks || []).slice().reverse().map(t => `
+  // The payload reaches back 200 ticks for API clients; this page keeps its short hero table.
+  const ticksTbl = (r.recentTicks || []).slice(-20).reverse().map(t => `
     <tr>
       <td><a class="link" href="#/tick/${t.tick}">${fmt.n(t.tick)}</a></td>
       <td>${fmt.idLink(t.leader)}</td>
