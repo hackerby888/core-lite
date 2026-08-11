@@ -54,6 +54,7 @@ unsigned char* allocateTestPages(size_t size)
 void freeTestPages(unsigned char* memory, size_t size)
 {
 #ifdef _WIN32
+    (void)size;
     VirtualFree(memory, 0, MEM_RELEASE);
 #else
     munmap(memory, size);
