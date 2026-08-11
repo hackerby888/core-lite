@@ -11,6 +11,11 @@
     #define OPTIMIZE_OFF() _Pragma("clang optimize off")
     #define OPTIMIZE_ON()  _Pragma("clang optimize on")
     #define NO_OPTIMIZE    __attribute__((optnone)) __attribute__((noinline))
+#elif defined(__GNUC__)
+    // GCC: no region opt-off pragma; honor NO_OPTIMIZE via noinline only.
+    #define OPTIMIZE_OFF()
+    #define OPTIMIZE_ON()
+    #define NO_OPTIMIZE    __attribute__((noinline))
 #else
     // Fallback for unknown compilers
     #define OPTIMIZE_OFF()

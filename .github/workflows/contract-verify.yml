@@ -6,24 +6,7 @@
 name: ContractVerify
 
 on:
-  push:
-    branches: [ "main", "develop" ]
-    paths:
-      - 'src/contracts/*.h'
-      - '!src/contracts/math_lib.h'
-      - '!src/contracts/qpi.h'
-      - '!src/contracts/TestExample*.h'
-      - 'src/oracle_interfaces/*.h'
-      - '.github/workflows/contract-verify.yml'
-  pull_request:
-    branches: [ "main", "develop" ]
-    paths:
-      - 'src/contracts/*.h'
-      - '!src/contracts/math_lib.h'
-      - '!src/contracts/qpi.h'
-      - '!src/contracts/TestExample*.h'
-      - 'src/oracle_interfaces/*.h'
-      - '.github/workflows/contract-verify.yml'
+  workflow_call:
 
 jobs:
   contract_verify_job:

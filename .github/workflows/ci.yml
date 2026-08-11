@@ -1,10 +1,95 @@
 name: CI
 on:
+  workflow_call:
+    inputs:
+      qinit_repository:
+        type: string
+        required: false
+        default: ""
+      qinit_ref:
+        type: string
+        required: false
+        default: ""
+    outputs:
+      qinit_repository:
+        value: ${{ jobs.resolve-qinit.outputs.repository }}
+      qinit_sha:
+        value: ${{ jobs.resolve-qinit.outputs.sha }}
+  workflow_dispatch:
+    inputs:
+      qinit_repository:
+        description: "temporary owner/repo override (requires qinit_ref)"
+        required: false
+        default: ""
+      qinit_ref:
+        description: "temporary qinit branch, tag, or commit"
+        required: false
+        default: ""
   push:
-    branches: [ "**" ]
+    branches: ["**"]
   pull_request:
-    branches: [ "**" ]
+
+permissions:
+  contents: read
+
 jobs:
+  resolve-qinit:
+    runs-on: ubuntu-22.04
+    outputs:
+      repository: ${{ steps.source.outputs.repository }}
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select qinit source
+        id: source
+        shell: bash
+        env:
+          QINIT_REPOSITORY: ${{ inputs.qinit_repository }}
+          QINIT_REF: ${{ inputs.qinit_ref }}
+        run: |
+          configured_repository=$(jq -r .repository .github/compat/qinit.json)
+          development_ref=$(jq -r '.developmentRef // empty' .github/compat/qinit.json)
+          pinned_commit=$(jq -r '.pinnedCommit // empty' .github/compat/qinit.json)
+          repository="${QINIT_REPOSITORY:-$configured_repository}"
+
+          if [ -n "$QINIT_REPOSITORY" ] && [ -z "$QINIT_REF" ]; then
+            echo "::error::a qinit repository override requires qinit_ref"
+            exit 1
+          fi
+          if [[ ! "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::invalid GitHub repository: $repository"
+            exit 1
+          fi
+
+          if [ -z "$QINIT_REF" ] &&
+             [ -n "$pinned_commit" ] &&
+             [[ ! "$pinned_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pinnedCommit must be empty or a full lowercase commit SHA"
+            exit 1
+          fi
+
+          ref="${QINIT_REF:-${pinned_commit:-$development_ref}}"
+          if [ -z "$ref" ]; then
+            echo "::error::qinit_ref, pinnedCommit, and developmentRef are all empty"
+            exit 1
+          fi
+
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Resolve qinit commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.source.outputs.repository }}
+          ref: ${{ steps.source.outputs.ref }}
+          path: resolved-qinit
+      - name: Record qinit commit
+        id: commit
+        shell: bash
+        run: |
+          sha=$(git -C resolved-qinit rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "::notice::qinit = ${{ steps.source.outputs.repository }}@${{ steps.source.outputs.ref }} ($sha)"
+
   build-linux:
     uses: ./.github/workflows/linux-build.yml
     with:
@@ -19,3 +104,19 @@ jobs:
     uses: ./.github/workflows/windows-build.yml
     with:
       configuration: Release
+
+  windows-test-build:
+    uses: ./.github/workflows/build-tests.yml
+
+  contract-verification:
+    uses: ./.github/workflows/contract-verify.yml
+
+  platform-tests:
+    uses: ./.github/workflows/platform-tests.yml
+
+  dynamic-contract-tests:
+    needs: resolve-qinit
+    uses: ./.github/workflows/dynamic-contracts.yml
+    with:
+      qinit_repository: ${{ needs.resolve-qinit.outputs.repository }}
+      qinit_ref: ${{ needs.resolve-qinit.outputs.sha }}

@@ -1,0 +1,520 @@
+name: Dynamic Contract Tests
+
+on:
+  workflow_call:
+    inputs:
+      qinit_repository:
+        type: string
+        required: true
+      qinit_ref:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Build and smoke the node on the same runner so every supported platform gates.
+  build-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            key: linux-x64
+            release_file: Qubic-linux-x64
+          - runner: ubuntu-24.04-arm
+            key: linux-arm64
+            release_file: Qubic-linux-arm64
+          - runner: macos-14
+            key: darwin-arm64
+            arch: arm64
+            release_file: Qubic-darwin-arm64
+          - runner: macos-15-intel
+            key: darwin-x64
+            arch: x86_64
+            release_file: Qubic-darwin-x64
+          - runner: windows-2022
+            key: windows-x64
+            release_file: Qubic-windows-x64.exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout core-lite
+        uses: actions/checkout@v7
+        with:
+          path: core
+
+      - name: Checkout qinit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.qinit_repository }}
+          ref: ${{ inputs.qinit_ref }}
+          path: qinit
+
+      - name: Read qinit toolchains
+        id: toolchains
+        shell: bash
+        run: |
+          node -e '
+            const config = require("./qinit/config/toolchains.json");
+            const bunVersion = config?.bun?.version;
+            if (
+              typeof bunVersion !== "string" ||
+              !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(bunVersion)
+            ) {
+              throw new Error("invalid qinit Bun version");
+            }
+            console.log(`bun_version=${bunVersion}`);
+          ' >> "$GITHUB_OUTPUT"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.toolchains.outputs.bun_version }}
+
+      - name: Build standalone Linux node
+        if: startsWith(matrix.key, 'linux-')
+        shell: bash
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE/core:/src" \
+            --workdir /src \
+            alpine:3.22 \
+            sh -euxc '
+              apk add --no-cache \
+                autoconf automake bash boost-dev build-base clang20 cmake git \
+                libffi-dev libtool linux-headers nasm openssl-dev \
+                openssl-libs-static util-linux-dev util-linux-static \
+                zlib-dev zlib-static
+              cmake -S . -B build-node \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_COMPILER=clang \
+                -DCMAKE_CXX_COMPILER=clang++ \
+                -DBUILD_BINARY=ON \
+                -DBUILD_TESTS=OFF \
+                -DENABLE_AVX512=OFF \
+                -DUSE_SANITIZER=OFF \
+                -DTESTNET=ON \
+                -DTESTNET_LITE_RAM=ON \
+                -DTESTNET_PREFILL_QUS=ON \
+                -DLITE_WASM_SC=ON \
+                -DCMAKE_NO_USE_SWAP=ON \
+                -DADDON_TX_STATUS_REQUEST=ON \
+                -DONLY_LOGGING=OFF
+              cmake --build build-node --target Qubic --parallel
+            '
+
+      - name: Smoke standalone Linux node in Alpine
+        if: startsWith(matrix.key, 'linux-')
+        shell: bash
+        run: |
+          docker run --rm \
+            --network none \
+            --read-only \
+            --tmpfs /smoke \
+            --volume "$GITHUB_WORKSPACE/core/build-node/src/Qubic:/Qubic:ro" \
+            --workdir /smoke \
+            alpine:3.22 \
+            sh -euxc '
+              # A tick past the initial one is the only proof that matters: it means the node reached its
+              # main loop, serves RPC, and is producing ticks. An exit status cannot say that — the node
+              # raises SIGTERM on its own way out, so "killed by a signal" is what failure looks like too.
+              # The flags match how qinit launches a node; a bare /Qubic never creates a tick.
+              /Qubic --peers 127.0.0.1 --node-mode 3 --ticking-delay 1000 >node-smoke.log 2>&1 &
+              node_pid=$!
+              ticked=0
+              for _ in $(seq 1 40); do
+                json=$(wget -qO- http://127.0.0.1:41841/live/v1/tick-info 2>/dev/null) || true
+                tick=$(printf "%s" "$json" | sed -n "s/.*\"tick\":\([0-9]*\).*/\1/p")
+                initial=$(printf "%s" "$json" | sed -n "s/.*\"initialTick\":\([0-9]*\).*/\1/p")
+                if [ -n "$tick" ] && [ -n "$initial" ] && [ "$tick" -gt "$initial" ]; then
+                  ticked=1
+                  break
+                fi
+                sleep 2
+              done
+              kill "$node_pid" 2>/dev/null || true
+              if [ "$ticked" -ne 1 ]; then
+                cat node-smoke.log
+                exit 1
+              fi
+            '
+
+      - name: Install macOS dependencies
+        if: startsWith(matrix.key, 'darwin-')
+        run: brew install cmake nasm jq jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi
+
+      - name: Cache Windows dependencies
+        if: matrix.key == 'windows-x64'
+        uses: actions/cache@v6
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: vcpkg-x64-windows-static-rel-${{ github.run_id }}
+          restore-keys: vcpkg-x64-windows-static-rel-
+
+      - name: Configure Windows dependencies
+        if: matrix.key == 'windows-x64'
+        shell: pwsh
+        working-directory: core
+        run: |
+          New-Item -ItemType Directory -Force triplets-overlay | Out-Null
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x64)',
+            'set(VCPKG_CRT_LINKAGE static)',
+            'set(VCPKG_LIBRARY_LINKAGE static)',
+            'set(VCPKG_BUILD_TYPE release)'
+          ) | Set-Content -Encoding ascii triplets-overlay/x64-windows-static-rel.cmake
+
+      - name: Build macOS node
+        if: startsWith(matrix.key, 'darwin-')
+        shell: bash
+        working-directory: core
+        run: |
+          set -o pipefail
+          BUILD_JOBS=$(getconf _NPROCESSORS_ONLN)
+          CC=$(xcrun -f clang)
+          CXX=$(xcrun -f clang++)
+          {
+            cmake -S . -B build-node \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER="$CC" \
+              -DCMAKE_CXX_COMPILER="$CXX" \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 \
+              -DBUILD_BINARY=ON \
+              -DBUILD_TESTS=OFF \
+              -DENABLE_AVX512=OFF \
+              -DUSE_SANITIZER=OFF \
+              -DTESTNET=ON \
+              -DTESTNET_LITE_RAM=ON \
+              -DTESTNET_PREFILL_QUS=ON \
+              -DLITE_WASM_SC=ON \
+              -DCMAKE_NO_USE_SWAP=ON \
+              -DADDON_TX_STATUS_REQUEST=ON \
+              -DONLY_LOGGING=OFF
+            cmake --build build-node -- -j"$BUILD_JOBS" Qubic
+          } 2>&1 | tee "$RUNNER_TEMP/node-build.log"
+
+      - name: Upload macOS build log on failure
+        if: failure() && startsWith(matrix.key, 'darwin-')
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-build-log-${{ matrix.key }}
+          path: ${{ runner.temp }}/node-build.log
+          if-no-files-found: ignore
+
+      - name: Configure Windows node
+        if: matrix.key == 'windows-x64'
+        shell: pwsh
+        working-directory: core
+        run: |
+          cmake -S . -B build-win-static -A x64 -T v143 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_OVERLAY_TRIPLETS="$PWD/triplets-overlay" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-rel `
+            -DVCPKG_APPLOCAL_DEPS=OFF `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            '-DCMAKE_SYSTEM_VERSION=10.0' `
+            -DBUILD_BINARY=ON `
+            -DBUILD_TESTS=OFF `
+            -DENABLE_AVX512=OFF `
+            -DUSE_SANITIZER=OFF `
+            -DTESTNET=ON `
+            -DTESTNET_LITE_RAM=ON `
+            -DTESTNET_PREFILL_QUS=ON `
+            -DLITE_WASM_SC=ON `
+            -DCMAKE_NO_USE_SWAP=ON `
+            -DADDON_TX_STATUS_REQUEST=ON `
+            -DONLY_LOGGING=OFF
+
+      - name: Build Windows node
+        if: matrix.key == 'windows-x64'
+        working-directory: core
+        shell: pwsh
+        run: |
+          cmake --build build-win-static `
+            --config Release `
+            --target Qubic `
+            --parallel 4
+
+      - name: Stage standalone Windows node
+        if: matrix.key == 'windows-x64'
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'qinit-standalone'
+          New-Item -ItemType Directory $stage | Out-Null
+          $node = Join-Path $stage 'Qubic.exe'
+          Copy-Item core/build-win-static/src/Release/Qubic.exe $node
+          $staged = @(Get-ChildItem $stage)
+          if ($staged.Count -ne 1 -or $staged[0].Name -ne 'Qubic.exe') {
+            throw "standalone stage must contain only Qubic.exe: $($staged.Name -join ', ')"
+          }
+          "NODE_BIN=$node" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Gate Windows DLL imports and PE baseline
+        if: matrix.key == 'windows-x64'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" |
+            Sort-Object FullName |
+            Select-Object -Last 1 -ExpandProperty FullName
+          if (-not $dumpbin) {
+            throw 'dumpbin.exe was not found in the Visual Studio installation'
+          }
+
+          $dependencies = & $dumpbin /DEPENDENTS $env:NODE_BIN | Out-String
+          $dependencies
+          $imports = [regex]::Matches(
+            $dependencies,
+            '(?im)^\s+([A-Za-z0-9_.-]+\.dll)\s*$'
+          ) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+          if (-not $imports.Count) {
+            throw 'no DLL imports were detected; dumpbin output could not be validated'
+          }
+          $forbidden = '^(VCRUNTIME.*|MSVCP.*|ucrtbase|libffi.*|libssl.*|libcrypto.*|cares.*|zlib.*|brotli.*|blosc.*|drogon.*|trantor.*|fmt.*|jsoncpp.*)\.dll$'
+          $blocked = @($imports | Where-Object { $_ -match $forbidden })
+          if ($blocked.Count) {
+            throw "forbidden runtime imports: $($blocked -join ', ')"
+          }
+          $nonSystem = @(
+            $imports | Where-Object {
+              $_ -notmatch '^(api|ext)-ms-win-' -and
+              -not (Test-Path (Join-Path "$env:WINDIR/System32" $_))
+            }
+          )
+          if ($nonSystem.Count) {
+            throw "non-system DLL imports: $($nonSystem -join ', ')"
+          }
+
+          $headers = & $dumpbin /HEADERS $env:NODE_BIN | Out-String
+          $subsystem = [regex]::Match(
+            $headers,
+            '(?im)^\s*(\d+)\.(\d+)\s+subsystem version\s*$'
+          )
+          if (-not $subsystem.Success) {
+            throw 'PE subsystem version was not found'
+          }
+          $subsystem.Value
+          if (
+            [int]$subsystem.Groups[1].Value -ne 10 -or
+            [int]$subsystem.Groups[2].Value -ne 0
+          ) {
+            throw "expected Windows 10 PE subsystem baseline, got $($subsystem.Value.Trim())"
+          }
+
+      - name: Prepare standalone Windows release node
+        if: matrix.key == 'windows-x64'
+        shell: pwsh
+        run: |
+          Copy-Item $env:NODE_BIN '${{ matrix.release_file }}'
+          (Get-FileHash -Algorithm SHA256 '${{ matrix.release_file }}').Hash.ToLower() |
+            Set-Content -NoNewline -Encoding ascii '${{ matrix.release_file }}.sha256'
+
+      - name: Select built POSIX node
+        if: matrix.key != 'windows-x64'
+        shell: bash
+        run: |
+          NODE_BIN="$GITHUB_WORKSPACE/core/build-node/src/Qubic"
+          echo "NODE_BIN=$NODE_BIN" >> "$GITHUB_ENV"
+          file "$NODE_BIN"
+
+      - name: Gate standalone Linux binary
+        if: startsWith(matrix.key, 'linux-')
+        shell: bash
+        run: |
+          file "$NODE_BIN" | grep -q 'statically linked'
+          if readelf -l "$NODE_BIN" | grep 'INTERP' >/dev/null; then
+            echo "::error::standalone Linux node has a program interpreter"
+            exit 1
+          fi
+          if readelf -d "$NODE_BIN" | grep '(NEEDED)' >/dev/null; then
+            echo "::error::standalone Linux node has dynamic dependencies"
+            exit 1
+          fi
+          if readelf -d "$NODE_BIN" | grep -E '(RPATH|RUNPATH)' >/dev/null; then
+            echo "::error::standalone Linux node has a runtime library path"
+            exit 1
+          fi
+
+      - name: Gate standalone macOS binary
+        if: startsWith(matrix.key, 'darwin-')
+        shell: bash
+        run: |
+          test "$(lipo -archs "$NODE_BIN")" = "${{ matrix.arch }}"
+          MIN_OS=$(otool -l "$NODE_BIN" | awk '
+            $1 == "cmd" && ($2 == "LC_BUILD_VERSION" || $2 == "LC_VERSION_MIN_MACOSX") { found = 1 }
+            found && ($1 == "minos" || $1 == "version") { print $2; exit }
+          ')
+          case "$MIN_OS" in
+            10.*|11.*|12.*|13.*) ;;
+            *)
+              echo "::error::expected macOS deployment target 13 or older, got $MIN_OS"
+              exit 1
+              ;;
+          esac
+          if otool -l "$NODE_BIN" | grep LC_RPATH >/dev/null; then
+            echo "::error::standalone macOS node has LC_RPATH"
+            exit 1
+          fi
+          otool -L "$NODE_BIN"
+          otool -L "$NODE_BIN" | tail -n +2 | awk '{print $1}' | while read -r dependency; do
+            case "$dependency" in
+              /usr/lib/*|/System/Library/Frameworks/*) ;;
+              *)
+                echo "::error::non-system macOS dependency: $dependency"
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Install qinit dependencies
+        shell: bash
+        run: cd qinit && bun install
+
+      - name: Build compiled qinit CLI
+        shell: bash
+        run: |
+          cd qinit
+          echo "qinit commit $(git rev-parse HEAD)"
+          bun run build:bin
+          if [ "${{ matrix.key }}" = 'windows-x64' ]; then
+            echo "QINIT_BIN=$GITHUB_WORKSPACE/qinit/dist/qinit.exe" >> "$GITHUB_ENV"
+          else
+            chmod +x dist/qinit
+            echo "QINIT_BIN=$GITHUB_WORKSPACE/qinit/dist/qinit" >> "$GITHUB_ENV"
+          fi
+
+      - name: Qinit compatibility smoke
+        shell: bash
+        run: |
+          cd qinit
+          bun run ci:core-lite-smoke -- \
+            --core-dir "$GITHUB_WORKSPACE/core" \
+            --node-bin "$NODE_BIN" \
+            --platform "${{ matrix.key }}" \
+            --result "$GITHUB_WORKSPACE/compat-${{ matrix.key }}.json" \
+            --qinit-bin "$QINIT_BIN" \
+            --qinit-repository "${{ inputs.qinit_repository }}" \
+            --core-repository "${{ github.repository }}"
+
+      - name: Stop node
+        if: always() && matrix.key != 'windows-x64'
+        shell: bash
+        run: |
+          if [ -n "${QINIT_BIN:-}" ] && [ -f "$QINIT_BIN" ]; then
+            "$QINIT_BIN" node stop
+          fi
+
+      - name: Stop Windows node
+        if: always() && matrix.key == 'windows-x64'
+        shell: pwsh
+        run: |
+          if (-not $env:QINIT_BIN -or -not (Test-Path $env:QINIT_BIN)) {
+            exit 0
+          }
+          & $env:QINIT_BIN node stop
+          if ($LASTEXITCODE -ne 0) {
+            Get-Process -Name Qubic -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep -Milliseconds 500
+          }
+          if (Get-Process -Name Qubic -ErrorAction SilentlyContinue) {
+            throw 'Qubic.exe is still running'
+          }
+          exit 0
+
+      - name: Upload compatibility result
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compat-${{ matrix.key }}
+          path: compat-${{ matrix.key }}.json
+          if-no-files-found: error
+
+      - name: Package POSIX release node
+        if: (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/qinit-v')) && matrix.key != 'windows-x64'
+        shell: bash
+        run: |
+          cp "$NODE_BIN" "${{ matrix.release_file }}"
+          shasum -a 256 "${{ matrix.release_file }}" | awk '{print $1}' > "${{ matrix.release_file }}.sha256"
+
+      - name: Upload release node
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/qinit-v')
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-node-${{ matrix.key }}
+          path: |
+            ${{ matrix.release_file }}
+            ${{ matrix.release_file }}.sha256
+          if-no-files-found: error
+
+      - name: Diagnose contract build on failure
+        if: failure()
+        shell: bash
+        run: |
+          if [ -n "${QINIT_BIN:-}" ] && [ -f "$QINIT_BIN" ]; then
+            "$QINIT_BIN" build "$GITHUB_WORKSPACE/qinit/fixtures/DigestProbe.h" \
+              --contract-name DigestProbe \
+              --slot 28 \
+              --core-dir "$GITHUB_WORKSPACE/core" \
+              --out "$RUNNER_TEMP/qinit-build-diag" \
+              --compiler clang \
+              --skip-verify \
+              --json || true
+          fi
+
+      - name: Node log tail on failure
+        if: failure()
+        shell: bash
+        run: tail -400 "$HOME/.cache/qinit/run/node.log" 2>/dev/null || true
+
+      - name: Upload full node log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nodelog-${{ matrix.key }}
+          path: ~/.cache/qinit/run/node.log
+          if-no-files-found: ignore
+
+  digest-check:
+    needs: build-smoke
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: 'compat-*'
+          path: results
+          merge-multiple: true
+      - name: State digests must match across platforms
+        run: |
+          cd results
+          echo "=== per-platform compatibility results ==="
+          for result_file in compat-*.json; do
+            jq -c '{platform, skipped, sources, stateDigest, qpiDigests, reason}' "$result_file"
+          done
+
+          # Every platform has to run. A floor of three let both Linux results excuse themselves for
+          # months while macOS and Windows carried the gate, and Linux is what the release ships.
+          RUNNABLE_COUNT=$(jq -s '[.[] | select(.skipped == false)] | length' compat-*.json)
+          if [ "$RUNNABLE_COUNT" -ne 5 ]; then
+            echo "need all 5 platform results runnable, got $RUNNABLE_COUNT"
+            exit 1
+          fi
+
+          UNIQUE_DIGEST_COUNT=$(
+            jq -r 'select(.skipped == false) |
+              [.stateDigest, .qpiDigests.driver, .qpiDigests.callee] | @tsv' \
+              compat-*.json | sort -u | wc -l
+          )
+          if [ "$UNIQUE_DIGEST_COUNT" -ne 1 ]; then
+            echo "::error::DIVERGENCE — contract state digests differ across platforms"
+            exit 1
+          fi
+          FIRST_DIGEST=$(
+            jq -r 'select(.skipped == false) |
+              [.stateDigest, .qpiDigests.driver, .qpiDigests.callee] | @tsv' \
+              compat-*.json | sort -u
+          )
+          echo "OK: all $RUNNABLE_COUNT runnable platforms agree -> $FIRST_DIGEST"

@@ -1,0 +1,193 @@
+name: qinit release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release tag"
+        required: true
+        default: "qinit-dev"
+      qinit_repository:
+        description: "temporary owner/repo override (requires qinit_ref)"
+        required: false
+        default: ""
+      qinit_ref:
+        description: "temporary qinit branch, tag, or commit"
+        required: false
+        default: ""
+  push:
+    tags: ["qinit-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    with:
+      qinit_repository: ${{ inputs.qinit_repository || '' }}
+      qinit_ref: ${{ inputs.qinit_ref || '' }}
+
+  headers:
+    needs: ci
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: core
+      - name: Checkout qinit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.ci.outputs.qinit_repository }}
+          ref: ${{ needs.ci.outputs.qinit_sha }}
+          path: qinit
+      - name: Read qinit toolchains
+        id: toolchains
+        shell: bash
+        run: |
+          node -e '
+            const config = require("./qinit/config/toolchains.json");
+            const bunVersion = config?.bun?.version;
+            const wasiRepository = config?.wasiSdk?.repository;
+            const wasiReleaseTag = config?.wasiSdk?.releaseTag;
+            const wasiAssetVersion = config?.wasiSdk?.assetVersion;
+            const valuePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+            const repositoryPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+            if (
+              ![bunVersion, wasiReleaseTag, wasiAssetVersion].every(
+                (value) => typeof value === "string" && valuePattern.test(value),
+              ) ||
+              typeof wasiRepository !== "string" ||
+              !repositoryPattern.test(wasiRepository)
+            ) {
+              throw new Error("invalid qinit toolchain configuration");
+            }
+            console.log(`bun_version=${bunVersion}`);
+            console.log(`wasi_repository=${wasiRepository}`);
+            console.log(`wasi_release_tag=${wasiReleaseTag}`);
+            console.log(`wasi_asset_version=${wasiAssetVersion}`);
+          ' >> "$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.toolchains.outputs.bun_version }}
+      - name: Install qinit dependencies
+        working-directory: qinit
+        run: bun install
+      - name: Fetch wasi-sdk
+        env:
+          WASI_SDK_REPOSITORY: ${{ steps.toolchains.outputs.wasi_repository }}
+          WASI_SDK_RELEASE_TAG: ${{ steps.toolchains.outputs.wasi_release_tag }}
+          WASI_SDK_ASSET_VERSION: ${{ steps.toolchains.outputs.wasi_asset_version }}
+        run: |
+          curl -fsSL -o wasi-sdk.tar.gz \
+            "https://github.com/$WASI_SDK_REPOSITORY/releases/download/$WASI_SDK_RELEASE_TAG/wasi-sdk-$WASI_SDK_ASSET_VERSION-x86_64-linux.tar.gz"
+          mkdir -p wasi-sdk
+          tar -xzf wasi-sdk.tar.gz -C wasi-sdk --strip-components=1
+      - name: Build header snapshot
+        working-directory: qinit
+        env:
+          WASM_CLANG: ${{ github.workspace }}/wasi-sdk/bin/clang++
+          WASI_SYSROOT: ${{ github.workspace }}/wasi-sdk/share/wasi-sysroot
+        run: |
+          bun run snapshot:core -- \
+            --core-dir "$GITHUB_WORKSPACE/core" \
+            --out "$GITHUB_WORKSPACE/snapshot-out"
+      - name: Stage header snapshot
+        run: |
+          cp snapshot-out/core-headers.tar.gz ./core-headers.tar.gz
+          cp snapshot-out/core-headers.sha256 ./core-headers.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: headers
+          path: "core-headers.*"
+          if-no-files-found: error
+
+  publish:
+    needs:
+      - ci
+      - headers
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: 'release-node-*'
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: headers
+          path: dist
+      - name: Generate manifest
+        working-directory: dist
+        env:
+          CORE_REPOSITORY: ${{ github.repository }}
+          CORE_SHA: ${{ github.sha }}
+          QINIT_REPOSITORY: ${{ needs.ci.outputs.qinit_repository }}
+          QINIT_SHA: ${{ needs.ci.outputs.qinit_sha }}
+        run: |
+          LINUX_X64_SHA=$(cat Qubic-linux-x64.sha256)
+          LINUX_ARM64_SHA=$(cat Qubic-linux-arm64.sha256)
+          DARWIN_ARM64_SHA=$(cat Qubic-darwin-arm64.sha256)
+          DARWIN_X64_SHA=$(cat Qubic-darwin-x64.sha256)
+          WINDOWS_X64_SHA=$(cat Qubic-windows-x64.exe.sha256)
+          HEADERS_SHA=$(cat core-headers.sha256)
+          cat > qinit-manifest.json <<EOF
+          {
+            "version": "$TAG",
+            "sources": {
+              "coreLite": { "repository": "$CORE_REPOSITORY", "commit": "$CORE_SHA" },
+              "qinit": { "repository": "$QINIT_REPOSITORY", "commit": "$QINIT_SHA" }
+            },
+            "node": { "url": "Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
+            "nodes": {
+              "linux-x64": { "url": "Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
+              "linux-arm64": { "url": "Qubic-linux-arm64", "sha256": "$LINUX_ARM64_SHA" },
+              "darwin-arm64": { "url": "Qubic-darwin-arm64", "sha256": "$DARWIN_ARM64_SHA" },
+              "darwin-x64": { "url": "Qubic-darwin-x64", "sha256": "$DARWIN_X64_SHA" },
+              "windows-x64": { "url": "Qubic-windows-x64.exe", "sha256": "$WINDOWS_X64_SHA" }
+            },
+            "headers": { "url": "core-headers.tar.gz", "sha256": "$HEADERS_SHA" }
+          }
+          EOF
+          cat qinit-manifest.json
+          jq -e '
+            (.nodes | keys == [
+              "darwin-arm64",
+              "darwin-x64",
+              "linux-arm64",
+              "linux-x64",
+              "windows-x64"
+            ]) and
+            (.sources.coreLite.commit | test("^[0-9a-f]{40}$")) and
+            (.sources.qinit.commit | test("^[0-9a-f]{40}$")) and
+            ([.node.sha256, .headers.sha256, .nodes[].sha256] |
+              all(test("^[0-9a-f]{64}$")))
+          ' qinit-manifest.json
+      - name: Publish release
+        working-directory: dist
+        run: |
+          gh release create "$TAG" \
+            Qubic-linux-x64 \
+            Qubic-linux-arm64 \
+            Qubic-darwin-arm64 \
+            Qubic-darwin-x64 \
+            Qubic-windows-x64.exe \
+            core-headers.tar.gz \
+            qinit-manifest.json \
+            --title "$TAG" \
+            --notes "qinit turnkey: prebuilt dynamic-contract nodes (linux-x64 + linux-arm64 + darwin-arm64 + darwin-x64 + windows-x64) + core-header snapshot" \
+            || gh release upload "$TAG" \
+              Qubic-linux-x64 \
+              Qubic-linux-arm64 \
+              Qubic-darwin-arm64 \
+              Qubic-darwin-x64 \
+              Qubic-windows-x64.exe \
+              core-headers.tar.gz \
+              qinit-manifest.json \
+              --clobber

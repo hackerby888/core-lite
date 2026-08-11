@@ -3,7 +3,7 @@
 // Shared per-IP HTTP rate limiter (token bucket) + client-IP extraction. Used by both the in-process
 // HTTP server (http.h) and the RPC sidecar proxy (rpc_proxy.h) so both throttle identically.
 
-#ifdef __linux__
+#if defined(__linux__) || defined(LITE_WASM_SC)
 
 #include <drogon/drogon.h>
 

@@ -1,9 +1,8 @@
 #pragma once
 
-// Node-side drogon-free RPC: a router + unix-socket server. The drogon sidecar forwards
-// HTTP here; the node re-binds the socket after a fork-promote so RPC survives. Linux-only.
-
-#ifdef __linux__
+// Node-side drogon-free RPC. The router core is portable (Wasm builds serve it through the
+// in-process drogon adapter in http.h); the unix-socket transport below is Linux-only — the
+// drogon sidecar forwards HTTP there and the node re-binds the socket after a fork-promote.
 
 #include <string>
 #include <map>
@@ -18,9 +17,6 @@
 #include <new>
 #include <cstdint>
 #include <cstring>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
 #include "json/json.h"
 #include "extensions/fork_census.h"   // SmartSharedMutex (census-aware gRpcDispatchLock)
 
@@ -177,6 +173,14 @@ public:
 
 inline RpcRouter gRpc;
 
+// Set once the node finishes init and enters the main loop. Until then a handler would read
+// uninitialized/zeroed consensus state and segfault, so dispatch answers 503 before it is set.
+inline std::atomic<bool> gRpcNodeReady{ false };
+
+// Fork-safety: dispatch takes a SHARED lock; bspForkPoint takes it EXCLUSIVE before fork() so no
+// handler holds a node lock at fork. Reinit in the child.
+inline SmartSharedMutex gRpcDispatchLock{ "gRpcDispatchLock" };
+
 // One RPC_ROUTE block per API; __COUNTER__ captured once (RPC_ROUTE_I) for TU-unique names.
 #define QRPC_CAT_(a, b) a##b
 #define QRPC_CAT(a, b) QRPC_CAT_(a, b)
@@ -186,6 +190,12 @@ inline RpcRouter gRpc;
     static const bool QRPC_CAT(qrpc_r_, N) =                         \
         (gRpc.route(METHOD, PATTERN, QRPC_CAT(qrpc_h_, N)), true);   \
     static RpcResp QRPC_CAT(qrpc_h_, N)(const RpcReq& req)
+
+#ifdef __linux__
+
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 // ---------------- wire framing: [u32 metaLen][meta json][u32 bodyLen][body] ----------------
 namespace rpcwire
@@ -249,14 +259,6 @@ inline std::atomic<bool> gRpcUnixRunning{ false };
 // The unix listen socket fd, so a promoted child can close the one it inherited from the forked
 // parent before re-binding (else each promote leaks one stale LISTEN socket).
 inline std::atomic<int> gRpcUnixListenFd{ -1 };
-
-// Set once the node finishes init and enters the main loop. Until then a handler would read
-// uninitialized/zeroed consensus state and segfault, so dispatch answers 503 before it is set.
-inline std::atomic<bool> gRpcNodeReady{ false };
-
-// Fork-safety: dispatch takes a SHARED lock; bspForkPoint takes it EXCLUSIVE before fork() so no
-// handler holds a node lock at fork. Reinit in the child.
-inline SmartSharedMutex gRpcDispatchLock{ "gRpcDispatchLock" };
 
 inline void rpcUnixHandleConn(int c)
 {

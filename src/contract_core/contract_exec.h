@@ -16,6 +16,8 @@
 #include "contract_core/contract_action_tracker.h"
 #include "contract_core/execution_time_accumulator.h"
 
+#include "extensions/native_contract_buffer.h"
+
 #include "logging/logging.h"
 #include "common_buffers.h"
 
@@ -42,10 +44,11 @@ enum ContractError
 };
 
 // Used to store: locals and for first invocation level also input and output
+// Keep nested QPI locals aligned for 64-bit values.
 #if defined(TESTNET) && defined(TESTNET_LITE_RAM)
-typedef StackBuffer<unsigned int, 4 * 1024 * 1024> ContractLocalsStack;
+typedef StackBuffer<unsigned int, 4 * 1024 * 1024, CONTRACT_INVOCATION_BUFFER_ALIGNMENT> ContractLocalsStack;
 #else
-typedef StackBuffer<unsigned int, 32 * 1024 * 1024> ContractLocalsStack;
+typedef StackBuffer<unsigned int, 32 * 1024 * 1024, CONTRACT_INVOCATION_BUFFER_ALIGNMENT> ContractLocalsStack;
 #endif
 GLOBAL_VAR_DECL ContractLocalsStack contractLocalsStack[NUMBER_OF_CONTRACT_EXECUTION_BUFFERS];
 GLOBAL_VAR_DECL volatile char contractLocalsStackLock[NUMBER_OF_CONTRACT_EXECUTION_BUFFERS];
@@ -1104,7 +1107,9 @@ struct QpiContextUserProcedureCall : public QPI::QpiContextProcedureCall
         unsigned short fullInputSize = contractUserProcedureInputSizes[_currentContractIndex][inputType];
         outputSize = contractUserProcedureOutputSizes[_currentContractIndex][inputType];
         unsigned int localsSize = contractUserProcedureLocalsSizes[_currentContractIndex][inputType];
-        char* inputBuffer = contractLocalsStack[_stackIndex].allocate(fullInputSize + outputSize + localsSize);
+        const ContractInvocationBufferLayout bufferLayout =
+            contractInvocationBufferLayout(fullInputSize, outputSize, localsSize);
+        char* inputBuffer = contractLocalsStack[_stackIndex].allocate(bufferLayout.totalSize);
         if (!inputBuffer)
         {
 #ifndef NDEBUG
@@ -1130,8 +1135,8 @@ struct QpiContextUserProcedureCall : public QPI::QpiContextProcedureCall
             __qpiAbort(ContractErrorAllocInputOutputFailed);
         }
 
-        outputBuffer = inputBuffer + fullInputSize;
-        char* localsBuffer = outputBuffer + outputSize;
+        outputBuffer = inputBuffer + bufferLayout.outputOffset;
+        char* localsBuffer = inputBuffer + bufferLayout.localsOffset;
         if (inputSize < fullInputSize)
         {
             // less input data than expected by contract -> fill with 0
@@ -1143,7 +1148,7 @@ struct QpiContextUserProcedureCall : public QPI::QpiContextProcedureCall
             inputSize = fullInputSize;
         }
         copyMem(inputBuffer, inputPtr, inputSize);
-        setMem(outputBuffer, outputSize + localsSize, 0);
+        setMem(outputBuffer, bufferLayout.totalSize - bufferLayout.outputOffset, 0);
 
         // acquire lock of contract state for writing (shouldn't block because 1 stack is not used by functions and thus kept free for procedures)
         contractStateLock[_currentContractIndex].acquireWrite();
@@ -1224,7 +1229,9 @@ struct QpiContextUserFunctionCall : public QPI::QpiContextFunctionCall
         unsigned short fullInputSize = contractUserFunctionInputSizes[_currentContractIndex][inputType];
         outputSize = contractUserFunctionOutputSizes[_currentContractIndex][inputType];
         unsigned int localsSize = contractUserFunctionLocalsSizes[_currentContractIndex][inputType];
-        char* inputBuffer = contractLocalsStack[_stackIndex].allocate(fullInputSize + outputSize + localsSize);
+        const ContractInvocationBufferLayout bufferLayout =
+            contractInvocationBufferLayout(fullInputSize, outputSize, localsSize);
+        char* inputBuffer = contractLocalsStack[_stackIndex].allocate(bufferLayout.totalSize);
         if (!inputBuffer)
         {
 #ifndef NDEBUG
@@ -1249,8 +1256,8 @@ struct QpiContextUserFunctionCall : public QPI::QpiContextFunctionCall
             // abort execution of contract here
             __qpiAbort(ContractErrorAllocInputOutputFailed);
         }
-        outputBuffer = inputBuffer + fullInputSize;
-        char* localsBuffer = outputBuffer + outputSize;
+        outputBuffer = inputBuffer + bufferLayout.outputOffset;
+        char* localsBuffer = inputBuffer + bufferLayout.localsOffset;
         if (inputSize < fullInputSize)
         {
             // less input data than expected by contract -> fill with 0
@@ -1262,7 +1269,7 @@ struct QpiContextUserFunctionCall : public QPI::QpiContextFunctionCall
             inputSize = fullInputSize;
         }
         copyMem(inputBuffer, inputPtr, inputSize);
-        setMem(outputBuffer, outputSize + localsSize, 0);
+        setMem(outputBuffer, bufferLayout.totalSize - bufferLayout.outputOffset, 0);
 
         // set error handler for canceling
         contractExecutionErrorData[_stackIndex].errorCode = NoContractError;
@@ -1345,7 +1352,9 @@ struct QpiContextUserProcedureNotificationCall : public QPI::QpiContextProcedure
         contractStateLock[_currentContractIndex].acquireWrite();
 
         QPI::NoData output;
-        char* input = contractLocalsStack[_stackIndex].allocate(notif.inputSize + notif.localsSize);
+        const ContractInvocationBufferLayout bufferLayout =
+            contractInvocationBufferLayout(notif.inputSize, 0, notif.localsSize);
+        char* input = contractLocalsStack[_stackIndex].allocate(bufferLayout.totalSize);
         if (!input)
         {
 #ifndef NDEBUG
@@ -1366,7 +1375,7 @@ struct QpiContextUserProcedureNotificationCall : public QPI::QpiContextProcedure
             // abort execution of contract here
             __qpiAbort(ContractErrorAllocInputOutputFailed);
         }
-        char* locals = input + notif.inputSize;
+        char* locals = input + bufferLayout.localsOffset;
         copyMem(input, inputPtr, notif.inputSize);
         setMem(locals, notif.localsSize, 0);
 

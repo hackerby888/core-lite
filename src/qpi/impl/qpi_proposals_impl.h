@@ -968,7 +968,7 @@ namespace QPI
 		if (proposalIndex >= pv.maxProposals || !pv.proposals[proposalIndex].epoch)
 			return false;
 
-		const ProposalWithAllVoteData<ProposalDataType, 676>& p = pv.proposals[proposalIndex];
+		const ProposalWithAllVoteData<ProposalDataType, NUMBER_OF_COMPUTORS>& p = pv.proposals[proposalIndex];
 		votingSummary.proposalIndex = proposalIndex;
 		votingSummary.optionCount = ProposalTypes::optionCount(p.type);
 		votingSummary.proposalTick = p.tick;

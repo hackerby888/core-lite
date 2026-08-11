@@ -2,7 +2,7 @@
 
 // Query-v2 endpoints as RpcReq->RpcResp router handlers.
 
-#ifdef __linux__
+#if defined(__linux__) || defined(LITE_WASM_SC)
 
 #include <optional>
 #include <deque>
@@ -1127,4 +1127,4 @@ RPC_ROUTE("POST", "/query/v1/getEventLogs")
 #endif
 }
 
-#endif // __linux__
+#endif // __linux__ || LITE_WASM_SC

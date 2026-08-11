@@ -2,6 +2,9 @@
 
 #ifdef __linux__
 
+// Blosc2 is unavailable on aarch64 and unnecessary in RAM-only builds.
+#if !defined(CMAKE_NO_USE_SWAP) && !defined(__aarch64__)
+
 #include <blosc2.h>
 #include <stdexcept>
 #include <thread>
@@ -75,5 +78,32 @@ public:
         return decompressed_out;
     }
 };
+
+#else
+#include <vector>
+#include <stdexcept>
+#include <cstddef>
+
+class Zipper
+{
+public:
+    static std::vector<unsigned char> zip(
+        unsigned char*,
+        size_t,
+        int = 0)
+    {
+        throw std::runtime_error("Zipper: NO_USE_SWAP build");
+    }
+
+    static std::vector<unsigned char> unzip(
+        unsigned char*,
+        size_t,
+        int = 0)
+    {
+        throw std::runtime_error("Zipper: NO_USE_SWAP build");
+    }
+};
+
+#endif // CMAKE_NO_USE_SWAP
 
 #endif // __linux__

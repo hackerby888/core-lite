@@ -1,5 +1,15 @@
 #pragma once
 
+// GCC needs empty calling-convention markers for EFI function pointer types.
+#if defined(__GNUC__) && !defined(__clang__)
+  #ifndef __cdecl
+    #define __cdecl
+  #endif
+  #ifndef __stdcall
+    #define __stdcall
+  #endif
+#endif
+
 /********* UEFI *********/
 
 #define FALSE ((BOOLEAN)0)

@@ -12,10 +12,13 @@
 #include <ws2tcpip.h>
 #include <Windows.h>
 #include <conio.h>
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")   // timeBeginPeriod
 #define MSG_DONTWAIT 0
 #define MSG_NOSIGNAL 0
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <sched.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -38,6 +41,7 @@
 #include <atomic>
 #include <chrono>
 #include <new>
+#include <memory>
 
 // Fork quiesce: the BSP fork point holds networkingLock across fork() for a consistent map snapshot.
 // Per-socket workers are cv-blocked when idle (no busy-spin), so they don't starve the fork.
@@ -50,6 +54,42 @@ static volatile bool listOfPeersIsStaticLiteNode = false;
 #define CreateEvent CreateEvent
 #include "platform/console_logging.h"
 #include "extensions/fork_census.h"   // SmartMutex (census-aware networkingLock/eventMapLock)
+#include "platform/processor_count.h"
+
+// Use a high-resolution Windows timer for the network retry loops.
+#ifdef _MSC_VER
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+static inline void preciseSleepMicros(long long microseconds)
+{
+    if (microseconds <= 0)
+    {
+        return;
+    }
+
+    static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (timer)
+    {
+        LARGE_INTEGER dueTime;
+        dueTime.QuadPart = -(microseconds * 10);
+        if (SetWaitableTimer(timer, &dueTime, 0, nullptr, nullptr, FALSE))
+        {
+            WaitForSingleObject(timer, INFINITE);
+            return;
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(microseconds));
+}
+#else
+static inline void preciseSleepMicros(long long microseconds)
+{
+    if (microseconds > 0)
+    {
+        std::this_thread::sleep_for(std::chrono::microseconds(microseconds));
+    }
+}
+#endif
 
 //////////// Custom Data \\\\\\\\\\\
 
@@ -65,7 +105,8 @@ static std::string nodeAlias = "My Qubic Lite Node";
 static const auto liteNodeStartTime = std::chrono::system_clock::now();
 
 
-#if defined(__linux__)
+// The legacy Windows solution opts out because it does not link the RPC dependencies.
+#if defined(__linux__) || defined(__APPLE__) || (defined(_WIN32) && !defined(NO_RPC))
 #include <json/config.h>
 #include <json/value.h>
 #include <json/writer.h>
@@ -231,6 +272,87 @@ inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size
 	}
     return VirtualAlloc(address, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE) != address;
 }
+
+// Emulate demand-zero overcommit by committing Windows pages on first access.
+struct LazyCommitRegion
+{
+    uintptr_t base;
+    uintptr_t end;
+};
+inline LazyCommitRegion g_lazyCommitRegions[4096 * 2];
+inline volatile long g_lazyCommitRegionCount = 0;
+inline volatile long g_lazyCommitVehInstalled = 0;
+inline unsigned long g_lazyCommitPageSize = 4096;
+
+inline bool inLazyCommitRegion(uintptr_t address)
+{
+    const long regionCount = g_lazyCommitRegionCount;
+    for (long i = 0; i < regionCount; i++)
+    {
+        if (address >= g_lazyCommitRegions[i].base && address < g_lazyCommitRegions[i].end)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Commit reserved pages on first access and let genuine allocation failures propagate.
+static LONG WINAPI lazyCommitVeh(EXCEPTION_POINTERS* exception)
+{
+    if (exception->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const uintptr_t faultAddress = (uintptr_t)exception->ExceptionRecord->ExceptionInformation[1];
+    if (!inLazyCommitRegion(faultAddress))
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const uintptr_t page = faultAddress & ~((uintptr_t)g_lazyCommitPageSize - 1);
+    if (VirtualAlloc((void*)page, g_lazyCommitPageSize, MEM_COMMIT, PAGE_READWRITE))
+    {
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Use lazy allocation only for pages written from user mode, not kernel I/O buffers.
+inline void* qVirtualAllocLazy(const unsigned long long size)
+{
+    if (!_InterlockedCompareExchange(&g_lazyCommitVehInstalled, 1, 0))
+    {
+        SYSTEM_INFO systemInfo;
+        GetSystemInfo(&systemInfo);
+        g_lazyCommitPageSize = systemInfo.dwPageSize ? systemInfo.dwPageSize : 4096;
+        AddVectoredExceptionHandler(1 /*first*/, lazyCommitVeh);
+    }
+
+    void* address = VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE, PAGE_READWRITE);
+    if (!address)
+    {
+        logToConsole(L"CRITIAL: VirtualAlloc(MEM_RESERVE) failed in qVirtualAllocLazy");
+        return nullptr;
+    }
+
+    const long regionIndex = g_lazyCommitRegionCount;
+    if (regionIndex < (long)(sizeof(g_lazyCommitRegions) / sizeof(g_lazyCommitRegions[0])))
+    {
+        g_lazyCommitRegions[regionIndex].base = (uintptr_t)address;
+        g_lazyCommitRegions[regionIndex].end = (uintptr_t)address + size;
+        _ReadWriteBarrier();
+        g_lazyCommitRegionCount = regionIndex + 1;
+    }
+    else
+    {
+        VirtualAlloc(address, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE);
+    }
+
+    commitMemMap[(unsigned long long)address] = true;
+    return address;
+}
 #else
 inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false) {
     int prot = commitMem ? (PROT_READ | PROT_WRITE) : PROT_NONE;
@@ -271,6 +393,23 @@ inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size
 }
 
 #endif
+
+// Route shutdown cleanup according to the original allocator.
+inline void freePoolOrVirtual(void* pointer)
+{
+    if (!pointer)
+    {
+        return;
+    }
+
+    auto allocation = commitMemMap.find((unsigned long long)pointer);
+    if (allocation != commitMemMap.end())
+    {
+        commitMemMap.erase(allocation);
+        return;
+    }
+    freePool(pointer);
+}
 
 void updateTime() {
     std::time_t t = std::time(nullptr);
@@ -433,59 +572,96 @@ struct Overload {
         signalWorker(tcpData.recvIo);
     }
 
+#ifndef _MSC_VER
+    // std::thread cannot size its stack, and the linker flag that gives the Linux build 8 MB has no ld64
+    // equivalent reaching a secondary thread — Darwin hands one 512 KB. processTick's own frame is about
+    // 144 KB before the Wasm interpreter runs on top of it, so the size is asked for outright.
+    static constexpr size_t PROCESSOR_THREAD_STACK_SIZE = 8u * 1024u * 1024u;
+
+    struct ProcessorThreadArgs
+    {
+        void* data;
+        unsigned long long processorNumber;
+        std::shared_ptr<std::atomic<bool>> finished;
+    };
+
+    static void* processorThreadEntry(void* argument) {
+        ProcessorThreadArgs* args = (ProcessorThreadArgs*)argument;
+        CustomStack* me = reinterpret_cast<CustomStack*>(args->data);
+        me->setupFuncToCall(me->setupDataToPass, args->processorNumber);
+        args->finished->store(true);
+        delete args;
+        return nullptr;
+    }
+#endif
+
     // Directly call the setup function without using custom stack.
     static void startThread(EFI_AP_PROCEDURE procedure, void* data, unsigned long long ProcessorNumber, EFI_EVENT WaitEvent, unsigned long long TimeoutInMicroseconds) {
-		bool isThreadFinished = false;
-        std::thread thread([&isThreadFinished, procedure, data, ProcessorNumber]() {
-           /* while (true) {
-                unsigned long long currentProcessorNumber;
-                WhoAmI(NULL, &currentProcessorNumber);
-                if (currentProcessorNumber == ProcessorNumber) {
-                    break;
-                } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-            }*/
-            CustomStack* me = reinterpret_cast<CustomStack*>(data);
-            me->setupFuncToCall(me->setupDataToPass, ProcessorNumber);
-            isThreadFinished = true;
-            });
+        (void)procedure;
+        // Shared with the thread because the timeout path below detaches and then reads this flag.
+        auto isThreadFinished = std::make_shared<std::atomic<bool>>(false);
 
         #ifdef _MSC_VER
+        std::thread thread([isThreadFinished, data, ProcessorNumber]() {
+            CustomStack* me = reinterpret_cast<CustomStack*>(data);
+            me->setupFuncToCall(me->setupDataToPass, ProcessorNumber);
+            isThreadFinished->store(true);
+            });
         HANDLE hThread = (HANDLE)thread.native_handle();
         SetThreadAffinityMask(hThread, 1ULL << ProcessorNumber);
         #else
+        pthread_attr_t attributes;
+        pthread_attr_init(&attributes);
+        pthread_attr_setstacksize(&attributes, PROCESSOR_THREAD_STACK_SIZE);
+
+        pthread_t thread{};
+        ProcessorThreadArgs* args = new ProcessorThreadArgs{ data, ProcessorNumber, isThreadFinished };
+        const int startError = pthread_create(&thread, &attributes, processorThreadEntry, args);
+        pthread_attr_destroy(&attributes);
+        if (startError != 0) {
+            delete args;
+            logToConsole(L"Error calling pthread_create");
+            return;
+        }
+        #ifdef __linux__
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(ProcessorNumber, &cpuset);
-        int rc = pthread_setaffinity_np(thread.native_handle(),
-                                    sizeof(cpu_set_t),
-                                    &cpuset);
+        int rc = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
         if (rc != 0) {
             logToConsole(L"Error calling pthread_setaffinity_np");
         }
+        #endif // macOS: no cpu affinity API (scheduler handles placement)
         #endif
 
         if (TimeoutInMicroseconds > 0) {
+            #ifdef _MSC_VER
             thread.detach();
+            #else
+            pthread_detach(thread);
+            #endif
         }
         else {
-			thread.join(); // Wait for the thread to finish if no timeout is specified
-			isThreadFinished = true; // Mark the thread as finished
+            #ifdef _MSC_VER
+            thread.join(); // Wait for the thread to finish if no timeout is specified
+            #else
+            pthread_join(thread, nullptr);
+            #endif
+            isThreadFinished->store(true); // Mark the thread as finished
         }
 
         if (TimeoutInMicroseconds > 0) {
-            while (!isThreadFinished && TimeoutInMicroseconds > 0) {
+            while (!isThreadFinished->load() && TimeoutInMicroseconds > 0) {
                 // Sleep for a short duration to avoid busy waiting
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                preciseSleepMicros(100);
                 TimeoutInMicroseconds -= 100;
             }
 
-            if (!isThreadFinished) {
+            if (!isThreadFinished->load()) {
                 #ifdef _MSC_VER
                 TerminateThread(hThread, 0); // Forcefully terminate the thread if it doesn't finish
                 #else
-                pthread_cancel(thread.native_handle());
+                pthread_cancel(thread);
                 #endif
             }
         }
@@ -536,7 +712,7 @@ struct Overload {
 
     static EFI_STATUS Stall(IN unsigned long long Microseconds) {
         // Simulate a stall by doing nothing for the specified time
-        std::this_thread::sleep_for(std::chrono::microseconds(Microseconds));
+        preciseSleepMicros((long long)Microseconds);
         return EFI_SUCCESS;
     }
 
@@ -766,7 +942,9 @@ struct Overload {
     ////////////// MP Services Protocol Implementation //////////////
 
     static EFI_STATUS GetNumberOfProcessors(IN void* This, OUT unsigned long long* NumberOfProcessors, OUT unsigned long long* NumberOfEnabledProcessors) {
-        *NumberOfProcessors = (unsigned long long)std::thread::hardware_concurrency();
+        // Counted before the main thread pinned itself — hardware_concurrency() answers 1 after that on
+        // builds whose libc reads the affinity mask.
+        *NumberOfProcessors = (unsigned long long)totalProcessorCount();
         *NumberOfEnabledProcessors = *NumberOfProcessors; // Assume all processors are enabled
         return EFI_SUCCESS;
     }
@@ -783,8 +961,8 @@ struct Overload {
         return EFI_SUCCESS;
     }
 
-    // Use custom stack in std:thread will break the runtime because it expectes the OS-provided stack
-    // so we can bypass the custom stack because stack size in window/linux already is large enough
+    // Using the custom stack here breaks the runtime, which expects the OS-provided one — startThread asks
+    // the OS for a stack large enough instead, so the custom stack can be bypassed.
     static EFI_STATUS StartupThisAP(IN void* This, IN EFI_AP_PROCEDURE Procedure, IN unsigned long long ProcessorNumber, IN EFI_EVENT WaitEvent OPTIONAL, IN unsigned long long TimeoutInMicroseconds, IN void* ProcedureArgument OPTIONAL, OUT BOOLEAN* Finished OPTIONAL) {
         std::thread thread(startThread, Procedure, ProcedureArgument, ProcessorNumber, WaitEvent, TimeoutInMicroseconds);
         thread.detach();
@@ -1090,6 +1268,11 @@ struct Overload {
             int buf_size = 16 * 1024 * 1024; // 16MB
             setsockopt(clientSocket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
             setsockopt(clientSocket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
+#ifdef _MSC_VER
+            // Disable Nagle for small per-vote messages on Windows loopback.
+            int nodelay = 1;
+            setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+#endif
 
             bool isLocal = false;
             if (peer)
@@ -1121,8 +1304,7 @@ struct Overload {
 #endif
 
             CreateChild(NULL, &ListenToken->NewChildHandle);
-            // At this point we dont know the tcp4Protocol for this peer (tcp4Protocol will be inititialzed in peerConnectionNewlyEstablished())
-            // so we map the clientSocket to the handle to process it later in peerConnectionNewlyEstablished()
+            // Save the socket until peerConnectionNewlyEstablished initializes the protocol.
             {
                 std::lock_guard<SmartMutex> lock(networkingLock);
                 incomingSocketMap[(unsigned long long)ListenToken->NewChildHandle] = clientSocket;
@@ -1193,6 +1375,10 @@ struct Overload {
             if (ok) {
                 tcpData->connectStatus = ConnectStatus::Connected;
                 ConnectionToken->CompletionToken.Status = EFI_SUCCESS;
+#ifdef _MSC_VER
+                int nodelay = 1;
+                setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+#endif
             } else {
                 tcpData->connectStatus = ConnectStatus::Error;
                 ConnectionToken->CompletionToken.Status = EFI_ABORTED;
@@ -1238,24 +1424,24 @@ struct Overload {
                     finalStatus = EFI_TIMEOUT;
                     break;
                 }
-                auto n = send(io->socket, (const char*)fragment.FragmentBuffer + totalSentBytes, fragment.FragmentLength - totalSentBytes, MSG_DONTWAIT | MSG_NOSIGNAL);
-                if (n > 0)
+                auto sentBytes = send(io->socket, (const char*)fragment.FragmentBuffer + totalSentBytes, fragment.FragmentLength - totalSentBytes, MSG_DONTWAIT | MSG_NOSIGNAL);
+                if (sentBytes > 0)
                 {
-                    totalSentBytes += n;
+                    totalSentBytes += sentBytes;
                     lastProgress = now;
                 }
-                else if (n == 0)
+                else if (sentBytes == 0)
                 {
                     finalStatus = EFI_ABORTED;
                     break;
                 }
-                else if (n == SOCKET_ERROR)
+                else if (sentBytes == SOCKET_ERROR)
                 {
 #ifdef _MSC_VER
                     int err = WSAGetLastError();
                     if (err == WSAEWOULDBLOCK)
                     {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        preciseSleepMicros(1000);
                         continue;
                     }
                     logToConsole(L"Closed a transmit socket");
@@ -1304,15 +1490,15 @@ struct Overload {
             // BUFFER_SIZE overruns receiveBuffer when it holds a partial message, clobbering the
             // adjacent peer's buffer (parses as malformed -> force-forgotten).
             const unsigned int maxReceiveSize = (unsigned int)token->Packet.RxData->FragmentTable[0].FragmentLength;
-            auto n = recv(io->socket, (char*)token->Packet.RxData->FragmentTable[0].FragmentBuffer, maxReceiveSize, MSG_DONTWAIT);
+            auto receivedBytes = recv(io->socket, (char*)token->Packet.RxData->FragmentTable[0].FragmentBuffer, maxReceiveSize, MSG_DONTWAIT);
             EFI_STATUS finalStatus;
             unsigned int dataLen = 0;
-            if (n > 0)
+            if (receivedBytes > 0)
             {
-                dataLen = (unsigned int)n;
+                dataLen = (unsigned int)receivedBytes;
                 finalStatus = EFI_SUCCESS;
             }
-            else if (n == 0)
+            else if (receivedBytes == 0)
             {
                 finalStatus = EFI_ABORTED;
             }
@@ -1351,19 +1537,32 @@ struct Overload {
     }
 
     static void initializeUefi() {
-        const unsigned int hwConcurrency = std::thread::hardware_concurrency();
+        const unsigned int hwConcurrency = totalProcessorCount();
         const unsigned int lastCpu = hwConcurrency > 0 ? hwConcurrency - 1 : 0;
         #ifndef _MSC_VER
         setNonBlockingInput(true);
-
+        #if defined(__linux__)
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(lastCpu, &cpuset);
         pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+        #endif // macOS: no cpu affinity API
         #else
 		// NOTE: In MSVC Release Mode, so the scheduler often just keeps the main thread on one CPU core (the best core), dont need to set affinity because it will slow down the main thread performance
         HANDLE hThread = GetCurrentThread();
         SetThreadAffinityMask(hThread, 1ULL << lastCpu);
+        // Keep one-millisecond network retries precise on Windows.
+        timeBeginPeriod(1);
+        // Disable background throttling that overrides the requested timer resolution.
+        PROCESS_POWER_THROTTLING_STATE pt;
+        memset(&pt, 0, sizeof(pt));
+        pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        pt.StateMask = 0;
+        pt.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
+        pt.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
+
         #endif
 
         ih = new EFI_HANDLE;

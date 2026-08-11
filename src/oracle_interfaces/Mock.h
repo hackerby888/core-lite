@@ -41,4 +41,5 @@ struct Mock
 	{
 		return (reply.echoedValue == query.value) && (reply.doubledValue == 2 * query.value);
 	}
+
 };

@@ -1463,7 +1463,7 @@ static int flushAsyncFileIOBuffer(int numberOfItemsPerQueue = 0)
 OPTIMIZE_ON()
 
 // add epoch number as an extension to a filename
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 static void addEpochToFileName(wchar_t* filename, int nameSize, short epoch)
 {
     filename[nameSize - 4] = epoch / 100 + L'0';

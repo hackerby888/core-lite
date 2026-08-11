@@ -2,7 +2,7 @@
 
 // Explorer endpoints as RpcReq->RpcResp router handlers.
 
-#ifdef __linux__
+#if defined(__linux__) || defined(LITE_WASM_SC)
 
 #include <string>
 #include <vector>
@@ -43,7 +43,7 @@ RPC_ROUTE("GET", "/explorer/data")
     out["header"]["ticksInCurrentEpoch"] = system.tick - system.initialTick;
     out["header"]["latestCreatedTick"]   = latestCreatedTickInfo.tick;
 
-    constexpr unsigned int N = 20;
+    constexpr unsigned int N = 200;
     Json::Value recent(Json::arrayValue);
     TickStorage::tickData.acquireLock();
     unsigned int start = (system.tick >= N) ? (system.tick - N + 1) : 0;
@@ -156,4 +156,4 @@ RPC_ROUTE("GET", "/explorer/data")
     return jsonResp(out);
 }
 
-#endif // __linux__
+#endif // __linux__ || LITE_WASM_SC

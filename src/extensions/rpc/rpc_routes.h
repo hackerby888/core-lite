@@ -3,7 +3,7 @@
 // Generic/admin endpoints as RpcReq->RpcResp router handlers.
 // Included late in qubic.cpp so node globals are visible.
 
-#ifdef __linux__
+#if defined(__linux__) || defined(LITE_WASM_SC)
 
 #include <string>
 #include <filesystem>
@@ -255,4 +255,4 @@ RPC_ROUTE("GET", "/set-operator-seed")
 #include "extensions/http/controller/rpc_live_controller.h"
 #include "extensions/http/controller/rpc_queryv2_controller.h"
 
-#endif // __linux__
+#endif // __linux__ || LITE_WASM_SC

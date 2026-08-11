@@ -1,6 +1,7 @@
 #pragma once
+#ifndef LITE_WASM_TU_BUILD
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #include "platform/msvc_polyfill.h"
 #endif
 
@@ -66,7 +67,13 @@ public:
         const unsigned long long lockSize = count * sizeof(subBufferLock[0]);
         const unsigned long long bufSize = count * size;
 
-        if (!allocPoolWithErrorLog(L"commonBuffers", ptrSize + lockSize + bufSize, (void**)&buffer, __LINE__))
+        // Commit the development reorg arena on demand while keeping its capacity.
+#if defined(TESTNET) && defined(LITE_WASM_SC)
+        const bool allocationSucceeded = allocPoolWithErrorLog(L"commonBuffers", ptrSize + lockSize + bufSize, (void**)&buffer, __LINE__, true, true, /*lazyCommit=*/true);
+#else
+        const bool allocationSucceeded = allocPoolWithErrorLog(L"commonBuffers", ptrSize + lockSize + bufSize, (void**)&buffer, __LINE__);
+#endif
+        if (!allocationSucceeded)
         {
             return false;
         }
@@ -220,3 +227,4 @@ static void __releaseScratchpad(void* ptr)
 {
     commonBuffers.releaseBuffer(ptr);
 }
+#endif // LITE_WASM_TU_BUILD

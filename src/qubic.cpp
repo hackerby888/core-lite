@@ -19,6 +19,19 @@
 #include <unistd.h>
 #include "extensions/utils.h"
 #include "platform/msvc_polyfill.h"
+#elif defined(__APPLE__)
+// macOS uses the POSIX path without byteswap or libbacktrace.
+#define BOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED
+#include <boost/stacktrace.hpp>
+#include <cstring>
+#include <cstdio>
+#include <codecvt>
+#include <locale>
+#include <csignal>
+#include <cstdlib>
+#include <unistd.h>
+#include "extensions/utils.h"
+#include "platform/msvc_polyfill.h"
 #endif
 
 // ============================================================================
@@ -41,6 +54,7 @@
 // #define TESTNET
 // #define TESTNET_PREFILL_QUS
 // #define TESTNET_LITE_RAM
+// #define LITE_WASM_SC   // Enable testnet Wasm contracts through CMake.
 // #define LONG_RUN_LOCAL_TESTNET
 #define USE_SWAP
 
@@ -166,7 +180,7 @@
 #include "revenue.h"
 
 #include <csignal>
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #include <sys/wait.h>
 #endif
 
@@ -192,8 +206,14 @@ static void enableAVX();
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
+#if (defined(__linux__) || defined(__APPLE__) || defined(_WIN32)) && defined(LITE_WASM_SC)
+#include "extensions/contract_state_pager.h"
+#endif
+#include "extensions/wasm/runtime/extension.h"
 #include "extensions/test_invalid_solution.h"
+#if !defined(LITE_WASM_SC)
 #include "extensions/k12_state_digest_cache.h"
+#endif
 #include "extensions/tick_storage_scan.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
@@ -586,6 +606,7 @@ static bool isLastTickInEpoch();
 #include "extensions/fork_stats.h"
 #include "extensions/tick_fork_rollback.h"
 #include "extensions/rpc/rpc_routes.h"
+#include "extensions/http/http.h"
 #include "extensions/missing_tx_debug.h"
 #include "extensions/peer_reaper.h"
 
@@ -635,7 +656,11 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
     {
         if (contractStateChangeFlags[digestIndex >> 6] & (1ULL << (digestIndex & 63)))
         {
+#ifdef LITE_WASM_SC
+            const unsigned long long size = digestIndex < contractCount ? Wasm::Runtime::effectiveStateSize(digestIndex, contractDescriptions[digestIndex].stateSize) : 0;
+#else
             const unsigned long long size = digestIndex < contractCount ? contractDescriptions[digestIndex].stateSize : 0;
+#endif
             if (!size)
             {
                 contractStateDigests[digestIndex] = m256i::zero();
@@ -650,10 +675,14 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
                 contractStateLock[digestIndex].acquireRead();
 
                 const unsigned long long startTime = __rdtsc();
+#if defined(LITE_WASM_SC)
+                Wasm::Runtime::hashContractState(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
+#else
                 if (!bypassCache && K12StateDigestCache::gK12StateDigestCacheEnabled && K12StateDigestCache::isCached(digestIndex))
                     K12StateDigestCache::computeDigest(digestIndex, &contractStateDigests[digestIndex]);
                 else
                     KangarooTwelve(contractStates[digestIndex], (unsigned int)size, &contractStateDigests[digestIndex], 32);
+#endif
                 const unsigned long long executionTime = __rdtsc() - startTime;
 
                 contractStateLock[digestIndex].releaseRead();
@@ -701,12 +730,14 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
 
 // Quorum-mismatch recovery: rebuild every contract digest canonically (cache bypassed) and resync the
 // incremental cache, so a digest-cache error self-heals instead of forking the node.
+#if !defined(LITE_WASM_SC)
 static void recomputeComputerDigestFull(m256i& digest)
 {
     setMem(contractStateChangeFlags, MAX_NUMBER_OF_CONTRACTS / 8, 0xFF);
     K12StateDigestCache::invalidateAll();
     getComputerDigest(digest, /*bypassCache=*/true);
 }
+#endif
 
 static void getSpectrumDigest(m256i& digest)
 {
@@ -3123,6 +3154,13 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                 moneyFlew = true;
             }
 
+#ifdef LITE_WASM_SC
+            if (transaction->destinationPublicKey == Wasm::Runtime::DeploymentProtocol::DeploymentAddress)
+            {
+                Wasm::Runtime::dispatchDeploymentTransaction(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
+            }
+            else
+#endif
             if (isZero(transaction->destinationPublicKey))
             {
                 // Destination is system
@@ -3555,6 +3593,14 @@ static void processTick(unsigned long long processorNumber)
         PROFILE_SCOPE_END();
     }
 
+#ifdef LITE_WASM_SC
+    // Activate armed contracts under SC_INITIALIZE_TX framing.
+    if (Wasm::Runtime::hasPendingActivation(system.tick))
+    {
+        logger.registerNewTx(system.tick, logger.SC_INITIALIZE_TX);
+        Wasm::Runtime::activatePendingContracts();
+    }
+#endif
     PROFILE_NAMED_SCOPE_BEGIN("processTick(): BEGIN_TICK");
     unsigned long long _btBeginTickStart = __rdtsc();
     logger.registerNewTx(system.tick, logger.SC_BEGIN_TICK_TX);
@@ -4678,12 +4724,15 @@ static void endEpoch()
             oracleEngine.getRevenuePoints(oracleRevPoints);
             copyMemory(gEpochRevenueData.oracleScore, oracleRevPoints.computorRevPoints);
         }
+        // Development epochs can have no revenue window, so skip windowed formulas.
+#if !(defined(TESTNET) && defined(LITE_WASM_SC))
         computeRevenueV2(gEpochRevenueData);
 
         // Multi-dimension revenue: computed for offline comparison; paid to computors
         // only when USE_REVENUE_MULTI_DIMENSION is set (see src/revenue.h).
         gMultiDimRevenue.totalTicks = system.tick - system.initialTick;
         computeMultiDimRevenue();
+#endif
 
         // Get revenue donation data by calling contract GQMPROP::GetRevenueDonation()
         QpiContextUserFunctionCall qpiContext(GQMPROP::__contract_index);
@@ -4697,7 +4746,10 @@ static void endEpoch()
         for (unsigned int computorIndex = 0; computorIndex < NUMBER_OF_COMPUTORS; computorIndex++)
         {
             // Compute initial computor revenue, reducing arbitrator revenue
-#if USE_REVENUE_MULTI_DIMENSION
+#if defined(TESTNET) && defined(LITE_WASM_SC)
+            // Split development issuance evenly when windowed formulas are disabled.
+            long long revenue = issuancePerComputor;
+#elif USE_REVENUE_MULTI_DIMENSION
             long long revenue = gMultiDimRevenue.revenue[computorIndex];
 #else
             long long revenue = gEpochRevenueData.v2Revenue[computorIndex];
@@ -6139,7 +6191,7 @@ void checkAllContractLocksReleased()
 
 void doBadBoySpam()
 {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #ifdef TESTNET
     const std::string rpcApi = "http://127.0.0.1:41841";
 #else
@@ -6829,6 +6881,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     gTickNumberOfComputors = tickNumberOfComputors;
                     gTickTotalNumberOfComputors = tickTotalNumberOfComputors;
 
+#if !defined(LITE_WASM_SC)
                     // K12 state-cache safety net: only at ticks where the computer digest is consensus-validated.
                     // If enough computors voted but quorum doesn't match our etalon, an incremental-cache error
                     // could be the cause, so recompute the computer digest canonically (cache bypassed) and re-tally
@@ -6852,6 +6905,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                             }
                         }
                     }
+#endif
 
                     if (tickNumberOfComputors >= QUORUM)
                     {
@@ -7116,6 +7170,9 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 }
             }
         }
+#ifdef LITE_WASM_SC
+        Wasm::Runtime::evictContractState();
+#endif
         tickerLoopNumerator += __rdtsc() - curTimeTick;
         tickerLoopDenominator++;
     }
@@ -7313,10 +7370,15 @@ static bool saveContractStateFiles(CHAR16* directory)
         CONTRACT_FILE_NAME[sizeof(CONTRACT_FILE_NAME) / sizeof(CONTRACT_FILE_NAME[0]) - 7] = (contractIndex % 100) / 10 + L'0';
         CONTRACT_FILE_NAME[sizeof(CONTRACT_FILE_NAME) / sizeof(CONTRACT_FILE_NAME[0]) - 6] = contractIndex % 10 + L'0';
         contractStateLock[contractIndex].acquireRead();
-        savedSize = save(CONTRACT_FILE_NAME, contractDescriptions[contractIndex].stateSize, contractStates[contractIndex], directory);
+#ifdef LITE_WASM_SC
+        const unsigned long long saveSize = Wasm::Runtime::effectiveStateSize(contractIndex, contractDescriptions[contractIndex].stateSize);
+#else
+        const unsigned long long saveSize = contractDescriptions[contractIndex].stateSize;
+#endif
+        savedSize = save(CONTRACT_FILE_NAME, saveSize, contractStates[contractIndex], directory);
         contractStateLock[contractIndex].releaseRead();
         totalSize += savedSize;
-        if (savedSize != contractDescriptions[contractIndex].stateSize)
+        if (savedSize != saveSize)
         {
             return false;
         }
@@ -7538,27 +7600,34 @@ static bool initialize()
         for (unsigned int contractIndex = 0; contractIndex < contractCount; contractIndex++)
         {
             unsigned long long size = contractDescriptions[contractIndex].stateSize;
-            // cached contracts need page-aligned state for per-chunk mprotect; off-path keeps the 64-byte alloc
+#if defined(LITE_WASM_SC)
+            const bool contractStateAllocOk = Wasm::Runtime::allocateContractState(contractIndex, size);
+#else
+            // cached contracts need page-aligned state for per-chunk mprotect; off-path keeps the plain alloc
             const bool contractStateAllocOk = K12StateDigestCache::wantsPageAlignedAlloc(size)
                 ? K12StateDigestCache::allocStatePool(size, (void**)&contractStates[contractIndex])
                 : allocPoolWithErrorLog(L"contractStates", size, (void**)&contractStates[contractIndex], __LINE__);
+#endif
             if (!contractStateAllocOk)
             {
                 return false;
             }
         }
 
-        if (!allocPoolWithErrorLog(L"score", sizeof(*score), (void**)&score, __LINE__))
+        // Commit the large score pools on demand.
+        if (!allocPoolWithErrorLog(L"score", sizeof(*score), (void**)&score, __LINE__, true, true, /*lazyCommit=*/true))
         {
             return false;
         }
+        if (!allocPoolWithErrorLog(L"score", sizeof(*score_qpi), (void**)&score_qpi, __LINE__, true, true, /*lazyCommit=*/true))
+        {
+            return false;
+        }
+#if !(defined(TESTNET) && defined(LITE_WASM_SC))
+        // Full mining builds still initialize the pools eagerly.
         setMem(score, sizeof(*score), 0);
-
-        if (!allocPoolWithErrorLog(L"score", sizeof(*score_qpi), (void**)&score_qpi, __LINE__))
-        {
-            return false;
-        }
         setMem(score_qpi, sizeof(*score_qpi), 0);
+#endif
 
         setMem(&solutionThreshold[0][0], sizeof(int) * MAX_NUMBER_EPOCH * score_engine::AlgoType::MaxAlgoCount, 0);
         if (!allocPoolWithErrorLog(L"minserSolutionFlag", NUMBER_OF_MINER_SOLUTION_FLAGS / 8, (void**)&minerSolutionFlags, __LINE__))
@@ -7674,6 +7743,7 @@ static bool initialize()
 
                 ASSERT(energy(::spectrumIndex(publicKey)) == (10'000'000'000 + currentAmount));
             }
+
 #endif
 
 #if defined(TESTNET)
@@ -7820,6 +7890,10 @@ static bool initialize()
 
     // universe needs to be initialized before initializing contract errors
     initializeContractErrors();
+#ifdef LITE_WASM_SC
+    Wasm::Runtime::initializeDeployment();
+    Wasm::Runtime::initializeEngine();
+#endif
 
     if (loadMiningSeedFromFile)
     {
@@ -7970,8 +8044,10 @@ static bool initialize()
     emptyTickResolver.tick = 0;
     emptyTickResolver.lastTryClock = 0;
 
-    // contract states are now allocated, loaded and constructed; arm the per-chunk K12 digest cache
+    // Wasm state has its own protection and paging lifecycle.
+#if !defined(LITE_WASM_SC)
     K12StateDigestCache::init();
+#endif
 
     return true;
 }
@@ -8010,7 +8086,11 @@ static void deinitialize()
     {
         if (contractStates[contractIndex])
         {
+#ifdef LITE_WASM_SC
+            Wasm::Runtime::freeContractState(contractIndex);
+#else
             freePool(contractStates[contractIndex]);
+#endif
         }
     }
 
@@ -8022,36 +8102,36 @@ static void deinitialize()
 
     if (score)
     {
-        freePool(score);
+        freePoolOrVirtual(score);
     }
     if (minerSolutionFlags)
     {
-        freePool(minerSolutionFlags);
+        freePoolOrVirtual(minerSolutionFlags);
     }
 
     if (dejavu0)
     {
-        freePool((void*)dejavu0);
+        freePoolOrVirtual((void*)dejavu0);
     }
     if (dejavu1)
     {
-        freePool((void*)dejavu1);
+        freePoolOrVirtual((void*)dejavu1);
     }
 
     if (requestQueueBuffer)
     {
-        freePool(requestQueueBuffer);
+        freePoolOrVirtual(requestQueueBuffer);
     }
     if (responseQueueBuffer)
     {
-        freePool(responseQueueBuffer);
+        freePoolOrVirtual(responseQueueBuffer);
     }
 
     for (unsigned int processorIndex = 0; processorIndex < MAX_NUMBER_OF_PROCESSORS; processorIndex++)
     {
         if (processors[processorIndex].buffer)
         {
-            freePool(processors[processorIndex].buffer);
+            freePoolOrVirtual(processors[processorIndex].buffer);
         }
     }
 
@@ -8059,15 +8139,15 @@ static void deinitialize()
     {
         if (peers[i].receiveBuffer)
         {
-            freePool(peers[i].receiveBuffer);
+            freePoolOrVirtual(peers[i].receiveBuffer);
         }
         if (peers[i].transmitData.FragmentTable[0].FragmentBuffer)
         {
-            freePool(peers[i].transmitData.FragmentTable[0].FragmentBuffer);
+            freePoolOrVirtual(peers[i].transmitData.FragmentTable[0].FragmentBuffer);
         }
         if (peers[i].dataToTransmit)
         {
-            freePool(peers[i].dataToTransmit);
+            freePoolOrVirtual(peers[i].dataToTransmit);
 
             closeEvent(peers[i].connectAcceptToken.CompletionToken.Event);
             closeEvent(peers[i].receiveToken.CompletionToken.Event);
@@ -9013,8 +9093,14 @@ static void spawnAPs()
         {
             // Reuse buffers already allocated (the fork child inherits them via COW); re-allocating
             // each promotion would leak ~BUFFER_SIZE+STACK_SIZE per processor every fork.
+#if defined(TESTNET) && defined(LITE_WASM_SC)
+            // Commit low-RAM development network buffers on demand.
+            if (!processors[numberOfProcessors].buffer
+                && !allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__, true, true, /*lazyCommit=*/true))
+#else
             if (!processors[numberOfProcessors].buffer
                 && !allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))
+#endif
             {
                 numberOfProcessors = 0;
                 break;
@@ -9391,6 +9477,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
         if (numberOfProcessors < 3)
         {
             logToConsole(L"At least 4 healthy enabled processors are required! Exiting...");
+            // main() raises SIGTERM before returning, so a status returned from here is never
+            // observed — without this the node lingers on its HTTP threads and reads as a clean exit.
+            std::exit(1);
         }
         else
         {
@@ -10028,6 +10117,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 #ifdef ENABLE_PROFILING
             gProfilingDataCollector.writeToFile();
 #endif
+#if defined(LITE_WASM_SC) && !defined(NO_RPC)
+            QubicHttpServer::stop();
+#endif
             setText(message, L"Qubic ");
             appendQubicVersion(message);
             appendText(message, L" is shut down.");
@@ -10200,8 +10292,13 @@ void processArgs(int argc, const char* argv[]) {
 #endif
         ("max-inbound-per-ip", "Max inbound connections per IP (0=unlimited)", cxxopts::value<int>()->default_value("0"))
         ("max-inbound", "Max inbound connection slots (0=none, -1=all)", cxxopts::value<int>()->default_value("-1"))
+#if !defined(LITE_WASM_SC)
         ("no-k12-state-cache", "Disable K12 state-digest incremental cache (Linux)")
         ("k12-state-cache-verify", "Verify K12 state-digest cache against one-shot (soak/CI)")
+#endif
+#ifdef LITE_SC_PAGER
+        ("max-sc-mem", "Contract-state RAM target in GB; cold state remains compressed in memory.", cxxopts::value<unsigned long long>()->default_value("1"))
+#endif
 
         // ── debug / test ──
         ("fbis,force-broadcast-invalid-solution", "TEST: broadcast random-nonce solution tx each tick to exercise fork rollback", cxxopts::value<bool>())
@@ -10228,6 +10325,13 @@ void processArgs(int argc, const char* argv[]) {
         std::cerr << "Warning: unknown option: " << u << "\n";
     }
 
+#ifdef LITE_SC_PAGER
+    if (result.count("max-sc-mem"))
+    {
+        Wasm::Runtime::setContractStateMemoryLimit(result["max-sc-mem"].as<unsigned long long>() * 1024ULL * 1024 * 1024);
+    }
+#endif
+
 #ifdef __linux__
     if (result.count("swap-compression")) {
         gSwapCompressionEnabled = true;
@@ -10237,6 +10341,7 @@ void processArgs(int argc, const char* argv[]) {
         gSwapDirtyTrackEnabled = true;
         logColorToScreen("INFO", "Swap dirty tracking enabled: clean SwapVM cache pages skip writeback on eviction");
     }
+#if !defined(LITE_WASM_SC)
     if (result.count("no-k12-state-cache")) {
         K12StateDigestCache::gK12StateDigestCacheEnabled = false;
         logColorToScreen("INFO", "K12 state-digest cache disabled: full one-shot K12 every tick");
@@ -10245,6 +10350,7 @@ void processArgs(int argc, const char* argv[]) {
         K12StateDigestCache::gK12StateDigestCacheVerify = true;
         logColorToScreen("INFO", "K12 state-digest cache self-verify enabled: each digest also runs the one-shot");
     }
+#endif
 #endif
 
 #if defined(__linux__) && !defined(LITE_WASM_SC)
@@ -10640,16 +10746,31 @@ static bool argEquals(const char* arg, const char* expected)
     return arg && std::string(arg) == expected;
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
+#ifdef LITE_SC_PAGER
+    // Contract-state pager fault: commit the page and resume before the crash path.
+    if ((sig == SIGSEGV || sig == SIGBUS)
+        && si
+        && Wasm::Runtime::handleManagedStateFault(si->si_addr))
+    {
+        return;
+    }
+#endif
+#ifdef __linux__
     // Component B fast path: a write to an armed read-only SwapVM cache page faults here. Mark the
     // slot dirty, restore write access, and resume the store. Any other fault hits the crash path below.
     if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr))
         return;
+#if !defined(LITE_WASM_SC)
     // A write to an armed read-only contract-state chunk faults here: mark the chunk dirty (needs si_addr),
     // restore write access, resume the store. Only changed chunks are re-hashed on the next digest.
     if (sig == SIGSEGV && si && K12StateDigestCache::tryMarkDirty(si->si_addr))
         return;
+#endif
+#else
+    (void)si;
+#endif
     boost::stacktrace::safe_dump_to("crash.dump");
     // Send to server in a child process
     pid_t pid = fork();
@@ -10692,6 +10813,8 @@ void setupSignalHandlers() {
     sa.sa_sigaction = signalHandler;       // SA_SIGINFO form: handler receives siginfo_t* (si_addr)
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGSEGV);
+    sigaddset(&sa.sa_mask, SIGBUS);
 
     // Common crash signals to catch:
     sigaction(SIGSEGV, &sa, NULL); // Segmentation fault (Invalid memory)
@@ -10702,7 +10825,7 @@ void setupSignalHandlers() {
 }
 #endif
 
-#if defined(__linux__) && !defined(NO_RPC)
+#if defined(__linux__) && !defined(NO_RPC) && !defined(LITE_WASM_SC)
 static bool hasArg(int argc, const char* argv[], const char* name)
 {
     for (int i = 1; i < argc; i++)
@@ -10763,19 +10886,25 @@ int main(int argc, const char* argv[])
         return tickStorageScan::scan();
     }
 #endif
-#if defined(__linux__) && !defined(NO_RPC)
+#if defined(__linux__) && !defined(NO_RPC) && !defined(LITE_WASM_SC)
     int rpcProxyExitCode = 0;
     if (runRpcProxyIfRequested(argc, argv, rpcProxyExitCode))
         return rpcProxyExitCode;
 #endif
 #ifdef __linux__
     prepareLinuxRuntime(argc, argv);
+#elif defined(__APPLE__)
+    setupSignalHandlers();
 #endif
     processStartupArgs(argc, argv);
 
     Overload::initializeUefi();
-#if defined(__linux__) && !defined(NO_RPC)
+#if defined(__linux__) && !defined(NO_RPC) && !defined(LITE_WASM_SC)
     startRpcServices();
+#endif
+#if defined(LITE_WASM_SC) && !defined(NO_RPC)
+    // Wasm testnet serves HTTP in-process; the unix-socket/sidecar stack is compiled out.
+    QubicHttpServer::start(httpPort);
 #endif
     auto status = (int)efi_main(ih, st);
     std::raise(SIGTERM);

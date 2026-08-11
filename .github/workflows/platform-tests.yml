@@ -1,0 +1,123 @@
+name: Platform tests
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CORE_GTEST_FILTER: 'TestFourQ.*:TestCore256*:TestCoreK12*:ContractInvocationAlignment.*'
+  STATE_GTEST_FILTER: 'K12DigestCacheTest.*:ContractStatePagerTest.*'
+  WASM_GTEST_FILTER: 'WasmContracts.*'
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-24.04
+          - name: Linux ARM64
+            runner: ubuntu-24.04-arm
+          - name: macOS ARM64
+            runner: macos-14
+          - name: macOS x64
+            runner: macos-15-intel
+          - name: Windows
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 cmake nasm \
+            libboost-stacktrace-dev libc++-dev libc++abi-dev libjsoncpp-dev uuid-dev \
+            zlib1g-dev libzstd-dev g++ libstdc++-12-dev libfmt-dev liblzo2-dev \
+            liblz4-dev libssl-dev libffi-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake nasm jsoncpp fmt boost lz4 zstd lzo openssl@3 zlib c-ares brotli libffi
+
+      - name: Cache Windows dependencies
+        if: runner.os == 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: vcpkg-x64-windows-static-rel-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-x64-windows-static-rel-
+
+      - name: Configure Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force triplets-overlay | Out-Null
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x64)',
+            'set(VCPKG_CRT_LINKAGE static)',
+            'set(VCPKG_LIBRARY_LINKAGE static)',
+            'set(VCPKG_BUILD_TYPE release)'
+          ) | Set-Content -Encoding ascii triplets-overlay/x64-windows-static-rel.cmake
+
+      - name: Configure POSIX tests
+        if: runner.os != 'Windows'
+        run: |
+          CC=clang-18
+          CXX=clang++-18
+          if [ "$RUNNER_OS" = 'macOS' ]; then
+            CC="$(xcrun -f clang)"
+            CXX="$(xcrun -f clang++)"
+          fi
+          cmake -S . -B build-platform-tests \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DBUILD_TESTS=ON \
+            -DBUILD_BINARY=OFF \
+            -DENABLE_AVX512=OFF \
+            -DUSE_SANITIZER=OFF \
+            -DONLY_LOGGING=ON \
+            -DLITE_WASM_SC=ON \
+            -DTESTNET=ON \
+            -DTESTNET_LITE_RAM=ON
+
+      - name: Configure Windows tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vcpkg = "$env:VCPKG_INSTALLATION_ROOT"
+          cmake -S . -B build-platform-tests -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_OVERLAY_TRIPLETS="$PWD/triplets-overlay" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-rel `
+            -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DENABLE_AVX512=OFF `
+            -DUSE_SANITIZER=OFF -DONLY_LOGGING=ON -DLITE_WASM_SC=ON `
+            -DTESTNET=ON -DTESTNET_LITE_RAM=ON
+
+      - name: Build and run POSIX tests
+        if: runner.os != 'Windows'
+        run: |
+          cmake --build build-platform-tests --target qubic_core_tests qubic_state_tests qubic_wasm_tests --parallel
+          ./build-platform-tests/test/qubic_core_tests --gtest_filter="$CORE_GTEST_FILTER"
+          ./build-platform-tests/test/qubic_state_tests --gtest_filter="$STATE_GTEST_FILTER"
+          ./build-platform-tests/test/qubic_wasm_tests --gtest_filter="$WASM_GTEST_FILTER"
+
+      - name: Build Windows tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cmake --build build-platform-tests --config Release --target qubic_core_tests qubic_state_tests qubic_wasm_tests --parallel 4
+
+      - name: Run Windows tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & .\build-platform-tests\test\Release\qubic_core_tests.exe "--gtest_filter=$env:CORE_GTEST_FILTER"
+          & .\build-platform-tests\test\Release\qubic_state_tests.exe "--gtest_filter=$env:STATE_GTEST_FILTER"
+          & .\build-platform-tests\test\Release\qubic_wasm_tests.exe "--gtest_filter=$env:WASM_GTEST_FILTER"

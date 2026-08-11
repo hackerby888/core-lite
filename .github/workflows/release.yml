@@ -1,7 +1,10 @@
 name: Release
 on:
   push:
-    tags: ["*"]
+    # qinit-release.yml handles dynamic-contract release tags.
+    tags:
+      - "*"
+      - "!qinit-v*"
 
 env:
   RELEASE_BUILD_DIR: "build"
