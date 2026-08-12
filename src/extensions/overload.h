@@ -1331,7 +1331,9 @@ struct Overload {
         SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (sock != INVALID_SOCKET) { u_long nb = 1; ioctlsocket(sock, FIONBIO, &nb); }
 #else
-        SOCKET sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, IPPROTO_TCP);
+        // SOCK_NONBLOCK is a Linux extension; set the flag separately so BSD/macOS builds too.
+        SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock != INVALID_SOCKET) { fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) | O_NONBLOCK); }
 #endif
         if (sock == INVALID_SOCKET) {
             logToConsole(L"Socket creation failed!!");
