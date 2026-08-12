@@ -10871,7 +10871,9 @@ static void processStartupArgs(int argc, const char* argv[])
 
 int main(int argc, const char* argv[])
 {
-    setvbuf(stdout, nullptr, _IOLBF, 0);
+    // MSVC rejects size 0 (its invalid-parameter handler fast-fails) and maps _IOLBF to
+    // _IOFBF anyway; unbuffered keeps the log intact when the node dies.
+    setvbuf(stdout, nullptr, _IONBF, 0);
 #ifdef __linux__
     if (tickStorageScan::requested(argc, argv))
     {

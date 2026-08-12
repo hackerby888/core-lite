@@ -174,17 +174,11 @@ jobs:
           BUILD_JOBS=$(getconf _NPROCESSORS_ONLN)
           CC=$(xcrun -f clang)
           CXX=$(xcrun -f clang++)
-          # ld-prime segfaults linking the x86_64 node; the classic linker handles it. arm64 is fine.
-          LINKER_FLAGS=""
-          if [ "${{ matrix.key }}" = 'darwin-x64' ]; then
-            LINKER_FLAGS="-Wl,-ld_classic"
-          fi
           {
             cmake -S . -B build-node \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_C_COMPILER="$CC" \
               -DCMAKE_CXX_COMPILER="$CXX" \
-              -DCMAKE_EXE_LINKER_FLAGS="$LINKER_FLAGS" \
               -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 \
               -DBUILD_BINARY=ON \
               -DBUILD_TESTS=OFF \

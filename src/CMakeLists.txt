@@ -336,6 +336,11 @@ find_package(Threads REQUIRED)
 
 apply_common_compiler_flags(Qubic)
 if(APPLE)
+    # ld-prime (Xcode 16) segfaults in ChainedFixupsWriter::buildLinkeditFixups emitting
+    # LC_DYLD_CHAINED_FIXUPS for this binary on x86_64; classic bind opcodes link fine.
+    if(NOT IS_ARM)
+        target_link_options(Qubic PRIVATE -Wl,-no_fixup_chains)
+    endif()
     # macOS ld64: no -Bstatic/-Bdynamic, no librt/libdl (in libSystem), no libbacktrace.
     target_link_libraries(Qubic
             platform_common
