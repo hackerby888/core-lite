@@ -3594,7 +3594,7 @@ static void processTick(unsigned long long processorNumber)
 
 #ifdef LITE_WASM_SC
     // Activate armed contracts under SC_INITIALIZE_TX framing.
-    if (Wasm::Runtime::hasPendingActivation(system.tick))
+    if (Wasm::Runtime::hasPendingActivation())
     {
         logger.registerNewTx(system.tick, logger.SC_INITIALIZE_TX);
         Wasm::Runtime::activatePendingContracts();

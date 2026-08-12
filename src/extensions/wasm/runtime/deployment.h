@@ -214,7 +214,7 @@ static void runPendingMigration(unsigned int contractIndex);
     }
 }
 
-static bool hasPendingActivation(unsigned int /*tick*/)
+static bool hasPendingActivation()
 {
     for (unsigned int slotOffset = 0; slotOffset < WASM_RESERVED_SLOT_COUNT; slotOffset++)
     {

@@ -24,7 +24,6 @@ struct ContractSlot
     bool everInitialized = false;
     bool needsMigrate = false;
     unsigned char codeHash[32] = {};
-    unsigned int activationTick = 0;
     unsigned int version = 0;
     char name[32] = {};
     std::string sourceH;
