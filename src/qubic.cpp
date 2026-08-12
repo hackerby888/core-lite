@@ -9532,7 +9532,8 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             autoResendTickVotes.lastTick = system.initialTick;
             autoResendTickVotes.lastCheck = __rdtsc();
             logToConsole(L"Init complete! Entering main loop ...");
-#if defined(__linux__) && !defined(NO_RPC)
+// Mirrors where gRpcNodeReady is defined: the unix-socket transport and the in-process Wasm server.
+#if !defined(NO_RPC) && (defined(__linux__) || defined(LITE_WASM_SC))
             gRpcNodeReady.store(true, std::memory_order_release);   // RPC dispatch may now read node state
 #endif
             while (!shutDownNode)

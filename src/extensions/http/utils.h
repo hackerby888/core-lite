@@ -1,6 +1,7 @@
 #pragma once
 
 #include "platform/concurrency.h"
+#include <drogon/drogon.h>   // fetch() below takes drogon types; do not rely on include order
 #include <trantor/net/EventLoopThread.h>
 
 class HttpUtils

@@ -3,6 +3,9 @@
 // Node-side drogon-free RPC. The router core is portable (Wasm builds serve it through the
 // in-process drogon adapter in http.h); the unix-socket transport below is Linux-only — the
 // drogon sidecar forwards HTTP there and the node re-binds the socket after a fork-promote.
+// The legacy Windows solution opts out entirely because it does not link jsoncpp.
+
+#if defined(__linux__) || defined(LITE_WASM_SC)
 
 #include <string>
 #include <map>
@@ -431,3 +434,5 @@ inline std::string rpcUnixPath(int httpPort)
 }
 
 #endif // __linux__
+
+#endif // __linux__ || LITE_WASM_SC

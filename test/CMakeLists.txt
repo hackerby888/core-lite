@@ -57,7 +57,6 @@ add_executable(
 		custom_qubic_mining_storage.cpp
 		fast_tx_window.cpp
    		file_io.cpp
-		fork_rollback.cpp
    		fourq.cpp
    		kangaroo_twelve.cpp
    		m256.cpp
@@ -87,6 +86,11 @@ add_executable(
 		oracle_engine.cpp
 		windows_lazy_memory.cpp
 )
+
+# Fork rollback is Linux-only (fork/pipe/disk-shadow); its test needs the real implementation.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(qubic_core_tests PRIVATE fork_rollback.cpp)
+endif()
 
 add_executable(
   qubic_state_tests
