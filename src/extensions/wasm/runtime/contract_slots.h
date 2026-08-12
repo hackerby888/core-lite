@@ -56,9 +56,7 @@ static inline unsigned int expectedModuleUploadChunkCount(unsigned int totalSize
     return (totalSize - 1u) / WASM_UPLOAD_CHUNK_SIZE + 1u;
 }
 
-static inline bool validModuleUploadShape(
-    unsigned int totalSize,
-    unsigned int chunkCount)
+static inline bool validModuleUploadShape(unsigned int totalSize, unsigned int chunkCount)
 {
     return totalSize > 0
         && totalSize <= WASM_MAX_MODULE_SIZE
@@ -104,17 +102,13 @@ static inline bool tryReceiveModuleChunk(
 
     const unsigned long long destinationOffset =
         (unsigned long long)sequence * WASM_UPLOAD_CHUNK_SIZE;
-    if (!data
-        || sequence != moduleUpload.receivedCount
-        || sequence >= moduleUpload.chunkCount)
+    if (!data || sequence != moduleUpload.receivedCount || sequence >= moduleUpload.chunkCount)
     {
         return false;
     }
 
-    const unsigned int remainingSize =
-        moduleUpload.totalSize - (unsigned int)destinationOffset;
-    const unsigned int expectedDataLength =
-        remainingSize < WASM_UPLOAD_CHUNK_SIZE
+    const unsigned int remainingSize = moduleUpload.totalSize - (unsigned int)destinationOffset;
+    const unsigned int expectedDataLength = remainingSize < WASM_UPLOAD_CHUNK_SIZE
         ? remainingSize
         : WASM_UPLOAD_CHUNK_SIZE;
     if (dataLength != expectedDataLength)

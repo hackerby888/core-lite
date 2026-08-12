@@ -83,15 +83,12 @@ constexpr char signatureCharacter()
 }
 
 template<class T>
-using AbiType =
-    std::conditional_t<std::is_void_v<T>, void,
+using AbiType = std::conditional_t<std::is_void_v<T>, void,
       std::conditional_t<std::is_pointer_v<T>, uint32_t,
         std::conditional_t<(std::is_integral_v<T> && safeSizeOf<T>() <= 4), uint32_t, T>>>;
 
 template<class Parameter>
-static inline Parameter convertArgument(
-    wasm_exec_env_t execEnv,
-    AbiType<Parameter> argument)
+static inline Parameter convertArgument(wasm_exec_env_t execEnv, AbiType<Parameter> argument)
 {
     if constexpr (std::is_pointer_v<Parameter>)
     {
@@ -183,10 +180,7 @@ struct InfrastructureImport<Member>
 };
 
 // Bespoke wrappers retain derived signatures through the ABI rows below.
-static uint32_t w_acquireScratch(
-    wasm_exec_env_t execEnv,
-    uint64_t size,
-    uint32_t initializeToZero)
+static uint32_t w_acquireScratch(wasm_exec_env_t execEnv, uint64_t size, uint32_t initializeToZero)
 {
     CallContext* callContext = activeCallContext(execEnv);
 
@@ -357,11 +351,7 @@ static uint32_t w_assetEnumerate(
     return hostServices.assetEnumerate(callContext->ctx, kind, nativeAddress(execEnv, issuanceOffset), nativeAddress(execEnv, ownershipOffset), nativeAddress(execEnv, possessionOffset), nativeAddress(execEnv, outputOffset), capacity);
 }
 
-static uint32_t w_dayOfWeek(
-    wasm_exec_env_t execEnv,
-    uint32_t year,
-    uint32_t month,
-    uint32_t day)
+static uint32_t w_dayOfWeek(wasm_exec_env_t execEnv, uint32_t year, uint32_t month, uint32_t day)
 {
     CallContext* callContext = activeCallContext(execEnv);
     return hostServices.dayOfWeek(callContext->ctx, (unsigned char)year, (unsigned char)month, (unsigned char)day);
@@ -397,10 +387,7 @@ static void w_ipoBidId(
     hostServices.ipoBidId(callContext->ctx, contractIndex, bidIndex, nativeAddress(execEnv, outputOffset));
 }
 
-static int64_t w_ipoBidPrice(
-    wasm_exec_env_t execEnv,
-    uint32_t contractIndex,
-    uint32_t bidIndex)
+static int64_t w_ipoBidPrice(wasm_exec_env_t execEnv, uint32_t contractIndex, uint32_t bidIndex)
 {
     CallContext* callContext = activeCallContext(execEnv);
     return hostServices.ipoBidPrice(callContext->ctx, contractIndex, bidIndex);
@@ -438,8 +425,7 @@ static int64_t w_invokeOc(
     CallContext* callContext = activeCallContext(execEnv);
     wasm_module_inst_t moduleInstance = wasm_runtime_get_module_inst(execEnv);
 
-    if (!callContext
-        || !wasm_runtime_validate_app_addr(moduleInstance, requestOffset, requestSize))
+    if (!callContext || !wasm_runtime_validate_app_addr(moduleInstance, requestOffset, requestSize))
     {
         return -1;
     }

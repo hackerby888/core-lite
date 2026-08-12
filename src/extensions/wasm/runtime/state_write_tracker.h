@@ -70,10 +70,7 @@ static inline bool captureStateWrite(unsigned char* faultAddress, unsigned char*
 
         if (!frame.dirtyPageBits[pageIndex])
         {
-            memcpy(
-                frame.pageSnapshots + (size_t)pageIndex * systemPageSize,
-                page,
-                systemPageSize);
+            memcpy(frame.pageSnapshots + (size_t)pageIndex * systemPageSize, page, systemPageSize);
             frame.dirtyPageBits[pageIndex] = 1;
         }
     }
@@ -98,11 +95,7 @@ static LONG WINAPI handleStateWriteException(EXCEPTION_POINTERS* exceptionPointe
     if (captureStateWrite(faultAddress, page))
     {
         DWORD oldProtection;
-        if (VirtualProtect(
-                page,
-                (SIZE_T)systemPageSize,
-                PAGE_READWRITE,
-                &oldProtection))
+        if (VirtualProtect(page, (SIZE_T)systemPageSize, PAGE_READWRITE, &oldProtection))
         {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
@@ -213,9 +206,7 @@ static inline bool reserveDirtyPages(StateWriteFrame& frame, unsigned int pageCo
     }
     frame.pageSnapshots = snapshots;
 
-    unsigned char* dirtyBits = (unsigned char*)realloc(
-        frame.dirtyPageBits,
-        pageCount);
+    unsigned char* dirtyBits = (unsigned char*)realloc(frame.dirtyPageBits, pageCount);
     if (!dirtyBits)
     {
         return false;
@@ -302,9 +293,7 @@ static inline void rearmParentStateWriteFrames()
     }
 }
 
-static inline StateWriteFrame* popStateWriteFrame(
-    unsigned char* stateStart,
-    unsigned int stateSize)
+static inline StateWriteFrame* popStateWriteFrame(unsigned char* stateStart, unsigned int stateSize)
 {
     if (!stateWriteFrameCount)
     {
@@ -337,9 +326,7 @@ static inline StateWriteFrame* popStateWriteFrame(
     return &frame;
 }
 
-static inline void discardStateWriteTracking(
-    unsigned char* stateStart,
-    unsigned int stateSize)
+static inline void discardStateWriteTracking(unsigned char* stateStart, unsigned int stateSize)
 {
     popStateWriteFrame(stateStart, stateSize);
 }
@@ -367,8 +354,7 @@ static inline void finishStateWriteTracking(
         }
 
         unsigned char* page = frame->protectionLow + (size_t)pageIndex * systemPageSize;
-        const unsigned char* before =
-            frame->pageSnapshots + (size_t)pageIndex * systemPageSize;
+        const unsigned char* before = frame->pageSnapshots + (size_t)pageIndex * systemPageSize;
         unsigned char* rangeStart = page > stateStart ? page : stateStart;
         unsigned char* rangeEnd = (page + systemPageSize) < stateEnd ? page + systemPageSize : stateEnd;
 

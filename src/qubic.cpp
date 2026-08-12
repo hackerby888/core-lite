@@ -1270,8 +1270,7 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
 
             unsigned int tickIndex = ts.tickToIndexCurrentEpoch(request->tick);
             ts.tickData.acquireLock();
-            if (request->tick == system.tick + 1
-                && ts.tickData[tickIndex].epoch == system.epoch)
+            if (request->tick == system.tick + 1 && ts.tickData[tickIndex].epoch == system.epoch)
             {
                 KangarooTwelve(request, transactionSize, digest, sizeof(digest));
                 auto* tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
@@ -4487,10 +4486,7 @@ static void processTick(unsigned long long processorNumber)
         }
         else
         {
-            TestInvalidSolution::broadcastRandom(
-                score->currentRandomSeed,
-                txTick,
-                claimedScore);
+            TestInvalidSolution::broadcastRandom(score->currentRandomSeed, txTick, claimedScore);
         }
     }
 
@@ -6784,8 +6780,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
 
                 if (numberOfKnownNextTickTransactions != numberOfNextTickTransactions)
                 {
-                    if (!targetNextTickDataDigestIsKnown
-                        && isTickTimeOut())
+                    if (!targetNextTickDataDigestIsKnown && isTickTimeOut())
                     {
                         // If we don't have enough txs data for the next tick, and current/next tick votes not reach quorum
                         // and tick duration exceed 5*TARGET_TICK_DURATION, then it will temporarily discard next tickData, that will lead to zero expectedNextTickTransactionDigest
@@ -8676,8 +8671,7 @@ static void processKeyPresses()
         switch (key.ScanCode)
         {
         /*
-        *
-        * F2 Key
+        * * F2 Key
         * By pressing the F2 Key the node will display the current status.
         * The status includes:
         * Version, faulty Computors, Last Tick Date,
@@ -8840,8 +8834,7 @@ static void processKeyPresses()
         break;
 
         /*
-        *
-        * F3 Key
+        * * F3 Key
         * By Pressing the F3 Key the node will display the current state of the mining race
         * You can see which of your ID's is at which position.
         */
@@ -9344,8 +9337,7 @@ static void bspForkPoint()
     }
     flushAsyncFileIOBuffer(0);
     const int remainingDrainMs = quiescence.remainingDrainMs();
-    const bool swapIoDrained =
-        remainingDrainMs > 0 && ts.drainSwapIoForFork(remainingDrainMs);
+    const bool swapIoDrained = remainingDrainMs > 0 && ts.drainSwapIoForFork(remainingDrainMs);
     if (!swapIoDrained)
     {
         ForkStats::onForkSkipped(ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "vm_io");
@@ -9802,8 +9794,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     const bool isNewTickPlus1 = true;
                     const bool isNewTickPlus2 = true;
 #endif
-                    if (tickRequestingIndicator == gTickTotalNumberOfComputors
-                        && isNewTick)
+                    if (tickRequestingIndicator == gTickTotalNumberOfComputors && isNewTick)
                     {
                         requestedQuorumTick.header.randomizeDejavu();
                         requestedQuorumTick.requestQuorumTick.quorumTick.tick = system.tick;

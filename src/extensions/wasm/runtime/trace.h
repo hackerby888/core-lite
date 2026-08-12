@@ -125,10 +125,7 @@ struct TraceLockScope
     TraceLockScope& operator=(const TraceLockScope&) = delete;
 };
 
-static inline void recordHostCall(
-    TraceEntry* entry,
-    const char* name,
-    const std::string& detail)
+static inline void recordHostCall(TraceEntry* entry, const char* name, const std::string& detail)
 {
     if (entry)
     {
@@ -149,9 +146,7 @@ static inline void commitTrace(TraceEntry& entry)
     traceWriteIndex++;
 }
 
-static inline std::vector<TraceEntry> traceSnapshot(
-    unsigned long long since,
-    unsigned int limit)
+static inline std::vector<TraceEntry> traceSnapshot(unsigned long long since, unsigned int limit)
 {
     std::vector<TraceEntry> entries;
 

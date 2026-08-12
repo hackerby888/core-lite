@@ -15,9 +15,7 @@ QPI::id QPI::QpiContextFunctionCall::K12(const T& data) const
     return digest;
 }
 
-long long QPI::QpiContextProcedureCall::transfer(
-    const m256i& destination,
-    long long amount) const
+long long QPI::QpiContextProcedureCall::transfer(const m256i& destination, long long amount) const
 {
     return lh_transfer(&destination, amount);
 }
@@ -35,9 +33,7 @@ void QPI::QpiContextFunctionCall::__qpiAbort(unsigned int errorCode) const
     lh_abort(errorCode);
 }
 
-long long QPI::QpiContextProcedureCall::burn(
-    long long amount,
-    unsigned int contractIndex) const
+long long QPI::QpiContextProcedureCall::burn(long long amount, unsigned int contractIndex) const
 {
     return lh_burn(amount, contractIndex);
 }
@@ -57,15 +53,12 @@ int QPI::QpiContextFunctionCall::numberOfTickTransactions() const
     return lh_numberOfTickTransactions();
 }
 
-QPI::bit QPI::QpiContextFunctionCall::getEntity(
-    const m256i& id,
-    QPI::Entity& entity) const
+QPI::bit QPI::QpiContextFunctionCall::getEntity(const m256i& id, QPI::Entity& entity) const
 {
     return (QPI::bit)lh_getEntity(&id, &entity);
 }
 
-long long QPI::QpiContextFunctionCall::queryFeeReserve(
-    unsigned int contractIndex) const
+long long QPI::QpiContextFunctionCall::queryFeeReserve(unsigned int contractIndex) const
 {
     return lh_queryFeeReserve(contractIndex);
 }
@@ -302,14 +295,12 @@ void QPI::QpiContextFunctionCall::initMiningSeed(const m256i miningSeed) const
     lh_initMiningSeed(&miningSeed);
 }
 
-unsigned char QPI::QpiContextFunctionCall::getOracleQueryStatus(
-    long long queryId) const
+unsigned char QPI::QpiContextFunctionCall::getOracleQueryStatus(long long queryId) const
 {
     return (unsigned char)lh_getOracleQueryStatus(queryId);
 }
 
-unsigned char QPI::QpiContextFunctionCall::getOcInvocationStatus(
-    long long invocationId) const
+unsigned char QPI::QpiContextFunctionCall::getOcInvocationStatus(long long invocationId) const
 {
     return (unsigned char)lh_getOcInvocationStatus(invocationId);
 }
@@ -328,8 +319,7 @@ QPI::sint64 QPI::QpiContextProcedureCall::__qpiInvokeOC(
         (unsigned int)sizeof(typename OcInterface::OcRequest));
 }
 
-bool QPI::QpiContextProcedureCall::unsubscribeOracle(
-    int oracleSubscriptionId) const
+bool QPI::QpiContextProcedureCall::unsubscribeOracle(int oracleSubscriptionId) const
 {
     return lh_unsubscribeOracle(oracleSubscriptionId) != 0;
 }
@@ -382,8 +372,7 @@ bool QPI::QpiContextFunctionCall::getOracleReply(
     return lh_getOracleReply(queryId, &reply, (unsigned int)sizeof(typename OracleInterface::OracleReply)) != 0;
 }
 
-bool QPI::QpiContextProcedureCall::distributeDividends(
-    long long amountPerShare) const
+bool QPI::QpiContextProcedureCall::distributeDividends(long long amountPerShare) const
 {
     return lh_distributeDividends(amountPerShare);
 }

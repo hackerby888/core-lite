@@ -10,29 +10,10 @@
 namespace Wasm::Sdk
 {
 
-typedef void (*UserFunction)(
-    const QPI::QpiContextFunctionCall&,
-    void*,
-    void*,
-    void*,
-    void*);
-typedef void (*UserProcedure)(
-    const QPI::QpiContextProcedureCall&,
-    void*,
-    void*,
-    void*,
-    void*);
-typedef void (*SystemProcedure)(
-    const QPI::QpiContextProcedureCall&,
-    void*,
-    void*,
-    void*,
-    void*);
-typedef void (*MigrateProcedure)(
-    const QPI::QpiContextFunctionCall&,
-    void*,
-    void*,
-    void*);
+typedef void (*UserFunction)(const QPI::QpiContextFunctionCall&, void*, void*, void*, void*);
+typedef void (*UserProcedure)(const QPI::QpiContextProcedureCall&, void*, void*, void*, void*);
+typedef void (*SystemProcedure)(const QPI::QpiContextProcedureCall&, void*, void*, void*, void*);
+typedef void (*MigrateProcedure)(const QPI::QpiContextFunctionCall&, void*, void*, void*);
 
 // Alignment keeps debug page protection for state separate from context and IO.
 // Raw storage avoids running constructors that native contract state never runs.

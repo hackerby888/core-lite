@@ -198,9 +198,7 @@ static void resumeLog()
     __resumeLogMessage();
 }
 
-static void* acquireScratch(
-    unsigned long long size,
-    bool initializeToZero)
+static void* acquireScratch(unsigned long long size, bool initializeToZero)
 {
     return __acquireScratchpad(size, initializeToZero);
 }
@@ -210,18 +208,12 @@ static void releaseScratch(void* pointer)
     __releaseScratchpad(pointer);
 }
 
-static void hashK12(
-    const void* input,
-    unsigned int length,
-    void* output)
+static void hashK12(const void* input, unsigned int length, void* output)
 {
     KangarooTwelve(input, length, output, 32);
 }
 
-static long long transfer(
-    const void* context,
-    const void* destination,
-    long long amount)
+static long long transfer(const void* context, const void* destination, long long amount)
 {
     return procedureContext(context)->transfer(*(const m256i*)destination, amount);
 }
@@ -240,10 +232,7 @@ static void abortCall(const void* context, unsigned int errorCode)
     procedureContext(context)->__qpiAbort(errorCode);
 }
 
-static long long burn(
-    const void* context,
-    long long amount,
-    unsigned int contractIndex)
+static long long burn(const void* context, long long amount, unsigned int contractIndex)
 {
     return procedureContext(context)->burn(amount, contractIndex);
 }
@@ -263,17 +252,12 @@ static int numberOfTickTransactions(const void* context)
     return functionContext(context)->numberOfTickTransactions();
 }
 
-static unsigned char getEntity(
-    const void* context,
-    const void* id,
-    void* entity)
+static unsigned char getEntity(const void* context, const void* id, void* entity)
 {
     return (unsigned char)functionContext(context)->getEntity(*(const m256i*)id, *(QPI::Entity*)entity);
 }
 
-static long long queryFeeReserve(
-    const void* context,
-    unsigned int contractIndex)
+static long long queryFeeReserve(const void* context, unsigned int contractIndex)
 {
     return functionContext(context)->queryFeeReserve(contractIndex);
 }
@@ -298,10 +282,7 @@ static void arbitrator(const void* context, void* output)
     *(m256i*)output = functionContext(context)->arbitrator();
 }
 
-static void computor(
-    const void* context,
-    unsigned short index,
-    void* output)
+static void computor(const void* context, unsigned short index, void* output)
 {
     *(m256i*)output = functionContext(context)->computor(index);
 }
@@ -361,10 +342,7 @@ static void previousComputerDigest(const void* context, void* output)
     *(m256i*)output = functionContext(context)->getPrevComputerDigest();
 }
 
-static unsigned char isAssetIssued(
-    const void* context,
-    const void* issuer,
-    unsigned long long name)
+static unsigned char isAssetIssued(const void* context, const void* issuer, unsigned long long name)
 {
     return (unsigned char)functionContext(context)->isAssetIssued(*(const m256i*)issuer, name);
 }
@@ -477,10 +455,7 @@ static void ipoBidId(
     *(m256i*)output = functionContext(context)->ipoBidId(contractIndex, bidIndex);
 }
 
-static long long ipoBidPrice(
-    const void* context,
-    unsigned int contractIndex,
-    unsigned int bidIndex)
+static long long ipoBidPrice(const void* context, unsigned int contractIndex, unsigned int bidIndex)
 {
     return functionContext(context)->ipoBidPrice(contractIndex, bidIndex);
 }
@@ -500,16 +475,12 @@ static void initMiningSeed(const void* context, const void* seed)
     functionContext(context)->initMiningSeed(*(const m256i*)seed);
 }
 
-static unsigned char getOracleQueryStatus(
-    const void* context,
-    long long queryId)
+static unsigned char getOracleQueryStatus(const void* context, long long queryId)
 {
     return functionContext(context)->getOracleQueryStatus(queryId);
 }
 
-static unsigned char getOcInvocationStatus(
-    const void* context,
-    long long invocationId)
+static unsigned char getOcInvocationStatus(const void* context, long long invocationId)
 {
     return functionContext(context)->getOcInvocationStatus(invocationId);
 }
@@ -543,16 +514,12 @@ static long long invokeOc(
     }
 }
 
-static unsigned char unsubscribeOracle(
-    const void* context,
-    int subscriptionId)
+static unsigned char unsubscribeOracle(const void* context, int subscriptionId)
 {
     return (unsigned char)procedureContext(context)->unsubscribeOracle(subscriptionId);
 }
 
-static unsigned char distributeDividends(
-    const void* context,
-    long long amountPerShare)
+static unsigned char distributeDividends(const void* context, long long amountPerShare)
 {
     return (unsigned char)procedureContext(context)->distributeDividends(amountPerShare);
 }

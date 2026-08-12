@@ -171,10 +171,7 @@ bool isArraySorted(const Array<T, L>& array, uint64 beginIndex, uint64 endIndex)
 }
 
 template <typename T, uint64 L>
-bool isArraySortedWithoutDuplicates(
-    const Array<T, L>& array,
-    uint64 beginIndex,
-    uint64 endIndex)
+bool isArraySortedWithoutDuplicates(const Array<T, L>& array, uint64 beginIndex, uint64 endIndex)
 {
     if (endIndex > L || beginIndex > endIndex)
     {

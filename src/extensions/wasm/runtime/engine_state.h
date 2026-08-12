@@ -99,9 +99,7 @@ static inline std::string lastTrap(unsigned int contractIndex)
     return engineSlots[slotOffset].lastTrap;
 }
 
-static inline uint32_t callU32(
-    wasm_exec_env_t execEnv,
-    wasm_function_inst_t function)
+static inline uint32_t callU32(wasm_exec_env_t execEnv, wasm_function_inst_t function)
 {
     uint32_t arguments[1] = { 0 };
 
@@ -145,9 +143,7 @@ static MemoryLayout resolveMemoryLayout(const EngineSlot& slot)
     return fixedMemoryLayout(slot.ioBaseOffset);
 }
 
-static bool resolveArenaLimit(
-    const MemoryLayout& fixedLayout,
-    uint32_t& arenaLimit)
+static bool resolveArenaLimit(const MemoryLayout& fixedLayout, uint32_t& arenaLimit)
 {
     const unsigned long long limit = (unsigned long long)fixedLayout.arenaOffset + WASM_ARENA_SIZE;
     if (limit > 0xffffffffull)

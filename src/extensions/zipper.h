@@ -87,18 +87,12 @@ public:
 class Zipper
 {
 public:
-    static std::vector<unsigned char> zip(
-        unsigned char*,
-        size_t,
-        int = 0)
+    static std::vector<unsigned char> zip(unsigned char*, size_t, int = 0)
     {
         throw std::runtime_error("Zipper: NO_USE_SWAP build");
     }
 
-    static std::vector<unsigned char> unzip(
-        unsigned char*,
-        size_t,
-        int = 0)
+    static std::vector<unsigned char> unzip(unsigned char*, size_t, int = 0)
     {
         throw std::runtime_error("Zipper: NO_USE_SWAP build");
     }

@@ -43,10 +43,7 @@ namespace tickStorageScan
         action.sa_flags = SA_SIGINFO;
         sigemptyset(&action.sa_mask);
 
-        std::memset(
-            &defaultSegmentationFaultAction,
-            0,
-            sizeof(defaultSegmentationFaultAction));
+        std::memset(&defaultSegmentationFaultAction, 0, sizeof(defaultSegmentationFaultAction));
         defaultSegmentationFaultAction.sa_handler = SIG_DFL;
         sigemptyset(&defaultSegmentationFaultAction.sa_mask);
         if (sigaction(SIGSEGV, &action, &previousSegmentationFaultAction) != 0)
@@ -234,8 +231,7 @@ namespace tickStorageScan
         const unsigned long long transactionLimit = storage.nextTickTransactionOffset;
         const unsigned long long transactionCapacity =
             storage.tickTransactions.storageSpaceCurrentEpoch;
-        const bool transactionLimitValid =
-            transactionLimit >= FIRST_TICK_TRANSACTION_OFFSET
+        const bool transactionLimitValid = transactionLimit >= FIRST_TICK_TRANSACTION_OFFSET
             && transactionLimit <= transactionCapacity;
         if (!transactionLimitValid)
         {
@@ -269,9 +265,7 @@ namespace tickStorageScan
                     tickData.epoch, tickData.tick, tickData.computorIndex,
                     tick % NUMBER_OF_COMPUTORS);
             }
-            else if (!hasTickData
-                && tickData.epoch != 0
-                && tickData.epoch != INVALIDATED_TICK_DATA)
+            else if (!hasTickData && tickData.epoch != 0 && tickData.epoch != INVALIDATED_TICK_DATA)
             {
                 issues.add("tick-data", tick, -1, "invalid epoch marker %u", tickData.epoch);
             }
@@ -294,9 +288,7 @@ namespace tickStorageScan
                 if (vote.epoch == 0)
                     continue;
 
-                if (vote.epoch != epoch
-                    || vote.tick != tick
-                    || vote.computorIndex != computor)
+                if (vote.epoch != epoch || vote.tick != tick || vote.computorIndex != computor)
                 {
                     issues.add(
                         "tick-vote", tick, computor,
@@ -495,8 +487,7 @@ namespace tickStorageScan
         const unsigned long long tickCount = systemRangeValid
             ? (unsigned long long)system.tick - system.initialTick
             : 0;
-        if (!systemRangeValid
-            || tickCount > MAX_NUMBER_OF_TICKS_PER_EPOCH)
+        if (!systemRangeValid || tickCount > MAX_NUMBER_OF_TICKS_PER_EPOCH)
         {
             std::fprintf(
                 stderr,
@@ -565,24 +556,15 @@ namespace tickStorageScan
         deInitFileSystem();
         if (gShadowPoisoned.load(std::memory_order_acquire))
         {
-            issues.add(
-                "swap-shadow", system.tick, -1,
-                "temporary shadow I/O failed");
+            issues.add("swap-shadow", system.tick, -1, "temporary shadow I/O failed");
         }
         if (!discardShadow())
         {
-            issues.add(
-                "swap-shadow", system.tick, -1,
-                "temporary shadow cleanup failed");
+            issues.add("swap-shadow", system.tick, -1, "temporary shadow cleanup failed");
         }
         cleanup();
 
-        progress.update(
-            tickCount,
-            tickCount,
-            result.transactionsChecked,
-            issues.total,
-            true);
+        progress.update(tickCount, tickCount, result.transactionsChecked, issues.total, true);
         issues.print();
 
         const int exitCode = issues.total ? 1 : 0;

@@ -21,8 +21,7 @@ struct EnvironmentScope
     explicit EnvironmentScope(const EngineSlot& slot)
     {
         // WAMR trap backtraces require every frame in an environment to belong to one module.
-        if (currentEnvironment
-            && wasm_runtime_get_module_inst(currentEnvironment) == slot.instance)
+        if (currentEnvironment && wasm_runtime_get_module_inst(currentEnvironment) == slot.instance)
         {
             execEnv = currentEnvironment;
             savedInstance = wasm_runtime_get_module_inst(execEnv);
@@ -68,10 +67,7 @@ struct EnvironmentScope
     EnvironmentScope& operator=(const EnvironmentScope&) = delete;
 };
 
-static CallContext createCallContext(
-    const void* context,
-    uint32_t arenaStart,
-    uint32_t arenaLimit)
+static CallContext createCallContext(const void* context, uint32_t arenaStart, uint32_t arenaLimit)
 {
     CallContext callContext;
 
@@ -82,9 +78,7 @@ static CallContext createCallContext(
     return callContext;
 }
 
-static void bindEnvironment(
-    wasm_exec_env_t execEnv,
-    CallContext& callContext)
+static void bindEnvironment(wasm_exec_env_t execEnv, CallContext& callContext)
 {
     wasm_runtime_set_user_data(execEnv, &callContext);
 }
@@ -96,10 +90,7 @@ struct CallContextScope
     CallContext* savedContext;
     void* savedUserData;
 
-    CallContextScope(
-        wasm_exec_env_t environment,
-        int slotOffset,
-        CallContext& callContext)
+    CallContextScope(wasm_exec_env_t environment, int slotOffset, CallContext& callContext)
         : activeContext(slotCallContexts[slotOffset])
     {
         execEnv = environment;
@@ -348,10 +339,7 @@ static void handleDispatchResult(
     wasm_runtime_clear_exception(slot.instance);
 }
 
-static void handleMigrationResult(
-    EngineSlot& slot,
-    uint32_t contractIndex,
-    bool succeeded)
+static void handleMigrationResult(EngineSlot& slot, uint32_t contractIndex, bool succeeded)
 {
     if (succeeded)
     {

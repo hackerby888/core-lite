@@ -170,9 +170,7 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
     app().registerPreHandlingAdvice(
         [](const HttpRequestPtr& req)
         {
-            req->getAttributes()->insert(
-                "qubic_start",
-                std::chrono::steady_clock::now());
+            req->getAttributes()->insert("qubic_start", std::chrono::steady_clock::now());
         });
 
     app().registerPostHandlingAdvice(

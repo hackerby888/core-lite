@@ -8,9 +8,7 @@
 namespace Wasm::Runtime
 {
 
-static void discoverRegistration(
-    EngineSlot& slot,
-    const RequiredExports& exports)
+static void discoverRegistration(EngineSlot& slot, const RequiredExports& exports)
 {
     wasm_function_inst_t contextAddress = wasm_runtime_lookup_function(slot.instance, "ctx_addr");
     if (contextAddress)
@@ -123,9 +121,7 @@ static uint32_t callWithU32Argument(
     return arguments[0];
 }
 
-static void registerSystemProcedures(
-    EngineSlot& slot,
-    unsigned int contractIndex)
+static void registerSystemProcedures(EngineSlot& slot, unsigned int contractIndex)
 {
     wasm_function_inst_t maskFunction = wasm_runtime_lookup_function(slot.instance, "reg_sysproc_mask");
     wasm_function_inst_t localsSizeFunction = wasm_runtime_lookup_function(slot.instance, "sysproc_locals_size");

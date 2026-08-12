@@ -338,14 +338,10 @@ TEST(RequestProcessorBarrierTest, FailedContenderDoesNotReleaseActiveOwner)
         tickFork::RequestProcessorBarrier contender;
         EXPECT_FALSE(contender.request());
     }
-    EXPECT_EQ(
-        tickFork::gRequestProcessorParkPhase.load(std::memory_order_acquire),
-        ownerPhase);
+    EXPECT_EQ(tickFork::gRequestProcessorParkPhase.load(std::memory_order_acquire), ownerPhase);
 
     owner.release();
-    EXPECT_EQ(
-        tickFork::gRequestProcessorParkPhase.load(std::memory_order_acquire),
-        ownerPhase + 1);
+    EXPECT_EQ(tickFork::gRequestProcessorParkPhase.load(std::memory_order_acquire), ownerPhase + 1);
     tickFork::gRequestProcessorParkPhase.store(0, std::memory_order_release);
 }
 
@@ -364,9 +360,7 @@ TEST(RequestProcessorBarrierTest, UnacknowledgedOwnerReleasesOwnedPhase)
         ownerPhase = owner.phase();
         EXPECT_FALSE(owner.allAcknowledged(processorIDs, 1));
     }
-    EXPECT_EQ(
-        tickFork::gRequestProcessorParkPhase.load(std::memory_order_acquire),
-        ownerPhase + 1);
+    EXPECT_EQ(tickFork::gRequestProcessorParkPhase.load(std::memory_order_acquire), ownerPhase + 1);
 
     tickFork::gRequestProcessorParkPhase.store(0, std::memory_order_release);
     tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(
@@ -418,9 +412,7 @@ TEST(ForkRollbackControl, RetireRequestWaitsForBspCompletion)
         return handoff.requestAndWait(1000);
     });
 
-    ASSERT_TRUE(waitForRetireState(
-        handoff,
-        tickForkControl::BspRetireHandoff::State::Requested));
+    ASSERT_TRUE(waitForRetireState(handoff, tickForkControl::BspRetireHandoff::State::Requested));
     EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
     ASSERT_TRUE(handoff.tryStart());
     EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
@@ -466,12 +458,9 @@ TEST(ForkRollbackControl, RunningRetireIgnoresRequestTimeout)
         return handoff.requestAndWait(10);
     });
 
-    ASSERT_TRUE(waitForRetireState(
-        handoff,
-        tickForkControl::BspRetireHandoff::State::Requested));
+    ASSERT_TRUE(waitForRetireState(handoff, tickForkControl::BspRetireHandoff::State::Requested));
     ASSERT_TRUE(handoff.tryStart());
-    const auto afterTimeout =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+    const auto afterTimeout = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
     while (std::chrono::steady_clock::now() < afterTimeout)
         std::this_thread::yield();
 
@@ -490,9 +479,7 @@ TEST(ForkRollbackControl, FailedRetireReturnsFailure)
         return handoff.requestAndWait(1000);
     });
 
-    ASSERT_TRUE(waitForRetireState(
-        handoff,
-        tickForkControl::BspRetireHandoff::State::Requested));
+    ASSERT_TRUE(waitForRetireState(handoff, tickForkControl::BspRetireHandoff::State::Requested));
     ASSERT_TRUE(handoff.tryStart());
     ASSERT_TRUE(handoff.finish(false));
     ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
@@ -614,8 +601,7 @@ TEST(ForkRollbackControl, PromoteClosesOnlyInheritedRpcUnixSockets)
             }
 
             const int clientFd = socket(AF_UNIX, SOCK_STREAM, 0);
-            if (clientFd < 0
-                || connect(clientFd, (sockaddr*)&rpcAddress, sizeof(rpcAddress)) != 0)
+            if (clientFd < 0 || connect(clientFd, (sockaddr*)&rpcAddress, sizeof(rpcAddress)) != 0)
             {
                 unlink(rpcPath.c_str());
                 _exit(1);
@@ -646,18 +632,15 @@ TEST(ForkRollbackControl, PromoteClosesOnlyInheritedRpcUnixSockets)
             unlink(rpcPath.c_str());
 
             errno = 0;
-            const bool listenerClosed =
-                fcntl(listenerFd, F_GETFD) == -1 && errno == EBADF;
+            const bool listenerClosed = fcntl(listenerFd, F_GETFD) == -1 && errno == EBADF;
             errno = 0;
             const bool acceptedConnectionClosed =
                 fcntl(acceptedFd, F_GETFD) == -1 && errno == EBADF;
             const bool clientOpen = fcntl(clientFd, F_GETFD) != -1;
-            const bool unrelatedUnixOpen =
-                fcntl(unrelatedUnixFds[0], F_GETFD) != -1
+            const bool unrelatedUnixOpen = fcntl(unrelatedUnixFds[0], F_GETFD) != -1
                 && fcntl(unrelatedUnixFds[1], F_GETFD) != -1;
             const bool inetOpen = fcntl(inetFd, F_GETFD) != -1;
-            const bool pipeOpen =
-                fcntl(pipeFds[0], F_GETFD) != -1
+            const bool pipeOpen = fcntl(pipeFds[0], F_GETFD) != -1
                 && fcntl(pipeFds[1], F_GETFD) != -1;
 
             _exit(closedCount == 2
@@ -850,9 +833,7 @@ TEST(ForkStatsTest, CountersAndDurableLog)
     EXPECT_EQ(ForkStats::forksOk.load() - initialForksOk, 1u);
     EXPECT_EQ(ForkStats::mismatches.load() - initialMismatches, 1u);
     EXPECT_EQ(ForkStats::forksSkippedTotal.load() - initialSkippedTotal, 3u);
-    EXPECT_EQ(
-        ForkStats::skipByReason[ForkStats::CENSUS].load() - initialCensusSkips,
-        2u);
+    EXPECT_EQ(ForkStats::skipByReason[ForkStats::CENSUS].load() - initialCensusSkips, 2u);
     EXPECT_EQ(ForkStats::lastSkipTick.load(), 1003u);
     EXPECT_EQ(ForkStats::lastSkipReason.load(), (int)ForkStats::PARK_TIMEOUT);
 
@@ -901,8 +882,7 @@ TEST(ForkStatsTest, ParentUpdatesAreVisibleToForkChild)
         while (readSize < 0 && errno == EINTR);
         close(releasePipe[0]);
 
-        const bool countersVisible =
-            ForkStats::forksOk.load() == initialForksOk + 1
+        const bool countersVisible = ForkStats::forksOk.load() == initialForksOk + 1
             && ForkStats::mismatches.load() == initialMismatches + 1;
         _exit(readSize == 1 && countersVisible ? 0 : 1);
     }

@@ -156,21 +156,13 @@ TEST(WasmContracts, UploadBeginPreservesTheActiveSession)
     std::memset(firstHash, 0x11, sizeof(firstHash));
     std::memset(otherHash, 0x22, sizeof(otherHash));
 
-    ASSERT_TRUE(tryBeginModuleUpload(
-        11,
-        WASM_UPLOAD_CHUNK_SIZE * 2u,
-        2,
-        firstHash));
+    ASSERT_TRUE(tryBeginModuleUpload(11, WASM_UPLOAD_CHUNK_SIZE * 2u, 2, firstHash));
     moduleUploadBuffer[0] = 0xab;
     moduleUploadBuffer[WASM_UPLOAD_CHUNK_SIZE] = 0xcd;
     receivedChunkBits[0] = 1;
     moduleUpload.receivedCount = 1;
 
-    EXPECT_TRUE(tryBeginModuleUpload(
-        11,
-        WASM_UPLOAD_CHUNK_SIZE,
-        1,
-        otherHash));
+    EXPECT_TRUE(tryBeginModuleUpload(11, WASM_UPLOAD_CHUNK_SIZE, 1, otherHash));
     EXPECT_EQ(moduleUpload.sessionId, 11u);
     EXPECT_EQ(moduleUpload.totalSize, WASM_UPLOAD_CHUNK_SIZE * 2u);
     EXPECT_EQ(moduleUpload.chunkCount, 2u);
@@ -180,11 +172,7 @@ TEST(WasmContracts, UploadBeginPreservesTheActiveSession)
     EXPECT_EQ(moduleUploadBuffer[0], 0xab);
     EXPECT_EQ(moduleUploadBuffer[WASM_UPLOAD_CHUNK_SIZE], 0xcd);
 
-    EXPECT_FALSE(tryBeginModuleUpload(
-        22,
-        WASM_UPLOAD_CHUNK_SIZE,
-        1,
-        otherHash));
+    EXPECT_FALSE(tryBeginModuleUpload(22, WASM_UPLOAD_CHUNK_SIZE, 1, otherHash));
     EXPECT_EQ(moduleUpload.sessionId, 11u);
     EXPECT_EQ(moduleUpload.totalSize, WASM_UPLOAD_CHUNK_SIZE * 2u);
     EXPECT_EQ(moduleUpload.chunkCount, 2u);
@@ -227,11 +215,7 @@ TEST(WasmContracts, UploadBeginRejectsInvalidShapesWithoutMutation)
         std::memset(moduleUploadBuffer, 0x5a, 64);
         std::memset(receivedChunkBits, 0xa5, sizeof(receivedChunkBits));
 
-        EXPECT_FALSE(tryBeginModuleUpload(
-            17,
-            testCase.totalSize,
-            testCase.chunkCount,
-            finalHash));
+        EXPECT_FALSE(tryBeginModuleUpload(17, testCase.totalSize, testCase.chunkCount, finalHash));
         EXPECT_FALSE(moduleUpload.active);
         EXPECT_EQ(moduleUpload.sessionId, 0u);
         EXPECT_EQ(moduleUpload.totalSize, 0u);
@@ -259,8 +243,7 @@ TEST(WasmContracts, UploadChunksRejectInvalidSequenceOrLengthWithoutMutation)
     const unsigned int twoFullChunksSizeBytes = WASM_UPLOAD_CHUNK_SIZE * 2u;
     const unsigned int threeFullChunksSizeBytes = WASM_UPLOAD_CHUNK_SIZE * 3u;
     const unsigned int finalChunkSizeBytes = 92;
-    const unsigned int partialFinalSizeBytes =
-        WASM_UPLOAD_CHUNK_SIZE + finalChunkSizeBytes;
+    const unsigned int partialFinalSizeBytes = WASM_UPLOAD_CHUNK_SIZE + finalChunkSizeBytes;
     const RejectedChunk cases[] = {
         {
             "short first",
@@ -338,8 +321,7 @@ TEST(WasmContracts, UploadChunksRejectInvalidSequenceOrLengthWithoutMutation)
         moduleUpload = ModuleUpload{};
         std::memset(moduleUploadBuffer, 0x5a, testCase.totalSize);
         std::memset(receivedChunkBits, 0, sizeof(receivedChunkBits));
-        const unsigned int chunkCount =
-            expectedModuleUploadChunkCount(testCase.totalSize);
+        const unsigned int chunkCount = expectedModuleUploadChunkCount(testCase.totalSize);
         ASSERT_TRUE(tryBeginModuleUpload(
             activeSessionId,
             testCase.totalSize,
@@ -378,12 +360,7 @@ TEST(WasmContracts, UploadChunksRejectInvalidSequenceOrLengthWithoutMutation)
                 uploadBefore.finalHash,
                 sizeof(moduleUpload.finalHash)),
             0);
-        EXPECT_EQ(
-            std::memcmp(
-                moduleUploadBuffer,
-                bufferBefore.data(),
-                bufferBefore.size()),
-            0);
+        EXPECT_EQ(std::memcmp(moduleUploadBuffer, bufferBefore.data(), bufferBefore.size()), 0);
         EXPECT_EQ(
             std::memcmp(
                 receivedChunkBits,
@@ -411,21 +388,11 @@ TEST(WasmContracts, UploadChunksAcceptExactSequentialPayloads)
         totalSize,
         expectedModuleUploadChunkCount(totalSize),
         finalHash));
-    EXPECT_TRUE(tryReceiveModuleChunk(
-        41,
-        0,
-        fullChunk.data(),
-        WASM_UPLOAD_CHUNK_SIZE));
-    EXPECT_TRUE(tryReceiveModuleChunk(
-        41,
-        1,
-        fullChunk.data(),
-        WASM_UPLOAD_CHUNK_SIZE));
+    EXPECT_TRUE(tryReceiveModuleChunk(41, 0, fullChunk.data(), WASM_UPLOAD_CHUNK_SIZE));
+    EXPECT_TRUE(tryReceiveModuleChunk(41, 1, fullChunk.data(), WASM_UPLOAD_CHUNK_SIZE));
     EXPECT_TRUE(tryReceiveModuleChunk(41, 2, &lastByte, 1));
 
-    EXPECT_EQ(
-        moduleUpload.receivedCount,
-        expectedModuleUploadChunkCount(totalSize));
+    EXPECT_EQ(moduleUpload.receivedCount, expectedModuleUploadChunkCount(totalSize));
     EXPECT_EQ(moduleUploadBuffer[0], 0x77);
     EXPECT_EQ(moduleUploadBuffer[WASM_UPLOAD_CHUNK_SIZE], 0x77);
     EXPECT_EQ(moduleUploadBuffer[totalSize - 1], 0x88);
@@ -452,9 +419,7 @@ TEST(WasmContracts, ReservedSlotOffsetRejectsNonDynamicContractSlots)
 
     for (const SlotCase& testCase : cases)
     {
-        EXPECT_EQ(
-            reservedSlotOffset(testCase.contractIndex),
-            testCase.expectedOffset);
+        EXPECT_EQ(reservedSlotOffset(testCase.contractIndex), testCase.expectedOffset);
     }
 }
 
@@ -624,12 +589,7 @@ void hs_assert(wasm_exec_env_t, uint32_t, uint32_t, uint32_t)
 {
 }
 
-uint32_t hs_fd_write(
-    wasm_exec_env_t,
-    uint32_t,
-    uint32_t,
-    uint32_t,
-    uint32_t)
+uint32_t hs_fd_write(wasm_exec_env_t, uint32_t, uint32_t, uint32_t, uint32_t)
 {
     return 0;
 }
@@ -639,12 +599,7 @@ uint32_t hs_fd_close(wasm_exec_env_t, uint32_t)
     return 0;
 }
 
-uint32_t hs_fd_seek(
-    wasm_exec_env_t,
-    uint32_t,
-    uint64_t,
-    uint32_t,
-    uint32_t)
+uint32_t hs_fd_seek(wasm_exec_env_t, uint32_t, uint64_t, uint32_t, uint32_t)
 {
     return 0;
 }
@@ -664,9 +619,7 @@ uint32_t hs_acquireScratch(
     return offset;
 }
 
-void hs_releaseScratch(
-    wasm_exec_env_t executionEnvironment,
-    uint32_t offset)
+void hs_releaseScratch(wasm_exec_env_t executionEnvironment, uint32_t offset)
 {
     if (offset)
     {
@@ -885,10 +838,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
                 printf("CROSSHOST_OP=%u:trap\n", operationIndex);
                 if (captureCheckpoints)
                 {
-                    printf(
-                        "CROSSHOST_CHECKPOINT=%u:%s\n",
-                        operationIndex,
-                        stateHex().c_str());
+                    printf("CROSSHOST_CHECKPOINT=%u:%s\n", operationIndex, stateHex().c_str());
                 }
                 operationIndex++;
                 break;
@@ -905,10 +855,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
             printf("CROSSHOST_OP=%u:ok:%s\n", operationIndex, outHex.c_str());
             if (captureCheckpoints)
             {
-                printf(
-                    "CROSSHOST_CHECKPOINT=%u:%s\n",
-                    operationIndex,
-                    stateHex().c_str());
+                printf("CROSSHOST_CHECKPOINT=%u:%s\n", operationIndex, stateHex().c_str());
             }
             operationIndex++;
         }

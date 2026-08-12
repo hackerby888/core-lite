@@ -99,9 +99,7 @@ static bool prepareModuleBuffer(
     return true;
 }
 
-static bool loadModule(
-    unsigned int length,
-    ModuleResources& moduleSet)
+static bool loadModule(unsigned int length, ModuleResources& moduleSet)
 {
     char error[192];
 
@@ -129,9 +127,7 @@ static bool loadModule(
     return true;
 }
 
-static bool findRequiredExports(
-    wasm_module_inst_t instance,
-    RequiredExports& exports)
+static bool findRequiredExports(wasm_module_inst_t instance, RequiredExports& exports)
 {
     exports.contractIndex = wasm_runtime_lookup_function(instance, "contract_index");
     exports.stateAddress = wasm_runtime_lookup_function(instance, "state_addr");
@@ -248,9 +244,7 @@ static void adoptModule(
     moduleSet.release();
 }
 
-static void takeOverState(
-    EngineSlot& slot,
-    unsigned int contractIndex)
+static void takeOverState(EngineSlot& slot, unsigned int contractIndex)
 {
     if (!slot.stateStubReleased)
     {
@@ -262,9 +256,7 @@ static void takeOverState(
     contractStates[contractIndex] = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset);
 }
 
-static void configureMigration(
-    EngineSlot& slot,
-    unsigned int contractIndex)
+static void configureMigration(EngineSlot& slot, unsigned int contractIndex)
 {
     slot.hasMigration = false;
     slot.migrationOldStateSize = 0;
@@ -309,10 +301,7 @@ static void configureMigration(
     }
 }
 
-static void restoreState(
-    EngineSlot& slot,
-    unsigned int contractIndex,
-    StateSnapshot& snapshot)
+static void restoreState(EngineSlot& slot, unsigned int contractIndex, StateSnapshot& snapshot)
 {
     if (!snapshot.buffer.data)
     {

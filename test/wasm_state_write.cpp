@@ -34,19 +34,9 @@ size_t testPageSize()
 unsigned char* allocateTestPages(size_t size)
 {
 #ifdef _WIN32
-    return (unsigned char*)VirtualAlloc(
-        nullptr,
-        size,
-        MEM_RESERVE | MEM_COMMIT,
-        PAGE_READWRITE);
+    return (unsigned char*)VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
-    void* memory = mmap(
-        nullptr,
-        size,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANON,
-        -1,
-        0);
+    void* memory = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     return memory == MAP_FAILED ? nullptr : (unsigned char*)memory;
 #endif
 }
@@ -72,12 +62,8 @@ void expectStateRegion(
     const Wasm::Runtime::StateRegionTrace& region = entry.stateDiff[regionIndex];
 
     EXPECT_EQ(region.offset, offset);
-    EXPECT_EQ(
-        region.before,
-        Wasm::Runtime::hex(before.data(), (unsigned int)before.size()));
-    EXPECT_EQ(
-        region.after,
-        Wasm::Runtime::hex(after.data(), (unsigned int)after.size()));
+    EXPECT_EQ(region.before, Wasm::Runtime::hex(before.data(), (unsigned int)before.size()));
+    EXPECT_EQ(region.after, Wasm::Runtime::hex(after.data(), (unsigned int)after.size()));
 }
 
 void expectSingleStateRegion(
@@ -131,10 +117,7 @@ TEST(WasmContracts, StateWriteFinishWithoutWritesRestoresWritability)
     memset(state, 0, pageSize);
 
     Wasm::Runtime::TraceEntry entry;
-    Wasm::Runtime::StateWriteScope scope(
-        true,
-        state,
-        (unsigned int)WASM_TRACE_DIFF_WINDOW);
+    Wasm::Runtime::StateWriteScope scope(true, state, (unsigned int)WASM_TRACE_DIFF_WINDOW);
     ASSERT_TRUE(scope.engaged);
 
     scope.finish(entry);
@@ -157,17 +140,11 @@ TEST(WasmContracts, NestedStateWriteScopesRestoreTheOuterTracker)
 
     Wasm::Runtime::TraceEntry outerEntry;
     Wasm::Runtime::TraceEntry innerEntry;
-    Wasm::Runtime::StateWriteScope outerScope(
-        true,
-        memory,
-        (unsigned int)(pageSize * 2));
+    Wasm::Runtime::StateWriteScope outerScope(true, memory, (unsigned int)(pageSize * 2));
     ASSERT_TRUE(outerScope.engaged);
     memory[8] = 0x11;
 
-    Wasm::Runtime::StateWriteScope innerScope(
-        true,
-        memory + pageSize * 2,
-        (unsigned int)pageSize);
+    Wasm::Runtime::StateWriteScope innerScope(true, memory + pageSize * 2, (unsigned int)pageSize);
     ASSERT_TRUE(innerScope.engaged);
     memory[pageSize * 2 + 8] = 0x22;
     innerScope.finish(innerEntry);
@@ -191,12 +168,7 @@ TEST(WasmContracts, NestedStateWriteScopesRestoreTheOuterTracker)
     outerFirstAfter[8] = 0x11;
     outerSecondAfter[8] = 0x33;
     expectStateRegion(outerEntry, 0, 0, outerBefore, outerFirstAfter);
-    expectStateRegion(
-        outerEntry,
-        1,
-        (unsigned int)pageSize,
-        outerBefore,
-        outerSecondAfter);
+    expectStateRegion(outerEntry, 1, (unsigned int)pageSize, outerBefore, outerSecondAfter);
 
     memory[16] = 0x44;
     memory[pageSize + 16] = 0x55;
@@ -215,10 +187,7 @@ TEST(WasmContracts, OverlappingUnalignedStateWriteScopesKeepBothDiffs)
     unsigned char* innerState = page + 16;
     Wasm::Runtime::TraceEntry outerEntry;
     Wasm::Runtime::TraceEntry innerEntry;
-    Wasm::Runtime::StateWriteScope outerScope(
-        true,
-        outerState,
-        (unsigned int)pageSize - 16);
+    Wasm::Runtime::StateWriteScope outerScope(true, outerState, (unsigned int)pageSize - 16);
     ASSERT_TRUE(outerScope.engaged);
     Wasm::Runtime::StateWriteScope innerScope(true, innerState, 128);
     ASSERT_TRUE(innerScope.engaged);
@@ -259,10 +228,7 @@ TEST(WasmContracts, StateWriteTracksUnalignedLogicalEdgesAcrossPages)
     unsigned char* state = memory + pageSize - leadingPageBytes;
     const size_t stateSize = pageSize + leadingPageBytes * 2;
     Wasm::Runtime::TraceEntry entry;
-    Wasm::Runtime::StateWriteScope scope(
-        true,
-        state,
-        (unsigned int)stateSize);
+    Wasm::Runtime::StateWriteScope scope(true, state, (unsigned int)stateSize);
     ASSERT_TRUE(scope.engaged);
 
     state[0] = 0x11;
@@ -284,22 +250,12 @@ TEST(WasmContracts, StateWriteTracksUnalignedLogicalEdgesAcrossPages)
     std::vector<unsigned char> middleBefore(middleWindowSize, 0);
     std::vector<unsigned char> middleAfter = middleBefore;
     middleAfter[0] = 0x33;
-    expectStateRegion(
-        entry,
-        1,
-        (unsigned int)leadingPageBytes,
-        middleBefore,
-        middleAfter);
+    expectStateRegion(entry, 1, (unsigned int)leadingPageBytes, middleBefore, middleAfter);
 
     std::vector<unsigned char> lastBefore(leadingPageBytes, 0);
     std::vector<unsigned char> lastAfter = lastBefore;
     lastAfter[leadingPageBytes - 1] = 0x44;
-    expectStateRegion(
-        entry,
-        2,
-        (unsigned int)(pageSize + leadingPageBytes),
-        lastBefore,
-        lastAfter);
+    expectStateRegion(entry, 2, (unsigned int)(pageSize + leadingPageBytes), lastBefore, lastAfter);
 
     freeTestPages(memory, allocationSize);
 }
@@ -341,10 +297,7 @@ TEST(WasmContracts, StateWriteKeepsTheFirstSnapshotAndDropsRevertedBytes)
     memset(state, 0, pageSize);
 
     Wasm::Runtime::TraceEntry entry;
-    Wasm::Runtime::StateWriteScope scope(
-        true,
-        state,
-        (unsigned int)WASM_TRACE_DIFF_WINDOW);
+    Wasm::Runtime::StateWriteScope scope(true, state, (unsigned int)WASM_TRACE_DIFF_WINDOW);
     ASSERT_TRUE(scope.engaged);
 
     state[8] = 0x11;
@@ -372,20 +325,11 @@ TEST(WasmContracts, FourNestedStateWriteScopesRestoreEveryParent)
     const unsigned int stateSize = (unsigned int)WASM_TRACE_DIFF_WINDOW;
     Wasm::Runtime::StateWriteScope outerScope(true, memory, stateSize);
     ASSERT_TRUE(outerScope.engaged);
-    Wasm::Runtime::StateWriteScope secondScope(
-        true,
-        memory + pageSize,
-        stateSize);
+    Wasm::Runtime::StateWriteScope secondScope(true, memory + pageSize, stateSize);
     ASSERT_TRUE(secondScope.engaged);
-    Wasm::Runtime::StateWriteScope thirdScope(
-        true,
-        memory + pageSize * 2,
-        stateSize);
+    Wasm::Runtime::StateWriteScope thirdScope(true, memory + pageSize * 2, stateSize);
     ASSERT_TRUE(thirdScope.engaged);
-    Wasm::Runtime::StateWriteScope innerScope(
-        true,
-        memory + pageSize * 3,
-        stateSize);
+    Wasm::Runtime::StateWriteScope innerScope(true, memory + pageSize * 3, stateSize);
     ASSERT_TRUE(innerScope.engaged);
 
     std::array<Wasm::Runtime::TraceEntry, 4> entries;
@@ -418,8 +362,7 @@ TEST(WasmContracts, StateWriteScopeCapacityUnwindsAndAcceptsAFreshScope)
     ASSERT_NE(state, nullptr);
     memset(state, 0, pageSize);
 
-    constexpr unsigned int frameCapacity =
-        Wasm::Runtime::STATE_WRITE_FRAME_CAPACITY;
+    constexpr unsigned int frameCapacity = Wasm::Runtime::STATE_WRITE_FRAME_CAPACITY;
     const unsigned int stateSize = (unsigned int)WASM_TRACE_DIFF_WINDOW;
     std::array<
         std::optional<Wasm::Runtime::StateWriteScope>,

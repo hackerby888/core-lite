@@ -22,12 +22,7 @@
 // Fork-path diagnostics: fprintf/stderr is fork-safe (no log-subsystem locks/buffers).
 static inline void tickForkLog(const char* message)
 {
-    fprintf(
-        stderr,
-        "[FORK] %s (pid=%d tick=%u)\n",
-        message,
-        (int)getpid(),
-        (unsigned)system.tick);
+    fprintf(stderr, "[FORK] %s (pid=%d tick=%u)\n", message, (int)getpid(), (unsigned)system.tick);
     fflush(stderr);
 }
 
@@ -318,8 +313,7 @@ namespace tickFork
         {
             // The timeout may cancel only before the BSP claims the request. Once claimed, exiting
             // here could race a live fork just as cancelling a running shadow commit would.
-            if (tickForkNowMs() > forkDeadlineMs
-                && gForkRequest.load(std::memory_order_acquire))
+            if (tickForkNowMs() > forkDeadlineMs && gForkRequest.load(std::memory_order_acquire))
             {
                 tickForkLog("BSP fork handoff stalled -> fatal exit for supervisor restart");
                 _exit(70);
@@ -396,8 +390,7 @@ namespace tickFork
         }
         for (;;)
         {
-            if (tickForkControl::gBspRetireHandoff.requestAndWait(
-                    gForkQuiesceTimeoutMs, true))
+            if (tickForkControl::gBspRetireHandoff.requestAndWait(gForkQuiesceTimeoutMs, true))
             {
                 shutDownNode = 1;
                 return;

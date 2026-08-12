@@ -10,9 +10,7 @@
 namespace Wasm::Sdk
 {
 
-static const ModuleEntry* findUserEntry(
-    unsigned int inputType,
-    DispatchKind kind)
+static const ModuleEntry* findUserEntry(unsigned int inputType, DispatchKind kind)
 {
     for (unsigned int entryIndex = 0; entryIndex < moduleEntryCount; entryIndex++)
     {
@@ -26,11 +24,7 @@ static const ModuleEntry* findUserEntry(
     return nullptr;
 }
 
-static void callSystemProcedure(
-    SystemProcedure procedure,
-    void* input,
-    void* output,
-    void* locals)
+static void callSystemProcedure(SystemProcedure procedure, void* input, void* output, void* locals)
 {
     auto& context = *reinterpret_cast<QPI::QpiContextProcedureCall*>(&moduleContextStorage[0]);
     procedure(context, &moduleState, input, output, locals);
@@ -93,11 +87,7 @@ static void dispatchMigration(void* oldState, void* locals)
     migrate(context, &moduleState, oldState, locals);
 }
 
-static void dispatchUserFunction(
-    unsigned int inputType,
-    void* input,
-    void* output,
-    void* locals)
+static void dispatchUserFunction(unsigned int inputType, void* input, void* output, void* locals)
 {
     const ModuleEntry* entry = findUserEntry(inputType, DispatchKind::UserFunction);
     if (!entry)
@@ -111,11 +101,7 @@ static void dispatchUserFunction(
     function(context, &moduleState, input, output, locals);
 }
 
-static void dispatchUserProcedure(
-    unsigned int inputType,
-    void* input,
-    void* output,
-    void* locals)
+static void dispatchUserProcedure(unsigned int inputType, void* input, void* output, void* locals)
 {
     const ModuleEntry* entry = findUserEntry(inputType, DispatchKind::UserProcedure);
     if (!entry)

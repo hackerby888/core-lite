@@ -61,12 +61,7 @@ void probeProcedure(
     recordProbe(input, output, locals);
 }
 
-void probeNotification(
-    const QPI::QpiContextProcedureCall&,
-    void*,
-    void* input,
-    void*,
-    void* locals)
+void probeNotification(const QPI::QpiContextProcedureCall&, void*, void* input, void*, void* locals)
 {
     probe.inputRemainder = alignmentRemainder(input);
     probe.localsRemainder = alignmentRemainder(locals);
@@ -88,8 +83,7 @@ void expectAlignedFunctionOrProcedure()
 
 TEST(ContractInvocationAlignment, AlignsNativeFunctionProcedureAndNotificationBuffers)
 {
-    constexpr ContractInvocationBufferLayout layout =
-        contractInvocationBufferLayout(1, 1, 1);
+    constexpr ContractInvocationBufferLayout layout = contractInvocationBufferLayout(1, 1, 1);
     static_assert(layout.outputOffset == 8);
     static_assert(layout.localsOffset == 16);
     static_assert(layout.totalSize == 17);

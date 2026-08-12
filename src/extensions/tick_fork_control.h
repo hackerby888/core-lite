@@ -49,10 +49,7 @@ namespace tickForkControl
             const State requestState =
                 shutDownAfterCommit ? State::ShutdownRequested : State::Requested;
             State expected = State::Idle;
-            if (!_state.compare_exchange_strong(
-                    expected,
-                    requestState,
-                    std::memory_order_acq_rel))
+            if (!_state.compare_exchange_strong(expected, requestState, std::memory_order_acq_rel))
             {
                 return false;
             }
@@ -68,8 +65,7 @@ namespace tickForkControl
                     return state == State::Succeeded;
                 }
 
-                if (state == requestState
-                    && std::chrono::steady_clock::now() >= deadline)
+                if (state == requestState && std::chrono::steady_clock::now() >= deadline)
                 {
                     expected = requestState;
                     if (_state.compare_exchange_strong(
@@ -87,20 +83,14 @@ namespace tickForkControl
         bool tryStart(bool& shutDownAfterCommit)
         {
             State expected = State::Requested;
-            if (_state.compare_exchange_strong(
-                    expected,
-                    State::Running,
-                    std::memory_order_acq_rel))
+            if (_state.compare_exchange_strong(expected, State::Running, std::memory_order_acq_rel))
             {
                 shutDownAfterCommit = false;
                 return true;
             }
 
             expected = State::ShutdownRequested;
-            if (_state.compare_exchange_strong(
-                    expected,
-                    State::Running,
-                    std::memory_order_acq_rel))
+            if (_state.compare_exchange_strong(expected, State::Running, std::memory_order_acq_rel))
             {
                 shutDownAfterCommit = true;
                 return true;
@@ -140,9 +130,7 @@ namespace tickForkControl
     inline BspRetireHandoff gBspRetireHandoff;
 
     // Accepted node-side RPC sockets retain the listener path after fork.
-    inline unsigned int closeInheritedRpcUnixSocketsForPromote(
-        int listenerFd,
-        const char* rpcPath)
+    inline unsigned int closeInheritedRpcUnixSocketsForPromote(int listenerFd, const char* rpcPath)
     {
         unsigned int closedCount = 0;
         if (listenerFd >= 0 && close(listenerFd) == 0)
