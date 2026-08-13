@@ -10,7 +10,7 @@ on:
     inputs:
       configuration:
         description: "Build configuration"
-        required: true
+        required: false
         default: "RelWithDebInfo"
         type: string
       build_dir:

@@ -35,6 +35,9 @@ jobs:
   zizmor:
     name: zizmor
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # uploads the SARIF report to code scanning
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:

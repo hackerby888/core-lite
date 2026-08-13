@@ -10,7 +10,7 @@ on:
     inputs:
       configuration:
         description: "Build configuration"
-        required: true
+        required: false
         default: "RelWithDebInfo"
         type: string
       build_dir:
@@ -26,8 +26,6 @@ jobs:
   build:
     name: build
     runs-on: ubuntu-22.04
-    outputs:
-      artifact-path: ${{ steps.build.outputs.path }}
     steps:
       # Checkout source
       - name: Checkout repository
