@@ -71,14 +71,22 @@ jobs:
         run: |
           CC=clang-18
           CXX=clang++-18
+          OSX_ARGS=()
           if [ "$RUNNER_OS" = 'macOS' ]; then
             CC="$(xcrun -f clang)"
             CXX="$(xcrun -f clang++)"
+            # Match the released node's floor so a newly introduced newer-than-floor API fails here.
+            if [ "$(uname -m)" = 'arm64' ]; then
+              OSX_ARGS+=(-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0)
+            else
+              OSX_ARGS+=(-DCMAKE_OSX_DEPLOYMENT_TARGET=10.15)
+            fi
           fi
           cmake -S . -B build-platform-tests \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="$CC" \
             -DCMAKE_CXX_COMPILER="$CXX" \
+            "${OSX_ARGS[@]}" \
             -DBUILD_TESTS=ON \
             -DBUILD_BINARY=OFF \
             -DENABLE_AVX512=OFF \
