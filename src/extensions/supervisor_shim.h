@@ -30,9 +30,15 @@ static pid_t shimForkSidecar()
 #ifdef NO_RPC
     return -1;
 #else
+    const pid_t supervisorPid = getpid();
     pid_t sidecarPid = fork();
     if (sidecarPid != 0)
         return sidecarPid;                // shim: child pid (or -1)
+    // An orphaned sidecar keeps the HTTP port bound (drogon is SO_REUSEPORT on Linux) and answers
+    // 503 forever, so the next node cannot serve RPC. Die with the supervisor even on SIGKILL.
+    prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+    if (getppid() != supervisorPid)
+        _exit(0);                         // supervisor died inside the fork window
     char self[512];
     ssize_t pathLength = readlink("/proc/self/exe", self, sizeof(self) - 1);
     if (pathLength <= 0)
@@ -96,6 +102,7 @@ static inline void runUnderSupervisor(int argc, const char** argv)
     // SUPERVISOR (stable PID). Reap everything + forward stop signals.
     signal(SIGTERM, shimForwardSignal);
     signal(SIGINT, shimForwardSignal);
+    signal(SIGHUP, shimForwardSignal);   // session/screen teardown must not kill the shim uncleanly
 
     int lastStatus = 0;
     bool sawSignal = false;
@@ -111,6 +118,7 @@ static inline void runUnderSupervisor(int argc, const char** argv)
         }
         if (sidecar > 0 && reapedPid == sidecar)
         {
+            sleep(1);                                      // a squatted port would hot-loop the respawn
             sidecar = shimForkSidecar();                   // RPC must not stay down: restart it
             continue;
         }
