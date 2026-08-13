@@ -302,28 +302,24 @@ private:
     {
         const size_t padded = roundUp(size, sharedBlockSize);
 #ifdef _WIN32
-        void* state = placeholdersAvailable
-            ? virtualAlloc2(nullptr, nullptr, padded, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
-                            PAGE_NOACCESS, nullptr, 0)
-            : VirtualAlloc(nullptr, padded, MEM_RESERVE, PAGE_NOACCESS);
+        void* state = nullptr;
+        if (placeholdersAvailable)
+        {
+            state = virtualAlloc2(nullptr, nullptr, padded, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                                  PAGE_NOACCESS, nullptr, 0);
+            if (!state)
+            {
+                reportPlaceholderFailure("VirtualAlloc2(MEM_RESERVE_PLACEHOLDER)");
+                placeholdersAvailable = false;
+            }
+        }
+        if (!state)
+        {
+            state = VirtualAlloc(nullptr, padded, MEM_RESERVE, PAGE_NOACCESS);
+        }
         if (!state)
         {
             throw std::runtime_error("VirtualAlloc(MEM_RESERVE) failed for contract state");
-        }
-        // Split up front: a view can only replace a placeholder that matches it exactly, and the
-        // final block needs no split because it is what remains of the reservation.
-        if (placeholdersAvailable)
-        {
-            for (size_t offset = 0; offset + sharedBlockSize < padded; offset += sharedBlockSize)
-            {
-                unsigned char* blockStart = (unsigned char*)state + offset;
-                const DWORD splitFlags = MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER;
-                if (!VirtualFree(blockStart, sharedBlockSize, splitFlags))
-                {
-                    releaseReservation(state, padded);
-                    throw std::runtime_error("placeholder split failed for contract state");
-                }
-            }
         }
 #else
         void* state = mmap(nullptr, padded, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -534,6 +530,12 @@ private:
             }
         }
 
+#ifdef _WIN32
+        // A view is mapped writable and only then dropped to read-only, so marking the block up
+        // front keeps a write that lands in that instant visible to the digest.
+        markBlockChanged(blockIndex);
+#endif
+
         // Publishing read-only keeps the first write trapping, so it still goes through
         // markBlockChanged and the digest cannot go stale.
         if (!publishScratchBlock(scratch, blockAddress(blockIndex)))
@@ -635,15 +637,22 @@ private:
 
         UnmapViewOfFile(scratch.data);
         scratch.data = nullptr;
+        // A view can only replace a placeholder that matches it exactly; splitting the range out
+        // fails harmlessly once it already is one, which is the case from the second restore on.
+        VirtualFree(address, sharedBlockSize, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
         const bool mapped = mapViewOfFile3(scratch.section, GetCurrentProcess(), address, 0,
-                                           sharedBlockSize, MEM_REPLACE_PLACEHOLDER, PAGE_READONLY,
+                                           sharedBlockSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE,
                                            nullptr, 0) != nullptr;
-        if (mapped)
+        if (!mapped)
         {
-            CloseHandle(scratch.section);
-            scratch.section = nullptr;
+            reportPlaceholderFailure("MapViewOfFile3(MEM_REPLACE_PLACEHOLDER)");
+            return false;
         }
-        return mapped;
+        DWORD oldProtection;
+        VirtualProtect(address, sharedBlockSize, PAGE_READONLY, &oldProtection);
+        CloseHandle(scratch.section);
+        scratch.section = nullptr;
+        return true;
 #else
         if (mprotect(scratch.data, sharedBlockSize, PROT_READ) != 0)
         {
@@ -680,6 +689,17 @@ private:
     static bool commitBlock(unsigned char* address)
     {
         return VirtualAlloc(address, sharedBlockSize, MEM_COMMIT, PAGE_READWRITE) == address;
+    }
+
+    static void reportPlaceholderFailure(const char* step)
+    {
+        static bool reported = false;
+        if (!reported)
+        {
+            reported = true;
+            std::cerr << "Contract-state pager: " << step << " failed with " << GetLastError()
+                      << "; falling back to unstaged block restore\n";
+        }
     }
 #endif
 
