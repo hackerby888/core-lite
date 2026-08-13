@@ -153,39 +153,51 @@ TEST(ContractStatePagerTest, ZeroBlocksNeedNoCompressedStorage)
 
 TEST(ContractStatePagerTest, ConcurrentColdFaultsAreSerializedWithoutCorruption)
 {
-    ManagedState state(16 * K12_chunkSize);
-    for (size_t block = 0; block < 16; block++)
-    {
-        state.data[block * K12_chunkSize] = (unsigned char)(block + 1);
-    }
-    pagerHash(state);
-    trimAllResidentState();
+    const size_t size = 16 * K12_chunkSize;
+    ManagedState state(size);
 
-    std::atomic<bool> valuesOk{true};
-    std::vector<std::thread> threads;
-    for (size_t block = 0; block < 8; block++)
+    // Every slot sits in the same pager block, so one thread's cold fault races all the others
+    // whatever the page size is; spacing by K12_chunkSize would only collide on 16K-page hosts.
+    const size_t threadCount = 8;
+    const size_t slotStride = state.pager->getBlockSize() / threadCount;
+
+    for (size_t iteration = 0; iteration < 200; iteration++)
     {
-        threads.emplace_back([&, block]()
+        for (size_t slot = 0; slot < threadCount; slot++)
         {
-            unsigned char* value = state.data + block * K12_chunkSize;
-            if (*value != (unsigned char)(block + 1))
+            state.data[slot * slotStride] = (unsigned char)(slot + 1);
+        }
+        pagerHash(state);
+        trimAllResidentState();
+
+        std::atomic<bool> valuesOk{true};
+        std::vector<std::thread> threads;
+        for (size_t slot = 0; slot < threadCount; slot++)
+        {
+            threads.emplace_back([&, slot]()
             {
-                valuesOk.store(false, std::memory_order_relaxed);
-            }
-            *value = (unsigned char)(*value + 40);
-        });
-    }
-    for (auto& thread : threads)
-    {
-        thread.join();
+                unsigned char* value = state.data + slot * slotStride;
+                if (*value != (unsigned char)(slot + 1))
+                {
+                    valuesOk.store(false, std::memory_order_relaxed);
+                }
+                *value = (unsigned char)(*value + 40);
+            });
+        }
+        for (auto& thread : threads)
+        {
+            thread.join();
+        }
+
+        ASSERT_TRUE(valuesOk.load(std::memory_order_relaxed)) << "iteration " << iteration;
+        for (size_t slot = 0; slot < threadCount; slot++)
+        {
+            ASSERT_EQ(state.data[slot * slotStride], (unsigned char)(slot + 41))
+                << "iteration " << iteration << ", slot " << slot;
+        }
     }
 
-    EXPECT_TRUE(valuesOk.load(std::memory_order_relaxed));
-    for (size_t block = 0; block < 8; block++)
-    {
-        EXPECT_EQ(state.data[block * K12_chunkSize], (unsigned char)(block + 41));
-    }
-    EXPECT_EQ(pagerHash(state), canonicalHash(state.data, 16 * K12_chunkSize));
+    EXPECT_EQ(pagerHash(state), canonicalHash(state.data, size));
 }
 
 TEST(ContractStatePagerTest, EvictionReleasesNativePages)

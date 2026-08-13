@@ -38,6 +38,11 @@ constexpr unsigned int contractCount = CONTRACT_STATE_PAGER_CONTRACT_COUNT;
 #include <unistd.h>
 #endif
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
+
 // In-RAM contract-state paging shared by Linux, macOS, and Windows.
 class ContractStatePager : public K12DigestCache
 {
@@ -252,9 +257,32 @@ private:
     };
     static inline PagerRequest pagerRequest;
 
+    // A block is filled in a scratch mapping and swapped in whole, so it is never reachable
+    // while it still holds zeros: a thread touching it then would not fault and would read them.
+    struct ScratchBlock
+    {
+        unsigned char* data = nullptr;
+#ifdef _WIN32
+        HANDLE section = nullptr;
+#endif
+    };
+
 #ifdef _WIN32
     static inline HANDLE requestEvent = nullptr;
     static inline HANDLE responseEvent = nullptr;
+
+    // Placeholder reservations are the only way to swap a filled view into a reserved range.
+    // They need Windows 10 1803; older builds keep the commit-then-fill path.
+    using VirtualAlloc2Fn = PVOID(WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, ULONG,
+                                           MEM_EXTENDED_PARAMETER*, ULONG);
+    using MapViewOfFile3Fn = PVOID(WINAPI*)(HANDLE, HANDLE, PVOID, ULONG64, SIZE_T, ULONG, ULONG,
+                                            MEM_EXTENDED_PARAMETER*, ULONG);
+    using UnmapViewOfFile2Fn = BOOL(WINAPI*)(HANDLE, PVOID, ULONG);
+
+    static inline VirtualAlloc2Fn virtualAlloc2 = nullptr;
+    static inline MapViewOfFile3Fn mapViewOfFile3 = nullptr;
+    static inline UnmapViewOfFile2Fn unmapViewOfFile2 = nullptr;
+    static inline bool placeholdersAvailable = false;
 #else
     static inline int requestPipe[2] = {-1, -1};
     static inline int responsePipe[2] = {-1, -1};
@@ -274,10 +302,28 @@ private:
     {
         const size_t padded = roundUp(size, sharedBlockSize);
 #ifdef _WIN32
-        void* state = VirtualAlloc(nullptr, padded, MEM_RESERVE, PAGE_NOACCESS);
+        void* state = placeholdersAvailable
+            ? virtualAlloc2(nullptr, nullptr, padded, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                            PAGE_NOACCESS, nullptr, 0)
+            : VirtualAlloc(nullptr, padded, MEM_RESERVE, PAGE_NOACCESS);
         if (!state)
         {
             throw std::runtime_error("VirtualAlloc(MEM_RESERVE) failed for contract state");
+        }
+        // Split up front: a view can only replace a placeholder that matches it exactly, and the
+        // final block needs no split because it is what remains of the reservation.
+        if (placeholdersAvailable)
+        {
+            for (size_t offset = 0; offset + sharedBlockSize < padded; offset += sharedBlockSize)
+            {
+                unsigned char* blockStart = (unsigned char*)state + offset;
+                const DWORD splitFlags = MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER;
+                if (!VirtualFree(blockStart, sharedBlockSize, splitFlags))
+                {
+                    releaseReservation(state, padded);
+                    throw std::runtime_error("placeholder split failed for contract state");
+                }
+            }
         }
 #else
         void* state = mmap(nullptr, padded, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -292,6 +338,16 @@ private:
     static void releaseReservation(void* state, size_t size)
     {
 #ifdef _WIN32
+        // Splitting turned the reservation into one placeholder per block, so it has to be freed
+        // block by block; a range already swallowed by an earlier release just fails harmlessly.
+        if (placeholdersAvailable)
+        {
+            for (size_t offset = 0; offset < size; offset += sharedBlockSize)
+            {
+                VirtualFree((unsigned char*)state + offset, 0, MEM_RELEASE);
+            }
+            return;
+        }
         VirtualFree(state, 0, MEM_RELEASE);
 #else
         munmap(state, size);
@@ -317,6 +373,10 @@ private:
             if (state == BlockState::Clean || state == BlockState::Dirty || state == BlockState::Evicting)
             {
                 residentBytes.fetch_sub(blockSize, std::memory_order_relaxed);
+#ifdef _WIN32
+                // A mapped view has to go before its placeholder can be released.
+                releasePhysicalBlock(blockAddress(i));
+#endif
             }
             compressedBytes.fetch_sub(blocks[i].compressed.size(), std::memory_order_relaxed);
         }
@@ -435,6 +495,11 @@ private:
     static bool releasePhysicalBlock(unsigned char* address)
     {
 #ifdef _WIN32
+        if (placeholdersAvailable)
+        {
+            // Preserving the placeholder keeps the range reservable for the next restore.
+            return unmapViewOfFile2(GetCurrentProcess(), address, MEM_PRESERVE_PLACEHOLDER) != 0;
+        }
         return VirtualFree(address, sharedBlockSize, MEM_DECOMMIT) != 0;
 #else
         void* replacement = mmap(address, sharedBlockSize, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
@@ -451,48 +516,172 @@ private:
             return true;
         }
 
-        unsigned char* address = blockAddress(blockIndex);
-        if (!commitBlock(address))
+        ScratchBlock scratch;
+        if (!allocateScratchBlock(scratch))
         {
             return false;
         }
 
         if (previous == BlockState::Compressed)
         {
-            const int decompressedSize = blosc2_decompress(block.compressed.data(), (int32_t)block.compressed.size(), address, (int32_t)blockSize);
+            const int decompressedSize = blosc2_decompress(
+                block.compressed.data(), (int32_t)block.compressed.size(), scratch.data,
+                (int32_t)blockSize);
             if (decompressedSize != (int)blockSize)
             {
-                releasePhysicalBlock(address);
+                releaseScratchBlock(scratch);
                 return false;
             }
         }
 
-        const bool clean = protectBlock(blockIndex, false);
+        // Publishing read-only keeps the first write trapping, so it still goes through
+        // markBlockChanged and the digest cannot go stale.
+        if (!publishScratchBlock(scratch, blockAddress(blockIndex)))
+        {
+            releaseScratchBlock(scratch);
+            return false;
+        }
+
         const size_t oldCompressedSize = block.compressed.size();
         std::vector<unsigned char>().swap(block.compressed);
         compressedBytes.fetch_sub(oldCompressedSize, std::memory_order_relaxed);
         residentBytes.fetch_add(blockSize, std::memory_order_relaxed);
         block.recent.store(true, std::memory_order_relaxed);
-        if (clean)
-        {
-            block.state.store(BlockState::Clean, std::memory_order_release);
-        }
-        else
-        {
-            markBlockChanged(blockIndex);
-            block.state.store(BlockState::Dirty, std::memory_order_release);
-        }
+        block.state.store(BlockState::Clean, std::memory_order_release);
         return true;
     }
 
-    static bool commitBlock(unsigned char* address)
+    static bool allocateScratchBlock(ScratchBlock& scratch)
     {
 #ifdef _WIN32
-        return VirtualAlloc(address, sharedBlockSize, MEM_COMMIT, PAGE_READWRITE) == address;
+        if (!placeholdersAvailable)
+        {
+            scratch.data = (unsigned char*)VirtualAlloc(
+                nullptr, sharedBlockSize, MEM_COMMIT, PAGE_READWRITE);
+            return scratch.data != nullptr;
+        }
+
+        scratch.section = CreateFileMappingW(
+            INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, (DWORD)sharedBlockSize, nullptr);
+        if (!scratch.section)
+        {
+            return false;
+        }
+        scratch.data = (unsigned char*)MapViewOfFile(
+            scratch.section, FILE_MAP_WRITE, 0, 0, sharedBlockSize);
+        if (!scratch.data)
+        {
+            CloseHandle(scratch.section);
+            scratch.section = nullptr;
+            return false;
+        }
+        return true;
 #else
-        return mmap(address, sharedBlockSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == address;
+        void* mapping = mmap(nullptr, sharedBlockSize, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (mapping == MAP_FAILED)
+        {
+            return false;
+        }
+        scratch.data = (unsigned char*)mapping;
+        return true;
 #endif
     }
+
+    static void releaseScratchBlock(ScratchBlock& scratch)
+    {
+#ifdef _WIN32
+        if (scratch.data)
+        {
+            if (placeholdersAvailable)
+            {
+                UnmapViewOfFile(scratch.data);
+            }
+            else
+            {
+                VirtualFree(scratch.data, 0, MEM_RELEASE);
+            }
+        }
+        if (scratch.section)
+        {
+            CloseHandle(scratch.section);
+        }
+#else
+        if (scratch.data)
+        {
+            munmap(scratch.data, sharedBlockSize);
+        }
+#endif
+        scratch = ScratchBlock();
+    }
+
+    // Takes ownership of the scratch block on success; the caller releases it on failure.
+    static bool publishScratchBlock(ScratchBlock& scratch, unsigned char* address)
+    {
+#ifdef _WIN32
+        if (!placeholdersAvailable)
+        {
+            // Without placeholders the block is reachable before it is filled.
+            if (!commitBlock(address))
+            {
+                return false;
+            }
+            std::memcpy(address, scratch.data, sharedBlockSize);
+            DWORD oldProtection;
+            VirtualProtect(address, sharedBlockSize, PAGE_READONLY, &oldProtection);
+            releaseScratchBlock(scratch);
+            return true;
+        }
+
+        UnmapViewOfFile(scratch.data);
+        scratch.data = nullptr;
+        const bool mapped = mapViewOfFile3(scratch.section, GetCurrentProcess(), address, 0,
+                                           sharedBlockSize, MEM_REPLACE_PLACEHOLDER, PAGE_READONLY,
+                                           nullptr, 0) != nullptr;
+        if (mapped)
+        {
+            CloseHandle(scratch.section);
+            scratch.section = nullptr;
+        }
+        return mapped;
+#else
+        if (mprotect(scratch.data, sharedBlockSize, PROT_READ) != 0)
+        {
+            return false;
+        }
+#ifdef __APPLE__
+        mach_vm_address_t target = (mach_vm_address_t)address;
+        vm_prot_t currentProtection = VM_PROT_READ;
+        vm_prot_t maximumProtection = VM_PROT_READ | VM_PROT_WRITE;
+        const kern_return_t result = mach_vm_remap(
+            mach_task_self(), &target, sharedBlockSize, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+            mach_task_self(), (mach_vm_address_t)scratch.data, TRUE, &currentProtection,
+            &maximumProtection, VM_INHERIT_NONE);
+        if (result != KERN_SUCCESS || target != (mach_vm_address_t)address)
+        {
+            return false;
+        }
+        releaseScratchBlock(scratch);
+        return true;
+#else
+        void* moved = mremap(scratch.data, sharedBlockSize, sharedBlockSize,
+                             MREMAP_MAYMOVE | MREMAP_FIXED, address);
+        if (moved != address)
+        {
+            return false;
+        }
+        scratch = ScratchBlock();
+        return true;
+#endif
+#endif
+    }
+
+#ifdef _WIN32
+    static bool commitBlock(unsigned char* address)
+    {
+        return VirtualAlloc(address, sharedBlockSize, MEM_COMMIT, PAGE_READWRITE) == address;
+    }
+#endif
 
     static void initializePager()
     {
@@ -512,6 +701,14 @@ private:
             {
                 throw std::runtime_error("AddVectoredExceptionHandler failed for contract-state pager");
             }
+            if (HMODULE kernelBase = GetModuleHandleW(L"kernelbase.dll"))
+            {
+                virtualAlloc2 = (VirtualAlloc2Fn)GetProcAddress(kernelBase, "VirtualAlloc2");
+                mapViewOfFile3 = (MapViewOfFile3Fn)GetProcAddress(kernelBase, "MapViewOfFile3");
+                unmapViewOfFile2 =
+                    (UnmapViewOfFile2Fn)GetProcAddress(kernelBase, "UnmapViewOfFile2");
+            }
+            placeholdersAvailable = virtualAlloc2 && mapViewOfFile3 && unmapViewOfFile2;
 #else
             const long pageSize = sysconf(_SC_PAGESIZE);
             systemPageSize = pageSize > 0 ? (size_t)pageSize : 4096;
@@ -520,8 +717,17 @@ private:
                 throw std::runtime_error("pipe failed for contract-state pager");
             }
 #endif
+            size_t blockAlignment = systemPageSize;
+#ifdef _WIN32
+            // A mapped view must start on the allocation granularity, so placeholders force
+            // coarser blocks than the page size alone would.
+            if (placeholdersAvailable && systemInfo.dwAllocationGranularity)
+            {
+                blockAlignment = systemInfo.dwAllocationGranularity;
+            }
+#endif
             sharedBlockSize = K12_chunkSize;
-            while (sharedBlockSize % systemPageSize != 0)
+            while (sharedBlockSize % blockAlignment != 0)
             {
                 sharedBlockSize += K12_chunkSize;
             }
