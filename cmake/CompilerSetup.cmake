@@ -85,7 +85,8 @@ message(STATUS "CLEARING CMAKE DEFAULT FLAGS")
 # Set all default flag variables to an empty string to take full control.
 set(CMAKE_C_FLAGS "" CACHE INTERNAL "")
 set(CMAKE_CXX_FLAGS "" CACHE INTERNAL "")
-set(CMAKE_EXE_LINKER_FLAGS "" CACHE INTERNAL "")
+# CMAKE_EXE_LINKER_FLAGS is left alone: CMake defaults it to empty outside MSVC, so clearing it
+# would only discard a -DCMAKE_EXE_LINKER_FLAGS passed on the command line (CACHE INTERNAL forces).
 
 set(CMAKE_C_FLAGS_DEBUG "" CACHE INTERNAL "")
 set(CMAKE_CXX_FLAGS_DEBUG "" CACHE INTERNAL "")
