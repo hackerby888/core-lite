@@ -32,14 +32,21 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   resolve-qinit:
+    name: resolve-qinit
     runs-on: ubuntu-22.04
     outputs:
       repository: ${{ steps.source.outputs.repository }}
       sha: ${{ steps.commit.outputs.sha }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
       - name: Select qinit source
         id: source
         shell: bash
@@ -77,18 +84,22 @@ jobs:
           echo "repository=$repository" >> "$GITHUB_OUTPUT"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
       - name: Resolve qinit commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           repository: ${{ steps.source.outputs.repository }}
           ref: ${{ steps.source.outputs.ref }}
           path: resolved-qinit
+          persist-credentials: false
       - name: Record qinit commit
         id: commit
         shell: bash
         run: |
           sha=$(git -C resolved-qinit rev-parse HEAD)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "::notice::qinit = ${{ steps.source.outputs.repository }}@${{ steps.source.outputs.ref }} ($sha)"
+          echo "::notice::qinit = ${STEPS_SOURCE_OUTPUTS_REPOSITORY}@${STEPS_SOURCE_OUTPUTS_REF} ($sha)"
+        env:
+          STEPS_SOURCE_OUTPUTS_REPOSITORY: ${{ steps.source.outputs.repository }}
+          STEPS_SOURCE_OUTPUTS_REF: ${{ steps.source.outputs.ref }}
 
   build-linux:
     uses: ./.github/workflows/linux-build.yml

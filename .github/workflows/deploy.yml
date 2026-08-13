@@ -28,6 +28,14 @@ on:
         default: ""
 
 
+# Deploys over SSH; needs no write access to the repository itself.
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-linux:
     uses: ./.github/workflows/linux-build.yml
@@ -36,11 +44,12 @@ jobs:
       build_dir: "build"
 
   deploy-linux:
+    name: deploy-linux
     needs: build-linux
     runs-on: ubuntu-latest
     steps:
       - name: Download Linux build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: QubicLiteLinuxBuild-${{ inputs.configuration }}
           path: ${{ inputs.build-dir }}
@@ -48,30 +57,32 @@ jobs:
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
+          echo "$SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
 
       - name: Deploy to multiple servers
         run: |
           # Check if there are no build artifacts then exit
-            if [ ! -f "${{ inputs.build-dir }}/src/Qubic" ]; then
+            if [ ! -f "${INPUTS_BUILD_DIR}/src/Qubic" ]; then
               echo "Build artifact not found!"
               exit 1
             fi
           
           # Check if there are no servers then exit
-            if [ -z "${{ vars.SERVERS }}" ]; then
+            if [ -z "${VARS_SERVERS}" ]; then
               echo "No servers specified for deployment."
               exit 0
             fi
           
           # Constant initialization
-          Executable=Qubic-${{ inputs.epoch }}
+          Executable=Qubic-${INPUTS_EPOCH}
           
           # Loop through each server and deploy
-          for server in ${{ vars.SERVERS }}; do
+          for server in ${VARS_SERVERS}; do
             echo "Deploying to $server..."
-            scp -o StrictHostKeyChecking=no ${{ inputs.build-dir }}/src/Qubic $server:/root/
+            scp -o StrictHostKeyChecking=no ${INPUTS_BUILD_DIR}/src/Qubic $server:/root/
             ssh -o StrictHostKeyChecking=no $server /bin/bash "
               # Start deployment commands here
               sudo apt update && upgrade
@@ -83,17 +94,23 @@ jobs:
               sudo apt-get install -y unzip wget cronolog
           
               # Set up deployment directory
-              mkdir -p qlite-${{ inputs.epoch }}
-              mv /root/Qubic qlite-${{ inputs.epoch }}/$Executable
-              cd qlite-${{ inputs.epoch }}
+              mkdir -p qlite-${INPUTS_EPOCH}
+              mv /root/Qubic qlite-${INPUTS_EPOCH}/$Executable
+              cd qlite-${INPUTS_EPOCH}
               chmod +x ./$Executable
           
               # Download and unzip epoch file
-              wget ${{ inputs.epoch-file }}
-              unzip $(basename ${{ inputs.epoch-file }})
+              wget ${INPUTS_EPOCH_FILE}
+              unzip $(basename ${INPUTS_EPOCH_FILE})
           
               pkill Qubic-* || echo "No existing process found."
               sleep 2
-              nohup sh -c 'stdbuf -oL -eL ./$Executable -s 32 --peers "${{ inputs.peers }}" 2>&1 | cronolog ./logs/qubic-%Y-%m-%d.log' > /dev/null 2>&1 &
+              nohup sh -c 'stdbuf -oL -eL ./$Executable -s 32 --peers "${INPUTS_PEERS}" 2>&1 | cronolog ./logs/qubic-%Y-%m-%d.log' > /dev/null 2>&1 &
               "
           done
+        env:
+          INPUTS_BUILD_DIR: ${{ inputs.build-dir }}
+          VARS_SERVERS: ${{ vars.SERVERS }}
+          INPUTS_EPOCH: ${{ inputs.epoch }}
+          INPUTS_EPOCH_FILE: ${{ inputs.epoch-file }}
+          INPUTS_PEERS: ${{ inputs.peers }}

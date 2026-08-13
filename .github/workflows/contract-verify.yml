@@ -8,6 +8,10 @@ name: ContractVerify
 on:
   workflow_call:
 
+# Reads the checked-out sources only.
+permissions:
+  contents: read
+
 jobs:
   contract_verify_job:
     runs-on: ubuntu-latest
@@ -16,9 +20,10 @@ jobs:
     steps:
       # Checkout repo to use files of the repo as input for container action
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           submodules: 'true'
+          persist-credentials: false
       - name: Find all contract files to verify
         id: filepaths
         run: |
@@ -28,6 +33,6 @@ jobs:
           echo "oi-filepaths=$files2" >> "$GITHUB_OUTPUT"
       - name: Contract verify action step
         id: verify
-        uses: Franziska-Mueller/qubic-contract-verify@main
+        uses: Franziska-Mueller/qubic-contract-verify@9535e1e6149c3540194a6716c1aa6b193d010d74  # main
         with:
           filepaths: '${{ steps.filepaths.outputs.contract-filepaths }},${{ steps.filepaths.outputs.oi-filepaths }}'

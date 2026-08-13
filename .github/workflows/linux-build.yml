@@ -24,13 +24,16 @@ permissions:
 
 jobs:
   build:
+    name: build
     runs-on: ubuntu-22.04
     outputs:
       artifact-path: ${{ steps.build.outputs.path }}
     steps:
       # Checkout source
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
 
       # Install dependencies
       - name: Install CMake and dependencies
@@ -43,8 +46,8 @@ jobs:
       # Configure the project
       - name: Configure with CMake
         run: |
-          cmake -S . -B ${{ inputs.build_dir }} \
-            -DCMAKE_BUILD_TYPE=${{ inputs.configuration }} \
+          cmake -S . -B ${INPUTS_BUILD_DIR} \
+            -DCMAKE_BUILD_TYPE=${INPUTS_CONFIGURATION} \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
             -DBUILD_TESTS:BOOL=ON \
             -DBUILD_BINARY:BOOL=ON \
@@ -53,14 +56,20 @@ jobs:
             -DONLY_LOGGING=ON \
             -DCMAKE_C_COMPILER=clang-18 \
             -DCMAKE_CXX_COMPILER=clang++-18
+        env:
+          INPUTS_BUILD_DIR: ${{ inputs.build_dir }}
+          INPUTS_CONFIGURATION: ${{ inputs.configuration }}
 
       # Build the project
       - name: Build with Make
-        run: cmake --build ${{ inputs.build_dir }} --config ${{ inputs.configuration }} -- -j$(nproc)
+        run: cmake --build ${INPUTS_BUILD_DIR} --config ${INPUTS_CONFIGURATION} -- -j$(nproc)
+        env:
+          INPUTS_BUILD_DIR: ${{ inputs.build_dir }}
+          INPUTS_CONFIGURATION: ${{ inputs.configuration }}
 
       # Upload build artifacts
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: QubicLiteLinuxBuild-${{ inputs.configuration }}
           path: |

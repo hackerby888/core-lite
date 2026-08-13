@@ -9,18 +9,36 @@ on:
         default: 'nightly'
         type: string
 
+# Publishes to Docker Hub, not to this repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish-docker-nightly:
+    name: publish-docker-nightly
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
 
       - name: Build Docker image
-        run: docker build -t qubiccore/lite:${{ inputs.tag }} -f docker/orchestrator/Dockerfile .
+        run: docker build -t qubiccore/lite:${INPUTS_TAG} -f docker/orchestrator/Dockerfile .
+        env:
+          INPUTS_TAG: ${{ inputs.tag }}
 
       - name: Log in to Docker Hub
-        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+        run: echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
       - name: Push Docker image
-        run: docker push qubiccore/lite:${{ inputs.tag }}
+        run: docker push qubiccore/lite:${INPUTS_TAG}
+        env:
+          INPUTS_TAG: ${{ inputs.tag }}

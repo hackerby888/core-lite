@@ -12,6 +12,10 @@ env:
   STATE_GTEST_FILTER: 'K12DigestCacheTest.*:ContractStatePagerTest.*'
   WASM_GTEST_FILTER: 'WasmContracts.*'
 
+concurrency:
+  group: platform-tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: ${{ matrix.name }}
@@ -31,7 +35,9 @@ jobs:
             runner: windows-latest
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -48,7 +54,7 @@ jobs:
 
       - name: Cache Windows dependencies
         if: runner.os == 'Windows'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
         with:
           path: ~/AppData/Local/vcpkg/archives
           key: vcpkg-x64-windows-static-rel-${{ hashFiles('vcpkg.json') }}

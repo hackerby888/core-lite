@@ -1,6 +1,12 @@
 name: Lint workflows
 
 on:
+  # Also on push: forks without code scanning otherwise see these findings for the first time
+  # on an upstream pull request.
+  push:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
   pull_request:
     paths:
       - '.github/workflows/**'

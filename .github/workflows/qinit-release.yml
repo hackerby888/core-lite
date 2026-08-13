@@ -21,6 +21,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: qinit-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
@@ -29,18 +33,21 @@ jobs:
       qinit_ref: ${{ inputs.qinit_ref || '' }}
 
   headers:
+    name: headers
     needs: ci
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           path: core
+          persist-credentials: false
       - name: Checkout qinit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           repository: ${{ needs.ci.outputs.qinit_repository }}
           ref: ${{ needs.ci.outputs.qinit_sha }}
           path: qinit
+          persist-credentials: false
       - name: Read qinit toolchains
         id: toolchains
         shell: bash
@@ -67,9 +74,10 @@ jobs:
             console.log(`wasi_release_tag=${wasiReleaseTag}`);
             console.log(`wasi_asset_version=${wasiAssetVersion}`);
           ' >> "$GITHUB_OUTPUT"
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: ${{ steps.toolchains.outputs.bun_version }}
+          no-cache: true
       - name: Install qinit dependencies
         working-directory: qinit
         run: bun install
@@ -96,30 +104,31 @@ jobs:
         run: |
           cp snapshot-out/core-headers.tar.gz ./core-headers.tar.gz
           cp snapshot-out/core-headers.sha256 ./core-headers.sha256
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: headers
           path: "core-headers.*"
           if-no-files-found: error
 
   publish:
+    name: publish
     needs:
       - ci
       - headers
     runs-on: ubuntu-22.04
     permissions:
-      contents: write
+      contents: write  # creates the qinit release and uploads its assets
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           path: dist
           pattern: 'release-node-*'
           merge-multiple: true
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: headers
           path: dist
