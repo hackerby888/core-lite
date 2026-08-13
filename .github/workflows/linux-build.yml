@@ -44,8 +44,8 @@ jobs:
       # Configure the project
       - name: Configure with CMake
         run: |
-          cmake -S . -B ${INPUTS_BUILD_DIR} \
-            -DCMAKE_BUILD_TYPE=${INPUTS_CONFIGURATION} \
+          cmake -S . -B "${INPUTS_BUILD_DIR}" \
+            -DCMAKE_BUILD_TYPE="${INPUTS_CONFIGURATION}" \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
             -DBUILD_TESTS:BOOL=ON \
             -DBUILD_BINARY:BOOL=ON \
@@ -60,7 +60,7 @@ jobs:
 
       # Build the project
       - name: Build with Make
-        run: cmake --build ${INPUTS_BUILD_DIR} --config ${INPUTS_CONFIGURATION} -- -j$(nproc)
+        run: cmake --build "${INPUTS_BUILD_DIR}" --config "${INPUTS_CONFIGURATION}" -- -j"$(nproc)"
         env:
           INPUTS_BUILD_DIR: ${{ inputs.build_dir }}
           INPUTS_CONFIGURATION: ${{ inputs.configuration }}

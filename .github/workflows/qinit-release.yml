@@ -52,6 +52,7 @@ jobs:
         id: toolchains
         shell: bash
         run: |
+          # shellcheck disable=SC2016  # ${...} below are JavaScript template literals
           node -e '
             const config = require("./qinit/config/toolchains.json");
             const bunVersion = config?.bun?.version;

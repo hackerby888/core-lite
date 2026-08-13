@@ -24,9 +24,9 @@ jobs:
           HOUR=$(date -u +%H)
           MIN=$(date -u +%M)
           if [ "$HOUR" = "12" ] && [ "$MIN" -ge 5 ] && [ "$MIN" -lt 10 ]; then
-            echo "should_trigger=true" >> $GITHUB_OUTPUT
+            echo "should_trigger=true" >> "$GITHUB_OUTPUT"
           else
-            echo "should_trigger=false" >> $GITHUB_OUTPUT
+            echo "should_trigger=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Trigger Docker Weekly workflow

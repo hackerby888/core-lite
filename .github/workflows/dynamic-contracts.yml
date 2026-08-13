@@ -59,6 +59,7 @@ jobs:
         id: toolchains
         shell: bash
         run: |
+          # shellcheck disable=SC2016  # ${...} below are JavaScript template literals
           node -e '
             const config = require("./qinit/config/toolchains.json");
             const bunVersion = config?.bun?.version;
@@ -185,7 +186,8 @@ jobs:
           export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
           # The toolchain clang cannot locate the SDK on its own the way /usr/bin/clang can, and
           # autotools links its probe binaries without the -isysroot cmake would have supplied.
-          export SDKROOT="$(xcrun --show-sdk-path)"
+          SDKROOT="$(xcrun --show-sdk-path)"
+          export SDKROOT
           if ! ./configure \
             --prefix="$LIBFFI_PREFIX" \
             --enable-static \

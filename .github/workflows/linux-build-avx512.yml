@@ -47,8 +47,8 @@ jobs:
           # NOTE: BUILD_TESTS is OFF on purpose. GitHub runners do not support
           # AVX-512, and CMake's gtest_discover_tests runs the test binary at
           # build time, which would SIGILL (Illegal instruction) here.
-          cmake -S . -B ${INPUTS_BUILD_DIR} \
-            -DCMAKE_BUILD_TYPE=${INPUTS_CONFIGURATION} \
+          cmake -S . -B "${INPUTS_BUILD_DIR}" \
+            -DCMAKE_BUILD_TYPE="${INPUTS_CONFIGURATION}" \
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
             -DBUILD_TESTS:BOOL=OFF \
             -DBUILD_BINARY:BOOL=ON \
@@ -61,7 +61,7 @@ jobs:
 
       # Build the project
       - name: Build with Make
-        run: cmake --build ${INPUTS_BUILD_DIR} --config ${INPUTS_CONFIGURATION} -- -j$(nproc)
+        run: cmake --build "${INPUTS_BUILD_DIR}" --config "${INPUTS_CONFIGURATION}" -- -j"$(nproc)"
         env:
           INPUTS_BUILD_DIR: ${{ inputs.build_dir || 'build' }}
           INPUTS_CONFIGURATION: ${{ inputs.configuration || 'RelWithDebInfo' }}

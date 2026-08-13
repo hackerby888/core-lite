@@ -1,8 +1,7 @@
 name: Lint workflows
 
 on:
-  # Also on push: forks without code scanning otherwise see these findings for the first time
-  # on an upstream pull request.
+  # On push too: forks without code scanning would otherwise only see findings upstream.
   push:
     paths:
       - '.github/workflows/**'

@@ -28,7 +28,7 @@ jobs:
           persist-credentials: false
 
       - name: Build Docker image
-        run: docker build -t qubiccore/lite:${INPUTS_TAG} -f docker/orchestrator/Dockerfile .
+        run: docker build -t "qubiccore/lite:${INPUTS_TAG}" -f docker/orchestrator/Dockerfile .
         env:
           INPUTS_TAG: ${{ inputs.tag }}
 
@@ -39,6 +39,6 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
       - name: Push Docker image
-        run: docker push qubiccore/lite:${INPUTS_TAG}
+        run: docker push "qubiccore/lite:${INPUTS_TAG}"
         env:
           INPUTS_TAG: ${{ inputs.tag }}
