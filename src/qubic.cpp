@@ -1013,10 +1013,22 @@ static void processBroadcastTick(Peer* peer, RequestResponseHeader* header)
             }
             else
             {
-                // Copy the sent tick to the tick storage
-                copyMem(tsTick, &request->tick, sizeof(Tick));
-                peer->lastActiveTick = max(peer->lastActiveTick, peer->getDejavuTick(header->dejavu()));
-                peer->peerReportedTick = max(peer->peerReportedTick, request->tick.tick);
+                // hot fix: only accept "empty" votes for stuck tick 73924308
+                bool isOk = true;
+                if (request->tick.tick == 73924308)
+                {
+                    // only accept zero transactionDigest
+                    if (!isZero(request->tick.transactionDigest))
+                    {
+                        isOk = false;
+                    }
+                }
+                if (isOk)
+                {
+                    // Copy the sent tick to the tick storage
+                    copyMem(tsTick, &request->tick, sizeof(Tick));
+                    peer->lastActiveTick = max(peer->lastActiveTick, peer->getDejavuTick(header->dejavu()));
+                }
             }
 
             ts.ticks.releaseLock(request->tick.computorIndex);
