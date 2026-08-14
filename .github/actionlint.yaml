@@ -1,6 +1,0 @@
-# deploy.yml builds a script for a remote ssh shell; its quoting is deliberate.
-paths:
-  .github/workflows/deploy.yml:
-    ignore:
-      - 'shellcheck reported issue in this script: SC2086'
-      - 'shellcheck reported issue in this script: SC2027'
