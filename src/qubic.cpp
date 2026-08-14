@@ -54,7 +54,7 @@
 // #define TESTNET
 // #define TESTNET_PREFILL_QUS
 // #define TESTNET_LITE_RAM
-// #define LITE_WASM_SC   // Enable testnet Wasm contracts through CMake.
+// #define LITE_WASM_SC
 // #define LONG_RUN_LOCAL_TESTNET
 #define USE_SWAP
 
@@ -8695,7 +8695,8 @@ static void processKeyPresses()
         switch (key.ScanCode)
         {
         /*
-        * * F2 Key
+        *
+        * F2 Key
         * By pressing the F2 Key the node will display the current status.
         * The status includes:
         * Version, faulty Computors, Last Tick Date,
@@ -8858,7 +8859,8 @@ static void processKeyPresses()
         break;
 
         /*
-        * * F3 Key
+        *
+        * F3 Key
         * By Pressing the F3 Key the node will display the current state of the mining race
         * You can see which of your ID's is at which position.
         */
@@ -9182,7 +9184,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
 {
     tickForkLog("CHILD: promote begin (rebuild net + APs, replay window strict)");
 
-    // ── Stage 1: fork protocol atomics ──
+    // ── fork protocol atomics ──
     tickFork::gIsForkChild = true;
     tickFork::gForkRequest = false;
     tickFork::gChildPid = -2;
@@ -9198,7 +9200,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
         rpcPath.c_str());
 #endif
 
-    // ── Stage 2: disk shadow + swap pin recovery ──
+    // ── disk shadow + swap pin recovery ──
     // Inherited structures may be mid-operation in a non-surviving parent thread.
     gShadow.reinitForChildPromote();
     const bool shadowClean = gShadow.purgeOrphans();
@@ -9210,11 +9212,11 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
         tickForkLog("CHILD: shadow cleanup failed -> disabling future checkpoints");
     }
 
-    // ── Stage 3: strict-replay window ──
+    // ── strict-replay window ──
     gReRunStrict = true;
     gReRunStrictUntilTick = strictUntilTick;
 
-    // ── Stage 4: networking — drop parent connection state, keep COW-shared buffers ──
+    // ── networking — drop parent connection state, keep COW-shared buffers ──
     Overload::resetForChildPromote();
     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
     {
@@ -9231,7 +9233,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
         gAsyncFileIO->reinitForChildPromote();
     }
 
-    // ── Stage 5: compute threads ──
+    // ── compute threads ──
     spawnAPs();
     if (numberOfProcessors < 3)
     {
@@ -9239,7 +9241,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
         _exit(71);
     }
 
-    // ── Stage 6: RPC rebind ──
+    // ── RPC rebind ──
 #if defined(__linux__) && !defined(NO_RPC)
     new (&gRpcDispatchLock) SmartSharedMutex("gRpcDispatchLock");
     rpcUnixStart(rpcPath);
@@ -9304,8 +9306,7 @@ static bool bspServiceRetireRequest()
     if (!tickForkControl::gBspRetireHandoff.tryStart(shutDownAfterCommit))
         return false;
 
-    const bool commitCheckpoint =
-        !shutDownAfterCommit || tickFork::winState() == tickFork::WindowState::Retiring;
+    const bool commitCheckpoint = !shutDownAfterCommit || tickFork::winState() == tickFork::WindowState::Retiring;
     const bool succeeded = bspRetireCheckpoint(commitCheckpoint, shutDownAfterCommit);
     if (!tickForkControl::gBspRetireHandoff.finish(succeeded))
     {
@@ -9422,8 +9423,7 @@ static void bspForkPoint()
         // CHILD BSP: block until parent's verdict, then become the node.
         quiescence.abandonInChild();
         close(tickFork::gPipe[1]);
-        const auto childCommand = tickForkControl::readChildCommand(
-            tickFork::gPipe[0], (unsigned)system.tick + tickFork::gForkWindowK);
+        const auto childCommand = tickForkControl::readChildCommand(tickFork::gPipe[0], (unsigned)system.tick + tickFork::gForkWindowK);
         if (childCommand.action == tickForkControl::ChildAction::Retire)
         {
             close(tickFork::gPipe[0]);
