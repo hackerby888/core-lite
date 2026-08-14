@@ -19,6 +19,20 @@ inline void copyMemory(T1& dst, const T2& src)
 }
 
 template <typename T1, typename T2>
+inline void copyToBuffer(T1& dst, const T2& src, bool setTailToZero)
+{
+    static_assert(sizeof(dst) >= sizeof(src), "Destination buffer must be at least the size of the source object.");
+    copyMem(&dst, &src, sizeof(src));
+
+    if (sizeof(dst) > sizeof(src) && setTailToZero)
+    {
+        uint8* tailPtr = reinterpret_cast<uint8*>(&dst) + sizeof(src);
+        const uint64 tailSize = sizeof(dst) - sizeof(src);
+        setMem(tailPtr, tailSize, 0);
+    }
+}
+
+template <typename T1, typename T2>
 inline void copyFromBuffer(T1& dst, const T2& src)
 {
     static_assert(sizeof(dst) <= sizeof(src), "Destination object must be at most the size of the source buffer.");
@@ -36,6 +50,9 @@ void setMemory(ContractState<T, I>&, uint8) = delete;
 
 template <typename T1, unsigned int I, typename T2>
 void copyMemory(ContractState<T1, I>&, const T2&) = delete;
+
+template <typename T1, unsigned int I, typename T2>
+void copyToBuffer(ContractState<T1, I>&, const T2&, bool) = delete;
 
 template <typename T1, unsigned int I, typename T2>
 void copyFromBuffer(ContractState<T1, I>&, const T2&) = delete;
