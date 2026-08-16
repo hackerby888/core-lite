@@ -70,8 +70,7 @@ namespace ForkCensus
             for (int slotIndex = 0; slotIndex < slotCount; slotIndex++)
             {
                 int expectedFree = 0;
-                if (gSlots[slotIndex].live.compare_exchange_strong(
-                        expectedFree, 1, std::memory_order_acq_rel))
+                if (gSlots[slotIndex].live.compare_exchange_strong(expectedFree, 1, std::memory_order_acq_rel))
                 {
                     tlLockSlot = slotIndex;
                     (void)&tlUnreg;
@@ -84,17 +83,13 @@ namespace ForkCensus
                 gCount.fetch_sub(1, std::memory_order_acq_rel);
                 if (!gOverflow.exchange(true, std::memory_order_acq_rel))
                 {
-                    fprintf(
-                        stderr,
-                        "[FORKCENSUS] slot overflow (>%d lock-holding threads) -> forks degrade to strict\n",
-                        MAX_THREADS);
+                    fprintf(stderr, "[FORKCENSUS] slot overflow (>%d lock-holding threads) -> forks degrade to strict\n", MAX_THREADS);
                     fflush(stderr);
                 }
                 return;
             }
             int expectedFree = 0;
-            if (gSlots[newSlot].live.compare_exchange_strong(
-                    expectedFree, 1, std::memory_order_acq_rel))
+            if (gSlots[newSlot].live.compare_exchange_strong(expectedFree, 1, std::memory_order_acq_rel))
             {
                 tlLockSlot = newSlot;
                 (void)&tlUnreg;
@@ -146,8 +141,7 @@ namespace ForkCensus
             slotCount = MAX_THREADS;
         for (int slotIndex = 0; slotIndex < slotCount; slotIndex++)
         {
-            if (slotIndex != selfSlot
-                && gSlots[slotIndex].depth.load(std::memory_order_relaxed) > 0)
+            if (slotIndex != selfSlot && gSlots[slotIndex].depth.load(std::memory_order_relaxed) > 0)
             {
                 return gSlots[slotIndex].what.load(std::memory_order_relaxed);
             }

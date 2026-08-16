@@ -6,23 +6,10 @@
 namespace Wasm::Sdk
 {
 
-int callFunction(
-    const void* callerContext,
-    unsigned int calleeIndex,
-    unsigned short inputType,
-    const void* input,
-    unsigned int inputSize,
-    void* output,
+int callFunction(const void* callerContext, unsigned int calleeIndex, unsigned short inputType, const void* input, unsigned int inputSize, void* output,
     unsigned int outputSize);
-int invokeProcedure(
-    const void* callerContext,
-    unsigned int calleeIndex,
-    unsigned short inputType,
-    const void* input,
-    unsigned int inputSize,
-    void* output,
-    unsigned int outputSize,
-    long long invocationReward);
+int invokeProcedure(const void* callerContext, unsigned int calleeIndex, unsigned short inputType, const void* input, unsigned int inputSize, void* output,
+    unsigned int outputSize, long long invocationReward);
 
 } // namespace Wasm::Sdk
 

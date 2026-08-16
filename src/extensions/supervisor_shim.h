@@ -44,8 +44,7 @@ static pid_t shimForkSidecar()
     if (pathLength <= 0)
         _exit(127);
     self[pathLength] = 0;
-    execl(self, "qubic-rpc-sidecar", "--rpc-proxy",
-          "--rpc-listen", gSidecarPort, "--rpc-node", gSidecarPort, (char*)nullptr);
+    execl(self, "qubic-rpc-sidecar", "--rpc-proxy", "--rpc-listen", gSidecarPort, "--rpc-node", gSidecarPort, (char*)nullptr);
     _exit(127);                           // execl failed
 #endif
 }

@@ -33,13 +33,7 @@ int main(int argc, char** argv)
     MEMORY_BASIC_INFORMATION memoryInfo;
     unsigned long long totalCommit = 0;
     unsigned long long totalResident = 0;
-    printf(
-        "%-16s %10s %10s %10s  %s\n",
-        "base",
-        "size MB",
-        "commit MB",
-        "ws MB",
-        "type/protect");
+    printf("%-16s %10s %10s %10s  %s\n", "base", "size MB", "commit MB", "ws MB", "type/protect");
 
     unsigned char* currentAllocationBase = 0;
     unsigned long long groupSize = 0;
@@ -61,14 +55,8 @@ int main(int argc, char** argv)
         {
             if (currentAllocationBase && groupSize >= minimumBytes)
             {
-                printf(
-                    "%-16p %10llu %10llu %10llu  type=%lx prot=%lx\n",
-                    currentAllocationBase,
-                    groupSize >> 20,
-                    groupCommit >> 20,
-                    groupResident >> 20,
-                    groupType,
-                    groupProtect);
+                printf("%-16p %10llu %10llu %10llu  type=%lx prot=%lx\n", currentAllocationBase, groupSize >> 20, groupCommit >> 20, groupResident >> 20,
+                    groupType, groupProtect);
             }
             if (done)
             {

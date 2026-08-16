@@ -1107,8 +1107,7 @@ struct QpiContextUserProcedureCall : public QPI::QpiContextProcedureCall
         unsigned short fullInputSize = contractUserProcedureInputSizes[_currentContractIndex][inputType];
         outputSize = contractUserProcedureOutputSizes[_currentContractIndex][inputType];
         unsigned int localsSize = contractUserProcedureLocalsSizes[_currentContractIndex][inputType];
-        const ContractInvocationBufferLayout bufferLayout =
-            contractInvocationBufferLayout(fullInputSize, outputSize, localsSize);
+        const ContractInvocationBufferLayout bufferLayout = contractInvocationBufferLayout(fullInputSize, outputSize, localsSize);
         char* inputBuffer = contractLocalsStack[_stackIndex].allocate(bufferLayout.totalSize);
         if (!inputBuffer)
         {
@@ -1229,8 +1228,7 @@ struct QpiContextUserFunctionCall : public QPI::QpiContextFunctionCall
         unsigned short fullInputSize = contractUserFunctionInputSizes[_currentContractIndex][inputType];
         outputSize = contractUserFunctionOutputSizes[_currentContractIndex][inputType];
         unsigned int localsSize = contractUserFunctionLocalsSizes[_currentContractIndex][inputType];
-        const ContractInvocationBufferLayout bufferLayout =
-            contractInvocationBufferLayout(fullInputSize, outputSize, localsSize);
+        const ContractInvocationBufferLayout bufferLayout = contractInvocationBufferLayout(fullInputSize, outputSize, localsSize);
         char* inputBuffer = contractLocalsStack[_stackIndex].allocate(bufferLayout.totalSize);
         if (!inputBuffer)
         {
@@ -1352,8 +1350,7 @@ struct QpiContextUserProcedureNotificationCall : public QPI::QpiContextProcedure
         contractStateLock[_currentContractIndex].acquireWrite();
 
         QPI::NoData output;
-        const ContractInvocationBufferLayout bufferLayout =
-            contractInvocationBufferLayout(notif.inputSize, 0, notif.localsSize);
+        const ContractInvocationBufferLayout bufferLayout = contractInvocationBufferLayout(notif.inputSize, 0, notif.localsSize);
         char* input = contractLocalsStack[_stackIndex].allocate(bufferLayout.totalSize);
         if (!input)
         {

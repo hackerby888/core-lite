@@ -8,10 +8,7 @@
 namespace Wasm::Runtime
 {
 
-[[maybe_unused]] static bool loadFromBytes(
-    unsigned int contractIndex,
-    const unsigned char* bytes,
-    unsigned int length)
+[[maybe_unused]] static bool loadFromBytes(unsigned int contractIndex, const unsigned char* bytes, unsigned int length)
 {
     const int slotOffset = engineSlotOffset(contractIndex);
     if (slotOffset < 0)

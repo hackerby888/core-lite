@@ -107,9 +107,7 @@ static inline uint32_t callU32(wasm_exec_env_t execEnv, wasm_function_inst_t fun
     return arguments[0];
 }
 
-static inline unsigned long long effectiveStateSize(
-    unsigned int contractIndex,
-    unsigned long long defaultSize)
+static inline unsigned long long effectiveStateSize(unsigned int contractIndex, unsigned long long defaultSize)
 {
     const int slotOffset = engineSlotOffset(contractIndex);
     if (slotOffset < 0 || !engineSlots[slotOffset].loaded)
@@ -155,12 +153,7 @@ static bool resolveArenaLimit(const MemoryLayout& fixedLayout, uint32_t& arenaLi
     return true;
 }
 
-static bool resolveIoSizes(
-    uint32_t contractIndex,
-    uint16_t inputType,
-    DispatchKind kind,
-    const EngineSlot& slot,
-    IoSizes& sizes)
+static bool resolveIoSizes(uint32_t contractIndex, uint16_t inputType, DispatchKind kind, const EngineSlot& slot, IoSizes& sizes)
 {
     switch (kind)
     {

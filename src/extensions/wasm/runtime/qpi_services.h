@@ -14,23 +14,13 @@ void logToConsole(const CHAR16* message);
 namespace Wasm::Runtime
 {
 
-static void logBytes(
-    unsigned int contractIndex,
-    unsigned char type,
-    const void* message,
-    unsigned int size)
+static void logBytes(unsigned int contractIndex, unsigned char type, const void* message, unsigned int size)
 {
     *((unsigned int*)(void*)message) = contractIndex;
     qLogger::logMessage(size, type, message);
 }
 
-static unsigned int enumerateAssets(
-    const void*,
-    unsigned int kind,
-    const void* issuance,
-    const void* ownership,
-    const void* possession,
-    void* outputBuffer,
+static unsigned int enumerateAssets(const void*, unsigned int kind, const void* issuance, const void* ownership, const void* possession, void* outputBuffer,
     unsigned int capacity)
 {
     AssetEntry* output = (AssetEntry*)outputBuffer;
@@ -77,13 +67,7 @@ static unsigned int enumerateAssets(
     return count;
 }
 
-static int callContractFunction(
-    const void* callerContext,
-    unsigned int contractIndex,
-    unsigned short inputType,
-    const void* input,
-    unsigned int,
-    void* output,
+static int callContractFunction(const void* callerContext, unsigned int contractIndex, unsigned short inputType, const void* input, unsigned int, void* output,
     unsigned int)
 {
     if (contractIndex >= contractCount || !contractUserFunctions[contractIndex][inputType])
@@ -110,15 +94,8 @@ static int callContractFunction(
     return (int)QPI::NoCallError;
 }
 
-static int invokeContractProcedure(
-    const void* callerContext,
-    unsigned int contractIndex,
-    unsigned short inputType,
-    const void* input,
-    unsigned int,
-    void* output,
-    unsigned int,
-    long long invocationReward)
+static int invokeContractProcedure(const void* callerContext, unsigned int contractIndex, unsigned short inputType, const void* input, unsigned int,
+    void* output, unsigned int, long long invocationReward)
 {
     if (contractIndex >= contractCount || !contractUserProcedures[contractIndex][inputType])
     {
@@ -144,21 +121,12 @@ static int invokeContractProcedure(
     return (int)QPI::NoCallError;
 }
 
-static unsigned short setShareholderProposal(
-    const void* context,
-    unsigned int contractIndex,
-    const void* proposal,
-    long long invocationReward)
+static unsigned short setShareholderProposal(const void* context, unsigned int contractIndex, const void* proposal, long long invocationReward)
 {
     return ((QPI::QpiContextProcedureCall*)context)->setShareholderProposal((unsigned short)contractIndex, *(const QPI::Array<QPI::uint8, 1024>*)proposal, invocationReward);
 }
 
-static unsigned char setShareholderVotes(
-    const void* context,
-    unsigned int contractIndex,
-    const void* voteData,
-    unsigned int,
-    long long invocationReward)
+static unsigned char setShareholderVotes(const void* context, unsigned int contractIndex, const void* voteData, unsigned int, long long invocationReward)
 {
     return (unsigned char)((QPI::QpiContextProcedureCall*)context)->setShareholderVotes((unsigned short)contractIndex, *(const QPI::ProposalMultiVoteDataV1*)voteData, invocationReward);
 }
@@ -218,11 +186,7 @@ static long long transfer(const void* context, const void* destination, long lon
     return procedureContext(context)->transfer(*(const m256i*)destination, amount);
 }
 
-static long long transferTyped(
-    const void* context,
-    const void* destination,
-    long long amount,
-    unsigned char transferType)
+static long long transferTyped(const void* context, const void* destination, long long amount, unsigned char transferType)
 {
     return procedureContext(context)->__transfer(*(const m256i*)destination, amount, transferType);
 }
@@ -347,110 +311,56 @@ static unsigned char isAssetIssued(const void* context, const void* issuer, unsi
     return (unsigned char)functionContext(context)->isAssetIssued(*(const m256i*)issuer, name);
 }
 
-static long long issueAsset(
-    const void* context,
-    unsigned long long name,
-    const void* issuer,
-    signed char decimals,
-    long long shares,
-    unsigned long long unit)
+static long long issueAsset(const void* context, unsigned long long name, const void* issuer, signed char decimals, long long shares, unsigned long long unit)
 {
     return procedureContext(context)->issueAsset(name, *(const QPI::id*)issuer, decimals, shares, unit);
 }
 
-static long long numberOfShares(
-    const void* context,
-    const void* asset,
-    const void* ownership,
-    const void* possession)
+static long long numberOfShares(const void* context, const void* asset, const void* ownership, const void* possession)
 {
     return functionContext(context)->numberOfShares(*(const QPI::Asset*)asset, *(const QPI::AssetOwnershipSelect*)ownership, *(const QPI::AssetPossessionSelect*)possession);
 }
 
-static long long numberOfPossessedShares(
-    const void* context,
-    unsigned long long name,
-    const void* issuer,
-    const void* owner,
-    const void* possessor,
-    unsigned short ownershipManagement,
-    unsigned short possessionManagement)
+static long long numberOfPossessedShares(const void* context, unsigned long long name, const void* issuer, const void* owner, const void* possessor,
+    unsigned short ownershipManagement, unsigned short possessionManagement)
 {
     return functionContext(context)->numberOfPossessedShares(name, *(const m256i*)issuer, *(const m256i*)owner, *(const m256i*)possessor, ownershipManagement, possessionManagement);
 }
 
-static long long transferShareOwnershipAndPossession(
-    const void* context,
-    unsigned long long name,
-    const void* issuer,
-    const void* owner,
-    const void* possessor,
-    long long shares,
-    const void* newOwner)
+static long long transferShareOwnershipAndPossession(const void* context, unsigned long long name, const void* issuer, const void* owner, const void* possessor,
+    long long shares, const void* newOwner)
 {
     return procedureContext(context)->transferShareOwnershipAndPossession(name, *(const m256i*)issuer, *(const m256i*)owner, *(const m256i*)possessor, shares, *(const m256i*)newOwner);
 }
 
-static long long acquireShares(
-    const void* context,
-    unsigned long long name,
-    const void* issuer,
-    const void* owner,
-    const void* possessor,
-    long long shares,
-    unsigned short sourceOwnershipManagement,
-    unsigned short sourcePossessionManagement,
-    long long fee)
+static long long acquireShares(const void* context, unsigned long long name, const void* issuer, const void* owner, const void* possessor, long long shares,
+    unsigned short sourceOwnershipManagement, unsigned short sourcePossessionManagement, long long fee)
 {
     return procedureContext(context)->acquireShares(QPI::Asset{ *(const m256i*)issuer, name }, *(const m256i*)owner, *(const m256i*)possessor, shares, sourceOwnershipManagement, sourcePossessionManagement, fee);
 }
 
-static long long releaseShares(
-    const void* context,
-    unsigned long long name,
-    const void* issuer,
-    const void* owner,
-    const void* possessor,
-    long long shares,
-    unsigned short destinationOwnershipManagement,
-    unsigned short destinationPossessionManagement,
-    long long fee)
+static long long releaseShares(const void* context, unsigned long long name, const void* issuer, const void* owner, const void* possessor, long long shares,
+    unsigned short destinationOwnershipManagement, unsigned short destinationPossessionManagement, long long fee)
 {
     return procedureContext(context)->releaseShares(QPI::Asset{ *(const m256i*)issuer, name }, *(const m256i*)owner, *(const m256i*)possessor, shares, destinationOwnershipManagement, destinationPossessionManagement, fee);
 }
 
-static unsigned char dayOfWeek(
-    const void* context,
-    unsigned char year,
-    unsigned char month,
-    unsigned char day)
+static unsigned char dayOfWeek(const void* context, unsigned char year, unsigned char month, unsigned char day)
 {
     return functionContext(context)->dayOfWeek(year, month, day);
 }
 
-static unsigned char signatureValidity(
-    const void* context,
-    const void* entity,
-    const void* digest,
-    const void* signature)
+static unsigned char signatureValidity(const void* context, const void* entity, const void* digest, const void* signature)
 {
     return (unsigned char)functionContext(context)->signatureValidity(*(const m256i*)entity, *(const m256i*)digest, *(const QPI::Array<QPI::sint8, 64>*)signature);
 }
 
-static long long bidInIPO(
-    const void* context,
-    unsigned int contractIndex,
-    long long price,
-    unsigned int quantity)
+static long long bidInIPO(const void* context, unsigned int contractIndex, long long price, unsigned int quantity)
 {
     return procedureContext(context)->bidInIPO(contractIndex, price, quantity);
 }
 
-static void ipoBidId(
-    const void* context,
-    unsigned int contractIndex,
-    unsigned int bidIndex,
-    void* output)
+static void ipoBidId(const void* context, unsigned int contractIndex, unsigned int bidIndex, void* output)
 {
     *(m256i*)output = functionContext(context)->ipoBidId(contractIndex, bidIndex);
 }
@@ -460,12 +370,7 @@ static long long ipoBidPrice(const void* context, unsigned int contractIndex, un
     return functionContext(context)->ipoBidPrice(contractIndex, bidIndex);
 }
 
-static void computeMiningFunction(
-    const void* context,
-    const void* seed,
-    const void* publicKey,
-    const void* nonce,
-    void* output)
+static void computeMiningFunction(const void* context, const void* seed, const void* publicKey, const void* nonce, void* output)
 {
     *(m256i*)output = functionContext(context)->computeMiningFunction(*(const m256i*)seed, *(const m256i*)publicKey, *(const m256i*)nonce);
 }
@@ -485,18 +390,11 @@ static unsigned char getOcInvocationStatus(const void* context, long long invoca
     return functionContext(context)->getOcInvocationStatus(invocationId);
 }
 
-static long long invokeOc(
-    const void* context,
-    unsigned int interfaceIndex,
-    const void* request,
-    unsigned int requestSize)
+static long long invokeOc(const void* context, unsigned int interfaceIndex, const void* request, unsigned int requestSize)
 {
     static_assert(OCI::ocInterfacesCount == 1, "add Wasm OC dispatch case");
 
-    if (!context
-        || !request
-        || interfaceIndex >= OCI::ocInterfacesCount
-        || requestSize != OCI::ocInterfaces[interfaceIndex].requestSize)
+    if (!context || !request || interfaceIndex >= OCI::ocInterfacesCount || requestSize != OCI::ocInterfaces[interfaceIndex].requestSize)
     {
         return -1;
     }

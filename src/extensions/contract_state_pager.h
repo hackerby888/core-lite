@@ -273,10 +273,8 @@ private:
 
     // Placeholder reservations are the only way to swap a filled view into a reserved range.
     // They need Windows 10 1803; older builds keep the commit-then-fill path.
-    using VirtualAlloc2Fn = PVOID(WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, ULONG,
-                                           MEM_EXTENDED_PARAMETER*, ULONG);
-    using MapViewOfFile3Fn = PVOID(WINAPI*)(HANDLE, HANDLE, PVOID, ULONG64, SIZE_T, ULONG, ULONG,
-                                            MEM_EXTENDED_PARAMETER*, ULONG);
+    using VirtualAlloc2Fn = PVOID(WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG);
+    using MapViewOfFile3Fn = PVOID(WINAPI*)(HANDLE, HANDLE, PVOID, ULONG64, SIZE_T, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG);
     using UnmapViewOfFile2Fn = BOOL(WINAPI*)(HANDLE, PVOID, ULONG);
 
     static inline VirtualAlloc2Fn virtualAlloc2 = nullptr;
@@ -305,8 +303,7 @@ private:
         void* state = nullptr;
         if (placeholdersAvailable)
         {
-            state = virtualAlloc2(nullptr, nullptr, padded, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
-                                  PAGE_NOACCESS, nullptr, 0);
+            state = virtualAlloc2(nullptr, nullptr, padded, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
             if (!state)
             {
                 reportPlaceholderFailure("VirtualAlloc2(MEM_RESERVE_PLACEHOLDER)");
@@ -457,10 +454,7 @@ private:
         }
 
         unsigned char* address = blockAddress(blockIndex);
-        const bool zero = std::all_of(
-            address,
-            address + blockSize,
-            [](unsigned char byte) { return byte == 0; });
+        const bool zero = std::all_of(address, address + blockSize, [](unsigned char byte) { return byte == 0; });
 
         std::vector<unsigned char> compressed;
         if (!zero)
@@ -520,9 +514,7 @@ private:
 
         if (previous == BlockState::Compressed)
         {
-            const int decompressedSize = blosc2_decompress(
-                block.compressed.data(), (int32_t)block.compressed.size(), scratch.data,
-                (int32_t)blockSize);
+            const int decompressedSize = blosc2_decompress(block.compressed.data(), (int32_t)block.compressed.size(), scratch.data, (int32_t)blockSize);
             if (decompressedSize != (int)blockSize)
             {
                 releaseScratchBlock(scratch);
@@ -558,19 +550,16 @@ private:
 #ifdef _WIN32
         if (!placeholdersAvailable)
         {
-            scratch.data = (unsigned char*)VirtualAlloc(
-                nullptr, sharedBlockSize, MEM_COMMIT, PAGE_READWRITE);
+            scratch.data = (unsigned char*)VirtualAlloc(nullptr, sharedBlockSize, MEM_COMMIT, PAGE_READWRITE);
             return scratch.data != nullptr;
         }
 
-        scratch.section = CreateFileMappingW(
-            INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, (DWORD)sharedBlockSize, nullptr);
+        scratch.section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, (DWORD)sharedBlockSize, nullptr);
         if (!scratch.section)
         {
             return false;
         }
-        scratch.data = (unsigned char*)MapViewOfFile(
-            scratch.section, FILE_MAP_WRITE, 0, 0, sharedBlockSize);
+        scratch.data = (unsigned char*)MapViewOfFile(scratch.section, FILE_MAP_WRITE, 0, 0, sharedBlockSize);
         if (!scratch.data)
         {
             CloseHandle(scratch.section);
@@ -579,8 +568,7 @@ private:
         }
         return true;
 #else
-        void* mapping = mmap(nullptr, sharedBlockSize, PROT_READ | PROT_WRITE,
-                             MAP_PRIVATE | MAP_ANON, -1, 0);
+        void* mapping = mmap(nullptr, sharedBlockSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (mapping == MAP_FAILED)
         {
             return false;
@@ -640,8 +628,7 @@ private:
         // A view can only replace a placeholder that matches it exactly; splitting the range out
         // fails harmlessly once it already is one, which is the case from the second restore on.
         VirtualFree(address, sharedBlockSize, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
-        const bool mapped = mapViewOfFile3(scratch.section, GetCurrentProcess(), address, 0,
-                                           sharedBlockSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE,
+        const bool mapped = mapViewOfFile3(scratch.section, GetCurrentProcess(), address, 0, sharedBlockSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE,
                                            nullptr, 0) != nullptr;
         if (!mapped)
         {
@@ -662,10 +649,8 @@ private:
         mach_vm_address_t target = (mach_vm_address_t)address;
         vm_prot_t currentProtection = VM_PROT_READ;
         vm_prot_t maximumProtection = VM_PROT_READ | VM_PROT_WRITE;
-        const kern_return_t result = mach_vm_remap(
-            mach_task_self(), &target, sharedBlockSize, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-            mach_task_self(), (mach_vm_address_t)scratch.data, TRUE, &currentProtection,
-            &maximumProtection, VM_INHERIT_NONE);
+        const kern_return_t result = mach_vm_remap(mach_task_self(), &target, sharedBlockSize, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+            mach_task_self(), (mach_vm_address_t)scratch.data, TRUE, &currentProtection, &maximumProtection, VM_INHERIT_NONE);
         if (result != KERN_SUCCESS || target != (mach_vm_address_t)address)
         {
             return false;
@@ -673,8 +658,7 @@ private:
         releaseScratchBlock(scratch);
         return true;
 #else
-        void* moved = mremap(scratch.data, sharedBlockSize, sharedBlockSize,
-                             MREMAP_MAYMOVE | MREMAP_FIXED, address);
+        void* moved = mremap(scratch.data, sharedBlockSize, sharedBlockSize, MREMAP_MAYMOVE | MREMAP_FIXED, address);
         if (moved != address)
         {
             return false;
@@ -697,8 +681,7 @@ private:
         if (!reported)
         {
             reported = true;
-            std::cerr << "Contract-state pager: " << step << " failed with " << GetLastError()
-                      << "; falling back to unstaged block restore\n";
+            std::cerr << "Contract-state pager: " << step << " failed with " << GetLastError() << "; falling back to unstaged block restore\n";
         }
     }
 #endif
@@ -725,8 +708,7 @@ private:
             {
                 virtualAlloc2 = (VirtualAlloc2Fn)GetProcAddress(kernelBase, "VirtualAlloc2");
                 mapViewOfFile3 = (MapViewOfFile3Fn)GetProcAddress(kernelBase, "MapViewOfFile3");
-                unmapViewOfFile2 =
-                    (UnmapViewOfFile2Fn)GetProcAddress(kernelBase, "UnmapViewOfFile2");
+                unmapViewOfFile2 = (UnmapViewOfFile2Fn)GetProcAddress(kernelBase, "UnmapViewOfFile2");
             }
             placeholdersAvailable = virtualAlloc2 && mapViewOfFile3 && unmapViewOfFile2;
 #else

@@ -58,8 +58,7 @@ namespace tickFork
                 return;
 
             unsigned long long expected = _phase;
-            gRequestProcessorParkPhase.compare_exchange_strong(
-                expected, _phase + 1, std::memory_order_acq_rel);
+            gRequestProcessorParkPhase.compare_exchange_strong(expected, _phase + 1, std::memory_order_acq_rel);
             _phase = 0;
         }
 
@@ -76,12 +75,10 @@ namespace tickFork
     {
         for (;;)
         {
-            const unsigned long long parkPhase =
-                gRequestProcessorParkPhase.load(std::memory_order_acquire);
+            const unsigned long long parkPhase = gRequestProcessorParkPhase.load(std::memory_order_acquire);
             if (!(parkPhase & 1))
                 return;
-            gRequestProcessorParkAcknowledgement[processorNumber].store(
-                parkPhase, std::memory_order_release);
+            gRequestProcessorParkAcknowledgement[processorNumber].store(parkPhase, std::memory_order_release);
 
             // Recheck after release so a worker cannot miss the next park request.
             while (gRequestProcessorParkPhase.load(std::memory_order_acquire) == parkPhase)

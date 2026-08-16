@@ -14,8 +14,7 @@ namespace Wasm::Runtime
 {
 
 static constexpr unsigned int WASM_UPLOAD_CHUNK_SIZE = 1008u;
-static constexpr unsigned int WASM_MAX_UPLOAD_CHUNKS =
-    (WASM_MAX_MODULE_SIZE - 1u) / WASM_UPLOAD_CHUNK_SIZE + 1u;
+static constexpr unsigned int WASM_MAX_UPLOAD_CHUNKS = (WASM_MAX_MODULE_SIZE - 1u) / WASM_UPLOAD_CHUNK_SIZE + 1u;
 
 struct ContractSlot
 {
@@ -57,16 +56,10 @@ static inline unsigned int expectedModuleUploadChunkCount(unsigned int totalSize
 
 static inline bool validModuleUploadShape(unsigned int totalSize, unsigned int chunkCount)
 {
-    return totalSize > 0
-        && totalSize <= WASM_MAX_MODULE_SIZE
-        && chunkCount == expectedModuleUploadChunkCount(totalSize);
+    return totalSize > 0 && totalSize <= WASM_MAX_MODULE_SIZE && chunkCount == expectedModuleUploadChunkCount(totalSize);
 }
 
-static inline bool tryBeginModuleUpload(
-    unsigned long long sessionId,
-    unsigned int totalSize,
-    unsigned int chunkCount,
-    const unsigned char* finalHash)
+static inline bool tryBeginModuleUpload(unsigned long long sessionId, unsigned int totalSize, unsigned int chunkCount, const unsigned char* finalHash)
 {
     if (moduleUpload.active)
     {
@@ -88,27 +81,21 @@ static inline bool tryBeginModuleUpload(
     return true;
 }
 
-static inline bool tryReceiveModuleChunk(
-    unsigned long long sessionId,
-    unsigned int sequence,
-    const unsigned char* data,
-    unsigned int dataLength)
+static inline bool tryReceiveModuleChunk(unsigned long long sessionId, unsigned int sequence, const unsigned char* data, unsigned int dataLength)
 {
     if (!moduleUpload.active || sessionId != moduleUpload.sessionId)
     {
         return false;
     }
 
-    const unsigned long long destinationOffset =
-        (unsigned long long)sequence * WASM_UPLOAD_CHUNK_SIZE;
+    const unsigned long long destinationOffset = (unsigned long long)sequence * WASM_UPLOAD_CHUNK_SIZE;
     if (!data || sequence != moduleUpload.receivedCount || sequence >= moduleUpload.chunkCount)
     {
         return false;
     }
 
     const unsigned int remainingSize = moduleUpload.totalSize - (unsigned int)destinationOffset;
-    const unsigned int expectedDataLength = remainingSize < WASM_UPLOAD_CHUNK_SIZE
-        ? remainingSize
+    const unsigned int expectedDataLength = remainingSize < WASM_UPLOAD_CHUNK_SIZE ? remainingSize
         : WASM_UPLOAD_CHUNK_SIZE;
     if (dataLength != expectedDataLength)
     {

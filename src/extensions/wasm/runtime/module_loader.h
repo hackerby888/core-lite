@@ -9,10 +9,7 @@
 namespace Wasm::Runtime
 {
 
-static void captureState(
-    const EngineSlot& slot,
-    unsigned int contractIndex,
-    StateSnapshot& snapshot)
+static void captureState(const EngineSlot& slot, unsigned int contractIndex, StateSnapshot& snapshot)
 {
     if (!slot.instance || !slot.stateStubReleased || !slot.stateSize || !contractStates[contractIndex])
     {
@@ -82,10 +79,7 @@ static void unloadSlot(EngineSlot& slot)
     slot.loaded = false;
 }
 
-static bool prepareModuleBuffer(
-    ModuleResources& moduleSet,
-    const unsigned char* bytes,
-    unsigned int length)
+static bool prepareModuleBuffer(ModuleResources& moduleSet, const unsigned char* bytes, unsigned int length)
 {
     // WAMR mutates and retains this buffer for the module lifetime.
     moduleSet.moduleBuffer = (unsigned char*)malloc(length);
@@ -146,10 +140,7 @@ static bool findRequiredExports(wasm_module_inst_t instance, RequiredExports& ex
     return true;
 }
 
-static bool validateContractIndex(
-    unsigned int targetContractIndex,
-    const ModuleResources& moduleSet,
-    const RequiredExports& exports)
+static bool validateContractIndex(unsigned int targetContractIndex, const ModuleResources& moduleSet, const RequiredExports& exports)
 {
     wasm_valkind_t resultType = WASM_I32;
     if (wasm_func_get_param_count(exports.contractIndex, moduleSet.instance) != 0 || wasm_func_get_result_count(exports.contractIndex, moduleSet.instance) != 1)
@@ -183,10 +174,7 @@ static bool validateContractIndex(
     return true;
 }
 
-static bool callU32Checked(
-    const ModuleResources& moduleSet,
-    wasm_function_inst_t function,
-    uint32_t& result)
+static bool callU32Checked(const ModuleResources& moduleSet, wasm_function_inst_t function, uint32_t& result)
 {
     uint32_t arguments[1] = { 0 };
     if (!wasm_runtime_call_wasm(moduleSet.execEnv, function, 0, arguments))
@@ -199,10 +187,7 @@ static bool callU32Checked(
     return true;
 }
 
-static bool discoverMemoryLayout(
-    ModuleLayout& layout,
-    const ModuleResources& moduleSet,
-    const RequiredExports& exports)
+static bool discoverMemoryLayout(ModuleLayout& layout, const ModuleResources& moduleSet, const RequiredExports& exports)
 {
     if (!callU32Checked(moduleSet, exports.stateAddress, layout.stateOffset) || !callU32Checked(moduleSet, exports.stateSize, layout.stateSize) || !callU32Checked(moduleSet, exports.ioBase, layout.ioBaseOffset))
     {
@@ -227,11 +212,7 @@ static bool discoverMemoryLayout(
     return true;
 }
 
-static void adoptModule(
-    EngineSlot& slot,
-    ModuleResources& moduleSet,
-    const RequiredExports& exports,
-    const ModuleLayout& layout)
+static void adoptModule(EngineSlot& slot, ModuleResources& moduleSet, const RequiredExports& exports, const ModuleLayout& layout)
 {
     slot.moduleBuffer = moduleSet.moduleBuffer;
     slot.module = moduleSet.module;

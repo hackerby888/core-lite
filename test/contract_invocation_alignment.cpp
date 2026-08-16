@@ -26,8 +26,7 @@ AlignmentProbe probe;
 
 unsigned int alignmentRemainder(const void* buffer)
 {
-    return static_cast<unsigned int>(
-        reinterpret_cast<std::uintptr_t>(buffer) % CONTRACT_INVOCATION_BUFFER_ALIGNMENT);
+    return static_cast<unsigned int>(reinterpret_cast<std::uintptr_t>(buffer) % CONTRACT_INVOCATION_BUFFER_ALIGNMENT);
 }
 
 void recordProbe(void* input, void* output, void* locals)
@@ -41,22 +40,12 @@ void recordProbe(void* input, void* output, void* locals)
     *static_cast<unsigned char*>(output) = outputValue;
 }
 
-void probeFunction(
-    const QPI::QpiContextFunctionCall&,
-    void*,
-    void* input,
-    void* output,
-    void* locals)
+void probeFunction(const QPI::QpiContextFunctionCall&, void*, void* input, void* output, void* locals)
 {
     recordProbe(input, output, locals);
 }
 
-void probeProcedure(
-    const QPI::QpiContextProcedureCall&,
-    void*,
-    void* input,
-    void* output,
-    void* locals)
+void probeProcedure(const QPI::QpiContextProcedureCall&, void*, void* input, void* output, void* locals)
 {
     recordProbe(input, output, locals);
 }

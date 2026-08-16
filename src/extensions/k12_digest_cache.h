@@ -24,11 +24,7 @@ protected:
     unsigned char *_lastOutput;
     size_t _lastOutputSize;
 
-    int _KangarooTwelve_Update(
-        XKCP::KangarooTwelve_Instance *ktInstance,
-        const unsigned char *input,
-        size_t inputByteLen,
-        bool useCache)
+    int _KangarooTwelve_Update(XKCP::KangarooTwelve_Instance *ktInstance, const unsigned char *input, size_t inputByteLen, bool useCache)
     {
         if (ktInstance->phase != XKCP::ABSORBING)
             return 1;

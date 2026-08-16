@@ -64,9 +64,7 @@ RPC_ROUTE("GET", "/explorer/data")
                 if (!isZero(td->transactionDigests[i])) txc++;
             row["empty"]     = false;
             row["txCount"]   = txc;
-            row["timestamp"] = HttpUtils::formatTimestamp(
-                td->millisecond, td->second, td->minute, td->hour,
-                td->day, td->month, td->year);
+            row["timestamp"] = HttpUtils::formatTimestamp(td->millisecond, td->second, td->minute, td->hour, td->day, td->month, td->year);
         }
         else
         {

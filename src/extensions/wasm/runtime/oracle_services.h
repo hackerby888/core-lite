@@ -11,15 +11,11 @@ static inline unsigned int oracleContractIndex(const void* context)
     return ((const QPI::QpiContextProcedureCall*)context)->__qpiCurrentContractIndex();
 }
 
-static const UserProcedureRegistry::UserProcedureData* oracleNotification(
-    unsigned int contractIndex,
-    unsigned int notificationProcedureId,
+static const UserProcedureRegistry::UserProcedureData* oracleNotification(unsigned int contractIndex, unsigned int notificationProcedureId,
     unsigned int replySize)
 {
     const UserProcedureRegistry::UserProcedureData* notification;
-    if (!userProcedureRegistry
-        || !(notification = userProcedureRegistry->get(notificationProcedureId))
-        || notification->contractIndex != contractIndex
+    if (!userProcedureRegistry || !(notification = userProcedureRegistry->get(notificationProcedureId)) || notification->contractIndex != contractIndex
         || notification->inputSize != 16 + replySize)
     {
         return nullptr;
@@ -27,14 +23,8 @@ static const UserProcedureRegistry::UserProcedureData* oracleNotification(
     return notification;
 }
 
-static void callOracleNotification(
-    const void* context,
-    const UserProcedureRegistry::UserProcedureData& notification,
-    long long queryId,
-    int subscriptionId,
-    unsigned char status,
-    const void* reply,
-    unsigned int replySize)
+static void callOracleNotification(const void* context, const UserProcedureRegistry::UserProcedureData& notification, long long queryId, int subscriptionId,
+    unsigned char status, const void* reply, unsigned int replySize)
 {
     alignas(8) unsigned char input[16 + MAX_ORACLE_REPLY_SIZE] = {};
     copyMem(input, &queryId, sizeof(queryId));
@@ -49,14 +39,8 @@ static void callOracleNotification(
     notification.procedure(*(const QPI::QpiContextProcedureCall*)context, contractStates[notification.contractIndex], input, &output, nullptr);
 }
 
-static long long queryOracle(
-    const void* context,
-    unsigned int interfaceIndex,
-    const void* query,
-    unsigned int querySize,
-    unsigned int replySize,
-    unsigned int notificationProcedureId,
-    unsigned int timeoutMilliseconds,
+static long long queryOracle(const void* context, unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int replySize,
+    unsigned int notificationProcedureId, unsigned int timeoutMilliseconds,
     long long /*untrustedWasmFee*/)
 {
     if (!context || !query || interfaceIndex >= OI::oracleInterfacesCount)
@@ -106,23 +90,11 @@ static long long queryOracle(
     return -1;
 }
 
-static int subscribeOracle(
-    const void* context,
-    unsigned int interfaceIndex,
-    const void* query,
-    unsigned int querySize,
-    unsigned int replySize,
-    unsigned int timestampOffset,
-    unsigned int notificationProcedureId,
-    unsigned int periodMilliseconds,
-    unsigned int notifyPrevious,
-    long long fee)
+static int subscribeOracle(const void* context, unsigned int interfaceIndex, const void* query, unsigned int querySize, unsigned int replySize,
+    unsigned int timestampOffset, unsigned int notificationProcedureId, unsigned int periodMilliseconds, unsigned int notifyPrevious, long long fee)
 {
-    if (!context || !query
-        || interfaceIndex >= OI::oracleInterfacesCount
-        || querySize != OI::oracleInterfaces[interfaceIndex].querySize
-        || replySize != OI::oracleInterfaces[interfaceIndex].replySize
-        || querySize < sizeof(QPI::DateAndTime)
+    if (!context || !query || interfaceIndex >= OI::oracleInterfacesCount || querySize != OI::oracleInterfaces[interfaceIndex].querySize
+        || replySize != OI::oracleInterfaces[interfaceIndex].replySize || querySize < sizeof(QPI::DateAndTime)
         || timestampOffset > querySize - sizeof(QPI::DateAndTime))
     {
         return -1;
@@ -171,18 +143,14 @@ static int subscribeOracle(
 
 static unsigned int getOracleQuery(
     const void* /*context*/,
-    long long queryId,
-    void* output,
-    unsigned int size)
+    long long queryId, void* output, unsigned int size)
 {
     return oracleEngine.getOracleQuery(queryId, output, (uint16_t)size) ? 1u : 0u;
 }
 
 static unsigned int getOracleReply(
     const void* /*context*/,
-    long long queryId,
-    void* output,
-    unsigned int size)
+    long long queryId, void* output, unsigned int size)
 {
     return oracleEngine.getOracleReply(queryId, output, (uint16_t)size) ? 1u : 0u;
 }

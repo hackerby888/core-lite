@@ -166,12 +166,10 @@ inline void logRateLimitReport(int intervalSec, size_t topN)
         bucketCount = m.size();
     }
     if (blocked.empty()) return;
-    std::sort(blocked.begin(), blocked.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
+    std::sort(blocked.begin(), blocked.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
     size_t bn = std::min(blocked.size(), topN);
     std::ostringstream oss;
-    oss << "HTTP rate-limit drops (last " << intervalSec << "s, top " << bn << " of "
-        << blocked.size() << " IPs, " << bucketCount << " buckets tracked):";
+    oss << "HTTP rate-limit drops (last " << intervalSec << "s, top " << bn << " of " << blocked.size() << " IPs, " << bucketCount << " buckets tracked):";
     for (size_t i = 0; i < bn; ++i)
         oss << " " << blocked[i].first << "=" << blocked[i].second;
     LOG_INFO << oss.str();

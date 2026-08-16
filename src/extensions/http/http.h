@@ -22,8 +22,7 @@ class QubicHttpServer
     {
         using namespace drogon;
 
-        app().registerSyncAdvice(
-            [](const HttpRequestPtr& req) -> HttpResponsePtr
+        app().registerSyncAdvice([](const HttpRequestPtr& req) -> HttpResponsePtr
             {
 #ifndef NO_HTTP_RATE_LIMIT
                 if (!rl::checkRateLimit(rl::extractClientIp(req)))

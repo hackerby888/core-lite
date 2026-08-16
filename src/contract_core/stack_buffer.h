@@ -16,9 +16,7 @@ struct StackBuffer
     // Data type used for size and index.
     typedef StackBufferSizeType SizeType;
     static_assert(SizeType(-1) > 0, "Signed StackBufferSizeType is not supported!");
-    static_assert(
-        alignment != 0 && (alignment & (alignment - 1)) == 0,
-        "alignment must be a power of two!");
+    static_assert(alignment != 0 && (alignment & (alignment - 1)) == 0, "alignment must be a power of two!");
 
     // Constructor (disabled because not called without MS CRT, you need to call init() to init)
     //StackBuffer()

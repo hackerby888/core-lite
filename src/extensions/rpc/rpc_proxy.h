@@ -59,8 +59,7 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
 
     // Forward every request via a SYNC ADVICE (runs before routing) so it pre-empts the
     // HttpControllers this binary auto-registers — they'd run here with no node state and crash.
-    app().registerSyncAdvice(
-        [unixPath](const HttpRequestPtr& req) -> HttpResponsePtr
+    app().registerSyncAdvice([unixPath](const HttpRequestPtr& req) -> HttpResponsePtr
         {
             // Per-IP rate limit at the edge: the sidecar sees the real client IP; the node behind
             // the unix socket only sees loopback, so it must throttle here, before the forward.
@@ -103,9 +102,7 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
                 }
                 if (!nodeUnavailable.exchange(true))
                 {
-                    LOG_ERROR << "RPC sidecar: node " << failedOperation
-                              << " failed for " << unixPath
-                              << ": errno=" << connectionError
+                    LOG_ERROR << "RPC sidecar: node " << failedOperation << " failed for " << unixPath << ": errno=" << connectionError
                               << " (" << strerror(connectionError) << ")";
                 }
                 auto r = HttpResponse::newHttpResponse();
@@ -167,21 +164,18 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
             return resp;
         });
 
-    app().registerPreHandlingAdvice(
-        [](const HttpRequestPtr& req)
+    app().registerPreHandlingAdvice([](const HttpRequestPtr& req)
         {
             req->getAttributes()->insert("qubic_start", std::chrono::steady_clock::now());
         });
 
-    app().registerPostHandlingAdvice(
-        [](const HttpRequestPtr& req, const HttpResponsePtr& resp)
+    app().registerPostHandlingAdvice([](const HttpRequestPtr& req, const HttpResponsePtr& resp)
         {
             auto end = std::chrono::steady_clock::now();
             std::chrono::steady_clock::time_point start;
             try
             {
-                start = req->getAttributes()->get<std::chrono::steady_clock::time_point>(
-                    "qubic_start");
+                start = req->getAttributes()->get<std::chrono::steady_clock::time_point>("qubic_start");
             }
             catch (...)
             {
@@ -216,15 +210,12 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
             if (ms >= RPC_SLOW_REQUEST_MS)
             {
                 std::ostringstream line;
-                line << "HTTP slow " << ms << "ms "
-                     << req->methodString() << " "
-                     << req->path() << " from " << clientIp;
+                line << "HTTP slow " << ms << "ms " << req->methodString() << " " << req->path() << " from " << clientIp;
                 if (clientIp != peerIp)
                     line << " via " << peer.toIpPort();
                 else
                     line << ":" << peer.toPort();
-                line << " status=" << status
-                     << " body=" << bodyLen << "B";
+                line << " status=" << status << " body=" << bodyLen << "B";
                 LOG_INFO << line.str();
             }
         });
@@ -248,12 +239,10 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
                 snapshot.emplace_back(kv.first, kv.second);
             rpcClientStats().clear();
         }
-        std::sort(snapshot.begin(), snapshot.end(),
-                  [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+        std::sort(snapshot.begin(), snapshot.end(), [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
         size_t n = std::min(snapshot.size(), RPC_CLIENT_REPORT_TOP_N);
         std::ostringstream oss;
-        oss << "HTTP client report (last " << (int)RPC_CLIENT_REPORT_INTERVAL_SEC
-            << "s, top " << n << " of " << snapshot.size() << " IPs):";
+        oss << "HTTP client report (last " << (int)RPC_CLIENT_REPORT_INTERVAL_SEC << "s, top " << n << " of " << snapshot.size() << " IPs):";
         for (size_t i = 0; i < n; ++i)
         {
             const auto& p = snapshot[i];
@@ -269,8 +258,7 @@ inline int rpcProxyMain(int httpPort, std::string unixPath)
             if (!pc.empty())
             {
                 std::vector<std::pair<std::string, uint64_t>> paths(pc.begin(), pc.end());
-                std::sort(paths.begin(), paths.end(),
-                          [](const auto& a, const auto& b) { return a.second > b.second; });
+                std::sort(paths.begin(), paths.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
                 size_t pn = std::min(paths.size(), RPC_TOP_PATHS_PER_IP_REPORTED);
                 oss << ",paths={";
                 for (size_t j = 0; j < pn; ++j)

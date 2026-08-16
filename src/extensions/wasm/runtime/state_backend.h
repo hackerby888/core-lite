@@ -40,10 +40,7 @@ inline bool allocateContractState(unsigned int contractIndex, unsigned long long
 #endif
 }
 
-inline void hashContractState(
-    unsigned int contractIndex,
-    unsigned char* output,
-    unsigned long long effectiveSize)
+inline void hashContractState(unsigned int contractIndex, unsigned char* output, unsigned long long effectiveSize)
 {
     if (statePagerActive(contractIndex))
     {

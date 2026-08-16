@@ -36,10 +36,7 @@ static inline void* nativeAddress(wasm_exec_env_t execEnv, uint32_t offset)
     return wasm_runtime_addr_app_to_native(wasm_runtime_get_module_inst(execEnv), offset);
 }
 
-static inline void traceHostCall(
-    CallContext* callContext,
-    const char* name,
-    const std::string& detail)
+static inline void traceHostCall(CallContext* callContext, const char* name, const std::string& detail)
 {
     if (callContext && callContext->trace)
     {
@@ -217,12 +214,7 @@ static void w_releaseScratch(wasm_exec_env_t execEnv, uint32_t offset)
     }
 }
 
-static void w_logBytes(
-    wasm_exec_env_t execEnv,
-    uint32_t contractIndex,
-    uint32_t type,
-    uint32_t messageOffset,
-    uint32_t size)
+static void w_logBytes(wasm_exec_env_t execEnv, uint32_t contractIndex, uint32_t type, uint32_t messageOffset, uint32_t size)
 {
     CallContext* callContext = activeCallContext(execEnv);
     void* message = nativeAddress(execEnv, messageOffset);
@@ -244,11 +236,7 @@ static int64_t w_transfer(wasm_exec_env_t execEnv, uint32_t destinationOffset, i
     return hostServices.transfer(callContext->ctx, destination, amount);
 }
 
-static int64_t w_transferTyped(
-    wasm_exec_env_t execEnv,
-    uint32_t destinationOffset,
-    int64_t amount,
-    uint32_t transferType)
+static int64_t w_transferTyped(wasm_exec_env_t execEnv, uint32_t destinationOffset, int64_t amount, uint32_t transferType)
 {
     CallContext* callContext = activeCallContext(execEnv);
     void* destination = nativeAddress(execEnv, destinationOffset);
@@ -273,13 +261,7 @@ static int64_t w_burn(wasm_exec_env_t execEnv, int64_t amount, uint32_t contract
     return hostServices.burn(callContext->ctx, amount, contractIndex);
 }
 
-static int64_t w_issueAsset(
-    wasm_exec_env_t execEnv,
-    uint64_t name,
-    uint32_t issuerOffset,
-    uint32_t decimals,
-    int64_t shares,
-    uint64_t unit)
+static int64_t w_issueAsset(wasm_exec_env_t execEnv, uint64_t name, uint32_t issuerOffset, uint32_t decimals, int64_t shares, uint64_t unit)
 {
     CallContext* callContext = activeCallContext(execEnv);
 
@@ -287,13 +269,7 @@ static int64_t w_issueAsset(
     return hostServices.issueAsset(callContext->ctx, name, nativeAddress(execEnv, issuerOffset), (signed char)decimals, shares, unit);
 }
 
-static int64_t w_transferShares(
-    wasm_exec_env_t execEnv,
-    uint64_t name,
-    uint32_t issuerOffset,
-    uint32_t ownerOffset,
-    uint32_t possessorOffset,
-    int64_t shares,
+static int64_t w_transferShares(wasm_exec_env_t execEnv, uint64_t name, uint32_t issuerOffset, uint32_t ownerOffset, uint32_t possessorOffset, int64_t shares,
     uint32_t newOwnerOffset)
 {
     CallContext* callContext = activeCallContext(execEnv);
@@ -357,31 +333,19 @@ static uint32_t w_dayOfWeek(wasm_exec_env_t execEnv, uint32_t year, uint32_t mon
     return hostServices.dayOfWeek(callContext->ctx, (unsigned char)year, (unsigned char)month, (unsigned char)day);
 }
 
-static uint32_t w_signatureValidity(
-    wasm_exec_env_t execEnv,
-    uint32_t entityOffset,
-    uint32_t digestOffset,
-    uint32_t signatureOffset)
+static uint32_t w_signatureValidity(wasm_exec_env_t execEnv, uint32_t entityOffset, uint32_t digestOffset, uint32_t signatureOffset)
 {
     CallContext* callContext = activeCallContext(execEnv);
     return hostServices.signatureValidity(callContext->ctx, nativeAddress(execEnv, entityOffset), nativeAddress(execEnv, digestOffset), nativeAddress(execEnv, signatureOffset));
 }
 
-static int64_t w_bidInIPO(
-    wasm_exec_env_t execEnv,
-    uint32_t contractIndex,
-    int64_t price,
-    uint32_t quantity)
+static int64_t w_bidInIPO(wasm_exec_env_t execEnv, uint32_t contractIndex, int64_t price, uint32_t quantity)
 {
     CallContext* callContext = activeCallContext(execEnv);
     return hostServices.bidInIPO(callContext->ctx, contractIndex, price, quantity);
 }
 
-static void w_ipoBidId(
-    wasm_exec_env_t execEnv,
-    uint32_t contractIndex,
-    uint32_t bidIndex,
-    uint32_t outputOffset)
+static void w_ipoBidId(wasm_exec_env_t execEnv, uint32_t contractIndex, uint32_t bidIndex, uint32_t outputOffset)
 {
     CallContext* callContext = activeCallContext(execEnv);
     hostServices.ipoBidId(callContext->ctx, contractIndex, bidIndex, nativeAddress(execEnv, outputOffset));
@@ -393,12 +357,7 @@ static int64_t w_ipoBidPrice(wasm_exec_env_t execEnv, uint32_t contractIndex, ui
     return hostServices.ipoBidPrice(callContext->ctx, contractIndex, bidIndex);
 }
 
-static void w_computeMiningFunction(
-    wasm_exec_env_t execEnv,
-    uint32_t seedOffset,
-    uint32_t publicKeyOffset,
-    uint32_t nonceOffset,
-    uint32_t outputOffset)
+static void w_computeMiningFunction(wasm_exec_env_t execEnv, uint32_t seedOffset, uint32_t publicKeyOffset, uint32_t nonceOffset, uint32_t outputOffset)
 {
     CallContext* callContext = activeCallContext(execEnv);
     hostServices.computeMiningFunction(callContext->ctx, nativeAddress(execEnv, seedOffset), nativeAddress(execEnv, publicKeyOffset), nativeAddress(execEnv, nonceOffset), nativeAddress(execEnv, outputOffset));
@@ -416,11 +375,7 @@ static uint32_t w_getOracleQueryStatus(wasm_exec_env_t execEnv, int64_t queryId)
     return hostServices.getOracleQueryStatus(callContext->ctx, queryId);
 }
 
-static int64_t w_invokeOc(
-    wasm_exec_env_t execEnv,
-    uint32_t interfaceIndex,
-    uint32_t requestOffset,
-    uint32_t requestSize)
+static int64_t w_invokeOc(wasm_exec_env_t execEnv, uint32_t interfaceIndex, uint32_t requestOffset, uint32_t requestSize)
 {
     CallContext* callContext = activeCallContext(execEnv);
     wasm_module_inst_t moduleInstance = wasm_runtime_get_module_inst(execEnv);
@@ -430,11 +385,7 @@ static int64_t w_invokeOc(
         return -1;
     }
 
-    return hostServices.invokeOc(
-        callContext->ctx,
-        interfaceIndex,
-        nativeAddress(execEnv, requestOffset),
-        requestSize);
+    return hostServices.invokeOc(callContext->ctx, interfaceIndex, nativeAddress(execEnv, requestOffset), requestSize);
 }
 
 static uint32_t w_unsubscribeOracle(wasm_exec_env_t execEnv, int32_t subscriptionId)
@@ -477,21 +428,13 @@ static int32_t w_subscribeOracle(
     return hostServices.subscribeOracle(callContext->ctx, interfaceIndex, nativeAddress(execEnv, queryOffset), querySize, replySize, timestampOffset, notificationProcedureId, periodMilliseconds, notifyWithPreviousReply, fee);
 }
 
-static uint32_t w_getOracleQuery(
-    wasm_exec_env_t execEnv,
-    int64_t queryId,
-    uint32_t outputOffset,
-    uint32_t size)
+static uint32_t w_getOracleQuery(wasm_exec_env_t execEnv, int64_t queryId, uint32_t outputOffset, uint32_t size)
 {
     CallContext* callContext = activeCallContext(execEnv);
     return hostServices.getOracleQuery(callContext->ctx, queryId, nativeAddress(execEnv, outputOffset), size);
 }
 
-static uint32_t w_getOracleReply(
-    wasm_exec_env_t execEnv,
-    int64_t queryId,
-    uint32_t outputOffset,
-    uint32_t size)
+static uint32_t w_getOracleReply(wasm_exec_env_t execEnv, int64_t queryId, uint32_t outputOffset, uint32_t size)
 {
     CallContext* callContext = activeCallContext(execEnv);
     return hostServices.getOracleReply(callContext->ctx, queryId, nativeAddress(execEnv, outputOffset), size);
@@ -536,11 +479,7 @@ static int32_t w_liteInvokeProcedure(
     return hostServices.liteInvokeProcedure(callContext->ctx, contractIndex, (unsigned short)inputType, nativeAddress(execEnv, inputOffset), inputSize, nativeAddress(execEnv, outputOffset), outputSize, invocationReward);
 }
 
-static int32_t w_liteSetShareholderProposal(
-    wasm_exec_env_t execEnv,
-    uint32_t contractIndex,
-    uint32_t proposalOffset,
-    int64_t invocationReward)
+static int32_t w_liteSetShareholderProposal(wasm_exec_env_t execEnv, uint32_t contractIndex, uint32_t proposalOffset, int64_t invocationReward)
 {
     CallContext* callContext = activeCallContext(execEnv);
 
@@ -548,12 +487,7 @@ static int32_t w_liteSetShareholderProposal(
     return hostServices.setShareholderProposal(callContext->ctx, contractIndex, nativeAddress(execEnv, proposalOffset), invocationReward);
 }
 
-static int32_t w_liteSetShareholderVotes(
-    wasm_exec_env_t execEnv,
-    uint32_t contractIndex,
-    uint32_t voteOffset,
-    uint32_t voteSize,
-    int64_t invocationReward)
+static int32_t w_liteSetShareholderVotes(wasm_exec_env_t execEnv, uint32_t contractIndex, uint32_t voteOffset, uint32_t voteSize, int64_t invocationReward)
 {
     CallContext* callContext = activeCallContext(execEnv);
 

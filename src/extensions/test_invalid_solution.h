@@ -49,10 +49,7 @@ inline void broadcastTransfer(unsigned int sourceComputorIdx,
     enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
 }
 
-inline void broadcastSolution(unsigned int computorIdx,
-                              const m256i& currentMiningSeed,
-                              unsigned int txTick,
-                              unsigned int claimedScore)
+inline void broadcastSolution(unsigned int computorIdx, const m256i& currentMiningSeed, unsigned int txTick, unsigned int claimedScore)
 {
     MiningSolutionTransaction payload{};
     payload.sourcePublicKey      = computorPublicKeys[computorIdx];
@@ -70,37 +67,25 @@ inline void broadcastSolution(unsigned int computorIdx,
     payload.reserved = 0;
 
     unsigned char digest[32];
-    KangarooTwelve(&payload,
-                   sizeof(Transaction) + MiningSolutionTransaction::minInputSize(),
-                   digest,
-                   sizeof(digest));
-    sign(computorSubseeds[computorIdx].m256i_u8,
-         computorPublicKeys[computorIdx].m256i_u8,
-         digest,
-         payload.signature);
+    KangarooTwelve(&payload, sizeof(Transaction) + MiningSolutionTransaction::minInputSize(), digest, sizeof(digest));
+    sign(computorSubseeds[computorIdx].m256i_u8, computorPublicKeys[computorIdx].m256i_u8, digest, payload.signature);
 
     enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
 }
 
 } // namespace detail
 
-inline bool broadcastN(const m256i& currentMiningSeed,
-                       unsigned int txTick,
-                       unsigned int count,
-                       bool sameComputor,
-                       unsigned int claimedScore)
+inline bool broadcastN(const m256i& currentMiningSeed, unsigned int txTick, unsigned int count, bool sameComputor, unsigned int claimedScore)
 {
     if (computorSeedsCount == 0)
         return false;
 
     m256i randomValue;
     randomValue.setRandomValue();
-    const unsigned int firstComputorIndex =
-        (unsigned int)(randomValue.m256i_u64[0] % computorSeedsCount);
+    const unsigned int firstComputorIndex = (unsigned int)(randomValue.m256i_u64[0] % computorSeedsCount);
     for (unsigned int solutionIndex = 0; solutionIndex < count; solutionIndex++)
     {
-        const unsigned int computorIndex = sameComputor
-            ? firstComputorIndex
+        const unsigned int computorIndex = sameComputor ? firstComputorIndex
             : (unsigned int)((firstComputorIndex + solutionIndex) % computorSeedsCount);
         detail::broadcastSolution(computorIndex, currentMiningSeed, txTick, claimedScore);
     }
@@ -116,31 +101,26 @@ inline bool broadcastRandom(const m256i& currentMiningSeed, unsigned int txTick,
 
     m256i randomValue;
     randomValue.setRandomValue();
-    const unsigned int computorIndex =
-        (unsigned int)(randomValue.m256i_u64[0] % computorSeedsCount);
+    const unsigned int computorIndex = (unsigned int)(randomValue.m256i_u64[0] % computorSeedsCount);
 
     // Exercise rollback with an invalid solution followed by ordinary transfers that must survive.
     detail::broadcastSolution(computorIndex, currentMiningSeed, txTick, claimedScore);
 
     const long long transferAmount = 1;
-    detail::broadcastTransfer(computorIndex,
-                              computorPublicKeys[computorIndex],
+    detail::broadcastTransfer(computorIndex, computorPublicKeys[computorIndex],
                               transferAmount,
                               txTick);
 
     m256i randomComputorSelector;
     randomComputorSelector.setRandomValue();
-    const unsigned int randomComputorIndex =
-        (unsigned int)(randomComputorSelector.m256i_u64[0] % NUMBER_OF_COMPUTORS);
-    detail::broadcastTransfer(computorIndex,
-                              broadcastedComputors.computors.publicKeys[randomComputorIndex],
+    const unsigned int randomComputorIndex = (unsigned int)(randomComputorSelector.m256i_u64[0] % NUMBER_OF_COMPUTORS);
+    detail::broadcastTransfer(computorIndex, broadcastedComputors.computors.publicKeys[randomComputorIndex],
                               transferAmount,
                               txTick);
 
     m256i randomDestination;
     randomDestination.setRandomValue();
-    detail::broadcastTransfer(computorIndex,
-                              randomDestination,
+    detail::broadcastTransfer(computorIndex, randomDestination,
                               transferAmount,
                               txTick);
 

@@ -484,12 +484,9 @@ namespace tickFork
         {
             const long long windowDurationNs = tickForkNowNs() - gForkWindowStartNs;
             const long rssAfterKb = tickForkRssKb();
-            fprintf(stderr,
-                "[FORK-BENCH] tick=%u %s ckpt=%u window=%.2fms quiesce=%.2fms fork()=%.3fms "
-                "rss: before=%ldMB after=%ldMB cow_delta=%ldMB\n",
-                (unsigned)system.tick, mismatch ? "MISMATCH" : "MATCH", gCheckpointTick,
-                windowDurationNs / 1e6, gForkQuiesceNs / 1e6, gForkSyscallNs / 1e6,
-                gForkRssBeforeKb / 1024, rssAfterKb / 1024,
+            fprintf(stderr, "[FORK-BENCH] tick=%u %s ckpt=%u window=%.2fms quiesce=%.2fms fork()=%.3fms "
+                "rss: before=%ldMB after=%ldMB cow_delta=%ldMB\n", (unsigned)system.tick, mismatch ? "MISMATCH" : "MATCH", gCheckpointTick,
+                windowDurationNs / 1e6, gForkQuiesceNs / 1e6, gForkSyscallNs / 1e6, gForkRssBeforeKb / 1024, rssAfterKb / 1024,
                 (rssAfterKb - gForkRssBeforeKb) / 1024);
             fflush(stderr);
         }

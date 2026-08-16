@@ -192,8 +192,7 @@ TEST(ContractStatePagerTest, ConcurrentColdFaultsAreSerializedWithoutCorruption)
         ASSERT_TRUE(valuesOk.load(std::memory_order_relaxed)) << "iteration " << iteration;
         for (size_t slot = 0; slot < threadCount; slot++)
         {
-            ASSERT_EQ(state.data[slot * slotStride], (unsigned char)(slot + 41))
-                << "iteration " << iteration << ", slot " << slot;
+            ASSERT_EQ(state.data[slot * slotStride], (unsigned char)(slot + 41)) << "iteration " << iteration << ", slot " << slot;
         }
     }
 

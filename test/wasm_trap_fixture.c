@@ -10,12 +10,7 @@ __attribute__((noinline)) static u64 do_div(u64 dividend, u64 divisor)
 }
 
 __attribute__((export_name("dispatch")))
-void dispatch(
-    u32 kind,
-    u32 inputType,
-    u32 inputOffset,
-    u32 outputOffset,
-    u32 localsOffset)
+void dispatch(u32 kind, u32 inputType, u32 inputOffset, u32 outputOffset, u32 localsOffset)
 {
     (void)kind;
     (void)inputOffset;

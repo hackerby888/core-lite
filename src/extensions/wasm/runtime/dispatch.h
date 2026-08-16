@@ -152,14 +152,8 @@ class DispatchFrameScope
     CallContextScope contextBinding;
 
 public:
-    DispatchFrameScope(
-        const EngineSlot& slot,
-        wasm_exec_env_t execEnv,
-        int slotOffset,
-        const QPI::QpiContext* qpiContext,
-        const MemoryLayout& layout,
-        uint32_t arenaLimit,
-        bool nested)
+    DispatchFrameScope(const EngineSlot& slot, wasm_exec_env_t execEnv, int slotOffset, const QPI::QpiContext* qpiContext, const MemoryLayout& layout,
+        uint32_t arenaLimit, bool nested)
         : nestedGuestRestore(slot, nested),
           context(createCallContext(qpiContext, layout.arenaOffset, arenaLimit)),
           dispatchDepth(slotCallDepth[slotOffset]),
@@ -173,12 +167,7 @@ public:
     }
 };
 
-static void prepareMemory(
-    const EngineSlot& slot,
-    const MemoryLayout& layout,
-    const void* context,
-    const void* input,
-    const IoSizes& sizes)
+static void prepareMemory(const EngineSlot& slot, const MemoryLayout& layout, const void* context, const void* input, const IoSizes& sizes)
 {
     if (context && slot.contextOffset)
     {
@@ -194,13 +183,7 @@ static void prepareMemory(
     zeroEntryLocals(wasm_runtime_addr_app_to_native(slot.instance, layout.localsOffset));
 }
 
-static void finalizeMemory(
-    const EngineSlot& slot,
-    const MemoryLayout& layout,
-    uint32_t contractIndex,
-    DispatchKind kind,
-    void* output,
-    const IoSizes& sizes)
+static void finalizeMemory(const EngineSlot& slot, const MemoryLayout& layout, uint32_t contractIndex, DispatchKind kind, void* output, const IoSizes& sizes)
 {
     if (sizes.output)
     {
@@ -224,16 +207,8 @@ struct DispatchTrace
     std::chrono::steady_clock::time_point startedAt;
 };
 
-static void beginDispatchTrace(
-    const EngineSlot& slot,
-    uint32_t contractIndex,
-    uint16_t inputType,
-    DispatchKind kind,
-    const void* context,
-    const void* input,
-    const IoSizes& sizes,
-    CallContext& callContext,
-    DispatchTrace& trace)
+static void beginDispatchTrace(const EngineSlot& slot, uint32_t contractIndex, uint16_t inputType, DispatchKind kind, const void* context, const void* input,
+    const IoSizes& sizes, CallContext& callContext, DispatchTrace& trace)
 {
     trace.enabled = traceEnabled();
     if (!trace.enabled)
@@ -268,12 +243,7 @@ static void beginDispatchTrace(
     trace.startedAt = std::chrono::steady_clock::now();
 }
 
-static void finishDispatchTrace(
-    const EngineSlot& slot,
-    const MemoryLayout& layout,
-    const IoSizes& sizes,
-    CallContext& callContext,
-    DispatchTrace& trace)
+static void finishDispatchTrace(const EngineSlot& slot, const MemoryLayout& layout, const IoSizes& sizes, CallContext& callContext, DispatchTrace& trace)
 {
     if (!trace.enabled)
     {
@@ -298,13 +268,7 @@ static void finishDispatchTrace(
     commitTrace(trace.entry);
 }
 
-static bool invokeDispatch(
-    EngineSlot& slot,
-    wasm_exec_env_t execEnv,
-    DispatchKind kind,
-    uint16_t inputType,
-    uint32_t inputOffset,
-    uint32_t outputOffset,
+static bool invokeDispatch(EngineSlot& slot, wasm_exec_env_t execEnv, DispatchKind kind, uint16_t inputType, uint32_t inputOffset, uint32_t outputOffset,
     uint32_t localsOffset)
 {
     uint32_t arguments[5] = {
@@ -318,12 +282,7 @@ static bool invokeDispatch(
     return wasm_runtime_call_wasm(execEnv, slot.dispatchFunction, 5, arguments);
 }
 
-static void handleDispatchResult(
-    EngineSlot& slot,
-    uint32_t contractIndex,
-    uint16_t inputType,
-    DispatchKind kind,
-    bool succeeded)
+static void handleDispatchResult(EngineSlot& slot, uint32_t contractIndex, uint16_t inputType, DispatchKind kind, bool succeeded)
 {
     if (succeeded)
     {
@@ -353,12 +312,7 @@ static void handleMigrationResult(EngineSlot& slot, uint32_t contractIndex, bool
     wasm_runtime_clear_exception(slot.instance);
 }
 
-static void dispatchMigration(
-    uint32_t contractIndex,
-    int slotOffset,
-    EngineSlot& slot,
-    const void* context,
-    const void* oldState)
+static void dispatchMigration(uint32_t contractIndex, int slotOffset, EngineSlot& slot, const void* context, const void* oldState)
 {
     const uint32_t oldStateSize = slot.migrationOldStateSize;
     if (oldStateSize > WASM_ARENA_SIZE)
@@ -407,14 +361,7 @@ static void dispatchMigration(
     hostServices.markDirty(contractIndex);
 }
 
-static void dispatchCall(
-    uint32_t contractIndex,
-    uint16_t inputType,
-    DispatchKind kind,
-    const void* context,
-    void* statePointer,
-    void* input,
-    void* output,
+static void dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKind kind, const void* context, void* statePointer, void* input, void* output,
     void* locals)
 {
     (void)statePointer;

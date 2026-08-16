@@ -89,8 +89,7 @@ struct WasmFixture
     {
         wasm_function_inst_t f = wasm_runtime_lookup_function(inst, fn);
         EXPECT_NE(f, nullptr) << fn;
-        EXPECT_TRUE(wasm_runtime_call_wasm(env, f, n, argv))
-            << fn << ": " << wasm_runtime_get_exception(inst);
+        EXPECT_TRUE(wasm_runtime_call_wasm(env, f, n, argv)) << fn << ": " << wasm_runtime_get_exception(inst);
         return argv[0];
     }
 
@@ -322,51 +321,25 @@ TEST(WasmContracts, UploadChunksRejectInvalidSequenceOrLengthWithoutMutation)
         std::memset(moduleUploadBuffer, 0x5a, testCase.totalSize);
         std::memset(receivedChunkBits, 0, sizeof(receivedChunkBits));
         const unsigned int chunkCount = expectedModuleUploadChunkCount(testCase.totalSize);
-        ASSERT_TRUE(tryBeginModuleUpload(
-            activeSessionId,
-            testCase.totalSize,
-            chunkCount,
-            finalHash));
+        ASSERT_TRUE(tryBeginModuleUpload(activeSessionId, testCase.totalSize, chunkCount, finalHash));
         if (testCase.receiveFirst)
         {
-            ASSERT_TRUE(tryReceiveModuleChunk(
-                activeSessionId,
-                0,
-                firstChunk.data(),
-                WASM_UPLOAD_CHUNK_SIZE));
+            ASSERT_TRUE(tryReceiveModuleChunk(activeSessionId, 0, firstChunk.data(), WASM_UPLOAD_CHUNK_SIZE));
         }
 
         const ModuleUpload uploadBefore = moduleUpload;
-        const std::vector<unsigned char> bufferBefore(
-            moduleUploadBuffer,
-            moduleUploadBuffer + testCase.totalSize);
-        const std::vector<unsigned char> chunkBitsBefore(
-            receivedChunkBits,
-            receivedChunkBits + sizeof(receivedChunkBits));
+        const std::vector<unsigned char> bufferBefore(moduleUploadBuffer, moduleUploadBuffer + testCase.totalSize);
+        const std::vector<unsigned char> chunkBitsBefore(receivedChunkBits, receivedChunkBits + sizeof(receivedChunkBits));
 
-        EXPECT_FALSE(tryReceiveModuleChunk(
-            testCase.sessionId,
-            testCase.sequence,
-            rejectedChunk.data(),
-            testCase.dataLength));
+        EXPECT_FALSE(tryReceiveModuleChunk(testCase.sessionId, testCase.sequence, rejectedChunk.data(), testCase.dataLength));
         EXPECT_EQ(moduleUpload.active, uploadBefore.active);
         EXPECT_EQ(moduleUpload.sessionId, uploadBefore.sessionId);
         EXPECT_EQ(moduleUpload.totalSize, uploadBefore.totalSize);
         EXPECT_EQ(moduleUpload.chunkCount, uploadBefore.chunkCount);
         EXPECT_EQ(moduleUpload.receivedCount, uploadBefore.receivedCount);
-        EXPECT_EQ(
-            std::memcmp(
-                moduleUpload.finalHash,
-                uploadBefore.finalHash,
-                sizeof(moduleUpload.finalHash)),
-            0);
+        EXPECT_EQ(std::memcmp(moduleUpload.finalHash, uploadBefore.finalHash, sizeof(moduleUpload.finalHash)), 0);
         EXPECT_EQ(std::memcmp(moduleUploadBuffer, bufferBefore.data(), bufferBefore.size()), 0);
-        EXPECT_EQ(
-            std::memcmp(
-                receivedChunkBits,
-                chunkBitsBefore.data(),
-                chunkBitsBefore.size()),
-            0);
+        EXPECT_EQ(std::memcmp(receivedChunkBits, chunkBitsBefore.data(), chunkBitsBefore.size()), 0);
     }
 }
 
@@ -383,11 +356,7 @@ TEST(WasmContracts, UploadChunksAcceptExactSequentialPayloads)
     std::memset(moduleUploadBuffer, 0, totalSize);
     std::memset(receivedChunkBits, 0, sizeof(receivedChunkBits));
 
-    ASSERT_TRUE(tryBeginModuleUpload(
-        41,
-        totalSize,
-        expectedModuleUploadChunkCount(totalSize),
-        finalHash));
+    ASSERT_TRUE(tryBeginModuleUpload(41, totalSize, expectedModuleUploadChunkCount(totalSize), finalHash));
     EXPECT_TRUE(tryReceiveModuleChunk(41, 0, fullChunk.data(), WASM_UPLOAD_CHUNK_SIZE));
     EXPECT_TRUE(tryReceiveModuleChunk(41, 1, fullChunk.data(), WASM_UPLOAD_CHUNK_SIZE));
     EXPECT_TRUE(tryReceiveModuleChunk(41, 2, &lastByte, 1));
@@ -564,8 +533,7 @@ TEST(WasmContracts, SystemProceduresMaskAndDispatch)
     a[3] = OUT;
     a[4] = LOCALS;
     w.call("dispatch", a, 5);
-    EXPECT_EQ(((uint64_t*)w.nat(st))[0], 4242u)
-        << "INITIALIZE sysproc ran via kind=2 dispatch";
+    EXPECT_EQ(((uint64_t*)w.nat(st))[0], 4242u) << "INITIALIZE sysproc ran via kind=2 dispatch";
 
     *(uint64_t*)w.nat(IN) = 777;
     a[0] = KIND_SYSPROC;
@@ -574,8 +542,7 @@ TEST(WasmContracts, SystemProceduresMaskAndDispatch)
     a[3] = OUT;
     a[4] = LOCALS;
     w.call("dispatch", a, 5);
-    EXPECT_EQ(((uint64_t*)w.nat(st))[1], 777u)
-        << "input sysproc read its marshalled input";
+    EXPECT_EQ(((uint64_t*)w.nat(st))[1], 777u) << "input sysproc read its marshalled input";
 }
 
 // Run Qinit-built fixtures directly in WAMR for cross-host state parity.
@@ -604,10 +571,7 @@ uint32_t hs_fd_seek(wasm_exec_env_t, uint32_t, uint64_t, uint32_t, uint32_t)
     return 0;
 }
 
-uint32_t hs_acquireScratch(
-    wasm_exec_env_t executionEnvironment,
-    uint64_t size,
-    uint32_t initializeToZero)
+uint32_t hs_acquireScratch(wasm_exec_env_t executionEnvironment, uint64_t size, uint32_t initializeToZero)
 {
     wasm_module_inst_t inst = wasm_runtime_get_module_inst(executionEnvironment);
     void* native = nullptr;
@@ -650,8 +614,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
     const char* path = getenv("QINIT_WASM");
     if (!path)
     {
-        GTEST_SKIP()
-            << "set QINIT_WASM to a qinit-built pure-state wasm (e.g. DigestProbe)";
+        GTEST_SKIP() << "set QINIT_WASM to a qinit-built pure-state wasm (e.g. DigestProbe)";
     }
     const int ops = getenv("QINIT_OPS") ? atoi(getenv("QINIT_OPS")) : 1;
 
@@ -710,25 +673,18 @@ TEST(WasmContracts, CrossHostStateEquivalence)
     wasm_func_get_result_types(contractIndex, inst, &contractIndexResultType);
     ASSERT_EQ(contractIndexResultType, WASM_I32);
     uint32_t contractIndexArguments[1] = { 0 };
-    ASSERT_TRUE(wasm_runtime_call_wasm(env, contractIndex, 0, contractIndexArguments))
-        << wasm_runtime_get_exception(inst);
-    ASSERT_EQ(contractIndexArguments[0], expectedSlot)
-        << "artifact slot mismatch: compiled " << contractIndexArguments[0]
-        << ", target " << expectedSlot;
+    ASSERT_TRUE(wasm_runtime_call_wasm(env, contractIndex, 0, contractIndexArguments)) << wasm_runtime_get_exception(inst);
+    ASSERT_EQ(contractIndexArguments[0], expectedSlot) << "artifact slot mismatch: compiled " << contractIndexArguments[0] << ", target " << expectedSlot;
 
     bool trapped = false;
-    auto call = [&](const char* fn,
-                    uint32_t* arguments,
-                    uint32_t argumentCount,
-                    bool expectSuccess = true) -> uint32_t
+    auto call = [&](const char* fn, uint32_t* arguments, uint32_t argumentCount, bool expectSuccess = true) -> uint32_t
     {
         wasm_function_inst_t f = wasm_runtime_lookup_function(inst, fn);
         EXPECT_NE(f, nullptr) << fn;
         const bool ok = f && wasm_runtime_call_wasm(env, f, argumentCount, arguments);
         if (expectSuccess)
         {
-            EXPECT_TRUE(ok)
-                << fn << ": " << wasm_runtime_get_exception(inst);
+            EXPECT_TRUE(ok) << fn << ": " << wasm_runtime_get_exception(inst);
         }
         trapped = !ok;
         return arguments[0];
@@ -783,8 +739,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
 
     auto stateHex = [&]()
     {
-        const unsigned char* state =
-            (const unsigned char*)wasm_runtime_addr_app_to_native(inst, st);
+        const unsigned char* state = (const unsigned char*)wasm_runtime_addr_app_to_native(inst, st);
         std::string encoded;
         encoded.reserve(ss * 2);
         char byteHex[3];
@@ -941,10 +896,8 @@ TEST(WasmContracts, TrapAutoDumpHasMappableOffset)
 
     EXPECT_FALSE(ok) << "dispatch must trap (divide by zero)";
     std::string out(cap);
-    EXPECT_NE(out.find("#0"), std::string::npos)
-        << "WAMR backtrace frame markers present in the auto-dump";
-    EXPECT_NE(out.find("0x"), std::string::npos)
-        << "the backtrace carries a (DWARF-mappable) byte offset";
+    EXPECT_NE(out.find("#0"), std::string::npos) << "WAMR backtrace frame markers present in the auto-dump";
+    EXPECT_NE(out.find("0x"), std::string::npos) << "the backtrace carries a (DWARF-mappable) byte offset";
 
     wasm_runtime_destroy_exec_env(env);
     wasm_runtime_deinstantiate(inst);

@@ -130,8 +130,7 @@ static inline void recordHostCall(TraceEntry* entry, const char* name, const std
     if (entry)
     {
         entry->hostCalls.push_back({
-            name,
-            detail,
+            name, detail,
         });
     }
 }
@@ -162,10 +161,7 @@ static inline std::vector<TraceEntry> traceSnapshot(unsigned long long since, un
         }
     }
 
-    std::sort(
-        entries.begin(),
-        entries.end(),
-        [](const TraceEntry& left, const TraceEntry& right)
+    std::sort(entries.begin(), entries.end(), [](const TraceEntry& left, const TraceEntry& right)
         {
             return left.sequence < right.sequence;
         });
@@ -211,11 +207,7 @@ static inline std::string hex(const void* bytes, unsigned int size)
     return result;
 }
 
-static inline void recordLog(
-    TraceEntry* entry,
-    unsigned char type,
-    const void* bytes,
-    unsigned int size)
+static inline void recordLog(TraceEntry* entry, unsigned char type, const void* bytes, unsigned int size)
 {
     if (!entry)
     {
@@ -223,9 +215,7 @@ static inline void recordLog(
     }
 
     entry->logs.push_back(LogTrace{
-        type,
-        size,
-        hex(bytes, size),
+        type, size, hex(bytes, size),
     });
 }
 

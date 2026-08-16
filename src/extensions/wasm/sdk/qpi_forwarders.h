@@ -20,10 +20,7 @@ long long QPI::QpiContextProcedureCall::transfer(const m256i& destination, long 
     return lh_transfer(&destination, amount);
 }
 
-long long QPI::QpiContextProcedureCall::__transfer(
-    const m256i& destination,
-    long long amount,
-    unsigned char transferType) const
+long long QPI::QpiContextProcedureCall::__transfer(const m256i& destination, long long amount, unsigned char transferType) const
 {
     return lh_transferTyped(&destination, amount, transferType);
 }
@@ -167,9 +164,7 @@ m256i QPI::QpiContextFunctionCall::getPrevComputerDigest() const
     return digest;
 }
 
-bool QPI::QpiContextFunctionCall::isAssetIssued(
-    const m256i& issuer,
-    unsigned long long assetName) const
+bool QPI::QpiContextFunctionCall::isAssetIssued(const m256i& issuer, unsigned long long assetName) const
 {
     return lh_isAssetIssued(&issuer, assetName);
 }
@@ -184,9 +179,7 @@ long long QPI::QpiContextProcedureCall::issueAsset(
     return lh_issueAsset(assetName, &issuer, (unsigned int)(unsigned char)decimals, numberOfShares, unitOfMeasurement);
 }
 
-long long QPI::QpiContextFunctionCall::numberOfShares(
-    const QPI::Asset& asset,
-    const QPI::AssetOwnershipSelect& ownership,
+long long QPI::QpiContextFunctionCall::numberOfShares(const QPI::Asset& asset, const QPI::AssetOwnershipSelect& ownership,
     const QPI::AssetPossessionSelect& possession) const
 {
     return lh_numberOfShares(&asset, &ownership, &possession);
@@ -238,33 +231,22 @@ long long QPI::QpiContextProcedureCall::releaseShares(
     return lh_releaseShares(asset.assetName, &asset.issuer, &owner, &possessor, numberOfShares, destinationOwnershipManagingContractIndex, destinationPossessionManagingContractIndex, offeredFee);
 }
 
-unsigned char QPI::QpiContextFunctionCall::dayOfWeek(
-    unsigned char year,
-    unsigned char month,
-    unsigned char day) const
+unsigned char QPI::QpiContextFunctionCall::dayOfWeek(unsigned char year, unsigned char month, unsigned char day) const
 {
     return (unsigned char)lh_dayOfWeek(year, month, day);
 }
 
-QPI::bit QPI::QpiContextFunctionCall::signatureValidity(
-    const m256i& entity,
-    const m256i& digest,
-    const QPI::Array<QPI::sint8, 64>& signature) const
+QPI::bit QPI::QpiContextFunctionCall::signatureValidity(const m256i& entity, const m256i& digest, const QPI::Array<QPI::sint8, 64>& signature) const
 {
     return lh_signatureValidity(&entity, &digest, &signature) != 0;
 }
 
-long long QPI::QpiContextProcedureCall::bidInIPO(
-    unsigned int ipoContractIndex,
-    long long price,
-    unsigned int quantity) const
+long long QPI::QpiContextProcedureCall::bidInIPO(unsigned int ipoContractIndex, long long price, unsigned int quantity) const
 {
     return lh_bidInIPO(ipoContractIndex, price, quantity);
 }
 
-m256i QPI::QpiContextFunctionCall::ipoBidId(
-    unsigned int ipoContractIndex,
-    unsigned int ipoBidIndex) const
+m256i QPI::QpiContextFunctionCall::ipoBidId(unsigned int ipoContractIndex, unsigned int ipoBidIndex) const
 {
     m256i id;
 
@@ -272,17 +254,12 @@ m256i QPI::QpiContextFunctionCall::ipoBidId(
     return id;
 }
 
-long long QPI::QpiContextFunctionCall::ipoBidPrice(
-    unsigned int ipoContractIndex,
-    unsigned int ipoBidIndex) const
+long long QPI::QpiContextFunctionCall::ipoBidPrice(unsigned int ipoContractIndex, unsigned int ipoBidIndex) const
 {
     return lh_ipoBidPrice(ipoContractIndex, ipoBidIndex);
 }
 
-m256i QPI::QpiContextFunctionCall::computeMiningFunction(
-    const m256i miningSeed,
-    const m256i publicKey,
-    const m256i nonce) const
+m256i QPI::QpiContextFunctionCall::computeMiningFunction(const m256i miningSeed, const m256i publicKey, const m256i nonce) const
 {
     m256i result;
 
@@ -306,17 +283,11 @@ unsigned char QPI::QpiContextFunctionCall::getOcInvocationStatus(long long invoc
 }
 
 template <typename OcInterface>
-QPI::sint64 QPI::QpiContextProcedureCall::__qpiInvokeOC(
-    const typename OcInterface::OcRequest& request) const
+QPI::sint64 QPI::QpiContextProcedureCall::__qpiInvokeOC(const typename OcInterface::OcRequest& request) const
 {
     static_assert(OcInterface::ocInterfaceIndex < OCI::ocInterfacesCount);
-    static_assert(
-        OCI::ocInterfaces[OcInterface::ocInterfaceIndex].requestSize
-        == sizeof(typename OcInterface::OcRequest));
-    return lh_invokeOc(
-        OcInterface::ocInterfaceIndex,
-        &request,
-        (unsigned int)sizeof(typename OcInterface::OcRequest));
+    static_assert(OCI::ocInterfaces[OcInterface::ocInterfaceIndex].requestSize == sizeof(typename OcInterface::OcRequest));
+    return lh_invokeOc(OcInterface::ocInterfaceIndex, &request, (unsigned int)sizeof(typename OcInterface::OcRequest));
 }
 
 bool QPI::QpiContextProcedureCall::unsubscribeOracle(int oracleSubscriptionId) const
@@ -325,49 +296,30 @@ bool QPI::QpiContextProcedureCall::unsubscribeOracle(int oracleSubscriptionId) c
 }
 
 template <typename OracleInterface, typename ContractStateType, typename LocalsType>
-QPI::sint64 QPI::QpiContextProcedureCall::__qpiQueryOracle(
-    const typename OracleInterface::OracleQuery& query,
-    void (*)(
-        const QPI::QpiContextProcedureCall&,
-        ContractStateType&,
-        QPI::OracleNotificationInput<OracleInterface>&,
-        QPI::NoData&,
-        LocalsType&),
-    unsigned int notificationProcedureId,
+QPI::sint64 QPI::QpiContextProcedureCall::__qpiQueryOracle(const typename OracleInterface::OracleQuery& query, void (*)(const QPI::QpiContextProcedureCall&,
+        ContractStateType&, QPI::OracleNotificationInput<OracleInterface>&, QPI::NoData&, LocalsType&), unsigned int notificationProcedureId,
     unsigned int timeoutMilliseconds) const
 {
     return lh_queryOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), (unsigned int)sizeof(typename OracleInterface::OracleReply), notificationProcedureId, timeoutMilliseconds, OracleInterface::getQueryFee(query));
 }
 
 template <typename OracleInterface, typename ContractStateType, typename LocalsType>
-QPI::sint32 QPI::QpiContextProcedureCall::__qpiSubscribeOracle(
-    const typename OracleInterface::OracleQuery& query,
-    void (*)(
-        const QPI::QpiContextProcedureCall&,
-        ContractStateType&,
-        QPI::OracleNotificationInput<OracleInterface>&,
-        QPI::NoData&,
-        LocalsType&),
-    unsigned int notificationProcedureId,
-    unsigned int notificationPeriodInMilliseconds,
-    bool notifyWithPreviousReply) const
+QPI::sint32 QPI::QpiContextProcedureCall::__qpiSubscribeOracle(const typename OracleInterface::OracleQuery& query, void (*)(const QPI::QpiContextProcedureCall&,
+        ContractStateType&, QPI::OracleNotificationInput<OracleInterface>&, QPI::NoData&, LocalsType&), unsigned int notificationProcedureId,
+    unsigned int notificationPeriodInMilliseconds, bool notifyWithPreviousReply) const
 {
     static_assert(sizeof(query.timestamp) == sizeof(QPI::DateAndTime));
     return lh_subscribeOracle(OracleInterface::oracleInterfaceIndex, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery), (unsigned int)sizeof(typename OracleInterface::OracleReply), (unsigned int)__builtin_offsetof(OracleInterface::OracleQuery, timestamp), notificationProcedureId, notificationPeriodInMilliseconds, notifyWithPreviousReply ? 1u : 0u, OracleInterface::getSubscriptionFee(query, notificationPeriodInMilliseconds));
 }
 
 template <typename OracleInterface>
-bool QPI::QpiContextFunctionCall::getOracleQuery(
-    QPI::sint64 queryId,
-    typename OracleInterface::OracleQuery& query) const
+bool QPI::QpiContextFunctionCall::getOracleQuery(QPI::sint64 queryId, typename OracleInterface::OracleQuery& query) const
 {
     return lh_getOracleQuery(queryId, &query, (unsigned int)sizeof(typename OracleInterface::OracleQuery)) != 0;
 }
 
 template <typename OracleInterface>
-bool QPI::QpiContextFunctionCall::getOracleReply(
-    QPI::sint64 queryId,
-    typename OracleInterface::OracleReply& reply) const
+bool QPI::QpiContextFunctionCall::getOracleReply(QPI::sint64 queryId, typename OracleInterface::OracleReply& reply) const
 {
     return lh_getOracleReply(queryId, &reply, (unsigned int)sizeof(typename OracleInterface::OracleReply)) != 0;
 }
@@ -377,17 +329,13 @@ bool QPI::QpiContextProcedureCall::distributeDividends(long long amountPerShare)
     return lh_distributeDividends(amountPerShare);
 }
 
-QPI::uint16 QPI::QpiContextProcedureCall::setShareholderProposal(
-    QPI::uint16 contractIndex,
-    const QPI::Array<QPI::uint8, 1024>& proposalDataBuffer,
+QPI::uint16 QPI::QpiContextProcedureCall::setShareholderProposal(QPI::uint16 contractIndex, const QPI::Array<QPI::uint8, 1024>& proposalDataBuffer,
     QPI::sint64 invocationReward) const
 {
     return (QPI::uint16)lh_liteSetShareholderProposal(contractIndex, &proposalDataBuffer, invocationReward);
 }
 
-bool QPI::QpiContextProcedureCall::setShareholderVotes(
-    QPI::uint16 contractIndex,
-    const QPI::ProposalMultiVoteDataV1& voteData,
+bool QPI::QpiContextProcedureCall::setShareholderVotes(QPI::uint16 contractIndex, const QPI::ProposalMultiVoteDataV1& voteData,
     QPI::sint64 invocationReward) const
 {
     return lh_liteSetShareholderVotes(contractIndex, &voteData, sizeof(voteData), invocationReward) != 0;

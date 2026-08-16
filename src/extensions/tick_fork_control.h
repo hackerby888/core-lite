@@ -46,16 +46,14 @@ namespace tickForkControl
 
         bool requestAndWait(unsigned int timeoutMs, bool shutDownAfterCommit = false)
         {
-            const State requestState =
-                shutDownAfterCommit ? State::ShutdownRequested : State::Requested;
+            const State requestState = shutDownAfterCommit ? State::ShutdownRequested : State::Requested;
             State expected = State::Idle;
             if (!_state.compare_exchange_strong(expected, requestState, std::memory_order_acq_rel))
             {
                 return false;
             }
 
-            const auto deadline =
-                std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
             for (;;)
             {
                 const State state = _state.load(std::memory_order_acquire);
@@ -68,10 +66,7 @@ namespace tickForkControl
                 if (state == requestState && std::chrono::steady_clock::now() >= deadline)
                 {
                     expected = requestState;
-                    if (_state.compare_exchange_strong(
-                            expected,
-                            State::Idle,
-                            std::memory_order_acq_rel))
+                    if (_state.compare_exchange_strong(expected, State::Idle, std::memory_order_acq_rel))
                     {
                         return false;
                     }
@@ -107,10 +102,7 @@ namespace tickForkControl
         bool finish(bool succeeded)
         {
             State expected = State::Running;
-            return _state.compare_exchange_strong(
-                expected,
-                succeeded ? State::Succeeded : State::Failed,
-                std::memory_order_acq_rel);
+            return _state.compare_exchange_strong(expected, succeeded ? State::Succeeded : State::Failed, std::memory_order_acq_rel);
         }
 
         State state() const
@@ -142,10 +134,7 @@ namespace tickForkControl
         if (!directory)
         {
             const int error = errno;
-            fprintf(stderr,
-                    "[RPC] promote opendir failed: errno=%d (%s)\n",
-                    error,
-                    strerror(error));
+            fprintf(stderr, "[RPC] promote opendir failed: errno=%d (%s)\n", error, strerror(error));
             fflush(stderr);
             return closedCount;
         }
@@ -161,14 +150,9 @@ namespace tickForkControl
                 closedir(directory);
                 if (error)
                 {
-                    fprintf(stderr,
-                            "[RPC] promote readdir failed: errno=%d (%s)\n",
-                            error,
-                            strerror(error));
+                    fprintf(stderr, "[RPC] promote readdir failed: errno=%d (%s)\n", error, strerror(error));
                 }
-                fprintf(stderr,
-                        "[RPC] promote closed %u inherited RPC AF_UNIX fd(s)\n",
-                        closedCount);
+                fprintf(stderr, "[RPC] promote closed %u inherited RPC AF_UNIX fd(s)\n", closedCount);
                 fflush(stderr);
                 return closedCount;
             }
@@ -181,16 +165,14 @@ namespace tickForkControl
 
             int domain = 0;
             socklen_t domainSize = sizeof(domain);
-            if (getsockopt(fd, SOL_SOCKET, SO_DOMAIN, &domain, &domainSize) != 0
-                || domain != AF_UNIX)
+            if (getsockopt(fd, SOL_SOCKET, SO_DOMAIN, &domain, &domainSize) != 0 || domain != AF_UNIX)
             {
                 continue;
             }
 
             sockaddr_un address{};
             socklen_t addressSize = sizeof(address);
-            if (getsockname(fd, (sockaddr*)&address, &addressSize) != 0
-                || strncmp(address.sun_path, rpcPath, sizeof(address.sun_path)) != 0)
+            if (getsockname(fd, (sockaddr*)&address, &addressSize) != 0 || strncmp(address.sun_path, rpcPath, sizeof(address.sun_path)) != 0)
             {
                 continue;
             }

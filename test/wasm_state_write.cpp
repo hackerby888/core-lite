@@ -51,11 +51,7 @@ void freeTestPages(unsigned char* memory, size_t size)
 #endif
 }
 
-void expectStateRegion(
-    const Wasm::Runtime::TraceEntry& entry,
-    size_t regionIndex,
-    unsigned int offset,
-    const std::vector<unsigned char>& before,
+void expectStateRegion(const Wasm::Runtime::TraceEntry& entry, size_t regionIndex, unsigned int offset, const std::vector<unsigned char>& before,
     const std::vector<unsigned char>& after)
 {
     ASSERT_LT(regionIndex, entry.stateDiff.size());
@@ -66,10 +62,7 @@ void expectStateRegion(
     EXPECT_EQ(region.after, Wasm::Runtime::hex(after.data(), (unsigned int)after.size()));
 }
 
-void expectSingleStateRegion(
-    const Wasm::Runtime::TraceEntry& entry,
-    unsigned int offset,
-    const std::vector<unsigned char>& before,
+void expectSingleStateRegion(const Wasm::Runtime::TraceEntry& entry, unsigned int offset, const std::vector<unsigned char>& before,
     const std::vector<unsigned char>& after)
 {
     ASSERT_EQ(entry.stateDiff.size(), 1u);
@@ -101,8 +94,7 @@ TEST(WasmContracts, StateWriteFaultIsRepaired)
     {
         struct sigaction installed;
         ASSERT_EQ(sigaction(signalNumber, nullptr, &installed), 0);
-        EXPECT_EQ(installed.sa_sigaction, &Wasm::Runtime::handleStateWriteFault)
-            << "signal " << signalNumber << " is not routed to the state-write handler";
+        EXPECT_EQ(installed.sa_sigaction, &Wasm::Runtime::handleStateWriteFault) << "signal " << signalNumber << " is not routed to the state-write handler";
     }
 #endif
 

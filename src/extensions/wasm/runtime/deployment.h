@@ -10,11 +10,7 @@
 namespace Wasm::Runtime
 {
 
-[[maybe_unused]] static void beginModuleUpload(
-    unsigned long long sessionId,
-    unsigned int totalSize,
-    unsigned int chunkCount,
-    const unsigned char* finalHash)
+[[maybe_unused]] static void beginModuleUpload(unsigned long long sessionId, unsigned int totalSize, unsigned int chunkCount, const unsigned char* finalHash)
 {
     const bool retry = moduleUpload.active;
     if (!tryBeginModuleUpload(sessionId, totalSize, chunkCount, finalHash))
@@ -33,11 +29,7 @@ namespace Wasm::Runtime
     logToConsole(retry ? L"LITEDYN: UploadBegin retry accepted" : L"LITEDYN: UploadBegin received");
 }
 
-[[maybe_unused]] static void receiveModuleChunk(
-    unsigned long long sessionId,
-    unsigned int sequence,
-    const unsigned char* data,
-    unsigned int dataLength)
+[[maybe_unused]] static void receiveModuleChunk(unsigned long long sessionId, unsigned int sequence, const unsigned char* data, unsigned int dataLength)
 {
     tryReceiveModuleChunk(sessionId, sequence, data, dataLength);
 }
@@ -64,19 +56,12 @@ static bool moduleUploadComplete()
 }
 
 // Defined by runtime/engine.h earlier in the extension translation unit.
-static bool loadFromBytes(
-    unsigned int contractIndex,
-    const unsigned char* bytes,
-    unsigned int length);
+static bool loadFromBytes(unsigned int contractIndex, const unsigned char* bytes, unsigned int length);
 static bool isContractLoaded(unsigned int contractIndex);
 static bool hasPendingMigration(unsigned int contractIndex);
 static void runPendingMigration(unsigned int contractIndex);
 
-[[maybe_unused]] static void deployModule(
-    unsigned long long sessionId,
-    unsigned int targetSlot,
-    const unsigned char* finalHash,
-    unsigned int abiVersion,
+[[maybe_unused]] static void deployModule(unsigned long long sessionId, unsigned int targetSlot, const unsigned char* finalHash, unsigned int abiVersion,
     unsigned int /*stateLayoutVersion*/,
     const char* name)
 {
@@ -149,10 +134,7 @@ static void runPendingMigration(unsigned int contractIndex);
 }
 
 
-[[maybe_unused]] static void dispatchDeploymentTransaction(
-    unsigned short inputType,
-    const unsigned char* input,
-    unsigned int size)
+[[maybe_unused]] static void dispatchDeploymentTransaction(unsigned short inputType, const unsigned char* input, unsigned int size)
 {
     if (inputType == WASM_DEPLOYMENT_UPLOAD_BEGIN_INPUT_TYPE)
     {
@@ -163,11 +145,7 @@ static void runPendingMigration(unsigned int contractIndex);
         }
 
         copyMem(&message, input, sizeof(message));
-        beginModuleUpload(
-            message.sessionId,
-            message.totalSize,
-            message.chunkCount,
-            message.finalHash);
+        beginModuleUpload(message.sessionId, message.totalSize, message.chunkCount, message.finalHash);
     }
     else if (inputType == WASM_DEPLOYMENT_UPLOAD_CHUNK_INPUT_TYPE)
     {
@@ -183,11 +161,7 @@ static void runPendingMigration(unsigned int contractIndex);
             return;
         }
 
-        receiveModuleChunk(
-            message.sessionId,
-            message.sequence,
-            input + sizeof(message),
-            message.dataLength);
+        receiveModuleChunk(message.sessionId, message.sequence, input + sizeof(message), message.dataLength);
     }
     else if (inputType == WASM_DEPLOYMENT_DEPLOY_INPUT_TYPE)
     {
@@ -204,13 +178,7 @@ static void runPendingMigration(unsigned int contractIndex);
             name = reinterpret_cast<const char*>(input + sizeof(message));
         }
 
-        deployModule(
-            message.sessionId,
-            message.targetSlot,
-            message.finalHash,
-            message.abiVersion,
-            message.stateLayoutVersion,
-            name);
+        deployModule(message.sessionId, message.targetSlot, message.finalHash, message.abiVersion, message.stateLayoutVersion, name);
     }
 }
 

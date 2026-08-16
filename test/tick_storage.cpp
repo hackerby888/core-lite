@@ -165,8 +165,7 @@ TEST(TickStorageScan, SkipsInvalidatedAndDetectsTransactionCorruption)
 
     tickStorageScan::Progress progress(false);
 
-    const tickStorageScan::ScanResult invalidatedResult =
-        tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
+    const tickStorageScan::ScanResult invalidatedResult = tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
     EXPECT_EQ(invalidatedResult.issues.total, 0ULL);
     EXPECT_EQ(invalidatedResult.transactionsChecked, 0ULL);
 
@@ -174,25 +173,19 @@ TEST(TickStorageScan, SkipsInvalidatedAndDetectsTransactionCorruption)
     tickData.epoch = epoch;
     tickData.tick = tick;
     tickData.computorIndex = tick % NUMBER_OF_COMPUTORS;
-    KangarooTwelve(
-        transaction,
-        transactionSize,
-        &tickData.transactionDigests[0],
-        sizeof(tickData.transactionDigests[0]));
+    KangarooTwelve(transaction, transactionSize, &tickData.transactionDigests[0], sizeof(tickData.transactionDigests[0]));
 
     m256i tickDataDigest;
     KangarooTwelve(&tickData, sizeof(tickData), &tickDataDigest, sizeof(tickDataDigest));
     for (unsigned int computor = 0; computor < QUORUM; computor++)
         tickVotes[computor].transactionDigest = tickDataDigest;
 
-    const tickStorageScan::ScanResult cleanResult =
-        tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
+    const tickStorageScan::ScanResult cleanResult = tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
     EXPECT_EQ(cleanResult.issues.total, 0ULL);
     EXPECT_EQ(cleanResult.transactionsChecked, 1ULL);
 
     transaction->tick++;
-    const tickStorageScan::ScanResult corruptedResult =
-        tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
+    const tickStorageScan::ScanResult corruptedResult = tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
     EXPECT_EQ(corruptedResult.issues.total, 2ULL);
     EXPECT_EQ(corruptedResult.issues.categoryTotals.at("transaction-tick"), 1ULL);
     EXPECT_EQ(corruptedResult.issues.categoryTotals.at("transaction-digest"), 1ULL);

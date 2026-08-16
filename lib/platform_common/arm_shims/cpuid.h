@@ -2,12 +2,7 @@
 
 // ARM has no x86 CPUID, so callers must use their fallback path.
 #if !defined(__x86_64__) && !defined(__i386__)
-static inline int __get_cpuid(
-    unsigned int leaf,
-    unsigned int* a,
-    unsigned int* b,
-    unsigned int* c,
-    unsigned int* d)
+static inline int __get_cpuid(unsigned int leaf, unsigned int* a, unsigned int* b, unsigned int* c, unsigned int* d)
 {
     (void)leaf;
     if (a)

@@ -31,8 +31,7 @@ RPC_ROUTE("GET", "/live/v1/assets/issuances")
             std::string identityStr = wchar_to_string(identity);
             std::string assetNameStr = std::string(asset.name);
 
-            if ((!issuerIdentity.empty() && identityStr != issuerIdentity) ||
-                (!assetName.empty() && assetNameStr != assetName))
+            if ((!issuerIdentity.empty() && identityStr != issuerIdentity) || (!assetName.empty() && assetNameStr != assetName))
                 continue;
 
             Json::Value root;
@@ -166,8 +165,7 @@ RPC_ROUTE("GET", "/live/v1/assets/possessions")
             std::string identityStr = wchar_to_string(identity);
             unsigned short currentOwnershipManagingContractIndex = assets[asset.ownershipIndex].varStruct.ownership.managingContractIndex;
             unsigned int currentIssuanceIndex = assets[asset.ownershipIndex].varStruct.ownership.issuanceIndex;
-            if ((!possessorIdentity.empty() && identityStr != possessorIdentity) ||
-                (!ownerIdentity.empty() && identityStr != ownerIdentity) ||
+            if ((!possessorIdentity.empty() && identityStr != possessorIdentity) || (!ownerIdentity.empty() && identityStr != ownerIdentity) ||
                 (ownershipManagingContract >= 0 && currentOwnershipManagingContractIndex != ownershipManagingContract) ||
                 (possessionManagingContract >= 0 && asset.managingContractIndex != possessionManagingContract) ||
                 (targetIssuanceIndex >= 0 && currentIssuanceIndex != targetIssuanceIndex))
@@ -614,8 +612,7 @@ RPC_ROUTE("GET", "/live/v1/log-stats")
 
         // Header + up to 32 payload bytes are enough for the sample.
         unsigned char bytes[LOG_HEADER_SIZE + 32];
-        const unsigned long long readSize =
-            blobInfo.length < (long long)sizeof(bytes) ? (unsigned long long)blobInfo.length : sizeof(bytes);
+        const unsigned long long readSize = blobInfo.length < (long long)sizeof(bytes) ? (unsigned long long)blobInfo.length : sizeof(bytes);
         qLogger::logBuf.getMany((char*)bytes, blobInfo.startIndex, readSize);
 
         const unsigned int sizeAndType = *((unsigned int*)(bytes + 6));
@@ -844,14 +841,12 @@ RPC_ROUTE("GET", "/live/v1/tx-status/:tick/:tx")
     // Search the current or retained previous epoch.
     bool inRange = false;
     int tickIndex = 0;
-    if (tick >= txStatusData.confirmedTxCurrentEpochBeginTick &&
-        tick < txStatusData.confirmedTxCurrentEpochBeginTick + MAX_NUMBER_OF_TICKS_PER_EPOCH)
+    if (tick >= txStatusData.confirmedTxCurrentEpochBeginTick && tick < txStatusData.confirmedTxCurrentEpochBeginTick + MAX_NUMBER_OF_TICKS_PER_EPOCH)
     {
         tickIndex = tick - txStatusData.confirmedTxCurrentEpochBeginTick;
         inRange = true;
     }
-    else if (txStatusData.confirmedTxPreviousEpochBeginTick != 0 &&
-             tick >= txStatusData.confirmedTxPreviousEpochBeginTick &&
+    else if (txStatusData.confirmedTxPreviousEpochBeginTick != 0 && tick >= txStatusData.confirmedTxPreviousEpochBeginTick &&
              tick < txStatusData.confirmedTxCurrentEpochBeginTick)
     {
         tickIndex = tick - txStatusData.confirmedTxPreviousEpochBeginTick + MAX_NUMBER_OF_TICKS_PER_EPOCH;

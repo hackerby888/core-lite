@@ -30,11 +30,7 @@ static void callSystemProcedure(SystemProcedure procedure, void* input, void* ou
     procedure(context, &moduleState, input, output, locals);
 }
 
-static void dispatchSystemProcedure(
-    unsigned int systemProcedureId,
-    void* input,
-    void* output,
-    void* locals)
+static void dispatchSystemProcedure(unsigned int systemProcedureId, void* input, void* output, void* locals)
 {
     switch (systemProcedureId)
     {
@@ -118,12 +114,7 @@ static void dispatchUserProcedure(unsigned int inputType, void* input, void* out
 extern "C"
 {
 LH_EXPORT(dispatch)
-void dispatch(
-    unsigned int kindValue,
-    unsigned int inputType,
-    unsigned int inputOffset,
-    unsigned int outputOffset,
-    unsigned int localsOffset)
+void dispatch(unsigned int kindValue, unsigned int inputType, unsigned int inputOffset, unsigned int outputOffset, unsigned int localsOffset)
 {
     ensureModuleRegistered();
 

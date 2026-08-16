@@ -32,11 +32,7 @@ QPI::QpiContextForInit::QpiContextForInit(unsigned int contractIndex)
 {
 }
 
-void QPI::QpiContextForInit::__registerUserFunction(
-    USER_FUNCTION function,
-    unsigned short inputType,
-    unsigned short inputSize,
-    unsigned short outputSize,
+void QPI::QpiContextForInit::__registerUserFunction(USER_FUNCTION function, unsigned short inputType, unsigned short inputSize, unsigned short outputSize,
     unsigned int localsSize) const
 {
     if (Wasm::Sdk::moduleEntryCount >= WASM_MAX_USER_ENTRIES)
@@ -54,11 +50,7 @@ void QPI::QpiContextForInit::__registerUserFunction(
     };
 }
 
-void QPI::QpiContextForInit::__registerUserProcedure(
-    USER_PROCEDURE procedure,
-    unsigned short inputType,
-    unsigned short inputSize,
-    unsigned short outputSize,
+void QPI::QpiContextForInit::__registerUserProcedure(USER_PROCEDURE procedure, unsigned short inputType, unsigned short inputSize, unsigned short outputSize,
     unsigned int localsSize) const
 {
     if (Wasm::Sdk::moduleEntryCount >= WASM_MAX_USER_ENTRIES)
@@ -77,12 +69,8 @@ void QPI::QpiContextForInit::__registerUserProcedure(
 }
 
 // Oracle notification dispatch uses the low 16 bits of its synthetic procedure ID.
-void QPI::QpiContextForInit::__registerUserProcedureNotification(
-    USER_PROCEDURE procedure,
-    unsigned int procedureId,
-    unsigned short inputSize,
-    unsigned short outputSize,
-    unsigned int localsSize) const
+void QPI::QpiContextForInit::__registerUserProcedureNotification(USER_PROCEDURE procedure, unsigned int procedureId, unsigned short inputSize,
+    unsigned short outputSize, unsigned int localsSize) const
 {
     if (Wasm::Sdk::moduleEntryCount >= WASM_MAX_USER_ENTRIES)
     {

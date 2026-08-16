@@ -309,9 +309,7 @@ TEST_F(ForkRollback, CleanupFailureStaysInactive)
 
 namespace {
 
-bool waitForRetireState(
-    tickForkControl::BspRetireHandoff& handoff,
-    tickForkControl::BspRetireHandoff::State expected)
+bool waitForRetireState(tickForkControl::BspRetireHandoff& handoff, tickForkControl::BspRetireHandoff::State expected)
 {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     while (std::chrono::steady_clock::now() < deadline)
@@ -350,8 +348,7 @@ TEST(RequestProcessorBarrierTest, UnacknowledgedOwnerReleasesOwnedPhase)
     constexpr unsigned long long processorNumber = 0;
     const unsigned long long processorIDs[] = { processorNumber };
     tickFork::gRequestProcessorParkPhase.store(0, std::memory_order_release);
-    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(
-        0, std::memory_order_release);
+    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(0, std::memory_order_release);
 
     unsigned long long ownerPhase;
     {
@@ -363,8 +360,7 @@ TEST(RequestProcessorBarrierTest, UnacknowledgedOwnerReleasesOwnedPhase)
     EXPECT_EQ(tickFork::gRequestProcessorParkPhase.load(std::memory_order_acquire), ownerPhase + 1);
 
     tickFork::gRequestProcessorParkPhase.store(0, std::memory_order_release);
-    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(
-        0, std::memory_order_release);
+    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(0, std::memory_order_release);
 }
 
 TEST(ForkRollbackControl, ParkWorkerAcknowledgesNextPhaseWithoutReleaseObservation)
@@ -372,8 +368,7 @@ TEST(ForkRollbackControl, ParkWorkerAcknowledgesNextPhaseWithoutReleaseObservati
     constexpr unsigned long long processorNumber = 0;
     constexpr unsigned long long firstParkPhase = 1;
     constexpr unsigned long long secondParkPhase = 3;
-    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(
-        0, std::memory_order_release);
+    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(0, std::memory_order_release);
     tickFork::gRequestProcessorParkPhase.store(firstParkPhase, std::memory_order_release);
 
     std::thread worker([processorNumber] { tickFork::requestProcessorParkPoint(processorNumber); });
@@ -381,8 +376,7 @@ TEST(ForkRollbackControl, ParkWorkerAcknowledgesNextPhaseWithoutReleaseObservati
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         while (std::chrono::steady_clock::now() < deadline)
         {
-            if (tickFork::gRequestProcessorParkAcknowledgement[processorNumber].load(
-                    std::memory_order_acquire) == expectedPhase)
+            if (tickFork::gRequestProcessorParkAcknowledgement[processorNumber].load(std::memory_order_acquire) == expectedPhase)
                 return true;
             std::this_thread::yield();
         }
@@ -401,8 +395,7 @@ TEST(ForkRollbackControl, ParkWorkerAcknowledgesNextPhaseWithoutReleaseObservati
     tickFork::gRequestProcessorParkPhase.store(secondParkPhase + 1, std::memory_order_release);
     worker.join();
     tickFork::gRequestProcessorParkPhase.store(0, std::memory_order_release);
-    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(
-        0, std::memory_order_release);
+    tickFork::gRequestProcessorParkAcknowledgement[processorNumber].store(0, std::memory_order_release);
 }
 
 TEST(ForkRollbackControl, RetireRequestWaitsForBspCompletion)
@@ -430,9 +423,7 @@ TEST(ForkRollbackControl, ShutdownIntentIsDeliveredToBsp)
         return handoff.requestAndWait(1000, true);
     });
 
-    ASSERT_TRUE(waitForRetireState(
-        handoff,
-        tickForkControl::BspRetireHandoff::State::ShutdownRequested));
+    ASSERT_TRUE(waitForRetireState(handoff, tickForkControl::BspRetireHandoff::State::ShutdownRequested));
     bool shutDownAfterCommit = false;
     ASSERT_TRUE(handoff.tryStart(shutDownAfterCommit));
     EXPECT_TRUE(shutDownAfterCommit);
@@ -554,8 +545,7 @@ TEST(ForkRollbackControl, PromoteWaitsForParentEof)
 
     bool drained = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-    while (std::chrono::steady_clock::now() < deadline
-           && commandFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+    while (std::chrono::steady_clock::now() < deadline && commandFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
     {
         int bytesAvailable = -1;
         if (ioctl(pipeFds[0], FIONREAD, &bytesAvailable) == 0 && bytesAvailable == 0)
@@ -584,17 +574,14 @@ TEST(ForkRollbackControl, PromoteClosesOnlyInheritedRpcUnixSockets)
 {
     EXPECT_EXIT(
         {
-            const std::string rpcPath =
-                "/tmp/qubic-rpc-promote-" + std::to_string(getpid()) + ".sock";
+            const std::string rpcPath = "/tmp/qubic-rpc-promote-" + std::to_string(getpid()) + ".sock";
             unlink(rpcPath.c_str());
 
             const int listenerFd = socket(AF_UNIX, SOCK_STREAM, 0);
             sockaddr_un rpcAddress{};
             rpcAddress.sun_family = AF_UNIX;
             std::strncpy(rpcAddress.sun_path, rpcPath.c_str(), sizeof(rpcAddress.sun_path) - 1);
-            if (listenerFd < 0
-                || bind(listenerFd, (sockaddr*)&rpcAddress, sizeof(rpcAddress)) != 0
-                || listen(listenerFd, 1) != 0)
+            if (listenerFd < 0 || bind(listenerFd, (sockaddr*)&rpcAddress, sizeof(rpcAddress)) != 0 || listen(listenerFd, 1) != 0)
             {
                 unlink(rpcPath.c_str());
                 _exit(1);
@@ -610,9 +597,7 @@ TEST(ForkRollbackControl, PromoteClosesOnlyInheritedRpcUnixSockets)
             const int acceptedFd = accept(listenerFd, nullptr, nullptr);
             int unrelatedUnixFds[2];
             int pipeFds[2];
-            if (acceptedFd < 0
-                || socketpair(AF_UNIX, SOCK_STREAM, 0, unrelatedUnixFds) != 0
-                || pipe(pipeFds) != 0)
+            if (acceptedFd < 0 || socketpair(AF_UNIX, SOCK_STREAM, 0, unrelatedUnixFds) != 0 || pipe(pipeFds) != 0)
             {
                 unlink(rpcPath.c_str());
                 _exit(1);
@@ -625,36 +610,21 @@ TEST(ForkRollbackControl, PromoteClosesOnlyInheritedRpcUnixSockets)
                 _exit(1);
             }
 
-            const unsigned int closedCount =
-                tickForkControl::closeInheritedRpcUnixSocketsForPromote(
-                    listenerFd,
-                    rpcPath.c_str());
+            const unsigned int closedCount = tickForkControl::closeInheritedRpcUnixSocketsForPromote(listenerFd, rpcPath.c_str());
             unlink(rpcPath.c_str());
 
             errno = 0;
             const bool listenerClosed = fcntl(listenerFd, F_GETFD) == -1 && errno == EBADF;
             errno = 0;
-            const bool acceptedConnectionClosed =
-                fcntl(acceptedFd, F_GETFD) == -1 && errno == EBADF;
+            const bool acceptedConnectionClosed = fcntl(acceptedFd, F_GETFD) == -1 && errno == EBADF;
             const bool clientOpen = fcntl(clientFd, F_GETFD) != -1;
-            const bool unrelatedUnixOpen = fcntl(unrelatedUnixFds[0], F_GETFD) != -1
-                && fcntl(unrelatedUnixFds[1], F_GETFD) != -1;
+            const bool unrelatedUnixOpen = fcntl(unrelatedUnixFds[0], F_GETFD) != -1 && fcntl(unrelatedUnixFds[1], F_GETFD) != -1;
             const bool inetOpen = fcntl(inetFd, F_GETFD) != -1;
-            const bool pipeOpen = fcntl(pipeFds[0], F_GETFD) != -1
-                && fcntl(pipeFds[1], F_GETFD) != -1;
+            const bool pipeOpen = fcntl(pipeFds[0], F_GETFD) != -1 && fcntl(pipeFds[1], F_GETFD) != -1;
 
-            _exit(closedCount == 2
-                      && listenerClosed
-                      && acceptedConnectionClosed
-                      && clientOpen
-                      && unrelatedUnixOpen
-                      && inetOpen
-                      && pipeOpen
-                  ? 0
+            _exit(closedCount == 2 && listenerClosed && acceptedConnectionClosed && clientOpen && unrelatedUnixOpen && inetOpen && pipeOpen ? 0
                   : 2);
-        },
-        ::testing::ExitedWithCode(0),
-        "");
+        }, ::testing::ExitedWithCode(0), "");
 }
 
 // registerPool + tryMarkDirty marks in-range slots dirty and ignores out-of-range addresses.
@@ -719,17 +689,11 @@ TEST(ForkRollbackDirtyTrack, OverflowGuardCapsPoolCount)
 
     const int registrationCount = maxPools + 4;
     std::vector<unsigned char*> poolBases(registrationCount);
-    std::vector<std::vector<unsigned char>> dirty(
-        registrationCount,
-        std::vector<unsigned char>(slotCount, 0));
+    std::vector<std::vector<unsigned char>> dirty(registrationCount, std::vector<unsigned char>(slotCount, 0));
     for (int i = 0; i < registrationCount; i++)
     {
         poolBases[i] = buffer;
-        SwapDirtyTrack::registerPool(
-            &poolBases[i],
-            stride,
-            slotCount,
-            (volatile unsigned char*)dirty[i].data());
+        SwapDirtyTrack::registerPool(&poolBases[i], stride, slotCount, (volatile unsigned char*)dirty[i].data());
         EXPECT_LE(SwapDirtyTrack::gPoolCount.load(), maxPools); // guard holds at every step
     }
     for (int i = 0; i < registrationCount; i++)
@@ -882,8 +846,7 @@ TEST(ForkStatsTest, ParentUpdatesAreVisibleToForkChild)
         while (readSize < 0 && errno == EINTR);
         close(releasePipe[0]);
 
-        const bool countersVisible = ForkStats::forksOk.load() == initialForksOk + 1
-            && ForkStats::mismatches.load() == initialMismatches + 1;
+        const bool countersVisible = ForkStats::forksOk.load() == initialForksOk + 1 && ForkStats::mismatches.load() == initialMismatches + 1;
         _exit(readSize == 1 && countersVisible ? 0 : 1);
     }
 

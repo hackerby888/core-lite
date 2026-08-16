@@ -232,8 +232,7 @@ namespace rpcwire
     inline bool writeFrame(int fd, const std::string& meta, const std::string& body)
     {
         uint32_t ml = (uint32_t)meta.size(), bl = (uint32_t)body.size();
-        return writeAll(fd, (char*)&ml, 4) && writeAll(fd, meta.data(), ml)
-            && writeAll(fd, (char*)&bl, 4) && writeAll(fd, body.data(), bl);
+        return writeAll(fd, (char*)&ml, 4) && writeAll(fd, meta.data(), ml) && writeAll(fd, (char*)&bl, 4) && writeAll(fd, body.data(), bl);
     }
     inline bool readFrame(int fd, std::string& meta, std::string& body)
     {
@@ -333,12 +332,7 @@ inline void rpcUnixServe(std::string path)
         {
             return;
         }
-        fprintf(stderr,
-                "[RPC] unix %s failed for %s: errno=%d (%s); retrying\n",
-                operation,
-                path.c_str(),
-                error,
-                strerror(error));
+        fprintf(stderr, "[RPC] unix %s failed for %s: errno=%d (%s); retrying\n", operation, path.c_str(), error, strerror(error));
         fflush(stderr);
         lastFailedOperation = operation;
         lastError = error;

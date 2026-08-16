@@ -31,11 +31,7 @@ static inline T readUnaligned(const unsigned char *p, size_t off)
 // Return the value of a filterable field, as the string representation the spec uses
 // ("123" for numbers, 60-char identity for pubkeys, 7-char trimmed for asset name).
 // Returns std::nullopt if the field is not present on this payload type.
-static inline std::optional<std::string> payloadFieldValue(
-    unsigned int logType,
-    const unsigned char *p,
-    unsigned int payloadSize,
-    const std::string &field)
+static inline std::optional<std::string> payloadFieldValue(unsigned int logType, const unsigned char *p, unsigned int payloadSize, const std::string &field)
 {
     auto fitId = [&](size_t off, bool lowercase = false) -> std::optional<std::string>
     {
@@ -176,11 +172,7 @@ static inline bool rangeMatches(const std::string &value, const Json::Value &ran
 }
 
 // Build the typed payload sub-object for an event, based on logType.
-static inline void buildTypedPayload(
-    unsigned int logType,
-    const unsigned char *p,
-    unsigned int payloadSize,
-    Json::Value &out)
+static inline void buildTypedPayload(unsigned int logType, const unsigned char *p, unsigned int payloadSize, Json::Value &out)
 {
     switch (logType)
     {
@@ -327,12 +319,8 @@ static inline void buildTypedPayload(
 }
 
 // Build the full Event JSON object from one raw [header || payload] log blob.
-static inline Json::Value eventLogToJson(
-    const char *blob,
-    unsigned int blobLen,
-    const TickData &tickDataForTimestamp,
-    const std::string &transactionHashOrEmpty,
-    const Json::Value &categories)
+static inline Json::Value eventLogToJson(const char *blob, unsigned int blobLen, const TickData &tickDataForTimestamp,
+    const std::string &transactionHashOrEmpty, const Json::Value &categories)
 {
     Json::Value out;
     if (blobLen < LOG_HEADER_SIZE) return out;
@@ -372,20 +360,9 @@ static inline Json::Value eventLogToJson(
 }
 
 // Evaluate one matched event against the request's filters.
-static inline bool eventMatchesFilters(
-    unsigned int logType,
-    unsigned int epoch,
-    unsigned int tickNumber,
-    unsigned long long logId,
-    const std::string &transactionHash,
-    const Json::Value &categories,
-    const unsigned char *payload,
-    unsigned int payloadSize,
-    const TickData &tickDataForTimestamp,
-    const Json::Value &filters,
-    const Json::Value &exclude,
-    const Json::Value &should,
-    const Json::Value &ranges)
+static inline bool eventMatchesFilters(unsigned int logType, unsigned int epoch, unsigned int tickNumber, unsigned long long logId,
+    const std::string &transactionHash, const Json::Value &categories, const unsigned char *payload, unsigned int payloadSize,
+    const TickData &tickDataForTimestamp, const Json::Value &filters, const Json::Value &exclude, const Json::Value &should, const Json::Value &ranges)
 {
     auto valueOf = [&](const std::string &field) -> std::optional<std::string>
     {

@@ -29,10 +29,7 @@ static inline long _InterlockedCompareExchange(volatile long* destination, long 
     return original;
 }
 
-static inline long long _InterlockedCompareExchange64(
-    volatile long long* destination,
-    long long exchange,
-    long long comparand)
+static inline long long _InterlockedCompareExchange64(volatile long long* destination, long long exchange, long long comparand)
 {
     long long original = *destination;
 
@@ -99,10 +96,7 @@ static inline unsigned long _byteswap_ulong(unsigned long value)
     return __builtin_bswap32((uint32_t)value);
 }
 
-static inline unsigned long long _umul128(
-    unsigned long long left,
-    unsigned long long right,
-    unsigned long long* high)
+static inline unsigned long long _umul128(unsigned long long left, unsigned long long right, unsigned long long* high)
 {
     __uint128_t result = (__uint128_t)left * right;
     *high = (unsigned long long)(result >> 64);

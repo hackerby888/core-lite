@@ -62,8 +62,7 @@ inline State& state()
     static_assert(std::atomic<const char*>::is_always_lock_free);
 
     static State* state = [] {
-        void* mapping = mmap(nullptr, sizeof(State), PROT_READ | PROT_WRITE,
-                             MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        void* mapping = mmap(nullptr, sizeof(State), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
         if (mapping == MAP_FAILED)
         {
             perror("[FORK] shared stats mmap failed");
@@ -119,13 +118,7 @@ inline void onForkSkipped(int reason, unsigned int tick, const char* offender)
     gmtime_r(&now, &utcTime);
 #endif
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utcTime);
-    fprintf(
-        logFile,
-        "%s tick=%u reason=%s offender=%s\n",
-        timestamp,
-        tick,
-        reasonName(reason),
-        offender ? offender : "");
+    fprintf(logFile, "%s tick=%u reason=%s offender=%s\n", timestamp, tick, reasonName(reason), offender ? offender : "");
     fclose(logFile);
 }
 

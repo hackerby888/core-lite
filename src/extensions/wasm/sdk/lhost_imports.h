@@ -96,27 +96,14 @@ LH_IMPORT(liteSetShareholderVotes) unsigned int lh_liteSetShareholderVotes(unsig
 namespace Wasm::Sdk
 {
 
-int callFunction(
-    const void*,
-    unsigned int calleeIndex,
-    unsigned short inputType,
-    const void* input,
-    unsigned int inputSize,
-    void* output,
+int callFunction(const void*, unsigned int calleeIndex, unsigned short inputType, const void* input, unsigned int inputSize, void* output,
     unsigned int outputSize)
 {
     return lh_liteCallFunction(calleeIndex, inputType, input, inputSize, output, outputSize);
 }
 
-int invokeProcedure(
-    const void*,
-    unsigned int calleeIndex,
-    unsigned short inputType,
-    const void* input,
-    unsigned int inputSize,
-    void* output,
-    unsigned int outputSize,
-    long long invocationReward)
+int invokeProcedure(const void*, unsigned int calleeIndex, unsigned short inputType, const void* input, unsigned int inputSize, void* output,
+    unsigned int outputSize, long long invocationReward)
 {
     return lh_liteInvokeProcedure(calleeIndex, inputType, input, inputSize, output, outputSize, invocationReward);
 }

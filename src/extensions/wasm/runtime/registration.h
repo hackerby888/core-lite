@@ -25,11 +25,7 @@ static void discoverRegistration(EngineSlot& slot, const RequiredExports& export
     logColorToScreen("INFO", "LITEWASM: loaded contract — " + std::to_string(slot.entryCount) + " entries, stateSize=" + std::to_string(slot.stateSize));
 }
 
-static void registerUserFunction(
-    unsigned int contractIndex,
-    uint16_t inputType,
-    const EntryInfo& entry,
-    void* code)
+static void registerUserFunction(unsigned int contractIndex, uint16_t inputType, const EntryInfo& entry, void* code)
 {
     contractUserFunctions[contractIndex][inputType] = (USER_FUNCTION)code;
     contractUserFunctionInputSizes[contractIndex][inputType] = (uint16_t)entry.inputSize;
@@ -37,11 +33,7 @@ static void registerUserFunction(
     contractUserFunctionLocalsSizes[contractIndex][inputType] = 0;
 }
 
-static void registerUserProcedure(
-    unsigned int contractIndex,
-    uint16_t inputType,
-    const EntryInfo& entry,
-    void* code)
+static void registerUserProcedure(unsigned int contractIndex, uint16_t inputType, const EntryInfo& entry, void* code)
 {
     contractUserProcedures[contractIndex][inputType] = (USER_PROCEDURE)code;
     contractUserProcedureInputSizes[contractIndex][inputType] = (uint16_t)entry.inputSize;
@@ -64,10 +56,7 @@ static void registerUserProcedure(
     }
 }
 
-static void registerUserEntries(
-    EngineSlot& slot,
-    unsigned int contractIndex,
-    const RequiredExports& exports)
+static void registerUserEntries(EngineSlot& slot, unsigned int contractIndex, const RequiredExports& exports)
 {
     for (uint32_t entryIndex = 0; entryIndex < slot.entryCount; ++entryIndex)
     {
@@ -105,10 +94,7 @@ static void registerUserEntries(
     }
 }
 
-static uint32_t callWithU32Argument(
-    wasm_exec_env_t execEnv,
-    wasm_function_inst_t function,
-    uint32_t argument)
+static uint32_t callWithU32Argument(wasm_exec_env_t execEnv, wasm_function_inst_t function, uint32_t argument)
 {
     if (!function)
     {

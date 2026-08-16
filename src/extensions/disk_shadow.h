@@ -63,8 +63,7 @@ class DiskShadow
     {
         const volatile CHAR16* volatileText = text;
         size_t length = 0;
-        while (volatileText[length])
-            ++length;
+        while (volatileText[length]) ++length;
         return length;
     }
 
@@ -86,16 +85,14 @@ class DiskShadow
 
     static void exitAfterPersistFailure(const std::string& realPath)
     {
-        fprintf(stderr, "[SHADOW] FATAL: commit could not persist %s (disk failure) -> exit for restart from snapshot\n",
-                realPath.c_str());
+        fprintf(stderr, "[SHADOW] FATAL: commit could not persist %s (disk failure) -> exit for restart from snapshot\n", realPath.c_str());
         fflush(stderr);
         _exit(1);   // skip atexit/global dtors under held locks
     }
 
     static void exitAfterDeleteFailure(const std::string& realPath)
     {
-        fprintf(stderr, "[SHADOW] FATAL: commit could not delete %s -> exit for restart from snapshot\n",
-                realPath.c_str());
+        fprintf(stderr, "[SHADOW] FATAL: commit could not delete %s -> exit for restart from snapshot\n", realPath.c_str());
         fflush(stderr);
         _exit(1);   // skip atexit/global dtors under held locks
     }
@@ -136,8 +133,7 @@ class DiskShadow
             if (!ec)
                 return;
 
-            fprintf(stderr, "[SHADOW] commit delete failed (attempt %d/%d) %s: %s\n",
-                    attempt, ioMaxAttempts, realPath.c_str(), ec.message().c_str());
+            fprintf(stderr, "[SHADOW] commit delete failed (attempt %d/%d) %s: %s\n", attempt, ioMaxAttempts, realPath.c_str(), ec.message().c_str());
             fflush(stderr);
 
             if (attempt < ioMaxAttempts)
@@ -184,8 +180,7 @@ class DiskShadow
         if (error)
         {
             gShadowPoisoned.store(true, std::memory_order_release);
-            fprintf(stderr, "[SHADOW] createDir failed for %s/s -> poison (force strict replay)\n",
-                    realDirPath.c_str());
+            fprintf(stderr, "[SHADOW] createDir failed for %s/s -> poison (force strict replay)\n", realDirPath.c_str());
             fflush(stderr);
         }
         return shadowDir.data();
@@ -201,8 +196,7 @@ class DiskShadow
             if (ec)
             {
                 success = false;
-                fprintf(stderr, "[SHADOW] cleanup failed for %s/s: %s\n",
-                        entry.first.c_str(), ec.message().c_str());
+                fprintf(stderr, "[SHADOW] cleanup failed for %s/s: %s\n", entry.first.c_str(), ec.message().c_str());
                 fflush(stderr);
             }
         }
@@ -248,9 +242,7 @@ public:
 
     const CHAR16* dirForWrite(const CHAR16* realDir, const CHAR16* pageName)
     {
-        if (!active.load(std::memory_order_acquire)
-            || !realDir || !realDir[0]
-            || !pageName || !pageName[0])
+        if (!active.load(std::memory_order_acquire) || !realDir || !realDir[0] || !pageName || !pageName[0])
             return realDir;
 
         std::lock_guard<std::mutex> guard(shadowMutex);
@@ -280,9 +272,7 @@ public:
 
     const CHAR16* dirForRemove(const CHAR16* realDir, const CHAR16* pageName)
     {
-        if (!active.load(std::memory_order_acquire)
-            || !realDir || !realDir[0]
-            || !pageName || !pageName[0])
+        if (!active.load(std::memory_order_acquire) || !realDir || !realDir[0] || !pageName || !pageName[0])
             return realDir;
 
         std::lock_guard<std::mutex> guard(shadowMutex);
@@ -312,9 +302,7 @@ public:
 
     const CHAR16* dirForRead(const CHAR16* realDir, const CHAR16* pageName)
     {
-        if (!active.load(std::memory_order_acquire)
-            || !realDir || !realDir[0]
-            || !pageName || !pageName[0])
+        if (!active.load(std::memory_order_acquire) || !realDir || !realDir[0] || !pageName || !pageName[0])
             return realDir;
 
         std::lock_guard<std::mutex> guard(shadowMutex);
@@ -404,10 +392,7 @@ public:
 
         if (gForkBench && !writtenPages.empty())
         {
-            fprintf(
-                stderr,
-                "[SHADOW] child purgeOrphans: drop %zu diverted page(s); real pristine\n",
-                writtenPages.size());
+            fprintf(stderr, "[SHADOW] child purgeOrphans: drop %zu diverted page(s); real pristine\n", writtenPages.size());
             fflush(stderr);
         }
 

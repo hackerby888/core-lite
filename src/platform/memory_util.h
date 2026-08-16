@@ -26,14 +26,8 @@ inline void* qVirtualAllocLazy(const unsigned long long size);
 // commitMem indicates whether to commit memory when using VirtualAlloc
 // NOTE: commitMem only used if host machine have enough RAM+Pagefile, otherwise VirtualAlloc will fail
 // lazyCommit is only safe for buffers written from user mode.
-static bool allocPoolWithErrorLog(
-    const wchar_t* name,
-    const unsigned long long size,
-    void** buffer,
-    const int LINE,
-    bool useVirtualMem = false,
-    bool commitMem = false,
-    bool lazyCommit = false)
+static bool allocPoolWithErrorLog(const wchar_t* name, const unsigned long long size, void** buffer, const int LINE, bool useVirtualMem = false,
+    bool commitMem = false, bool lazyCommit = false)
 {
     static unsigned long long totalMemoryUsed = 0;
     static unsigned long long totalVirtualMemoryUsed = 0;

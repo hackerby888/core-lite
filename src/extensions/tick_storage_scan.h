@@ -122,14 +122,12 @@ namespace tickStorageScan
         {
             if (total > detailLimit)
             {
-                std::fprintf(stderr, "[SCAN] %llu additional issue details suppressed\n",
-                    total - detailLimit);
+                std::fprintf(stderr, "[SCAN] %llu additional issue details suppressed\n", total - detailLimit);
             }
 
             for (const auto& category : categoryTotals)
             {
-                std::fprintf(stderr, "[SCAN] %-24s %llu\n",
-                    category.first.c_str(), category.second);
+                std::fprintf(stderr, "[SCAN] %-24s %llu\n", category.first.c_str(), category.second);
             }
         }
     };
@@ -151,11 +149,7 @@ namespace tickStorageScan
         {
         }
 
-        void update(
-            unsigned long long completedTicks,
-            unsigned long long totalTicks,
-            unsigned long long transactions,
-            unsigned long long issues,
+        void update(unsigned long long completedTicks, unsigned long long totalTicks, unsigned long long transactions, unsigned long long issues,
             bool force = false)
         {
             if (!outputEnabled)
@@ -182,23 +176,16 @@ namespace tickStorageScan
                     bar += '>';
                 bar.append((size_t)(barWidth - (int)bar.size()), ' ');
 
-                std::fprintf(
-                    stdout,
-                    "\r[SCAN] [%s] %6.2f%% %llu/%llu ticks | %llu tx | %llu issues | %.1f tick/s | ETA %02llu:%02llu:%02llu",
-                    bar.c_str(), fraction * 100,
-                    completedTicks, totalTicks, transactions, issues, rate,
+                std::fprintf(stdout, "\r[SCAN] [%s] %6.2f%% %llu/%llu ticks | %llu tx | %llu issues | %.1f tick/s | ETA %02llu:%02llu:%02llu",
+                    bar.c_str(), fraction * 100, completedTicks, totalTicks, transactions, issues, rate,
                     etaSeconds / 3600, (etaSeconds / 60) % 60, etaSeconds % 60);
                 if (force)
                     std::fprintf(stdout, "\n");
             }
             else
             {
-                std::fprintf(
-                    stdout,
-                    "[SCAN] %.2f%% %llu/%llu ticks | %llu tx | %llu issues | %.1f tick/s | ETA %02llu:%02llu:%02llu\n",
-                    fraction * 100, completedTicks, totalTicks,
-                    transactions, issues, rate,
-                    etaSeconds / 3600, (etaSeconds / 60) % 60, etaSeconds % 60);
+                std::fprintf(stdout, "[SCAN] %.2f%% %llu/%llu ticks | %llu tx | %llu issues | %.1f tick/s | ETA %02llu:%02llu:%02llu\n",
+                    fraction * 100, completedTicks, totalTicks, transactions, issues, rate, etaSeconds / 3600, (etaSeconds / 60) % 60, etaSeconds % 60);
             }
             std::fflush(stdout);
         }
@@ -218,29 +205,18 @@ namespace tickStorageScan
         unsigned long long transactionsChecked = 0;
     };
 
-    static ScanResult scanLoadedRange(
-        TickStorage& storage,
-        unsigned short epoch,
-        unsigned int initialTick,
-        unsigned int endTick,
-        Progress& progress)
+    static ScanResult scanLoadedRange(TickStorage& storage, unsigned short epoch, unsigned int initialTick, unsigned int endTick, Progress& progress)
     {
         ScanResult result;
         IssueSummary& issues = result.issues;
         const unsigned long long tickCount = (unsigned long long)endTick - initialTick;
         const unsigned long long transactionLimit = storage.nextTickTransactionOffset;
-        const unsigned long long transactionCapacity =
-            storage.tickTransactions.storageSpaceCurrentEpoch;
-        const bool transactionLimitValid = transactionLimit >= FIRST_TICK_TRANSACTION_OFFSET
-            && transactionLimit <= transactionCapacity;
+        const unsigned long long transactionCapacity = storage.tickTransactions.storageSpaceCurrentEpoch;
+        const bool transactionLimitValid = transactionLimit >= FIRST_TICK_TRANSACTION_OFFSET && transactionLimit <= transactionCapacity;
         if (!transactionLimitValid)
         {
-            issues.add(
-                "transaction-layout", initialTick, -1,
-                "next offset %llu is outside [%llu, %llu]",
-                transactionLimit,
-                (unsigned long long)FIRST_TICK_TRANSACTION_OFFSET,
-                transactionCapacity);
+            issues.add("transaction-layout", initialTick, -1, "next offset %llu is outside [%llu, %llu]", transactionLimit,
+                (unsigned long long)FIRST_TICK_TRANSACTION_OFFSET, transactionCapacity);
         }
 
         std::vector<TransactionReference> transactionReferences;
@@ -254,15 +230,10 @@ namespace tickStorageScan
 
             const TickData& tickData = storage.tickData.getByTickInCurrentEpoch(tick);
             const bool hasTickData = tickData.epoch == epoch;
-            const bool tickDataValid = hasTickData
-                && tickData.tick == tick
-                && tickData.computorIndex == tick % NUMBER_OF_COMPUTORS;
+            const bool tickDataValid = hasTickData && tickData.tick == tick && tickData.computorIndex == tick % NUMBER_OF_COMPUTORS;
             if (hasTickData && !tickDataValid)
             {
-                issues.add(
-                    "tick-data", tick, -1,
-                    "epoch=%u storedTick=%u leader=%u expectedLeader=%u",
-                    tickData.epoch, tickData.tick, tickData.computorIndex,
+                issues.add("tick-data", tick, -1, "epoch=%u storedTick=%u leader=%u expectedLeader=%u", tickData.epoch, tickData.tick, tickData.computorIndex,
                     tick % NUMBER_OF_COMPUTORS);
             }
             else if (!hasTickData && tickData.epoch != 0 && tickData.epoch != INVALIDATED_TICK_DATA)
@@ -273,11 +244,7 @@ namespace tickStorageScan
             m256i expectedTickDataDigest = m256i::zero();
             if (tickDataValid)
             {
-                KangarooTwelve(
-                    &tickData,
-                    sizeof(TickData),
-                    &expectedTickDataDigest,
-                    sizeof(expectedTickDataDigest));
+                KangarooTwelve(&tickData, sizeof(TickData), &expectedTickDataDigest, sizeof(expectedTickDataDigest));
             }
 
             const Tick* tickVotes = storage.ticks.getByTickInCurrentEpoch(tick);
@@ -290,10 +257,7 @@ namespace tickStorageScan
 
                 if (vote.epoch != epoch || vote.tick != tick || vote.computorIndex != computor)
                 {
-                    issues.add(
-                        "tick-vote", tick, computor,
-                        "epoch=%u storedTick=%u computor=%u",
-                        vote.epoch, vote.tick, vote.computorIndex);
+                    issues.add("tick-vote", tick, computor, "epoch=%u storedTick=%u computor=%u", vote.epoch, vote.tick, vote.computorIndex);
                     continue;
                 }
 
@@ -302,23 +266,16 @@ namespace tickStorageScan
             }
             if (matchingVotes < QUORUM)
             {
-                issues.add(
-                    "tick-quorum", tick, -1,
-                    "%u matching votes, need %u", matchingVotes, (unsigned int)QUORUM);
+                issues.add("tick-quorum", tick, -1, "%u matching votes, need %u", matchingVotes, (unsigned int)QUORUM);
             }
 
             if (!tickDataValid)
             {
-                progress.update(
-                    (unsigned long long)tick - initialTick + 1,
-                    tickCount,
-                    result.transactionsChecked,
-                    issues.total);
+                progress.update((unsigned long long)tick - initialTick + 1, tickCount, result.transactionsChecked, issues.total);
                 continue;
             }
 
-            const unsigned long long* offsets =
-                storage.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
+            const unsigned long long* offsets = storage.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
             for (unsigned int slot = 0; slot < NUMBER_OF_TRANSACTIONS_PER_TICK; slot++)
             {
                 const unsigned long long offset = offsets[slot];
@@ -327,9 +284,7 @@ namespace tickStorageScan
                 {
                     if (hasDigest)
                     {
-                        issues.add(
-                            "transaction-pair", tick, slot,
-                            "digest has no transaction offset");
+                        issues.add("transaction-pair", tick, slot, "digest has no transaction offset");
                     }
                     continue;
                 }
@@ -337,24 +292,18 @@ namespace tickStorageScan
                 TransactionReference reference;
                 reference.offset = offset;
                 reference.slot = slot;
-                reference.expectedDigest = hasDigest
-                    ? tickData.transactionDigests[slot]
+                reference.expectedDigest = hasDigest ? tickData.transactionDigests[slot]
                     : m256i::zero();
                 reference.hasExpectedDigest = hasDigest;
                 transactionReferences.push_back(reference);
 
                 if (!hasDigest)
                 {
-                    issues.add(
-                        "transaction-pair", tick, slot,
-                        "offset %llu has no transaction digest", offset);
+                    issues.add("transaction-pair", tick, slot, "offset %llu has no transaction digest", offset);
                 }
             }
 
-            std::sort(
-                transactionReferences.begin(),
-                transactionReferences.end(),
-                [](const TransactionReference& left, const TransactionReference& right)
+            std::sort(transactionReferences.begin(), transactionReferences.end(), [](const TransactionReference& left, const TransactionReference& right)
                 {
                     return left.offset < right.offset;
                 });
@@ -365,66 +314,44 @@ namespace tickStorageScan
                 result.transactionsChecked++;
                 if (reference.offset == previousOffset)
                 {
-                    issues.add(
-                        "transaction-offset", tick, reference.slot,
-                        "duplicate offset %llu", reference.offset);
+                    issues.add("transaction-offset", tick, reference.slot, "duplicate offset %llu", reference.offset);
                 }
                 previousOffset = reference.offset;
 
-                if (!transactionLimitValid
-                    || reference.offset < FIRST_TICK_TRANSACTION_OFFSET
-                    || reference.offset >= transactionLimit
+                if (!transactionLimitValid || reference.offset < FIRST_TICK_TRANSACTION_OFFSET || reference.offset >= transactionLimit
                     || transactionLimit - reference.offset < sizeof(Transaction))
                 {
-                    issues.add(
-                        "transaction-offset", tick, reference.slot,
-                        "offset %llu is outside stored transaction bytes", reference.offset);
+                    issues.add("transaction-offset", tick, reference.slot, "offset %llu is outside stored transaction bytes", reference.offset);
                     continue;
                 }
 
                 PinScope transactionPinScope;
                 const Transaction* transaction = storage.tickTransactions(reference.offset);
                 const unsigned int transactionSize = transaction->totalSize();
-                if (!transaction->checkValidity()
-                    || transactionSize > MAX_TRANSACTION_SIZE
-                    || transactionSize > transactionLimit - reference.offset)
+                if (!transaction->checkValidity() || transactionSize > MAX_TRANSACTION_SIZE || transactionSize > transactionLimit - reference.offset)
                 {
-                    issues.add(
-                        "transaction-header", tick, reference.slot,
-                        "offset=%llu inputSize=%u totalSize=%u",
+                    issues.add("transaction-header", tick, reference.slot, "offset=%llu inputSize=%u totalSize=%u",
                         reference.offset, transaction->inputSize, transactionSize);
                     continue;
                 }
 
                 if (transaction->tick != tick)
                 {
-                    issues.add(
-                        "transaction-tick", tick, reference.slot,
-                        "offset=%llu storedTick=%u", reference.offset, transaction->tick);
+                    issues.add("transaction-tick", tick, reference.slot, "offset=%llu storedTick=%u", reference.offset, transaction->tick);
                 }
 
                 if (reference.hasExpectedDigest)
                 {
                     m256i transactionDigest;
-                    KangarooTwelve(
-                        transaction,
-                        transactionSize,
-                        &transactionDigest,
-                        sizeof(transactionDigest));
+                    KangarooTwelve(transaction, transactionSize, &transactionDigest, sizeof(transactionDigest));
                     if (transactionDigest != reference.expectedDigest)
                     {
-                        issues.add(
-                            "transaction-digest", tick, reference.slot,
-                            "digest mismatch at offset %llu", reference.offset);
+                        issues.add("transaction-digest", tick, reference.slot, "digest mismatch at offset %llu", reference.offset);
                     }
                 }
             }
 
-            progress.update(
-                (unsigned long long)tick - initialTick + 1,
-                tickCount,
-                result.transactionsChecked,
-                issues.total);
+            progress.update((unsigned long long)tick - initialTick + 1, tickCount, result.transactionsChecked, issues.total);
         }
 
         return result;
@@ -440,9 +367,7 @@ namespace tickStorageScan
         cleanupPending = true;
         std::atexit(cleanup);
 
-        std::fprintf(
-            stdout,
-            "[SCAN] Offline mode: stop the node before scanning its runtime directory\n");
+        std::fprintf(stdout, "[SCAN] Offline mode: stop the node before scanning its runtime directory\n");
         enableAVX();
 #if defined(__AVX512F__) && !GENERIC_K12
         initAVX512KangarooTwelveConstants();
@@ -471,44 +396,30 @@ namespace tickStorageScan
 
         static CHAR16 systemSnapshotFileName[] = L"system.snp";
         setMem(&system, sizeof(system), 0);
-        const long long loadedSystemSize = load(
-            systemSnapshotFileName,
-            sizeof(system),
-            (unsigned char*)&system,
-            snapshotDirectory);
+        const long long loadedSystemSize = load(systemSnapshotFileName, sizeof(system), (unsigned char*)&system, snapshotDirectory);
         if (loadedSystemSize != sizeof(system))
         {
             std::fprintf(stderr, "[SCAN] failed to load ep%u/system.snp\n", (unsigned int)EPOCH);
             return 2;
         }
 
-        const bool systemRangeValid = system.epoch == EPOCH
-            && system.tick >= system.initialTick;
-        const unsigned long long tickCount = systemRangeValid
-            ? (unsigned long long)system.tick - system.initialTick
+        const bool systemRangeValid = system.epoch == EPOCH && system.tick >= system.initialTick;
+        const unsigned long long tickCount = systemRangeValid ? (unsigned long long)system.tick - system.initialTick
             : 0;
         if (!systemRangeValid || tickCount > MAX_NUMBER_OF_TICKS_PER_EPOCH)
         {
-            std::fprintf(
-                stderr,
-                "[SCAN] invalid system snapshot: epoch=%u initialTick=%u tick=%u\n",
-                system.epoch, system.initialTick, system.tick);
+            std::fprintf(stderr, "[SCAN] invalid system snapshot: epoch=%u initialTick=%u tick=%u\n", system.epoch, system.initialTick, system.tick);
             return 2;
         }
 
         EFI_GUID mpServiceProtocolGuid = EFI_MP_SERVICES_PROTOCOL_GUID;
-        const EFI_STATUS locateProtocolStatus = bs->LocateProtocol(
-            &mpServiceProtocolGuid,
-            nullptr,
-            (void**)&mpServicesProtocol);
+        const EFI_STATUS locateProtocolStatus = bs->LocateProtocol(&mpServiceProtocolGuid, nullptr, (void**)&mpServicesProtocol);
         if (locateProtocolStatus != EFI_SUCCESS || !mpServicesProtocol)
         {
             std::fprintf(stderr, "[SCAN] async file-I/O initialization failed\n");
             return 2;
         }
-        const EFI_STATUS processorStatus = mpServicesProtocol->WhoAmI(
-            mpServicesProtocol,
-            &mainThreadProcessorID);
+        const EFI_STATUS processorStatus = mpServicesProtocol->WhoAmI(mpServicesProtocol, &mainThreadProcessorID);
         if (processorStatus != EFI_SUCCESS)
         {
             std::fprintf(stderr, "[SCAN] async file-I/O initialization failed\n");
@@ -530,10 +441,7 @@ namespace tickStorageScan
         }
         if (ts.getPreloadTick() != system.tick)
         {
-            std::fprintf(
-                stderr,
-                "[SCAN] snapshot tick mismatch: system=%u TickStorage=%u\n",
-                system.tick, ts.getPreloadTick());
+            std::fprintf(stderr, "[SCAN] snapshot tick mismatch: system=%u TickStorage=%u\n", system.tick, ts.getPreloadTick());
             return 2;
         }
 
@@ -545,12 +453,7 @@ namespace tickStorageScan
         shadowArmed = true;
 
         Progress progress;
-        ScanResult result = scanLoadedRange(
-            ts,
-            system.epoch,
-            system.initialTick,
-            system.tick,
-            progress);
+        ScanResult result = scanLoadedRange(ts, system.epoch, system.initialTick, system.tick, progress);
         IssueSummary& issues = result.issues;
 
         deInitFileSystem();
@@ -568,10 +471,7 @@ namespace tickStorageScan
         issues.print();
 
         const int exitCode = issues.total ? 1 : 0;
-        std::fprintf(
-            stdout,
-            "[SCAN] %s: %llu ticks, %llu transactions, %llu issues\n",
-            exitCode == 0 ? "clean" : "failed",
+        std::fprintf(stdout, "[SCAN] %s: %llu ticks, %llu transactions, %llu issues\n", exitCode == 0 ? "clean" : "failed",
             tickCount, result.transactionsChecked, issues.total);
         return exitCode;
 #endif

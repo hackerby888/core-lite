@@ -60,8 +60,7 @@ static inline bool captureStateWrite(unsigned char* faultAddress, unsigned char*
         }
 
         matched = true;
-        const unsigned int pageIndex =
-            (unsigned int)((page - frame.protectionLow) / systemPageSize);
+        const unsigned int pageIndex = (unsigned int)((page - frame.protectionLow) / systemPageSize);
         if (pageIndex >= frame.pageCount || !frame.pageSnapshots || !frame.dirtyPageBits)
         {
             frame.captureFailed = true;
@@ -82,10 +81,7 @@ static inline bool captureStateWrite(unsigned char* faultAddress, unsigned char*
 static LONG WINAPI handleStateWriteException(EXCEPTION_POINTERS* exceptionPointers)
 {
     EXCEPTION_RECORD* record = exceptionPointers ? exceptionPointers->ExceptionRecord : nullptr;
-    if (!record
-        || record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION
-        || record->NumberParameters < 2
-        || record->ExceptionInformation[0] != 1)
+    if (!record || record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || record->NumberParameters < 2 || record->ExceptionInformation[0] != 1)
     {
         return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -108,8 +104,7 @@ static void handleStateWriteFault(int signalNumber, siginfo_t* info, void* conte
 {
     unsigned char* faultAddress = (unsigned char*)info->si_addr;
     unsigned char* page = alignPointerDown(faultAddress, systemPageSize);
-    if (captureStateWrite(faultAddress, page)
-        && mprotect(page, systemPageSize, PROT_READ | PROT_WRITE) == 0)
+    if (captureStateWrite(faultAddress, page) && mprotect(page, systemPageSize, PROT_READ | PROT_WRITE) == 0)
     {
         return;
     }
@@ -142,8 +137,7 @@ static void installWriteFaultHandler()
 
     GetSystemInfo(&systemInfo);
     systemPageSize = systemInfo.dwPageSize ? (long)systemInfo.dwPageSize : 4096;
-    writeFaultHandlerInstalled =
-        AddVectoredExceptionHandler(1, handleStateWriteException) != nullptr;
+    writeFaultHandlerInstalled = AddVectoredExceptionHandler(1, handleStateWriteException) != nullptr;
 #else
     systemPageSize = sysconf(_SC_PAGESIZE);
     if (systemPageSize <= 0)
@@ -197,9 +191,7 @@ static inline bool reserveDirtyPages(StateWriteFrame& frame, unsigned int pageCo
         return true;
     }
 
-    unsigned char* snapshots = (unsigned char*)realloc(
-        frame.pageSnapshots,
-        (size_t)pageCount * systemPageSize);
+    unsigned char* snapshots = (unsigned char*)realloc(frame.pageSnapshots, (size_t)pageCount * systemPageSize);
     if (!snapshots)
     {
         return false;
@@ -216,10 +208,7 @@ static inline bool reserveDirtyPages(StateWriteFrame& frame, unsigned int pageCo
     return true;
 }
 
-static inline bool setStatePageProtection(
-    unsigned char* protectionLow,
-    unsigned char* protectionHigh,
-    bool readOnly)
+static inline bool setStatePageProtection(unsigned char* protectionLow, unsigned char* protectionHigh, bool readOnly)
 {
     if (!protectionLow || protectionHigh <= protectionLow)
     {
@@ -228,16 +217,9 @@ static inline bool setStatePageProtection(
 
 #ifdef _WIN32
     DWORD oldProtection;
-    return VirtualProtect(
-        protectionLow,
-        (SIZE_T)(protectionHigh - protectionLow),
-        readOnly ? PAGE_READONLY : PAGE_READWRITE,
-        &oldProtection) != 0;
+    return VirtualProtect(protectionLow, (SIZE_T)(protectionHigh - protectionLow), readOnly ? PAGE_READONLY : PAGE_READWRITE, &oldProtection) != 0;
 #else
-    return mprotect(
-        protectionLow,
-        protectionHigh - protectionLow,
-        readOnly ? PROT_READ : PROT_READ | PROT_WRITE) == 0;
+    return mprotect(protectionLow, protectionHigh - protectionLow, readOnly ? PROT_READ : PROT_READ | PROT_WRITE) == 0;
 #endif
 }
 
@@ -255,8 +237,7 @@ static inline bool beginStateWriteTracking(unsigned char* stateStart, unsigned i
 
     unsigned char* protectionLow = alignPointerDown(stateStart, systemPageSize);
     unsigned char* protectionHigh = alignPointerUp(stateStart + stateSize, systemPageSize);
-    const unsigned int pageCount =
-        (unsigned int)((protectionHigh - protectionLow) / systemPageSize);
+    const unsigned int pageCount = (unsigned int)((protectionHigh - protectionLow) / systemPageSize);
     StateWriteFrame& frame = stateWriteFrames[stateWriteFrameCount];
 
     if (!reserveDirtyPages(frame, pageCount))
@@ -331,10 +312,7 @@ static inline void discardStateWriteTracking(unsigned char* stateStart, unsigned
     popStateWriteFrame(stateStart, stateSize);
 }
 
-static inline void finishStateWriteTracking(
-    TraceEntry& traceEntry,
-    unsigned char* stateStart,
-    unsigned int stateSize)
+static inline void finishStateWriteTracking(TraceEntry& traceEntry, unsigned char* stateStart, unsigned int stateSize)
 {
     StateWriteFrame* frame = popStateWriteFrame(stateStart, stateSize);
     if (!frame)
@@ -370,9 +348,7 @@ static inline void finishStateWriteTracking(
 
             const unsigned int size = (unsigned int)(pendingEnd - pendingStart);
             traceEntry.stateDiff.push_back({
-                (unsigned int)(pendingStart - stateStart),
-                hex(before + (unsigned int)(pendingStart - page), size),
-                hex(pendingStart, size),
+                (unsigned int)(pendingStart - stateStart), hex(before + (unsigned int)(pendingStart - page), size), hex(pendingStart, size),
             });
             pendingStart = nullptr;
         };
@@ -426,10 +402,7 @@ struct StateWriteScope
     bool captureFailed = false;
     bool finished = false;
 
-    StateWriteScope(
-        bool enabled,
-        unsigned char* protectedStateStart,
-        unsigned int protectedStateSize)
+    StateWriteScope(bool enabled, unsigned char* protectedStateStart, unsigned int protectedStateSize)
     {
         if (!enabled)
         {

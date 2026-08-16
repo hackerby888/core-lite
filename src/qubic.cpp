@@ -4485,16 +4485,10 @@ static void processTick(unsigned long long processorNumber)
     if (forceBroadcastInvalidSolution && computorSeedsCount > 0)
     {
         const unsigned int txTick = system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET;
-        const unsigned int claimedScore =
-            (unsigned int)getSolutionThreshold(score_engine::AlgoType::Bpp9000);
+        const unsigned int claimedScore = (unsigned int)getSolutionThreshold(score_engine::AlgoType::Bpp9000);
         if (gFbisCount > 1 || gFbisSameComputor)
         {
-            TestInvalidSolution::broadcastN(
-                score->currentRandomSeed,
-                txTick,
-                gFbisCount,
-                gFbisSameComputor,
-                claimedScore);
+            TestInvalidSolution::broadcastN(score->currentRandomSeed, txTick, gFbisCount, gFbisSameComputor, claimedScore);
         }
         else
         {
@@ -6665,8 +6659,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     int status = findCurrentDigestsFromNextTickVotes(spectrumDigestFromQuorum, resourceTestingDigestFromQuorum);
                     if (status == 1)
                     {
-                        const bool spectrumMismatch =
-                            etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum;
+                        const bool spectrumMismatch = etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum;
                         if (tickFork::verdict(spectrumMismatch, spectrumDigestFromQuorum, processorNumber))
                         {
                             resourceTestingDigest = resourceTestingDigestFromQuorum;
@@ -9136,8 +9129,7 @@ static void spawnAPs()
                 numberOfProcessors = 0;
                 break;
             }
-            if (!processors[numberOfProcessors].stackBottom
-                && !processors[numberOfProcessors].alloc(STACK_SIZE))
+            if (!processors[numberOfProcessors].stackBottom && !processors[numberOfProcessors].alloc(STACK_SIZE))
             {
                 logToConsole(L"Failed to allocate stack for processor!");
                 numberOfProcessors = 0;
@@ -9169,8 +9161,7 @@ static void spawnAPs()
                 createEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK, (void*)&shutdownCallback, NULL, &processors[numberOfProcessors].event);
                 mpServicesProtocol->StartupThisAP(mpServicesProtocol, Processor::runFunction, i, processors[numberOfProcessors].event, 0, &processors[numberOfProcessors], NULL);
 
-                if (!solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS]
-                    && !solutionProcessorFlags[i])
+                if (!solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS] && !solutionProcessorFlags[i])
                 {
                     solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS] = true;
                     solutionProcessorFlags[i] = true;
@@ -9207,9 +9198,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
 #if !defined(NO_RPC)
     gRpcUnixRunning = false;
     const std::string rpcPath = rpcUnixPath(httpPort);
-    tickForkControl::closeInheritedRpcUnixSocketsForPromote(
-        gRpcUnixListenFd.exchange(-1),
-        rpcPath.c_str());
+    tickForkControl::closeInheritedRpcUnixSocketsForPromote(gRpcUnixListenFd.exchange(-1), rpcPath.c_str());
 #endif
 
     // ── disk shadow + swap pin recovery ──
@@ -9397,14 +9386,8 @@ static void bspForkPoint()
         if (forkCensusSumExcept() != 0)
         {
             const char* offendingLock = forkCensusOffender();
-            ForkStats::onForkSkipped(
-                ForkStats::CENSUS,
-                (unsigned)system.tick,
-                offendingLock ? offendingLock : "?");
-            fprintf(
-                stderr,
-                "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n",
-                offendingLock ? offendingLock : "?",
+            ForkStats::onForkSkipped(ForkStats::CENSUS, (unsigned)system.tick, offendingLock ? offendingLock : "?");
+            fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n", offendingLock ? offendingLock : "?",
                 (unsigned)system.tick);
             fflush(stderr);
             quiescence.release();
@@ -10420,10 +10403,7 @@ void processArgs(int argc, const char* argv[]) {
         gForkForceRollbackEvery = result["fork-force-rollback-every"].as<unsigned int>();
         if (gForkForceRollbackEvery)
         {
-            logColorToScreen(
-                "INFO",
-                "TEST: forcing a fork + single-tick rollback every "
-                    + std::to_string(gForkForceRollbackEvery) + " ticks");
+            logColorToScreen("INFO", "TEST: forcing a fork + single-tick rollback every " + std::to_string(gForkForceRollbackEvery) + " ticks");
         }
     }
 #endif
@@ -10432,9 +10412,7 @@ void processArgs(int argc, const char* argv[]) {
         const int solutionCount = result["fbis-count"].as<int>();
         if (solutionCount > 0)
             gFbisCount = (unsigned int)solutionCount;
-        logColorToScreen(
-            "INFO",
-            std::string("TEST: fbis solutions per tick = ") + std::to_string(gFbisCount));
+        logColorToScreen("INFO", std::string("TEST: fbis solutions per tick = ") + std::to_string(gFbisCount));
     }
     if (result.count("fbis-same"))
     {
@@ -10446,10 +10424,7 @@ void processArgs(int argc, const char* argv[]) {
         gTestSolutionThreshold = result["test-solution-threshold"].as<int>();
         if (gTestSolutionThreshold >= 0)
         {
-            logColorToScreen(
-                "INFO",
-                std::string("TEST: solution threshold override = ")
-                    + std::to_string(gTestSolutionThreshold));
+            logColorToScreen("INFO", std::string("TEST: solution threshold override = ") + std::to_string(gTestSolutionThreshold));
         }
     }
 
@@ -10778,9 +10753,7 @@ static bool argEquals(const char* arg, const char* expected)
 void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
 #ifdef LITE_SC_PAGER
     // Contract-state pager fault: commit the page and resume before the crash path.
-    if ((sig == SIGSEGV || sig == SIGBUS)
-        && si
-        && Wasm::Runtime::handleManagedStateFault(si->si_addr))
+    if ((sig == SIGSEGV || sig == SIGBUS) && si && Wasm::Runtime::handleManagedStateFault(si->si_addr))
     {
         return;
     }

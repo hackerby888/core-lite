@@ -85,10 +85,8 @@ struct OcInFlightAuthState
     unsigned char padding[3];                         // explicit tail padding — keeps sizeof stable regardless of compiler packing
 };
 
-static_assert(sizeof(OcInFlightAuthState) ==
-    (QUORUM * (SIGNATURE_SIZE + sizeof(unsigned short)) + sizeof(unsigned short) + alignof(unsigned int) - 1)
-        / alignof(unsigned int) * alignof(unsigned int)
-        + sizeof(unsigned int) + (NUMBER_OF_COMPUTORS + 7) / 8 + 3,
+static_assert(sizeof(OcInFlightAuthState) == (QUORUM * (SIGNATURE_SIZE + sizeof(unsigned short)) + sizeof(unsigned short) + alignof(unsigned int) - 1)
+        / alignof(unsigned int) * alignof(unsigned int) + sizeof(unsigned int) + (NUMBER_OF_COMPUTORS + 7) / 8 + 3,
     "OcInFlightAuthState size mismatch.");
 
 

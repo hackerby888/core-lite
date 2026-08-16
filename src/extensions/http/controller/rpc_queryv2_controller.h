@@ -139,8 +139,7 @@ RPC_ROUTE("POST", "/query/v1/getTickData")
     jsonObject["epoch"] = localTickData.epoch;
     jsonObject["computorIndex"] = localTickData.computorIndex;
     jsonObject["timelock"] = base64_encode(localTickData.timelock.m256i_u8, 32);
-    jsonObject["timestamp"] = HttpUtils::formatTimestamp(
-        localTickData.millisecond, localTickData.second, localTickData.minute,
+    jsonObject["timestamp"] = HttpUtils::formatTimestamp(localTickData.millisecond, localTickData.second, localTickData.minute,
         localTickData.hour, localTickData.day, localTickData.month, localTickData.year);
     jsonObject["varStruct"] = "";
     Json::Value txDigestsJson(Json::arrayValue);
@@ -616,8 +615,7 @@ RPC_ROUTE("POST", "/query/v1/getVotesForTick")
     if (tickNumber < system.initialTick || tickNumber > system.tick)
     {
         result["code"] = QV2_NF;
-        result["message"] = fmt::format("tick {} out of epoch range [{}, {}]",
-                                        tickNumber, system.initialTick, system.tick);
+        result["message"] = fmt::format("tick {} out of epoch range [{}, {}]", tickNumber, system.initialTick, system.tick);
         return jsonResp(result, 404);
     }
 
@@ -642,8 +640,7 @@ RPC_ROUTE("POST", "/query/v1/getVotesForTick")
         v["computorIndex"] = t.computorIndex;
         v["epoch"] = t.epoch;
         v["tick"] = t.tick;
-        v["timestamp"] = HttpUtils::formatTimestamp(t.millisecond, t.second, t.minute,
-                                                    t.hour, t.day, t.month, t.year);
+        v["timestamp"] = HttpUtils::formatTimestamp(t.millisecond, t.second, t.minute, t.hour, t.day, t.month, t.year);
         v["prevSpectrumDigest"]       = base64_encode(t.prevSpectrumDigest.m256i_u8, 32);
         v["saltedSpectrumDigest"]     = base64_encode(t.saltedSpectrumDigest.m256i_u8, 32);
         v["prevUniverseDigest"]       = base64_encode(t.prevUniverseDigest.m256i_u8, 32);
@@ -948,8 +945,7 @@ RPC_ROUTE("POST", "/query/v1/getEventLogs")
             tickLo = tickHi = hashAnchorTick;
             qLogger::TickBlobInfo tbi;
             qLogger::tx.getTickLogIdInfo(&tbi, hashAnchorTick);
-            if (hashAnchorTxId < LOG_TX_PER_TICK &&
-                tbi.fromLogId[hashAnchorTxId] >= 0 && tbi.length[hashAnchorTxId] > 0)
+            if (hashAnchorTxId < LOG_TX_PER_TICK && tbi.fromLogId[hashAnchorTxId] >= 0 && tbi.length[hashAnchorTxId] > 0)
             {
                 unsigned long long f = (unsigned long long)tbi.fromLogId[hashAnchorTxId];
                 logIdLo = std::max(logIdLo, f);
@@ -1066,19 +1062,14 @@ RPC_ROUTE("POST", "/query/v1/getEventLogs")
                 continue;
 
             const unsigned char *payload = blob.data() + LOG_HEADER_SIZE;
-            if (!QV2::eventMatchesFilters(logType, headerEpoch, headerTick, headerLogId,
-                                          txHashForEvent, categories,
-                                          payload, payloadSize,
-                                          cachedTickData,
+            if (!QV2::eventMatchesFilters(logType, headerEpoch, headerTick, headerLogId, txHashForEvent, categories, payload, payloadSize, cachedTickData,
                                           filters, exclude, should, ranges))
                 continue;
 
-            bool wantBuild = descOrder
-                || (totalMatched >= (unsigned long long)offset && totalMatched < pageEndExclusive);
+            bool wantBuild = descOrder || (totalMatched >= (unsigned long long)offset && totalMatched < pageEndExclusive);
             if (wantBuild)
             {
-                Json::Value je = QV2::eventLogToJson(reinterpret_cast<const char *>(blob.data()),
-                                                     (unsigned int)entryLen,
+                Json::Value je = QV2::eventLogToJson(reinterpret_cast<const char *>(blob.data()), (unsigned int)entryLen,
                                                      cachedTickData, txHashForEvent, categories);
                 if (descOrder)
                 {

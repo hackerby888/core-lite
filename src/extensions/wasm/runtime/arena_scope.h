@@ -30,11 +30,7 @@ static inline MemoryLayout fixedMemoryLayout(uint32_t ioBaseOffset)
     return layout;
 }
 
-static inline bool nestedMemoryLayout(
-    const MemoryLayout& fixedLayout,
-    uint32_t arenaLimit,
-    uint32_t parentArenaTop,
-    MemoryLayout& layout)
+static inline bool nestedMemoryLayout(const MemoryLayout& fixedLayout, uint32_t arenaLimit, uint32_t parentArenaTop, MemoryLayout& layout)
 {
     unsigned long long frameBase = fixedLayout.arenaOffset;
     if (parentArenaTop > frameBase)

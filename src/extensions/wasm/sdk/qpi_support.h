@@ -250,12 +250,7 @@ static_assert(offsetof(Wasm::AssetEntry, shares) == 64, "AssetEntry shares offse
 static_assert(offsetof(Wasm::AssetEntry, ownershipManagingContract) == 72, "AssetEntry ownership-management offset");
 static_assert(offsetof(Wasm::AssetEntry, possessionManagingContract) == 74, "AssetEntry possession-management offset");
 __attribute__((import_module("lhost"), import_name("assetEnumerate")))
-extern "C" unsigned int lh_assetEnumerate(
-    unsigned int kind,
-    const void* issuance,
-    const void* ownership,
-    const void* possession,
-    void* output,
+extern "C" unsigned int lh_assetEnumerate(unsigned int kind, const void* issuance, const void* ownership, const void* possession, void* output,
     unsigned int capacity);
 
 namespace
@@ -263,9 +258,7 @@ namespace
 Wasm::AssetEntry assetEntries[WASM_ASSET_ENTRY_CAPACITY];
 } // namespace
 
-void QPI::AssetOwnershipIterator::begin(
-    const QPI::Asset& issuance,
-    const QPI::AssetOwnershipSelect& ownership)
+void QPI::AssetOwnershipIterator::begin(const QPI::Asset& issuance, const QPI::AssetOwnershipSelect& ownership)
 {
     _issuance = issuance;
     _ownership = ownership;
@@ -312,10 +305,7 @@ QPI::uint16 QPI::AssetOwnershipIterator::ownershipManagingContract() const
     return assetEntries[_ownershipIdx].ownershipManagingContract;
 }
 
-void QPI::AssetPossessionIterator::begin(
-    const QPI::Asset& issuance,
-    const QPI::AssetOwnershipSelect& ownership,
-    const QPI::AssetPossessionSelect& possession)
+void QPI::AssetPossessionIterator::begin(const QPI::Asset& issuance, const QPI::AssetOwnershipSelect& ownership, const QPI::AssetPossessionSelect& possession)
 {
     _issuance = issuance;
     _ownership = ownership;

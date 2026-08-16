@@ -211,8 +211,7 @@ RPC_ROUTE("GET", "/v1/latest-stats")
     TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(system.tick - 1);
     if (tickData)
     {
-        data["timestamp"] = HttpUtils::formatTimestamp(
-            tickData->millisecond, tickData->second, tickData->minute,
+        data["timestamp"] = HttpUtils::formatTimestamp(tickData->millisecond, tickData->second, tickData->minute,
             tickData->hour, tickData->day, tickData->month, tickData->year);
     } else
     {
@@ -263,8 +262,7 @@ RPC_ROUTE("GET", "/v1/rich-list")
             balances.emplace_back(spectrum[i].publicKey, balance);
     }
 
-    std::sort(balances.begin(), balances.end(),
-              [](const std::pair<m256i, long long> &a, const std::pair<m256i, long long> &b)
+    std::sort(balances.begin(), balances.end(), [](const std::pair<m256i, long long> &a, const std::pair<m256i, long long> &b)
               { return a.second > b.second; });
 
     long long start = page * pageSize;

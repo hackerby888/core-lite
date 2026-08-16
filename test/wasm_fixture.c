@@ -86,12 +86,7 @@ __attribute__((export_name("sysproc_locals_size"))) u32 sysproc_locals_size(u32 
 }
 
 __attribute__((export_name("dispatch")))
-void dispatch(
-    u32 kind,
-    u32 inputType,
-    u32 inputOffset,
-    u32 outputOffset,
-    u32 localsOffset)
+void dispatch(u32 kind, u32 inputType, u32 inputOffset, u32 outputOffset, u32 localsOffset)
 {
     (void)localsOffset;
     if (kind == 2)

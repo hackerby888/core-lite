@@ -388,9 +388,7 @@ constexpr unsigned short LITEDYN3_CONTRACT_INDEX = WASM_RESERVED_SLOT_BASE + 3;
 #define CONTRACT_STATE_TYPE LITEDYN3
 #define CONTRACT_STATE2_TYPE LITEDYN3_2
 #include "extensions/wasm/runtime/reserved_slot_contract.h"
-static_assert(
-    LITEDYN3_CONTRACT_INDEX + 1 == WASM_RESERVED_SLOT_BASE + WASM_RESERVED_SLOT_COUNT,
-    "Wasm reserved slots must be contiguous");
+static_assert(LITEDYN3_CONTRACT_INDEX + 1 == WASM_RESERVED_SLOT_BASE + WASM_RESERVED_SLOT_COUNT, "Wasm reserved slots must be contiguous");
 #endif
 
 #define MAX_CONTRACT_ITERATION_DURATION 0 // In milliseconds, must be above 0; for now set to 0 to disable timeout, because a rollback mechanism needs to be implemented to properly handle timeout

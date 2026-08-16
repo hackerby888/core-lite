@@ -49,14 +49,7 @@ int main(int argc, char** argv)
     ZeroMemory(&securityAttributes, sizeof(securityAttributes));
     securityAttributes.nLength = sizeof(securityAttributes);
     securityAttributes.bInheritHandle = TRUE;
-    HANDLE logHandle = CreateFileA(
-        logFile,
-        GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        &securityAttributes,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL);
+    HANDLE logHandle = CreateFileA(logFile, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &securityAttributes, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (logHandle == INVALID_HANDLE_VALUE)
     {
         fprintf(stderr, "open log failed %lu\n", GetLastError());
@@ -73,17 +66,7 @@ int main(int argc, char** argv)
 
     PROCESS_INFORMATION processInfo;
     ZeroMemory(&processInfo, sizeof(processInfo));
-    if (!CreateProcessA(
-            NULL,
-            command,
-            NULL,
-            NULL,
-            TRUE,
-            CREATE_SUSPENDED,
-            NULL,
-            NULL,
-            &startupInfo,
-            &processInfo))
+    if (!CreateProcessA(NULL, command, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &startupInfo, &processInfo))
     {
         fprintf(stderr, "CreateProcess failed %lu\n", GetLastError());
         return 1;
