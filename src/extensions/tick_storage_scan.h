@@ -83,14 +83,20 @@ namespace tickStorageScan
     }
 #endif
 
+    // Skip ticks before this one, for re-checking a known bad range without walking the whole epoch.
+    static unsigned int scanFromTick = 0;
+
     static bool requested(int argc, const char* argv[])
     {
+        bool scanRequested = false;
         for (int i = 1; i < argc; i++)
         {
             if (std::strcmp(argv[i], "--scan-issue") == 0)
-                return true;
+                scanRequested = true;
+            else if (std::strcmp(argv[i], "--scan-from") == 0 && i + 1 < argc)
+                scanFromTick = (unsigned int)std::strtoul(argv[++i], nullptr, 10);
         }
-        return false;
+        return scanRequested;
     }
 
     struct IssueSummary
@@ -357,7 +363,8 @@ namespace tickStorageScan
         return result;
     }
 
-    static void scanLoggingState(const CHAR16* snapshotDirectory, IssueSummary& issues, unsigned long long& logIds, unsigned long long& logBytes)
+    static void scanLoggingState(const CHAR16* snapshotDirectory, unsigned int startTick, IssueSummary& issues, unsigned long long& logIds,
+        unsigned long long& logBytes)
     {
 #if ENABLED_LOGGING
         static CHAR16 loggingFileName[] = L"logEventState.db";
@@ -386,17 +393,48 @@ namespace tickStorageScan
         if (indexCount != logCount)
             issues.add("logging-idmap", system.tick, -1, "logId=%llu but %llu index entries", logCount, indexCount);
 
+        const unsigned long long tickRangeCount = qLogger::mapTxToLogId.size();
+        const unsigned long long startOffset = startTick > logger.tickBegin ? (unsigned long long)startTick - logger.tickBegin
+            : 0;
+        const bool partialScan = startOffset > 0;
+
+        // A partial scan cannot verify continuity back to logId 0, so it begins at the first
+        // log event of the first non-empty tick blob in range.
+        unsigned long long startLogId = 0;
+        if (partialScan)
+        {
+            startLogId = logCount;
+            for (unsigned long long o = startOffset; o < tickRangeCount && startLogId == logCount; o++)
+            {
+                qLogger::TickBlobInfo tbi;
+                qLogger::mapTxToLogId.getOne(o, &tbi);
+                for (int t = 0; t < LOG_TX_PER_TICK; t++)
+                {
+                    const long long from = tbi.fromLogId[t];
+                    if (from >= 0 && (unsigned long long)from < startLogId)
+                        startLogId = (unsigned long long)from;
+                }
+            }
+        }
+
         // per-entry header + contiguous layout
         char header[LOG_HEADER_SIZE];
-        unsigned long long previousEnd = 0;
+        unsigned long long previousEnd = 0, firstEntryStart = 0;
+        bool haveEntryLayout = false;
         const unsigned long long checkLimit = logCount < indexCount ? logCount : indexCount;
-        for (unsigned long long i = 0; i < checkLimit; i++)
+        for (unsigned long long i = startLogId; i < checkLimit; i++)
         {
             auto bi = logger.logBuf.getBlobInfo(i);
             if (bi.startIndex < 0 || bi.length < 0)
             {
                 issues.add("logging-index", system.tick, -1, "logId %llu missing index", i);
                 continue;
+            }
+            if (!haveEntryLayout)
+            {
+                firstEntryStart = (unsigned long long)bi.startIndex;
+                previousEnd = firstEntryStart;
+                haveEntryLayout = true;
             }
             if (bi.startIndex != previousEnd)
                 issues.add("logging-layout", system.tick, -1, "logId %llu gap/overlap at %lld (expected %llu)", i, bi.startIndex, previousEnd);
@@ -416,45 +454,68 @@ namespace tickStorageScan
                 issues.add("logging-header", system.tick, -1, "logId %llu epoch=%u tick=%u", i, epoch, tick);
             previousEnd = entryEnd;
         }
-        if (checkLimit > 0 && previousEnd != logger.logBufferTail)
+        if (haveEntryLayout && previousEnd != logger.logBufferTail)
             issues.add("logging-tail", system.tick, -1, "entries cover %llu bytes but tail=%llu", previousEnd, logger.logBufferTail);
 
-        // per-tick ranges partition [0, logId) with no gap or overlap
-        const unsigned long long tickRangeCount = qLogger::mapTxToLogId.size();
+        // Each tick's slot ranges form one contiguous logId block, and blocks are consecutive.
+        // Slot index order is not logId order: the special slots (SC_BEGIN_TICK, SC_NOTIFICATION)
+        // log before lower-indexed tx slots, so the block is checked as a whole, not slot by slot.
         const unsigned long long expectedTickCount = logger.lastUpdatedTick >= logger.tickBegin
             ? (unsigned long long)logger.lastUpdatedTick - logger.tickBegin + 1 : 0;
         if (tickRangeCount != expectedTickCount)
             issues.add("logging-ticks", system.tick, -1, "%llu tick ranges vs expected %llu", tickRangeCount, expectedTickCount);
-        unsigned long long expectedLogId = 0;
-        for (unsigned long long o = 0; o < tickRangeCount; o++)
+        unsigned long long expectedLogId = startLogId;
+        for (unsigned long long o = startOffset; o < tickRangeCount; o++)
         {
+            const unsigned int tick = logger.tickBegin + (unsigned int)o;
             qLogger::TickBlobInfo tbi;
             qLogger::mapTxToLogId.getOne(o, &tbi);
+
+            unsigned long long blockBegin = 0, blockEnd = 0, coveredLogIds = 0;
+            bool hasSlot = false;
             for (int t = 0; t < LOG_TX_PER_TICK; t++)
             {
                 const long long from = tbi.fromLogId[t];
                 const long long len = tbi.length[t];
-                if (from < 0)
+                if (from < 0 && len < 0)
                     continue;
-                if (len < 1 || (unsigned long long)from != expectedLogId)
+
+                if (from < 0 || len < 1 || (unsigned long long)from + len > logCount)
                 {
-                    issues.add("logging-txrange", system.tick, -1, "tickOffset %llu tx %d fromLogId=%lld len=%lld expected=%llu", o, t, from, len, expectedLogId);
+                    issues.add("logging-txslot", tick, t, "fromLogId=%lld len=%lld outside [0, %llu)", from, len, logCount);
                     continue;
                 }
-                expectedLogId += (unsigned long long)len;
-            }
-        }
-        if (tickRangeCount > 0 && expectedLogId != logCount)
-            issues.add("logging-txrange", system.tick, -1, "tx ranges cover %llu logIds vs %llu total", expectedLogId, logCount);
 
-        logIds = logger.logId;
-        logBytes = logger.logBufferTail;
+                const unsigned long long slotEnd = (unsigned long long)from + len;
+                if (!hasSlot || (unsigned long long)from < blockBegin)
+                    blockBegin = (unsigned long long)from;
+                if (!hasSlot || slotEnd > blockEnd)
+                    blockEnd = slotEnd;
+                coveredLogIds += (unsigned long long)len;
+                hasSlot = true;
+            }
+
+            if (!hasSlot)
+                continue;
+
+            if (coveredLogIds != blockEnd - blockBegin)
+                issues.add("logging-txrange", tick, -1, "slots cover %llu logIds in block [%llu, %llu)", coveredLogIds, blockBegin, blockEnd);
+            if (blockBegin != expectedLogId)
+                issues.add("logging-txrange", tick, -1, "block starts at %llu, expected %llu", blockBegin, expectedLogId);
+
+            expectedLogId = blockEnd; // resync so one bad tick cannot cascade into the rest
+        }
+        if (tickRangeCount > startOffset && expectedLogId != logCount)
+            issues.add("logging-txrange", logger.lastUpdatedTick, -1, "tick blocks cover %llu logIds vs %llu total", expectedLogId, logCount);
+
+        logIds = logCount - startLogId;
+        logBytes = haveEntryLayout ? previousEnd - firstEntryStart : 0;
         logger.deinitLogging();
         commonBuffers.deinit();
 #endif
     }
 
-    static int scan()
+    static int runScan()
     {
 #if !defined(USE_SWAP) || !TICK_STORAGE_AUTOSAVE_MODE
         std::fprintf(stderr, "[SCAN] --scan-issue requires USE_SWAP and tick-storage snapshots\n");
@@ -501,13 +562,19 @@ namespace tickStorageScan
         }
 
         const bool systemRangeValid = system.epoch == EPOCH && system.tick >= system.initialTick;
-        const unsigned long long tickCount = systemRangeValid ? (unsigned long long)system.tick - system.initialTick
-            : 0;
-        if (!systemRangeValid || tickCount > MAX_NUMBER_OF_TICKS_PER_EPOCH)
+        if (!systemRangeValid || (unsigned long long)system.tick - system.initialTick > MAX_NUMBER_OF_TICKS_PER_EPOCH)
         {
             std::fprintf(stderr, "[SCAN] invalid system snapshot: epoch=%u initialTick=%u tick=%u\n", system.epoch, system.initialTick, system.tick);
             return 2;
         }
+
+        unsigned int startTick = system.initialTick;
+        if (scanFromTick > startTick)
+        {
+            startTick = scanFromTick < system.tick ? scanFromTick : system.tick;
+        }
+        const unsigned long long tickCount = (unsigned long long)system.tick - startTick;
+        std::fprintf(stdout, "[SCAN] epoch %u range: ticks %u..%u (initialTick=%u)\n", system.epoch, startTick, system.tick, system.initialTick);
 
         EFI_GUID mpServiceProtocolGuid = EFI_MP_SERVICES_PROTOCOL_GUID;
         const EFI_STATUS locateProtocolStatus = bs->LocateProtocol(&mpServiceProtocolGuid, nullptr, (void**)&mpServicesProtocol);
@@ -550,11 +617,11 @@ namespace tickStorageScan
         shadowArmed = true;
 
         Progress progress;
-        ScanResult result = scanLoadedRange(ts, system.epoch, system.initialTick, system.tick, progress);
+        ScanResult result = scanLoadedRange(ts, system.epoch, startTick, system.tick, progress);
         IssueSummary& issues = result.issues;
 
         unsigned long long logIds = 0, logBytes = 0;
-        scanLoggingState(snapshotDirectory, issues, logIds, logBytes);
+        scanLoggingState(snapshotDirectory, startTick, issues, logIds, logBytes);
 
         deInitFileSystem();
         if (gShadowPoisoned.load(std::memory_order_acquire))
@@ -574,9 +641,18 @@ namespace tickStorageScan
         const int exitCode = issues.total ? 1 : 0;
         std::fprintf(stdout, "[SCAN] %s: %llu ticks, %llu transactions, %llu issues\n", exitCode == 0 ? "clean" : "failed",
             tickCount, result.transactionsChecked, issues.total);
-        std::fflush(stdout);
-        _exit(exitCode); // skip exit(): static OpenSSL + dlopen'd legacy provider crash in OPENSSL_cleanup
+        return exitCode;
 #endif
+    }
+
+    static int scan()
+    {
+        const int exitCode = runScan();
+        std::fflush(stdout);
+        std::fflush(stderr);
+        // Skip exit(): the statically linked OpenSSL crashes in OPENSSL_cleanup once its
+        // provider framework has dlopen'd a second libcrypto from ossl-modules.
+        _exit(exitCode);
     }
 }
 
