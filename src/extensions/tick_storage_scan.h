@@ -357,6 +357,103 @@ namespace tickStorageScan
         return result;
     }
 
+    static void scanLoggingState(const CHAR16* snapshotDirectory, IssueSummary& issues, unsigned long long& logIds, unsigned long long& logBytes)
+    {
+#if ENABLED_LOGGING
+        static CHAR16 loggingFileName[] = L"logEventState.db";
+        if (getFileSize(loggingFileName, (CHAR16*)snapshotDirectory) <= 0)
+        {
+            std::fprintf(stderr, "[SCAN] logging: no logEventState.db (logging disabled), skipping\n");
+            return;
+        }
+
+        if (!commonBuffers.init(1, qLogger::logStateBufferSize))
+        {
+            issues.add("logging", system.tick, -1, "cannot allocate logging scratchpad");
+            return;
+        }
+        if (!logger.initLogging() || !logger.loadLastLoggingStates((CHAR16*)snapshotDirectory))
+        {
+            issues.add("logging", system.tick, -1, "logEventState.db load failed");
+            logger.deinitLogging();
+            commonBuffers.deinit();
+            return;
+        }
+
+        // one index entry per log event
+        const unsigned long long logCount = logger.logId;
+        const unsigned long long indexCount = qLogger::mapLogIdToBufferIndex.size();
+        if (indexCount != logCount)
+            issues.add("logging-idmap", system.tick, -1, "logId=%llu but %llu index entries", logCount, indexCount);
+
+        // per-entry header + contiguous layout
+        char header[LOG_HEADER_SIZE];
+        unsigned long long previousEnd = 0;
+        const unsigned long long checkLimit = logCount < indexCount ? logCount : indexCount;
+        for (unsigned long long i = 0; i < checkLimit; i++)
+        {
+            auto bi = logger.logBuf.getBlobInfo(i);
+            if (bi.startIndex < 0 || bi.length < 0)
+            {
+                issues.add("logging-index", system.tick, -1, "logId %llu missing index", i);
+                continue;
+            }
+            if (bi.startIndex != previousEnd)
+                issues.add("logging-layout", system.tick, -1, "logId %llu gap/overlap at %lld (expected %llu)", i, bi.startIndex, previousEnd);
+            const unsigned long long entryEnd = (unsigned long long)(bi.startIndex + bi.length);
+            if (entryEnd > logger.logBufferTail)
+                issues.add("logging-layout", system.tick, -1, "logId %llu overruns logBufferTail", i);
+
+            setMem(header, sizeof(header), 0);
+            logger.logBuf.getMany(header, (unsigned long long)bi.startIndex, LOG_HEADER_SIZE);
+            if (logger.getLogId(header) != i)
+                issues.add("logging-id", system.tick, -1, "logId %llu header says %llu", i, logger.getLogId(header));
+            if ((long long)(LOG_HEADER_SIZE + logger.getLogSize(header)) != bi.length)
+                issues.add("logging-size", system.tick, -1, "logId %llu size=%u vs length=%lld", i, logger.getLogSize(header), bi.length);
+            const unsigned short epoch = *((unsigned short*)header);
+            const unsigned int tick = *((unsigned int*)(header + 2));
+            if (epoch != system.epoch || tick < logger.tickBegin || tick > logger.lastUpdatedTick)
+                issues.add("logging-header", system.tick, -1, "logId %llu epoch=%u tick=%u", i, epoch, tick);
+            previousEnd = entryEnd;
+        }
+        if (checkLimit > 0 && previousEnd != logger.logBufferTail)
+            issues.add("logging-tail", system.tick, -1, "entries cover %llu bytes but tail=%llu", previousEnd, logger.logBufferTail);
+
+        // per-tick ranges partition [0, logId) with no gap or overlap
+        const unsigned long long tickRangeCount = qLogger::mapTxToLogId.size();
+        const unsigned long long expectedTickCount = logger.lastUpdatedTick >= logger.tickBegin
+            ? (unsigned long long)logger.lastUpdatedTick - logger.tickBegin + 1 : 0;
+        if (tickRangeCount != expectedTickCount)
+            issues.add("logging-ticks", system.tick, -1, "%llu tick ranges vs expected %llu", tickRangeCount, expectedTickCount);
+        unsigned long long expectedLogId = 0;
+        for (unsigned long long o = 0; o < tickRangeCount; o++)
+        {
+            qLogger::TickBlobInfo tbi;
+            qLogger::mapTxToLogId.getOne(o, &tbi);
+            for (int t = 0; t < LOG_TX_PER_TICK; t++)
+            {
+                const long long from = tbi.fromLogId[t];
+                const long long len = tbi.length[t];
+                if (from < 0)
+                    continue;
+                if (len < 1 || (unsigned long long)from != expectedLogId)
+                {
+                    issues.add("logging-txrange", system.tick, -1, "tickOffset %llu tx %d fromLogId=%lld len=%lld expected=%llu", o, t, from, len, expectedLogId);
+                    continue;
+                }
+                expectedLogId += (unsigned long long)len;
+            }
+        }
+        if (tickRangeCount > 0 && expectedLogId != logCount)
+            issues.add("logging-txrange", system.tick, -1, "tx ranges cover %llu logIds vs %llu total", expectedLogId, logCount);
+
+        logIds = logger.logId;
+        logBytes = logger.logBufferTail;
+        logger.deinitLogging();
+        commonBuffers.deinit();
+#endif
+    }
+
     static int scan()
     {
 #if !defined(USE_SWAP) || !TICK_STORAGE_AUTOSAVE_MODE
@@ -456,6 +553,9 @@ namespace tickStorageScan
         ScanResult result = scanLoadedRange(ts, system.epoch, system.initialTick, system.tick, progress);
         IssueSummary& issues = result.issues;
 
+        unsigned long long logIds = 0, logBytes = 0;
+        scanLoggingState(snapshotDirectory, issues, logIds, logBytes);
+
         deInitFileSystem();
         if (gShadowPoisoned.load(std::memory_order_acquire))
         {
@@ -469,11 +569,13 @@ namespace tickStorageScan
 
         progress.update(tickCount, tickCount, result.transactionsChecked, issues.total, true);
         issues.print();
+        std::fprintf(stdout, "[SCAN] logging: %llu logIds, %llu bytes\n", logIds, logBytes);
 
         const int exitCode = issues.total ? 1 : 0;
         std::fprintf(stdout, "[SCAN] %s: %llu ticks, %llu transactions, %llu issues\n", exitCode == 0 ? "clean" : "failed",
             tickCount, result.transactionsChecked, issues.total);
-        return exitCode;
+        std::fflush(stdout);
+        _exit(exitCode); // skip exit(): static OpenSSL + dlopen'd legacy provider crash in OPENSSL_cleanup
 #endif
     }
 }
