@@ -28,8 +28,17 @@ alignas(65536) static unsigned char moduleContextStorage[256];
 #ifndef WASM_ARENA_SIZE
 #define WASM_ARENA_SIZE (1024 * 1024 * 1024)
 #endif
+
+// Room past the carve for the state-write journal. Reserved whether or not the artifact carries one,
+// so the layout never depends on instrumentation; shared-memory builds pack modules and pass 0.
+#ifndef WASM_JOURNAL_SIZE
+#define WASM_JOURNAL_SIZE (72 * 1024 * 1024)
+#endif
+
+#define WASM_IO_CARVE_SIZE ((64 * 1024) + (64 * 1024) + (32 * 1024) + WASM_ARENA_SIZE)
+
 // Layout is input, output, locals, then scratch arena; it must match the node carve.
-alignas(65536) static unsigned char moduleIoStorage[(64 * 1024) + (64 * 1024) + (32 * 1024) + WASM_ARENA_SIZE];
+alignas(65536) static unsigned char moduleIoStorage[WASM_IO_CARVE_SIZE + WASM_JOURNAL_SIZE];
 
 static bool moduleRegistered = false;
 static void ensureModuleRegistered()
@@ -74,7 +83,8 @@ unsigned int io_base()
 LH_EXPORT(io_size)
 unsigned int io_size()
 {
-    return (unsigned int)sizeof(moduleIoStorage);
+    // The carve only: the journal past it is not the host's to hand out.
+    return (unsigned int)WASM_IO_CARVE_SIZE;
 }
 
 LH_EXPORT(ctx_addr)
