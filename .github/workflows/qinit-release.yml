@@ -7,14 +7,6 @@ on:
         description: "release tag"
         required: true
         default: "qinit-dev"
-      qinit_repository:
-        description: "temporary owner/repo override (requires qinit_ref)"
-        required: false
-        default: ""
-      qinit_ref:
-        description: "temporary qinit branch, tag, or commit"
-        required: false
-        default: ""
   push:
     tags: ["qinit-v*"]
 
@@ -28,9 +20,6 @@ concurrency:
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
-    with:
-      qinit_repository: ${{ inputs.qinit_repository || '' }}
-      qinit_ref: ${{ inputs.qinit_ref || '' }}
 
   headers:
     name: headers
@@ -45,7 +34,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           repository: ${{ needs.ci.outputs.qinit_repository }}
-          ref: ${{ needs.ci.outputs.qinit_sha }}
+          ref: ${{ needs.ci.outputs.qinit_pin }}
           path: qinit
           persist-credentials: false
       - name: Read qinit toolchains
@@ -139,7 +128,7 @@ jobs:
           CORE_REPOSITORY: ${{ github.repository }}
           CORE_SHA: ${{ github.sha }}
           QINIT_REPOSITORY: ${{ needs.ci.outputs.qinit_repository }}
-          QINIT_SHA: ${{ needs.ci.outputs.qinit_sha }}
+          QINIT_PIN: ${{ needs.ci.outputs.qinit_pin }}
         run: |
           LINUX_X64_SHA=$(cat Qubic-linux-x64.sha256)
           LINUX_ARM64_SHA=$(cat Qubic-linux-arm64.sha256)
@@ -152,7 +141,7 @@ jobs:
             "version": "$TAG",
             "sources": {
               "coreLite": { "repository": "$CORE_REPOSITORY", "commit": "$CORE_SHA" },
-              "qinit": { "repository": "$QINIT_REPOSITORY", "commit": "$QINIT_SHA" }
+              "qinit": { "repository": "$QINIT_REPOSITORY", "commit": "$QINIT_PIN" }
             },
             "node": { "url": "Qubic-linux-x64", "sha256": "$LINUX_X64_SHA" },
             "nodes": {
