@@ -5,6 +5,8 @@
 
 #include "extensions/wasm/runtime/engine_state.h"
 #include "extensions/wasm/runtime/state_write_tracker.h"
+#include <map>
+#include <utility>
 
 namespace Wasm::Runtime
 {
@@ -76,6 +78,14 @@ static CallContext createCallContext(const void* context, uint32_t arenaStart, u
     callContext.arenaTop = arenaStart;
     callContext.arenaLimit = arenaLimit;
     return callContext;
+}
+
+/** Lets the lhost adapters reach the journal, so a host write into state is recorded like a store. */
+static void bindJournal(CallContext& callContext, const EngineSlot& slot)
+{
+    callContext.journalBaseOffset = slot.journalBaseOffset;
+    callContext.stateOffset = slot.stateOffset;
+    callContext.journalHeader = slot.journalBaseOffset ? &slot.journalHeader : nullptr;
 }
 
 static void bindEnvironment(wasm_exec_env_t execEnv, CallContext& callContext)
@@ -159,6 +169,7 @@ public:
           dispatchDepth(slotCallDepth[slotOffset]),
           contextBinding(execEnv, slotOffset, context)
     {
+        bindJournal(context, slot);
     }
 
     CallContext& callContext()
@@ -337,6 +348,7 @@ static void dispatchMigration(uint32_t contractIndex, int slotOffset, EngineSlot
 
     const uint32_t migrationArenaStart = layout.arenaOffset + ((oldStateSize + 15u) & ~15u);
     CallContext callContext = createCallContext(context, migrationArenaStart, arenaLimit);
+    bindJournal(callContext, slot);
     DispatchDepthScope dispatchDepth(slotCallDepth[slotOffset]);
 
     bindEnvironment(environment.execEnv, callContext);
@@ -359,6 +371,50 @@ static void dispatchMigration(uint32_t contractIndex, int slotOffset, EngineSlot
 
     contractStates[contractIndex] = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset);
     hostServices.markDirty(contractIndex);
+}
+
+/** Regions flattened per byte: the tracker splits a run at page boundaries, the journal at block ones. */
+static std::map<unsigned int, std::pair<std::string, std::string>> changedStateBytes(const std::vector<StateRegionTrace>& regions)
+{
+    std::map<unsigned int, std::pair<std::string, std::string>> bytes;
+    for (const StateRegionTrace& region : regions)
+    {
+        for (size_t index = 0; index * 2u + 1u < region.before.size(); index++)
+        {
+            bytes[region.offset + (unsigned int)index] = {region.before.substr(index * 2u, 2u), region.after.substr(index * 2u, 2u)};
+        }
+    }
+    return bytes;
+}
+
+/**
+ * Runs the journal beside the page tracker and reports any disagreement. The tracker is still the trace
+ * source; this is what has to stay quiet before the journal can take over from it.
+ */
+static void checkJournalAgainstTracker(EngineSlot& slot, uint32_t contractIndex, StateJournalScope& journalScope, TraceEntry& traceEntry)
+{
+    std::vector<StateRegionTrace> journalDiff;
+    if (!journalScope.finish(journalDiff))
+    {
+        if (slot.journalBaseOffset && !slot.journalOverflowed)
+        {
+            // Only the next call can fall back: the before-image this one missed is already gone.
+            slot.journalOverflowed = true;
+        }
+        return;
+    }
+
+    if (traceEntry.stateTruncated)
+    {
+        return;
+    }
+
+    if (changedStateBytes(journalDiff) != changedStateBytes(traceEntry.stateDiff))
+    {
+        logColorToScreen("ERROR",
+            "LITEWASM state journal disagrees with the write tracker idx=" + std::to_string(contractIndex) + " journal=" + std::to_string(journalDiff.size())
+                + " tracker=" + std::to_string(traceEntry.stateDiff.size()));
+    }
 }
 
 static void dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKind kind, const void* context, void* statePointer, void* input, void* output,
@@ -419,10 +475,14 @@ static void dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKin
     beginDispatchTrace(slot, contractIndex, inputType, kind, context, input, sizes, frame.callContext(), trace);
     prepareMemory(slot, layout, context, input, sizes);
 
+    unsigned char* linearMemory = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.ioBaseOffset) - slot.ioBaseOffset;
+    const bool journalUsable = slot.journalBaseOffset && !slot.journalOverflowed;
+    StateJournalScope journalScope(trace.tracksWrites && journalUsable, linearMemory, slot.journalBaseOffset, slot.stateOffset, slot.journalHeader);
     StateWriteScope pageProtection(trace.tracksWrites, trace.state, slot.stateSize);
     const bool succeeded = invokeDispatch(slot, environment.execEnv, kind, inputType, layout.inputOffset, layout.outputOffset, layout.localsOffset);
     handleDispatchResult(slot, contractIndex, inputType, kind, succeeded);
     pageProtection.finish(trace.entry);
+    checkJournalAgainstTracker(slot, contractIndex, journalScope, trace.entry);
 
     finalizeMemory(slot, layout, contractIndex, kind, output, sizes);
     finishDispatchTrace(slot, layout, sizes, frame.callContext(), trace);

@@ -300,4 +300,58 @@ TEST(WasmContracts, StateJournalMatchesTheWriteTrackerRegions)
     freeJournalTestPages(memory, total);
 }
 
+// The dispatch site drives both through their scopes, so the scopes are what the node actually relies
+// on: the journal retires a generation on entry and reports the same bytes the tracker does on exit.
+TEST(WasmContracts, StateJournalScopeAgreesWithTheWriteScopeAcrossDispatches)
+{
+    const size_t pageSize = journalTestPageSize();
+    const unsigned int stateSize = (unsigned int)(pageSize + 300u);
+    const unsigned int journalBase = (unsigned int)(((stateSize + pageSize - 1u) / pageSize) * pageSize);
+    const size_t total = journalBase + 64u * 1024u;
+
+    unsigned char* memory = allocateJournalTestPages(total);
+    ASSERT_NE(memory, nullptr);
+    memset(memory, 0, total);
+
+    const JournalHeader header = initJournal(memory, journalBase, stateSize, 64u);
+
+    for (unsigned int dispatch = 0u; dispatch < 3u; dispatch++)
+    {
+        StateJournalScope journalScope(true, memory, journalBase, 0u, header);
+        StateWriteScope writeScope(true, memory, stateSize);
+
+        const unsigned char value = (unsigned char)(0x40 + dispatch);
+        noteAndWrite(memory, journalBase, header, 0u, dispatch * 16u, filled(4u, value));
+        noteAndWrite(memory, journalBase, header, 0u, (unsigned int)pageSize - 2u, filled(4u, value));
+
+        TraceEntry entry;
+        writeScope.finish(entry);
+
+        std::vector<StateRegionTrace> journalDiff;
+        ASSERT_TRUE(journalScope.finish(journalDiff)) << "dispatch " << dispatch;
+        EXPECT_FALSE(entry.stateTruncated);
+        EXPECT_EQ(changedBytes(journalDiff), changedBytes(entry.stateDiff)) << "dispatch " << dispatch;
+    }
+
+    freeJournalTestPages(memory, total);
+}
+
+// Past capacity the journal can only report truncation, which is what arms the tracker for the next call.
+TEST(WasmContracts, StateJournalScopeReportsNothingOnceItOverflows)
+{
+    std::vector<unsigned char> memory(256u * 1024u, 0);
+    const unsigned int base = 16384u;
+    const JournalHeader header = initJournal(memory.data(), base, 8192u, 2u);
+
+    StateJournalScope journalScope(true, memory.data(), base, 0u, header);
+    for (unsigned int block = 0u; block < 4u; block++)
+    {
+        noteAndWrite(memory.data(), base, header, 0u, block * JOURNAL_BLOCK_BYTES, filled(4u, (unsigned char)(0x50 + block)));
+    }
+
+    std::vector<StateRegionTrace> regions;
+    EXPECT_FALSE(journalScope.finish(regions));
+    EXPECT_TRUE(regions.empty());
+}
+
 #endif // LITE_WASM_SC

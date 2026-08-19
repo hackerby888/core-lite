@@ -36,7 +36,7 @@
     GQ("epoch",                               epoch,                                "()i")       \
     GQ("tick",                                tick,                                 "()i")       \
     GQ("numberOfTickTransactions",            numberOfTickTransactions,             "()i")       \
-    GQ("getEntity",                           getEntity,                            "(ii)i")     \
+    HQ("getEntity",                           getEntity,      w_getEntity,          "(ii)i")     \
     GQ("queryFeeReserve",                     queryFeeReserve,                      "(i)I")      \
     GQ("nextId",                              nextId,                               "(ii)")      \
     GQ("prevId",                              prevId,                               "(ii)")      \

@@ -14,6 +14,7 @@
 #include "extensions/wasm/runtime/arena_scope.h"
 #include "extensions/wasm/runtime/contract_slots.h"
 #include "extensions/wasm/runtime/lhost_registry.h"
+#include "extensions/wasm/runtime/state_write_journal.h"
 
 void logColorToScreen(std::string type, std::string msg);
 
@@ -67,6 +68,11 @@ struct EngineSlot
     ffi_closure* migrationClosure = nullptr;
     unsigned char* pendingOldState = nullptr;
     uint32_t pendingOldStateSize = 0;
+    // Zero when the artifact carries no journal, which leaves the page tracker as the only diff source.
+    uint32_t journalBaseOffset = 0;
+    JournalHeader journalHeader = {};
+    // Latched once a dispatch overflows: the before-image of the blocks it missed is already gone.
+    bool journalOverflowed = false;
 };
 
 static EngineSlot engineSlots[WASM_RESERVED_SLOT_COUNT];

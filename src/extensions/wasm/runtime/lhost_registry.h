@@ -8,6 +8,7 @@
 #include "extensions/wasm/shared/abi_metadata.h"
 #include "extensions/wasm/shared/abi_types.h"
 #include "extensions/wasm/runtime/trace.h"
+#include "extensions/wasm/runtime/state_write_journal.h"
 
 namespace Wasm::Runtime
 {
@@ -19,6 +20,10 @@ struct CallContext
     uint32_t arenaTop;
     uint32_t arenaLimit;
     void* trace = nullptr;
+    // Zero when the artifact carries no journal; otherwise where it sits and what state it covers.
+    uint32_t journalBaseOffset = 0;
+    uint32_t stateOffset = 0;
+    const JournalHeader* journalHeader = nullptr;
 };
 
 static inline CallContext* activeCallContext(wasm_exec_env_t execEnv)
@@ -34,6 +39,21 @@ static inline void* nativeAddress(wasm_exec_env_t execEnv, uint32_t offset)
     }
 
     return wasm_runtime_addr_app_to_native(wasm_runtime_get_module_inst(execEnv), offset);
+}
+
+/**
+ * Records a host write into contract state. Store instrumentation only wraps the contract's own stores,
+ * so a write the host makes through an out-pointer is invisible to the journal unless it is noted here.
+ */
+static inline void noteGuestWrite(wasm_exec_env_t execEnv, CallContext* callContext, uint32_t offset, uint32_t size)
+{
+    if (!callContext || !callContext->journalBaseOffset || !callContext->journalHeader || !size)
+    {
+        return;
+    }
+
+    unsigned char* memory = (unsigned char*)nativeAddress(execEnv, callContext->journalBaseOffset) - callContext->journalBaseOffset;
+    noteHostWrite(memory, callContext->journalBaseOffset, *callContext->journalHeader, callContext->stateOffset, offset, size);
 }
 
 static inline void traceHostCall(CallContext* callContext, const char* name, const std::string& detail)
@@ -225,6 +245,15 @@ static void w_logBytes(wasm_exec_env_t execEnv, uint32_t contractIndex, uint32_t
     }
 
     hostServices.logBytes(contractIndex, (unsigned char)type, message, size);
+}
+
+static uint32_t w_getEntity(wasm_exec_env_t execEnv, uint32_t idOffset, uint32_t entityOffset)
+{
+    CallContext* callContext = activeCallContext(execEnv);
+
+    // getEntity fills a caller-supplied QPI::Entity, and a contract may point it straight at its state.
+    noteGuestWrite(execEnv, callContext, entityOffset, (uint32_t)sizeof(QPI::Entity));
+    return hostServices.getEntity(callContext->ctx, nativeAddress(execEnv, idOffset), nativeAddress(execEnv, entityOffset));
 }
 
 static int64_t w_transfer(wasm_exec_env_t execEnv, uint32_t destinationOffset, int64_t amount)
@@ -431,12 +460,17 @@ static int32_t w_subscribeOracle(
 static uint32_t w_getOracleQuery(wasm_exec_env_t execEnv, int64_t queryId, uint32_t outputOffset, uint32_t size)
 {
     CallContext* callContext = activeCallContext(execEnv);
+
+    // The corpus passes its own OracleQuery by reference, so the destination can be inside state.
+    noteGuestWrite(execEnv, callContext, outputOffset, size);
     return hostServices.getOracleQuery(callContext->ctx, queryId, nativeAddress(execEnv, outputOffset), size);
 }
 
 static uint32_t w_getOracleReply(wasm_exec_env_t execEnv, int64_t queryId, uint32_t outputOffset, uint32_t size)
 {
     CallContext* callContext = activeCallContext(execEnv);
+
+    noteGuestWrite(execEnv, callContext, outputOffset, size);
     return hostServices.getOracleReply(callContext->ctx, queryId, nativeAddress(execEnv, outputOffset), size);
 }
 
@@ -460,6 +494,7 @@ static int32_t w_liteCallFunction(
     CallContext* callContext = activeCallContext(execEnv);
 
     traceHostCall(callContext, "callFunction", "-> " + std::to_string(contractIndex) + "/" + std::to_string(inputType));
+    noteGuestWrite(execEnv, callContext, outputOffset, outputSize);
     return hostServices.liteCallFunction(callContext->ctx, contractIndex, (unsigned short)inputType, nativeAddress(execEnv, inputOffset), inputSize, nativeAddress(execEnv, outputOffset), outputSize);
 }
 
@@ -476,6 +511,7 @@ static int32_t w_liteInvokeProcedure(
     CallContext* callContext = activeCallContext(execEnv);
 
     traceHostCall(callContext, "invokeProcedure", "-> " + std::to_string(contractIndex) + "/" + std::to_string(inputType) + " reward " + std::to_string(invocationReward));
+    noteGuestWrite(execEnv, callContext, outputOffset, outputSize);
     return hostServices.liteInvokeProcedure(callContext->ctx, contractIndex, (unsigned short)inputType, nativeAddress(execEnv, inputOffset), inputSize, nativeAddress(execEnv, outputOffset), outputSize, invocationReward);
 }
 

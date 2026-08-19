@@ -268,6 +268,66 @@ static inline void journalRegions(
     }
 }
 
+
+/**
+ * Drives the journal across one dispatch: retires the previous generation on entry, then reports the
+ * blocks the call changed. Overflow is latched by the caller, since the before-image of the blocks it
+ * missed is already gone and only the next call can fall back.
+ */
+struct StateJournalScope
+{
+    unsigned char* memory = nullptr;
+    unsigned int journalBase = 0;
+    unsigned int stateOffset = 0;
+    JournalHeader header = {};
+    bool engaged = false;
+    bool finished = false;
+
+    StateJournalScope(bool enabled, unsigned char* linearMemory, unsigned int journalBaseOffset, unsigned int stateBaseOffset, const JournalHeader& journal)
+    {
+        if (!enabled || !linearMemory || !journalBaseOffset)
+        {
+            return;
+        }
+
+        memory = linearMemory;
+        journalBase = journalBaseOffset;
+        stateOffset = stateBaseOffset;
+        header = journal;
+        engaged = true;
+        resetJournal(memory, journalBase, header);
+    }
+
+    /** Regions the journal recorded, or false when it overflowed and can only report truncation. */
+    bool finish(std::vector<StateRegionTrace>& regions)
+    {
+        if (finished || !engaged)
+        {
+            return false;
+        }
+
+        finished = true;
+
+        // Counters move during the call, so the header is re-read rather than reused.
+        JournalHeader after;
+        if (!readJournalHeader(memory, (size_t)journalBase + JOURNAL_HEADER_BYTES, journalBase, after))
+        {
+            return false;
+        }
+
+        if (after.overflowed)
+        {
+            return false;
+        }
+
+        journalRegions(memory, journalBase, after, stateOffset, regions);
+        return true;
+    }
+
+    StateJournalScope(const StateJournalScope&) = delete;
+    StateJournalScope& operator=(const StateJournalScope&) = delete;
+};
+
 } // namespace Wasm::Runtime
 
 #endif // LITE_WASM_SC
