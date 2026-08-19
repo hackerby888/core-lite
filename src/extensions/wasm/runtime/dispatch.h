@@ -5,6 +5,8 @@
 
 #include "extensions/wasm/runtime/engine_state.h"
 #include "extensions/wasm/runtime/state_write_tracker.h"
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <utility>
 
@@ -387,34 +389,49 @@ static std::map<unsigned int, std::pair<std::string, std::string>> changedStateB
     return bytes;
 }
 
-/**
- * Runs the journal beside the page tracker and reports any disagreement. The tracker is still the trace
- * source; this is what has to stay quiet before the journal can take over from it.
- */
-static void checkJournalAgainstTracker(EngineSlot& slot, uint32_t contractIndex, StateJournalScope& journalScope, TraceEntry& traceEntry)
+/** QINIT_STATE_DIFF=verify arms the page tracker beside the journal and compares the two every dispatch. */
+static bool verifyingStateDiff()
 {
+    static const bool enabled = []
+    {
+        const char* mode = getenv("QINIT_STATE_DIFF");
+        return mode && strcmp(mode, "verify") == 0;
+    }();
+
+    return enabled;
+}
+
+/**
+ * Fills the trace with what the call changed in contract state. The journal is the source whenever the
+ * artifact carries one; the page tracker only covers the dispatches it cannot.
+ */
+static void recordStateDiff(EngineSlot& slot, uint32_t contractIndex, StateJournalScope& journalScope, TraceEntry& traceEntry)
+{
+    if (!journalScope.engaged)
+    {
+        // No journal for this dispatch, so the tracker already filled the trace.
+        return;
+    }
+
     std::vector<StateRegionTrace> journalDiff;
     if (!journalScope.finish(journalDiff))
     {
-        if (slot.journalBaseOffset && !slot.journalOverflowed)
-        {
-            // Only the next call can fall back: the before-image this one missed is already gone.
-            slot.journalOverflowed = true;
-        }
+        // Overflowed. This call's before-images are gone; the next one falls back to the tracker.
+        slot.journalOverflowed = true;
+        traceEntry.stateTruncated = true;
         return;
     }
 
-    if (traceEntry.stateTruncated)
-    {
-        return;
-    }
-
-    if (changedStateBytes(journalDiff) != changedStateBytes(traceEntry.stateDiff))
+    if (verifyingStateDiff() && !traceEntry.stateTruncated && changedStateBytes(journalDiff) != changedStateBytes(traceEntry.stateDiff))
     {
         logColorToScreen("ERROR",
             "LITEWASM state journal disagrees with the write tracker idx=" + std::to_string(contractIndex) + " journal=" + std::to_string(journalDiff.size())
                 + " tracker=" + std::to_string(traceEntry.stateDiff.size()));
     }
+
+    traceEntry.stateDiff = std::move(journalDiff);
+    // The journal covered the call whole, so a tracker-side truncation no longer describes this entry.
+    traceEntry.stateTruncated = false;
 }
 
 static void dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKind kind, const void* context, void* statePointer, void* input, void* output,
@@ -476,13 +493,14 @@ static void dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKin
     prepareMemory(slot, layout, context, input, sizes);
 
     unsigned char* linearMemory = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.ioBaseOffset) - slot.ioBaseOffset;
-    const bool journalUsable = slot.journalBaseOffset && !slot.journalOverflowed;
+    // A nested frame would reset the journal out from under its caller, so nesting keeps the tracker.
+    const bool journalUsable = slot.journalBaseOffset && !slot.journalOverflowed && !nested;
     StateJournalScope journalScope(trace.tracksWrites && journalUsable, linearMemory, slot.journalBaseOffset, slot.stateOffset, slot.journalHeader);
-    StateWriteScope pageProtection(trace.tracksWrites, trace.state, slot.stateSize);
+    StateWriteScope pageProtection(trace.tracksWrites && (!journalUsable || verifyingStateDiff()), trace.state, slot.stateSize);
     const bool succeeded = invokeDispatch(slot, environment.execEnv, kind, inputType, layout.inputOffset, layout.outputOffset, layout.localsOffset);
     handleDispatchResult(slot, contractIndex, inputType, kind, succeeded);
     pageProtection.finish(trace.entry);
-    checkJournalAgainstTracker(slot, contractIndex, journalScope, trace.entry);
+    recordStateDiff(slot, contractIndex, journalScope, trace.entry);
 
     finalizeMemory(slot, layout, contractIndex, kind, output, sizes);
     finishDispatchTrace(slot, layout, sizes, frame.callContext(), trace);
