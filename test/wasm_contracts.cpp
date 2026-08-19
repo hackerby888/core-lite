@@ -17,6 +17,7 @@ constexpr unsigned short WASM_RESERVED_SLOT_COUNT = 4;
 #include "extensions/wasm/runtime/arena_scope.h"
 #include "extensions/wasm/runtime/contract_slots.h"
 #include "extensions/wasm/runtime/deployment_protocol.h"
+#include "extensions/wasm/runtime/state_write_journal.h"
 #include "wasm_contract_fixture.h"
 
 namespace
@@ -696,6 +697,16 @@ TEST(WasmContracts, CrossHostStateEquivalence)
     uint32_t st = call("state_addr", a, 0);
     a[0] = 0;
     uint32_t ss = call("state_size", a, 0);
+    a[0] = 0;
+    uint32_t carve = call("io_size", a, 0);
+
+    // The journal sits past the io carve. An artifact built before it carries none, and then the run
+    // reports state only — an absent CROSSHOST_DIFF line means no journal, not an empty diff.
+    unsigned int journalBase = 0;
+    Wasm::Runtime::JournalHeader journalHeader = {};
+    const bool haveJournal = Wasm::Runtime::attachJournal(inst, env, io, carve, ss, journalBase, journalHeader);
+    unsigned char* linearMemory = haveJournal ? (unsigned char*)wasm_runtime_addr_app_to_native(inst, journalBase) - journalBase : nullptr;
+
     const uint32_t IN = io;
     const uint32_t OUT = io + 64;
     const uint32_t LOCALS = io + 128;
@@ -787,10 +798,17 @@ TEST(WasmContracts, CrossHostStateEquivalence)
             a[2] = IN;
             a[3] = OUT;
             a[4] = LOCALS;
+            // The same scope production dispatch uses, so a bug in it fails here too.
+            Wasm::Runtime::StateJournalScope journalScope(haveJournal, linearMemory, journalBase, st, journalHeader);
             call("dispatch", a, 5, false);
             if (trapped)
             {
                 printf("CROSSHOST_OP=%u:trap\n", operationIndex);
+                if (haveJournal)
+                {
+                    // A trap leaves the journal holding a partial call; report it rather than a diff.
+                    printf("CROSSHOST_DIFF=%u:trap\n", operationIndex);
+                }
                 if (captureCheckpoints)
                 {
                     printf("CROSSHOST_CHECKPOINT=%u:%s\n", operationIndex, stateHex().c_str());
@@ -808,6 +826,27 @@ TEST(WasmContracts, CrossHostStateEquivalence)
                 outHex += byteHex;
             }
             printf("CROSSHOST_OP=%u:ok:%s\n", operationIndex, outHex.c_str());
+            if (haveJournal)
+            {
+                std::vector<Wasm::Runtime::StateRegionTrace> journalDiff;
+                if (!journalScope.finish(journalDiff))
+                {
+                    printf("CROSSHOST_DIFF=%u:overflow\n", operationIndex);
+                }
+                else
+                {
+                    std::string encodedDiff;
+                    for (const Wasm::Runtime::StateRegionTrace& region : journalDiff)
+                    {
+                        if (!encodedDiff.empty())
+                        {
+                            encodedDiff += ";";
+                        }
+                        encodedDiff += std::to_string(region.offset) + "," + region.before + "," + region.after;
+                    }
+                    printf("CROSSHOST_DIFF=%u:%s\n", operationIndex, encodedDiff.c_str());
+                }
+            }
             if (captureCheckpoints)
             {
                 printf("CROSSHOST_CHECKPOINT=%u:%s\n", operationIndex, stateHex().c_str());
