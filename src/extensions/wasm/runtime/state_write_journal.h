@@ -5,6 +5,7 @@
 #ifdef LITE_WASM_SC
 
 #include "extensions/wasm/runtime/trace.h"
+#include "wasm_export.h"
 #include <algorithm>
 #include <cstring>
 #include <string>
@@ -34,6 +35,9 @@ static constexpr unsigned int JOURNAL_OVERFLOW_FLAG = 1u;
 
 // Knuth multiplicative hash, the same constant the module emits (-1640531527 as a signed i32).
 static constexpr unsigned int JOURNAL_HASH_MULTIPLIER = 0x9e3779b9u;
+
+// Export the module carries so a host can initialise the journal without knowing its geometry.
+static constexpr const char* JOURNAL_RESET_EXPORT = "__q_journal_reset";
 
 struct JournalHeaderOffset
 {
@@ -274,6 +278,45 @@ static inline void journalRegions(
  * blocks the call changed. Overflow is latched by the caller, since the before-image of the blocks it
  * missed is already gone and only the next call can fall back.
  */
+/**
+ * Finds the journal an instrumented artifact carries. It sits immediately past the region the module
+ * reports through `io_size()`, so the host never hands that memory out and needs no extra export.
+ */
+static inline bool attachJournal(
+    wasm_module_inst_t instance, wasm_exec_env_t execEnv, unsigned int ioBaseOffset, unsigned int carveBytes, unsigned int stateSize,
+    unsigned int& journalBaseOffset, JournalHeader& header)
+{
+    journalBaseOffset = 0;
+
+    const unsigned int journalOffset = ioBaseOffset + carveBytes;
+    if (!instance || !execEnv || !wasm_runtime_validate_app_addr(instance, journalOffset, JOURNAL_HEADER_BYTES))
+    {
+        return false;
+    }
+
+    // The module writes its header lazily, so the export has to run before anything can be read back.
+    wasm_function_inst_t reset = wasm_runtime_lookup_function(instance, JOURNAL_RESET_EXPORT);
+    if (!reset || !wasm_runtime_call_wasm(execEnv, reset, 0, nullptr))
+    {
+        return false;
+    }
+
+    unsigned char* memory = (unsigned char*)wasm_runtime_addr_app_to_native(instance, ioBaseOffset) - ioBaseOffset;
+    // WAMR validated the range above, so the reader only confirms the magic, version and geometry.
+    if (!readJournalHeader(memory, (size_t)journalOffset + JOURNAL_HEADER_BYTES, journalOffset, header))
+    {
+        return false;
+    }
+
+    if (header.stateSize != stateSize)
+    {
+        return false;
+    }
+
+    journalBaseOffset = journalOffset;
+    return true;
+}
+
 struct StateJournalScope
 {
     unsigned char* memory = nullptr;

@@ -212,38 +212,6 @@ static bool discoverMemoryLayout(ModuleLayout& layout, const ModuleResources& mo
     return true;
 }
 
-/**
- * Finds the write journal an instrumented artifact carries. It sits immediately past the region the
- * module reports through `io_size()`, so the node never hands that memory out and needs no new export.
- */
-static void attachJournal(EngineSlot& slot)
-{
-    slot.journalBaseOffset = 0;
-    slot.journalOverflowed = false;
-
-    const uint32_t journalOffset = slot.ioBaseOffset + (uint32_t)WASM_IO_CAPACITY;
-    if (!wasm_runtime_validate_app_addr(slot.instance, journalOffset, JOURNAL_HEADER_BYTES))
-    {
-        return;
-    }
-
-    unsigned char* memory = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.ioBaseOffset) - slot.ioBaseOffset;
-    JournalHeader header;
-    // WAMR validated the range above, so the reader only has to confirm the magic, version and geometry.
-    if (!readJournalHeader(memory, (size_t)journalOffset + JOURNAL_HEADER_BYTES, journalOffset, header))
-    {
-        return;
-    }
-
-    if (header.stateSize != slot.stateSize)
-    {
-        return;
-    }
-
-    slot.journalBaseOffset = journalOffset;
-    slot.journalHeader = header;
-}
-
 static void adoptModule(EngineSlot& slot, ModuleResources& moduleSet, const RequiredExports& exports, const ModuleLayout& layout)
 {
     slot.moduleBuffer = moduleSet.moduleBuffer;
@@ -254,7 +222,9 @@ static void adoptModule(EngineSlot& slot, ModuleResources& moduleSet, const Requ
     slot.stateOffset = layout.stateOffset;
     slot.stateSize = layout.stateSize;
     slot.ioBaseOffset = layout.ioBaseOffset;
-    attachJournal(slot);
+    slot.journalOverflowed = false;
+    attachJournal(
+        slot.instance, slot.loadExecEnv, slot.ioBaseOffset, (uint32_t)WASM_IO_CAPACITY, slot.stateSize, slot.journalBaseOffset, slot.journalHeader);
     moduleSet.release();
 }
 

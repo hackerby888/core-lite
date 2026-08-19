@@ -6,7 +6,10 @@
 #include "extensions/wasm/runtime/state_write_journal.h"
 #include "extensions/wasm/runtime/state_write_tracker.h"
 #include "gtest/gtest.h"
+#include "wasm_export.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -352,6 +355,122 @@ TEST(WasmContracts, StateJournalScopeReportsNothingOnceItOverflows)
     std::vector<StateRegionTrace> regions;
     EXPECT_FALSE(journalScope.finish(regions));
     EXPECT_TRUE(regions.empty());
+}
+
+namespace
+{
+
+// Counter's dispatch only reaches these; WAMR leaves the rest of the lhost surface unlinked until called.
+void stubVoidI(wasm_exec_env_t, uint32_t) {}
+uint32_t stubAcquireScratch(wasm_exec_env_t, uint64_t, uint32_t)
+{
+    return 0u;
+}
+void stubReleaseScratch(wasm_exec_env_t, uint32_t) {}
+
+} // namespace
+
+/**
+ * The journal against a real Qinit-built artifact: found where the node looks for it, and reporting the
+ * same bytes the tracker does for the contract's own instrumented stores rather than synthetic writes.
+ */
+TEST(WasmContracts, StateJournalAttachesToARealArtifactAndAgreesOnItsStores)
+{
+    // Its own variable: QINIT_WASM already drives the cross-host test, which needs more setup.
+    const char* path = getenv("QINIT_JOURNAL_WASM");
+    if (!path)
+    {
+        GTEST_SKIP() << "set QINIT_JOURNAL_WASM to a qinit-built instrumented contract";
+    }
+
+    FILE* file = fopen(path, "rb");
+    ASSERT_NE(file, nullptr) << "open " << path;
+    fseek(file, 0, SEEK_END);
+    const long length = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    std::vector<unsigned char> moduleBytes((size_t)length);
+    ASSERT_EQ(fread(moduleBytes.data(), 1, (size_t)length, file), (size_t)length);
+    fclose(file);
+
+    RuntimeInitArgs initArgs;
+    memset(&initArgs, 0, sizeof initArgs);
+    initArgs.mem_alloc_type = Alloc_With_System_Allocator;
+    ASSERT_TRUE(wasm_runtime_full_init(&initArgs));
+
+    static NativeSymbol lhostStubs[] = {
+        {"beginFn", (void*)stubVoidI, "(i)", nullptr},
+        {"endFn", (void*)stubVoidI, "(i)", nullptr},
+        {"markDirty", (void*)stubVoidI, "(i)", nullptr},
+        {"acquireScratch", (void*)stubAcquireScratch, "(Ii)i", nullptr},
+        {"releaseScratch", (void*)stubReleaseScratch, "(i)", nullptr},
+    };
+    ASSERT_TRUE(wasm_runtime_register_natives("lhost", lhostStubs, 5));
+
+    char error[256];
+    wasm_module_t module = wasm_runtime_load(moduleBytes.data(), (uint32_t)length, error, sizeof error);
+    ASSERT_NE(module, nullptr) << error;
+    wasm_module_inst_t instance = wasm_runtime_instantiate(module, 256u * 1024u, 0u, error, sizeof error);
+    ASSERT_NE(instance, nullptr) << error;
+    wasm_exec_env_t execEnv = wasm_runtime_create_exec_env(instance, 256u * 1024u);
+    ASSERT_NE(execEnv, nullptr);
+
+    auto callExport = [&](const char* name, uint32_t* arguments, uint32_t count) -> uint32_t
+    {
+        wasm_function_inst_t function = wasm_runtime_lookup_function(instance, name);
+        EXPECT_NE(function, nullptr) << name;
+        EXPECT_TRUE(function && wasm_runtime_call_wasm(execEnv, function, count, arguments)) << name << ": " << wasm_runtime_get_exception(instance);
+        return arguments[0];
+    };
+
+    uint32_t arguments[8] = {0};
+    const uint32_t ioBase = callExport("io_base", arguments, 0);
+    arguments[0] = 0;
+    const uint32_t ioSize = callExport("io_size", arguments, 0);
+    arguments[0] = 0;
+    const uint32_t stateOffset = callExport("state_addr", arguments, 0);
+    arguments[0] = 0;
+    const uint32_t stateSize = callExport("state_size", arguments, 0);
+
+    // The node derives the journal from its own carve constant, so this is where the two would drift.
+    unsigned int journalBaseOffset = 0;
+    JournalHeader header;
+    ASSERT_TRUE(attachJournal(instance, execEnv, ioBase, ioSize, stateSize, journalBaseOffset, header)) << "no journal at io_base + io_size";
+    EXPECT_EQ(journalBaseOffset, ioBase + ioSize);
+    EXPECT_EQ(header.stateSize, stateSize);
+    EXPECT_GT(header.capacityBlocks, 0u);
+
+    unsigned char* memory = (unsigned char*)wasm_runtime_addr_app_to_native(instance, ioBase) - ioBase;
+    unsigned char* state = memory + stateOffset;
+
+    const uint32_t inputOffset = ioBase;
+    const uint32_t outputOffset = ioBase + 64u * 1024u;
+    const uint32_t localsOffset = outputOffset + 64u * 1024u;
+
+    for (uint32_t call = 0u; call < 3u; call++)
+    {
+        StateJournalScope journalScope(true, memory, journalBaseOffset, stateOffset, header);
+        StateWriteScope writeScope(true, state, stateSize);
+
+        // Kind 1 is a user procedure; Counter's entry 1 increments its state.
+        uint32_t dispatchArguments[5] = {1u, 1u, inputOffset, outputOffset, localsOffset};
+        wasm_function_inst_t dispatch = wasm_runtime_lookup_function(instance, "dispatch");
+        ASSERT_NE(dispatch, nullptr);
+        ASSERT_TRUE(wasm_runtime_call_wasm(execEnv, dispatch, 5, dispatchArguments)) << wasm_runtime_get_exception(instance);
+
+        TraceEntry entry;
+        writeScope.finish(entry);
+
+        std::vector<StateRegionTrace> journalDiff;
+        ASSERT_TRUE(journalScope.finish(journalDiff)) << "call " << call;
+        EXPECT_FALSE(entry.stateTruncated);
+        EXPECT_FALSE(entry.stateDiff.empty()) << "call " << call << ": the contract wrote nothing";
+        EXPECT_EQ(changedBytes(journalDiff), changedBytes(entry.stateDiff)) << "call " << call;
+    }
+
+    wasm_runtime_destroy_exec_env(execEnv);
+    wasm_runtime_deinstantiate(instance);
+    wasm_runtime_unload(module);
+    wasm_runtime_destroy();
 }
 
 #endif // LITE_WASM_SC
