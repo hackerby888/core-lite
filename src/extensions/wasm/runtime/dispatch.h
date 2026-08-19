@@ -395,7 +395,13 @@ static bool verifyingStateDiff()
     static const bool enabled = []
     {
         const char* mode = getenv("QINIT_STATE_DIFF");
-        return mode && strcmp(mode, "verify") == 0;
+        const bool verify = mode && strcmp(mode, "verify") == 0;
+        if (verify)
+        {
+            logColorToScreen("INFO", "LITEWASM state diff verify mode: journal and page tracker both armed");
+        }
+
+        return verify;
     }();
 
     return enabled;
