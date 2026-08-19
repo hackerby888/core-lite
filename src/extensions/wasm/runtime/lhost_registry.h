@@ -2,6 +2,7 @@
 // Resolve Wasm32 offsets for the canonical lhost import table.
 #ifdef LITE_WASM_SC
 #include <cstdint>
+#include <cstdio>
 #include <type_traits>
 #include <array>
 #include "wasm_export.h"
@@ -49,6 +50,15 @@ static inline void noteGuestWrite(wasm_exec_env_t execEnv, CallContext* callCont
 {
     if (!callContext || !callContext->journalBaseOffset || !callContext->journalHeader || !size)
     {
+        return;
+    }
+
+    // A host write outside the module's memory would be a caller bug; say so rather than corrupt memory.
+    wasm_module_inst_t moduleInstance = wasm_runtime_get_module_inst(execEnv);
+    if (!wasm_runtime_validate_app_addr(moduleInstance, offset, size))
+    {
+        fprintf(stderr, "LITEWASM noteGuestWrite out of range offset=%u size=%u journal=%u state=%u\n", offset, size, callContext->journalBaseOffset,
+            callContext->stateOffset);
         return;
     }
 
