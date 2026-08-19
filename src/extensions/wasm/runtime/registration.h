@@ -23,6 +23,12 @@ static void discoverRegistration(EngineSlot& slot, const RequiredExports& export
     }
 
     logColorToScreen("INFO", "LITEWASM: loaded contract — " + std::to_string(slot.entryCount) + " entries, stateSize=" + std::to_string(slot.stateSize));
+    // Says plainly whether the artifact carries a journal: silence would otherwise read the same as
+    // agreement in the checks that follow.
+    logColorToScreen("INFO",
+        slot.journalBaseOffset ? "LITEWASM: state journal attached at " + std::to_string(slot.journalBaseOffset) + ", capacity "
+                + std::to_string(slot.journalHeader.capacityBlocks) + " blocks"
+                               : "LITEWASM: no state journal in this artifact — page tracker only");
 }
 
 static void registerUserFunction(unsigned int contractIndex, uint16_t inputType, const EntryInfo& entry, void* code)
