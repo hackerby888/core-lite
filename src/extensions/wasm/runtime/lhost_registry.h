@@ -32,13 +32,10 @@ static inline CallContext* activeCallContext(wasm_exec_env_t execEnv)
     return (CallContext*)wasm_runtime_get_user_data(execEnv);
 }
 
+// Offset 0 is an ordinary linear-memory address, not a null pointer: a module can and does place data
+// there. WAMR returns the memory base for it and null only when the offset is out of bounds.
 static inline void* nativeAddress(wasm_exec_env_t execEnv, uint32_t offset)
 {
-    if (!offset)
-    {
-        return nullptr;
-    }
-
     return wasm_runtime_addr_app_to_native(wasm_runtime_get_module_inst(execEnv), offset);
 }
 
