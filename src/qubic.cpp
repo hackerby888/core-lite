@@ -4246,6 +4246,19 @@ static void processTick(unsigned long long processorNumber)
                     sign(computorSubseeds[ownComputorIndicesMapping[i]].m256i_u8, computorPublicKeys[ownComputorIndicesMapping[i]].m256i_u8, digest, broadcastedFutureTickData.tickData.signature);
 
                     enqueueResponse(NULL, sizeof(broadcastedFutureTickData), BroadcastFutureTickData::type(), 0, &broadcastedFutureTickData);
+#ifdef LONG_RUN_LOCAL_TESTNET
+                    // Store own tickData directly: flooded incoming queue may drop the echo, stalling the node.
+                    if (ts.tickInCurrentEpochStorage(broadcastedFutureTickData.tickData.tick))
+                    {
+                        ts.tickData.acquireLock();
+                        TickData& td = ts.tickData.getByTickInCurrentEpoch(broadcastedFutureTickData.tickData.tick);
+                        if (td.epoch != INVALIDATED_TICK_DATA && td.epoch != system.epoch)
+                        {
+                            copyMem(&td, &broadcastedFutureTickData.tickData, sizeof(TickData));
+                        }
+                        ts.tickData.releaseLock();
+                    }
+#endif
                 }
 
                 system.latestLedTick = system.tick;
@@ -5974,6 +5987,20 @@ static void broadcastTickVotes()
         // - if own votes don't get echoed back, that indicates this node has internet/topo issue, and need to reissue vote (F9)
         // - all votes need to be processed in a single place of code (for further handling)
         // - all votes are treated equally (own votes and their votes)
+#ifdef LONG_RUN_LOCAL_TESTNET
+        // Store own vote directly: flooded incoming queue may drop the echo, stalling the node.
+        if (ts.tickInCurrentEpochStorage(broadcastTick.tick.tick))
+        {
+            const unsigned int computorIndex = broadcastTick.tick.computorIndex;
+            ts.ticks.acquireLock(computorIndex);
+            Tick* tsTick = ts.ticks.getByTickInCurrentEpoch(broadcastTick.tick.tick) + computorIndex;
+            if (tsTick->epoch != system.epoch)
+            {
+                copyMem(tsTick, &broadcastTick.tick, sizeof(Tick));
+            }
+            ts.ticks.releaseLock(computorIndex);
+        }
+#endif
     }
 }
 
