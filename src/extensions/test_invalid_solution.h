@@ -126,6 +126,9 @@ inline bool broadcastRandom(const m256i& currentMiningSeed, unsigned int txTick,
 // Ant-colony injector. The node mines against its own colony, so this drives the whole inputType-12
 // path on one machine: broadcast, pre-score, publish, commit, deposit, ranking. Each mode aims at one
 // branch of the accept rules, so every ValidityResult is reachable without a second node.
+// Same value as MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET, which is defined after this header is included.
+static constexpr unsigned int ANT_INJECT_PUBLICATION_OFFSET = 3;
+
 enum class AntInjectMode
 {
     Valid,          // honest solution: accepted, deposit refunded, ranked
@@ -179,10 +182,11 @@ inline void signAndBroadcastAntSolution(unsigned int computorIdx,
 // ColonyT and ScoreT stay template parameters so this header keeps compiling where it is included,
 // which is before qubic.cpp declares gAntColony and score.
 template<typename ColonyT, typename ScoreT>
+// The publish tick is read from system.tick when the transaction is signed, not when the walk
+// starts: a walk takes seconds and the chain may have moved dozens of ticks meanwhile.
 inline bool broadcastAntSolution(ColonyT& colony,
                                  ScoreT& scoreFn,
                                  unsigned long long processorNumber,
-                                 unsigned int txTick,
                                  unsigned int anchorTick,
                                  AntInjectMode mode,
                                  unsigned int attempts = 8)
@@ -233,7 +237,7 @@ inline bool broadcastAntSolution(ColonyT& colony,
     }
     else if (mode == AntInjectMode::FutureParent)
     {
-        parentRef.tick = txTick;
+        parentRef.tick = system.tick + ANT_INJECT_PUBLICATION_OFFSET;
         parentRef.solutionIndexInTick = 0;
         parentRec = nullptr;
     }
@@ -265,7 +269,8 @@ inline bool broadcastAntSolution(ColonyT& colony,
         }
         if (!haveAnchor)
         {
-            detail::broadcastTransfer(computorIdx, computorPublicKeys[computorIdx], 1, txTick);
+            detail::broadcastTransfer(computorIdx, computorPublicKeys[computorIdx], 1,
+                                      system.tick + ANT_INJECT_PUBLICATION_OFFSET);
             return false;
         }
     }
@@ -291,7 +296,8 @@ inline bool broadcastAntSolution(ColonyT& colony,
     if (mode == AntInjectMode::NonCanonical)
     {
         nonce.m256i_u8[1] = 0;   // L below range; the scorer refuses before walking
-        detail::signAndBroadcastAntSolution(computorIdx, parentRef, usedAnchorTick, 0, nonce, txTick);
+        detail::signAndBroadcastAntSolution(computorIdx, parentRef, usedAnchorTick, 0, nonce,
+                                            system.tick + ANT_INJECT_PUBLICATION_OFFSET);
         return true;
     }
 
@@ -328,7 +334,23 @@ inline bool broadcastAntSolution(ColonyT& colony,
     const unsigned int claimedScore =
         (mode == AntInjectMode::BadClaim) ? (childScore + 1) : childScore;
 
-    detail::signAndBroadcastAntSolution(computorIdx, parentRef, usedAnchorTick, claimedScore, nonce, txTick);
+    const unsigned int publishTick = system.tick + ANT_INJECT_PUBLICATION_OFFSET;
+    detail::signAndBroadcastAntSolution(computorIdx, parentRef, usedAnchorTick, claimedScore, nonce, publishTick);
+
+    CHAR16 line[192];
+    setText(line, L"ANT-INJECT published score=");
+    appendNumber(line, childScore, FALSE);
+    appendText(line, L" claimed=");
+    appendNumber(line, claimedScore, FALSE);
+    appendText(line, L" parent=");
+    appendNumber(line, parentRef.tick, FALSE);
+    appendText(line, L"/");
+    appendNumber(line, parentRef.solutionIndexInTick, FALSE);
+    appendText(line, L" anchor=");
+    appendNumber(line, usedAnchorTick, FALSE);
+    appendText(line, L" for tick ");
+    appendNumber(line, publishTick, FALSE);
+    logToConsole(line);
     return true;
 }
 

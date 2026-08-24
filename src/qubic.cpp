@@ -5457,7 +5457,6 @@ static void processTick(unsigned long long processorNumber)
                         {
                             lastMinedTick = tick;
                             TestInvalidSolution::broadcastAntSolution(gAntColony, *score, 1,
-                                                                      tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET,
                                                                       tick - 1,
                                                                       forceAntInjectMode, 1);
                         }
