@@ -18,6 +18,8 @@ static void logBytes(unsigned int contractIndex, unsigned char type, const void*
 {
     *((unsigned int*)(void*)message) = contractIndex;
     qLogger::logMessage(size, type, message);
+
+    *((unsigned int*)(void*)message) = 0;
 }
 
 static unsigned int enumerateAssets(const void*, unsigned int kind, const void* issuance, const void* ownership, const void* possession, void* outputBuffer,
