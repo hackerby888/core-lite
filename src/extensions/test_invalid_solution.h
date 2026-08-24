@@ -197,7 +197,8 @@ inline bool broadcastAntSolution(ColonyT& colony,
     }
 
     // One identity, so successive solutions chain into a deepening tree rather than 676 depth-1 stubs.
-    const unsigned int computorIdx = 0;
+    // Seat 0's root network fails to self-clock under this pool, so mine seat 1.
+    const unsigned int computorIdx = 1;
     const m256i& minerKey = computorPublicKeys[computorIdx];
 
     // Extend this identity's best node when it has one, otherwise start its tree from the root.
