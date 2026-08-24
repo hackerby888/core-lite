@@ -275,6 +275,7 @@ static bool forceBroadcastAntSolution = false;
 static unsigned int forceReprocessEveryNTicks = 0;
 static bool gLastTickHadSolutionTx = false;
 static bool antTrustClaimedScore = false;
+static unsigned int forceAntSolutionBudget = 3;
 static TestInvalidSolution::AntInjectMode forceAntInjectMode = TestInvalidSolution::AntInjectMode::Valid;
 
 static volatile unsigned char epochTransitionState = 0;
@@ -5461,7 +5462,8 @@ static void processTick(unsigned long long processorNumber)
                 std::thread([]()
                 {
                     unsigned int lastMinedTick = 0;
-                    while (!shutDownNode)
+                    unsigned int published = 0;
+                    while (!shutDownNode && published < forceAntSolutionBudget)
                     {
                         const unsigned int tick = system.tick;
                         if (tick != lastMinedTick && tick > system.initialTick)
@@ -5469,12 +5471,20 @@ static void processTick(unsigned long long processorNumber)
                             lastMinedTick = tick;
                             // Engine slot is processorNumber % solutionBufferCount; the tick processor is
                             // processor 1, so use 0 to keep the miner's walk off the verifier's lock.
-                            TestInvalidSolution::broadcastAntSolution(gAntColony, *score, 0,
-                                                                      tick - 1,
-                                                                      forceAntInjectMode, 1);
+                            if (TestInvalidSolution::broadcastAntSolution(gAntColony, *score, 0,
+                                                                          tick - 1,
+                                                                          forceAntInjectMode, 1))
+                            {
+                                published++;
+                            }
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(50));
                     }
+                    CHAR16 doneLine[128];
+                    setText(doneLine, L"ANT-INJECT budget spent, miner thread exiting after ");
+                    appendNumber(doneLine, published, FALSE);
+                    appendText(doneLine, L" solution(s)");
+                    logToConsole(doneLine);
                 }).detach();
             }
         }
@@ -11416,7 +11426,7 @@ void processArgs(int argc, const char* argv[]) {
 		("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
         ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
         ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the reprocessSolutionTransaction() rollback path", cxxopts::value<bool>())
-        ("fbas, force-broadcast-ant-solution", "TEST: each tick, mine one ant-colony solution against our own colony and publish it. Mode selects which accept rule it aims at: valid, badclaim, noncanon, wrongtree, stale, futureparent, leparent", cxxopts::value<std::string>())
+        ("fbas, force-broadcast-ant-solution", "TEST: mine ant-colony solutions against our own colony and publish them, as <mode> or <mode>:<count> (default 3; a walk costs seconds of CPU and each publish burns a deposit). Mode selects which accept rule it aims at: valid, badclaim, noncanon, wrongtree, stale, futureparent, leparent", cxxopts::value<std::string>())
         ("force-reprocess-every", "TEST: run the solution reprocess path every N ticks regardless of quorum agreement. On a tick whose solutions are all valid the rollback and replay must reproduce the same digests, so a mismatch is a rollback bug", cxxopts::value<unsigned int>())
         ("ant-trust-claimed-score", "TEST (aux only): accept an ant solution's claimed score without walking, so a MAIN publishing bad claims forces a real quorum mismatch and rollback on this node", cxxopts::value<bool>())
         ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
@@ -11720,7 +11730,15 @@ void processArgs(int argc, const char* argv[]) {
 
     if (result.count("force-broadcast-ant-solution"))
     {
-        const std::string mode = result["force-broadcast-ant-solution"].as<std::string>();
+        std::string mode = result["force-broadcast-ant-solution"].as<std::string>();
+        // "mode" or "mode:count" - a walk costs ~25s of CPU and each publish burns a deposit, so the
+        // injector stops after a small budget rather than mining every tick forever.
+        const size_t colonPos = mode.find(':');
+        if (colonPos != std::string::npos)
+        {
+            forceAntSolutionBudget = (unsigned int)std::stoul(mode.substr(colonPos + 1));
+            mode = mode.substr(0, colonPos);
+        }
         forceBroadcastAntSolution = true;
         if (mode == "valid")             forceAntInjectMode = TestInvalidSolution::AntInjectMode::Valid;
         else if (mode == "badclaim")     forceAntInjectMode = TestInvalidSolution::AntInjectMode::BadClaim;
@@ -11736,7 +11754,8 @@ void processArgs(int argc, const char* argv[]) {
         }
         if (forceBroadcastAntSolution)
         {
-            logColorToScreen("INFO", "Force broadcast ant solution enabled, mode " + mode + " (TEST ONLY)");
+            logColorToScreen("INFO", "Force broadcast ant solution enabled, mode " + mode
+                + ", budget " + std::to_string(forceAntSolutionBudget) + " solution(s) (TEST ONLY)");
         }
     }
 }
