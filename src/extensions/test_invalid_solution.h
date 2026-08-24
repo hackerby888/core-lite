@@ -308,10 +308,23 @@ inline bool broadcastAntSolution(ColonyT& colony,
         nonce.setRandomValue();
         nonce.m256i_u8[0] = (unsigned char)score_engine::AlgoType::Bpp9000;
         nonce.m256i_u8[1] = (unsigned char)(1 + (nonce.m256i_u8[1] % score_engine::MAX_LUT_ENTRIES_PER_STEP));
-        nonce.m256i_u8[2] = (unsigned char)(nonce.m256i_u8[2] % 64);
+        nonce.m256i_u8[2] = 0;   // no explore steps: pure descent gives the best odds of beating the parent
 
+        const unsigned long long walkStart = __rdtsc();
         childScore = scoreFn.computeAntChildScore(processorNumber, parentAnnPtr, minerKey, nonce,
                                                   anchorDigest, childAnn);
+        {
+            CHAR16 line[192];
+            setText(line, L"ANT-INJECT attempt score=");
+            appendNumber(line, childScore, FALSE);
+            appendText(line, L" parentScore=");
+            appendNumber(line, parentScore, FALSE);
+            appendText(line, L" threshold=");
+            appendNumber(line, colony.errorThreshold(), FALSE);
+            appendText(line, L" ms=");
+            appendNumber(line, (__rdtsc() - walkStart) / (frequency / 1000), FALSE);
+            logToConsole(line);
+        }
         if (childScore == score_engine::INVALID_SCORE_VALUE)
         {
             continue;

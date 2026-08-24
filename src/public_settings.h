@@ -171,9 +171,10 @@ static constexpr unsigned long long BPP9000_NUMBER_OF_MUTATIONS = 100;
 // better, and a solution passes when score <= threshold.
 static constexpr unsigned long long BPP9000_NUMBER_OF_WINDOWS = BPP9000_SEQUENCE_LENGTH - BPP9000_WINDOW_WIDTH;
 #ifdef TESTNET
-// A fresh root scores around 4044, so the mainnet bound makes a depth-1 child rare and the local
-// tree barely grows. Raise it on testnet so the tree deepens in seconds.
-static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 4100;
+// A fresh root scores around 5500 and one walk reaches about 4500, so the mainnet bound is
+// unreachable at depth 1 and the local tree never starts. Raise it on testnet so every walk qualifies
+// and the tree deepens; deeper nodes must still strictly beat their parent.
+static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 6500;
 #else
 static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 4000;
 #endif
