@@ -170,7 +170,13 @@ static constexpr unsigned long long BPP9000_NUMBER_OF_MUTATIONS = 100;
 // Number of graded windows. The score is an error count in [0, BPP9000_NUMBER_OF_WINDOWS], smaller is
 // better, and a solution passes when score <= threshold.
 static constexpr unsigned long long BPP9000_NUMBER_OF_WINDOWS = BPP9000_SEQUENCE_LENGTH - BPP9000_WINDOW_WIDTH;
+#ifdef TESTNET
+// A fresh root scores around 4044, so the mainnet bound makes a depth-1 child rare and the local
+// tree barely grows. Raise it on testnet so the tree deepens in seconds.
+static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 4100;
+#else
 static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 4000;
+#endif
 
 // Ant colony: a solution must be published within this many ticks of the anchor its walk seeded from.
 static constexpr unsigned int ANT_PUBLISH_WINDOW_TICKS = 15000;

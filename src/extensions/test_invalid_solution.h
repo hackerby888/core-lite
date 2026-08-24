@@ -247,10 +247,27 @@ inline bool broadcastAntSolution(ColonyT& colony,
             : 0;
     }
 
+    // Anchors are only recorded for non-empty ticks, so an idle testnet has none and the injector
+    // would never fire. Walk back a short window, and if nothing is there put a transfer on chain to
+    // make this tick non-empty - that seeds the ring for the next attempt.
     m256i anchorDigest = m256i::zero();
-    if (!colony.getAnchorDigest(usedAnchorTick, anchorDigest) && mode != AntInjectMode::Stale)
+    if (mode != AntInjectMode::Stale)
     {
-        return false;
+        bool haveAnchor = false;
+        for (unsigned int back = 0; back < 16 && back < usedAnchorTick; back++)
+        {
+            if (colony.getAnchorDigest(usedAnchorTick - back, anchorDigest))
+            {
+                usedAnchorTick -= back;
+                haveAnchor = true;
+                break;
+            }
+        }
+        if (!haveAnchor)
+        {
+            detail::broadcastTransfer(computorIdx, computorPublicKeys[computorIdx], 1, txTick);
+            return false;
+        }
     }
 
     // The parent's network is what the child inherits; the scorer derives the root itself when the
