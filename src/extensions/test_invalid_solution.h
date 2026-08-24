@@ -196,9 +196,8 @@ inline bool broadcastAntSolution(ColonyT& colony,
         return false;
     }
 
-    m256i rnd;
-    rnd.setRandomValue();
-    const unsigned int computorIdx = (unsigned int)(rnd.m256i_u64[0] % computorSeedsCount);
+    // One identity, so successive solutions chain into a deepening tree rather than 676 depth-1 stubs.
+    const unsigned int computorIdx = 0;
     const m256i& minerKey = computorPublicKeys[computorIdx];
 
     // Extend this identity's best node when it has one, otherwise start its tree from the root.
