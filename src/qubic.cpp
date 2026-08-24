@@ -274,6 +274,7 @@ static bool forceBroadcastInvalidSolution = false;
 static bool forceBroadcastAntSolution = false;
 static unsigned int forceReprocessEveryNTicks = 0;
 static bool gLastTickHadSolutionTx = false;
+static bool antTrustClaimedScore = false;
 static TestInvalidSolution::AntInjectMode forceAntInjectMode = TestInvalidSolution::AntInjectMode::Valid;
 
 static volatile unsigned char epochTransitionState = 0;
@@ -3779,7 +3780,16 @@ static void processTickTransactionAntColonySolution(
 
     unsigned int childScore;
     const AntColonyBpp9000T::Ann* childAnn;
-    if (gAntScoredReady[transactionIndex])
+    if (antTrustClaimedScore && !isReprocessingSolutions)
+    {
+        // TEST: an optimistic aux node that takes the claim without walking. Its first pass is wrong
+        // whenever the claim is, so the quorum mismatch and the rollback that repairs it are
+        // exercised for real. The replay above runs the walk.
+        childScore = transaction->claimedScore;
+        setMem(&childAnnScratch, sizeof(childAnnScratch), 0);
+        childAnn = &childAnnScratch;
+    }
+    else if (gAntScoredReady[transactionIndex])
     {
         childScore = gAntScoredValue[transactionIndex];
         childAnn = &gAntScoredAnn[transactionIndex];
@@ -4542,7 +4552,8 @@ static void processTick(unsigned long long processorNumber)
                                 }
                             }
                             // Ant solutions ride the same async queue
-                            else if (isZero(transaction->destinationPublicKey)
+                            else if (!antTrustClaimedScore
+                                && isZero(transaction->destinationPublicKey)
                                 && transaction->amount >= AntColonyMiningSolutionTransaction::minAmount()
                                 && transaction->inputType == AntColonyMiningSolutionTransaction::transactionType()
                                 && transaction->inputSize == AntColonyMiningSolutionTransaction::minInputSize())
@@ -11407,6 +11418,7 @@ void processArgs(int argc, const char* argv[]) {
         ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the reprocessSolutionTransaction() rollback path", cxxopts::value<bool>())
         ("fbas, force-broadcast-ant-solution", "TEST: each tick, mine one ant-colony solution against our own colony and publish it. Mode selects which accept rule it aims at: valid, badclaim, noncanon, wrongtree, stale, futureparent, leparent", cxxopts::value<std::string>())
         ("force-reprocess-every", "TEST: run the solution reprocess path every N ticks regardless of quorum agreement. On a tick whose solutions are all valid the rollback and replay must reproduce the same digests, so a mismatch is a rollback bug", cxxopts::value<unsigned int>())
+        ("ant-trust-claimed-score", "TEST (aux only): accept an ant solution's claimed score without walking, so a MAIN publishing bad claims forces a real quorum mismatch and rollback on this node", cxxopts::value<bool>())
         ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
         ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
@@ -11688,6 +11700,12 @@ void processArgs(int argc, const char* argv[]) {
     {
         forceBroadcastInvalidSolution = true;
         logColorToScreen("INFO", "Force broadcast invalid solution enabled (TEST ONLY)");
+    }
+
+    if (result.count("ant-trust-claimed-score"))
+    {
+        antTrustClaimedScore = true;
+        logColorToScreen("INFO", "Ant claimed scores are TRUSTED on first pass (TEST ONLY, aux node)");
     }
 
     if (result.count("force-reprocess-every"))
