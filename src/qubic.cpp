@@ -273,6 +273,7 @@ static bool forceVerifySolutions = false;
 static bool forceBroadcastInvalidSolution = false;
 static bool forceBroadcastAntSolution = false;
 static unsigned int forceReprocessEveryNTicks = 0;
+static bool gLastTickHadSolutionTx = false;
 static TestInvalidSolution::AntInjectMode forceAntInjectMode = TestInvalidSolution::AntInjectMode::Valid;
 
 static volatile unsigned char epochTransitionState = 0;
@@ -4377,6 +4378,7 @@ static void publishAntSolutionFor(unsigned long long processorNumber, unsigned i
 
 static void processTick(unsigned long long processorNumber)
 {
+    gLastTickHadSolutionTx = false;
     PROFILE_SCOPE();
     TickBench::Scope _btTotal(TickBench::TICK_TOTAL);
 
@@ -4649,6 +4651,8 @@ static void processTick(unsigned long long processorNumber)
                 }
             }
         }
+
+        gLastTickHadSolutionTx = isThisTickHasSolution || isThisTickHasAntSolution;
 
 #if LITE_ANT_TICK_ROLLBACK
         // Only a tick carrying an ant solution can move colony state, so ordinary ticks pay nothing.
@@ -5434,13 +5438,33 @@ static void processTick(unsigned long long processorNumber)
                                                  getSolutionThreshold(score_engine::AlgoType::Bpp9000));
         }
 
-        // TEST: mine one ant solution against our own colony to drive the inputType-12 path.
+        // TEST: mine ant solutions against our own colony to drive the inputType-12 path. A walk
+        // takes seconds, so it runs on its own thread like an external miner would, never on the
+        // tick processor.
         if (forceBroadcastAntSolution && computorSeedsCount > 0)
         {
-            TestInvalidSolution::broadcastAntSolution(gAntColony, *score, processorNumber,
-                                                      system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET,
-                                                      system.tick - 1,
-                                                      forceAntInjectMode);
+            static bool antMinerStarted = false;
+            if (!antMinerStarted)
+            {
+                antMinerStarted = true;
+                std::thread([]()
+                {
+                    unsigned int lastMinedTick = 0;
+                    while (!shutDownNode)
+                    {
+                        const unsigned int tick = system.tick;
+                        if (tick != lastMinedTick && tick > system.initialTick)
+                        {
+                            lastMinedTick = tick;
+                            TestInvalidSolution::broadcastAntSolution(gAntColony, *score, 1,
+                                                                      tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET,
+                                                                      tick - 1,
+                                                                      forceAntInjectMode, 1);
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    }
+                }).detach();
+            }
         }
     }
 
@@ -7826,7 +7850,10 @@ static void tickProcessor(void*, unsigned long long processorNumber)
 
                 // TEST: rollback + replay of a tick whose solutions are all valid must reproduce the
                 // same digests. Runs regardless of quorum agreement, so a single node can check it.
-                if (forceReprocessEveryNTicks > 0 && (system.tick % forceReprocessEveryNTicks) == 0)
+                // Only meaningful on a tick that carried solutions: the rollback baselines are captured
+                // inside processTick's transaction path, which an empty tick never enters.
+                if (forceReprocessEveryNTicks > 0 && (system.tick % forceReprocessEveryNTicks) == 0
+                    && gLastTickHadSolutionTx)
                 {
                     recomputeSaltedSpectrumDigest();
                     const m256i spectrumDigestBefore = etalonTick.saltedSpectrumDigest;
