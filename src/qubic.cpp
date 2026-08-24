@@ -5456,7 +5456,9 @@ static void processTick(unsigned long long processorNumber)
                         if (tick != lastMinedTick && tick > system.initialTick)
                         {
                             lastMinedTick = tick;
-                            TestInvalidSolution::broadcastAntSolution(gAntColony, *score, 1,
+                            // Engine slot is processorNumber % solutionBufferCount; the tick processor is
+                            // processor 1, so use 0 to keep the miner's walk off the verifier's lock.
+                            TestInvalidSolution::broadcastAntSolution(gAntColony, *score, 0,
                                                                       tick - 1,
                                                                       forceAntInjectMode, 1);
                         }
