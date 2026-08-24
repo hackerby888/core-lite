@@ -25,6 +25,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../src)
 include_directories(${PROJECT_ROOT_DIR})
 
 file(COPY data/example_task_bpp9000.bin data/samples_bpp9000.csv data/scores_bpp9000.csv
+     data/bpp9000.task data/gt_production.csv data/gt_ant_production.csv
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/data)
 
 add_executable(
@@ -49,6 +50,9 @@ add_executable(
 		contract_qrwa.cpp
 		contract_qip.cpp
 		contract_qusino.cpp
+		ant_colony.cpp
+		ant_pending_solutions.cpp
+		trit_pack.cpp
 		custom_qubic_mining_storage.cpp
 		fast_tx_window.cpp
    		file_io.cpp

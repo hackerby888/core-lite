@@ -1318,4 +1318,5 @@ struct Overload {
     }
 };
 
+void logToConsole_1(const CHAR16* message);
 #define logToConsole logToConsole_1
