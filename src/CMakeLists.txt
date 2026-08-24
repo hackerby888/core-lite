@@ -162,6 +162,11 @@ endif()
 
 # Ant-colony tick rollback, on by default. Configure with -DLITE_ANT_TICK_ROLLBACK=OFF to build the
 # node without it, which is how the fork-based rollback replaces it.
+# Peer port override, so a second node can run where the default is taken.
+if(DEFINED PORT)
+    target_compile_definitions(Qubic PRIVATE PORT=${PORT})
+endif()
+
 if(DEFINED LITE_ANT_TICK_ROLLBACK AND NOT LITE_ANT_TICK_ROLLBACK)
     target_compile_definitions(Qubic PRIVATE LITE_ANT_TICK_ROLLBACK=0)
 endif()

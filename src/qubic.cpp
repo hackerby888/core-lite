@@ -211,10 +211,13 @@ TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
 #define MAX_MESSAGE_PAYLOAD_SIZE MAX_TRANSACTION_SIZE
 #define MAX_UNIVERSE_SIZE 1073741824
 #define MESSAGE_DISSEMINATION_THRESHOLD 1000000000
+// Overridable so a second node can run on a box where the default port is already taken.
+#ifndef PORT
 #ifdef TESTNET
 #define PORT 31841
 #else
 #define PORT 21841
+#endif
 #endif
 #define SYSTEM_DATA_SAVING_PERIOD 300000ULL
 #define TICK_TRANSACTIONS_PUBLICATION_OFFSET 2 // Must be only 2
@@ -7193,7 +7196,15 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
     TickData currentTickData;
     // copy system.tick data
     ts.tickData.acquireLock();
-    copyMem(&currentTickData, ts.tickData.getByTickIfNotEmpty(system.tick), sizeof(TickData));
+    const TickData* storedTickData = ts.tickData.getByTickIfNotEmpty(system.tick);
+    if (storedTickData == nullptr)
+    {
+        // An empty tick carries no transactions, so there is nothing to roll back or replay.
+        ts.tickData.releaseLock();
+        isReprocessingSolutions = false;
+        return;
+    }
+    copyMem(&currentTickData, storedTickData, sizeof(TickData));
     ts.tickData.releaseLock();
 
     // first rollback the miner scores data
