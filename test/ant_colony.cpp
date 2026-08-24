@@ -1142,27 +1142,50 @@ TEST(TestAntColonyRollback, ClearsOnlyTheBitsItSet)
     EXPECT_FALSE(testFlagBit(11)) << "left our own bit set, so the replay rejects itself";
 }
 
-// The anchor digest seeds every child's walk, so a stale ring slot rescores the whole tick differently.
-TEST(TestAntColonyRollback, RestoresTheAnchorSlot)
+// The anchor ring is K12(tick || K12(TickData)) and is written after the capture point, so a re-run
+// must leave it alone. Restoring it would blank this tick's own anchor, and nothing re-records it -
+// every later solution anchored to that tick would then be rejected as stale on this node only.
+TEST(TestAntColonyRollback, LeavesTheAnchorRingAlone)
 {
     AntColonyBpp9000T* colony = freshColony();
     ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
 
-    const m256i before = makeKey(4242);
-    const m256i after = makeKey(4343);
-    colony->recordAnchorDigest(TEST_ROLLBACK_TICK, before);
+    const m256i beforeCapture = makeKey(4242);
+    const m256i writtenByTheTick = makeKey(4343);
+    colony->recordAnchorDigest(TEST_ROLLBACK_TICK, beforeCapture);
 
     gAntTickRollback.capture(*colony, TEST_ROLLBACK_TICK);
-    colony->recordAnchorDigest(TEST_ROLLBACK_TICK, after);
-
-    m256i got;
-    ASSERT_TRUE(colony->getAnchorDigest(TEST_ROLLBACK_TICK, got));
-    ASSERT_EQ(memcmp(&got, &after, sizeof(got)), 0);
+    // processTick records the anchor after the transaction loop, i.e. after the capture.
+    colony->recordAnchorDigest(TEST_ROLLBACK_TICK, writtenByTheTick);
 
     gAntTickRollback.restore(*colony, gTestAntFlags);
 
+    m256i got;
     ASSERT_TRUE(colony->getAnchorDigest(TEST_ROLLBACK_TICK, got));
-    EXPECT_EQ(memcmp(&got, &before, sizeof(got)), 0) << "anchor ring kept the discarded digest";
+    EXPECT_EQ(memcmp(&got, &writtenByTheTick, sizeof(got)), 0)
+        << "the rollback clobbered the anchor the tick legitimately recorded";
+}
+
+// reprocessSolutionTransaction can be entered twice for the same tick if the digest still disagrees
+// after the first replay, so it re-arms the capture after restoring. A second pass must undo the
+// first replay's commits, not leave them in the tree.
+TEST(TestAntColonyRollback, SurvivesASecondRollbackOfTheSameTick)
+{
+    AntColonyBpp9000T* colony = freshColony();
+    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+
+    const m256i me = makeKey(6);
+    ASSERT_NE(commitRootChild(colony, me, 3800, 0, 1100), ANT_INVALID_INDEX);
+    const unsigned int base = colony->solutionCount();
+
+    for (unsigned int pass = 0; pass < 2; pass++)
+    {
+        gAntTickRollback.capture(*colony, TEST_ROLLBACK_TICK);
+        ASSERT_NE(commitRootChild(colony, me, 3750, 0, 1101, TEST_ROLLBACK_TICK), ANT_INVALID_INDEX)
+            << "pass " << pass << " could not replay the solution";
+        gAntTickRollback.restore(*colony, gTestAntFlags);
+        EXPECT_EQ(colony->solutionCount(), base) << "pass " << pass << " left commits behind";
+    }
 }
 
 // Ordinary ticks never capture, so a restore reaching them must do nothing at all.

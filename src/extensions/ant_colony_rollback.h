@@ -33,9 +33,6 @@ struct AntColonyTickRollback
     unsigned int tickSlotIndex;
     bool tickSlotValid;
     AntTickSlot tickSlot;
-    unsigned int anchorSlotIndex;
-    unsigned int anchorTick;
-    m256i anchorDigest;
     Colony::ExportSet exportSet;
     AntColonyDiagnostics stats;
     FlagUndo flagJournal[2 * NUMBER_OF_TRANSACTIONS_PER_TICK];
@@ -58,10 +55,6 @@ struct AntColonyTickRollback
             tickSlot = colony._tickIndex[tickSlotIndex];
         }
 
-        anchorSlotIndex = tick & (ANT_ANCHOR_RING_SIZE - 1);
-        anchorTick = colony._anchors->ticks[anchorSlotIndex];
-        anchorDigest = colony._anchors->digests[anchorSlotIndex];
-
         copyMem(&exportSet, colony._exportSet, sizeof(exportSet));
         stats = colony._stats;
 
@@ -69,6 +62,7 @@ struct AntColonyTickRollback
         armed = true;
     }
 
+    // Tick processor only: the journal is per-tick and unsynchronised.
     void noteFlagSet(unsigned int index, bool wasSet)
     {
         if (!armed || flagJournalCount >= (unsigned int)(sizeof(flagJournal) / sizeof(flagJournal[0])))
@@ -130,9 +124,9 @@ struct AntColonyTickRollback
             colony._tickIndex[tickSlotIndex] = tickSlot;
         }
 
-        colony._anchors->digests[anchorSlotIndex] = anchorDigest;
-        ATOMIC_STORE32(colony._anchors->ticks[anchorSlotIndex], (long)anchorTick);
-
+        // The anchor ring is deliberately not restored: it is K12(tick || K12(TickData)), which a
+        // re-run does not change, and it is written after the capture point. Putting the pre-tick
+        // value back would leave a hole for this tick that nothing re-records.
         copyMem(colony._exportSet, &exportSet, sizeof(exportSet));
         colony._stats = stats;
 

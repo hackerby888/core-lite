@@ -268,6 +268,9 @@ static int misalignedState = 0;
 
 static bool forceVerifySolutions = false;
 static bool forceBroadcastInvalidSolution = false;
+static bool forceBroadcastAntSolution = false;
+static unsigned int forceReprocessEveryNTicks = 0;
+static TestInvalidSolution::AntInjectMode forceAntInjectMode = TestInvalidSolution::AntInjectMode::Valid;
 
 static volatile unsigned char epochTransitionState = 0;
 static volatile unsigned char epochTransitionCleanMemoryFlag = 1;
@@ -5427,6 +5430,15 @@ static void processTick(unsigned long long processorNumber)
                                                  system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET,
                                                  getSolutionThreshold(score_engine::AlgoType::Bpp9000));
         }
+
+        // TEST: mine one ant solution against our own colony to drive the inputType-12 path.
+        if (forceBroadcastAntSolution && computorSeedsCount > 0)
+        {
+            TestInvalidSolution::broadcastAntSolution(gAntColony, *score, processorNumber,
+                                                      system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET,
+                                                      system.tick - 1,
+                                                      forceAntInjectMode);
+        }
     }
 
 #ifndef NDEBUG
@@ -7137,6 +7149,43 @@ static bool isTickTimeOut()
     return (__rdtsc() - tickTicks[sizeof(tickTicks) / sizeof(tickTicks[0]) - 1] > TARGET_TICK_DURATION * NEXT_TICK_TIMEOUT_THRESHOLD * frequency / 1000);
 }
 
+// Rebuild etalonTick.saltedSpectrumDigest from the spectrum entries this tick touched. Shared by
+// the quorum-mismatch recovery and the forced reprocess self-check, so both measure the same thing.
+static void recomputeSaltedSpectrumDigest()
+{
+    unsigned int digestIndex;
+    ACQUIRE(spectrumLock);
+    for (digestIndex = 0; digestIndex < SPECTRUM_CAPACITY; digestIndex++)
+    {
+        if (spectrum[digestIndex].latestIncomingTransferTick == system.tick || spectrum[digestIndex].latestOutgoingTransferTick == system.tick)
+        {
+            KangarooTwelve64To32(&spectrum[digestIndex], &spectrumDigests[digestIndex]);
+            spectrumChangeFlags[digestIndex >> 6] |= (1ULL << (digestIndex & 63));
+        }
+    }
+    unsigned int previousLevelBeginning = 0;
+    unsigned int numberOfLeafs = SPECTRUM_CAPACITY;
+    while (numberOfLeafs > 1)
+    {
+        for (unsigned int i = 0; i < numberOfLeafs; i += 2)
+        {
+            if (spectrumChangeFlags[i >> 6] & (3ULL << (i & 63)))
+            {
+                KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[digestIndex]);
+                spectrumChangeFlags[i >> 6] &= ~(3ULL << (i & 63));
+                spectrumChangeFlags[i >> 7] |= (1ULL << ((i >> 1) & 63));
+            }
+            digestIndex++;
+        }
+        previousLevelBeginning += numberOfLeafs;
+        numberOfLeafs >>= 1;
+    }
+    spectrumChangeFlags[0] = 0;
+
+    etalonTick.saltedSpectrumDigest = spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1];
+    RELEASE(spectrumLock);
+}
+
 void reprocessSolutionTransaction(unsigned long long processorNumber)
 {
     isReprocessingSolutions = true;
@@ -7158,6 +7207,10 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
     // the caller, so the replay below re-applies the ant contributions from a clean tree.
     gAntTickRollback.restore(gAntColony, gAntSolutionFlags);
     setMem(gAntScoredReady, sizeof(gAntScoredReady), 0);
+    // The colony now matches the original capture point, so re-arm: this function can be entered
+    // again for the same tick if the digest still disagrees, and a disarmed second restore would
+    // leave the first replay's commits in the tree.
+    gAntTickRollback.capture(gAntColony, system.tick);
 #endif
 
     auto tsCurrentTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(system.tick);
@@ -7760,6 +7813,48 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 processTick(processorNumber);
                 latestProcessedTick = system.tick;
 
+                // TEST: rollback + replay of a tick whose solutions are all valid must reproduce the
+                // same digests. Runs regardless of quorum agreement, so a single node can check it.
+                if (forceReprocessEveryNTicks > 0 && (system.tick % forceReprocessEveryNTicks) == 0)
+                {
+                    recomputeSaltedSpectrumDigest();
+                    const m256i spectrumDigestBefore = etalonTick.saltedSpectrumDigest;
+                    const unsigned int resourceDigestBefore = resourceTestingDigest;
+                    const unsigned int antSolutionsBefore = gAntColony.solutionCount();
+                    const unsigned int minersBefore = numberOfMiners;
+
+                    resourceTestingDigest = resourceTestingDigestRollback;
+                    reprocessSolutionTransaction(processorNumber);
+                    recomputeSaltedSpectrumDigest();
+
+                    const bool spectrumMatches = (etalonTick.saltedSpectrumDigest == spectrumDigestBefore);
+                    const bool resourceMatches = (resourceTestingDigest == resourceDigestBefore);
+                    const bool antMatches = (gAntColony.solutionCount() == antSolutionsBefore);
+                    const bool minersMatch = (numberOfMiners == minersBefore);
+                    if (spectrumMatches && resourceMatches && antMatches && minersMatch)
+                    {
+                        setText(message, L"FORCE-REPROCESS tick ");
+                        appendNumber(message, system.tick, FALSE);
+                        appendText(message, L": OK (replay reproduced every digest)");
+                        logToConsole(message);
+                    }
+                    else
+                    {
+                        setText(message, L"FORCE-REPROCESS tick ");
+                        appendNumber(message, system.tick, FALSE);
+                        appendText(message, L": MISMATCH spectrum=");
+                        appendNumber(message, spectrumMatches ? 1 : 0, FALSE);
+                        appendText(message, L" resource=");
+                        appendNumber(message, resourceMatches ? 1 : 0, FALSE);
+                        appendText(message, L" antNodes=");
+                        appendNumber(message, antMatches ? 1 : 0, FALSE);
+                        appendText(message, L" miners=");
+                        appendNumber(message, minersMatch ? 1 : 0, FALSE);
+                        logToConsole(message);
+                    }
+                    etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
+                }
+
                 // safety check for contract locks
                 // after processing a tick, all contract locks should be released
                 checkAllContractLocksReleased();
@@ -7869,38 +7964,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                             reprocessSolutionTransaction(processorNumber);
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
 
-                            // Update etalonTick.saltedSpectrumDigest
-                            unsigned int digestIndex;
-                            ACQUIRE(spectrumLock);
-                            for (digestIndex = 0; digestIndex < SPECTRUM_CAPACITY; digestIndex++)
-                            {
-                                if (spectrum[digestIndex].latestIncomingTransferTick == system.tick || spectrum[digestIndex].latestOutgoingTransferTick == system.tick)
-                                {
-                                    KangarooTwelve64To32(&spectrum[digestIndex], &spectrumDigests[digestIndex]);
-                                    spectrumChangeFlags[digestIndex >> 6] |= (1ULL << (digestIndex & 63));
-                                }
-                            }
-                            unsigned int previousLevelBeginning = 0;
-                            unsigned int numberOfLeafs = SPECTRUM_CAPACITY;
-                            while (numberOfLeafs > 1)
-                            {
-                                for (unsigned int i = 0; i < numberOfLeafs; i += 2)
-                                {
-                                    if (spectrumChangeFlags[i >> 6] & (3ULL << (i & 63)))
-                                    {
-                                        KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[digestIndex]);
-                                        spectrumChangeFlags[i >> 6] &= ~(3ULL << (i & 63));
-                                        spectrumChangeFlags[i >> 7] |= (1ULL << ((i >> 1) & 63));
-                                    }
-                                    digestIndex++;
-                                }
-                                previousLevelBeginning += numberOfLeafs;
-                                numberOfLeafs >>= 1;
-                            }
-                            spectrumChangeFlags[0] = 0;
-
-                            etalonTick.saltedSpectrumDigest = spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1];
-                            RELEASE(spectrumLock);
+                            recomputeSaltedSpectrumDigest();
 
                             if (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum)
                             {
@@ -11302,6 +11366,8 @@ void processArgs(int argc, const char* argv[]) {
 		("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
         ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
         ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the reprocessSolutionTransaction() rollback path", cxxopts::value<bool>())
+        ("fbas, force-broadcast-ant-solution", "TEST: each tick, mine one ant-colony solution against our own colony and publish it. Mode selects which accept rule it aims at: valid, badclaim, noncanon, wrongtree, stale, futureparent, leparent", cxxopts::value<std::string>())
+        ("force-reprocess-every", "TEST: run the solution reprocess path every N ticks regardless of quorum agreement. On a tick whose solutions are all valid the rollback and replay must reproduce the same digests, so a mismatch is a rollback bug", cxxopts::value<unsigned int>())
         ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
         ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
@@ -11583,6 +11649,38 @@ void processArgs(int argc, const char* argv[]) {
     {
         forceBroadcastInvalidSolution = true;
         logColorToScreen("INFO", "Force broadcast invalid solution enabled (TEST ONLY)");
+    }
+
+    if (result.count("force-reprocess-every"))
+    {
+        forceReprocessEveryNTicks = result["force-reprocess-every"].as<unsigned int>();
+        if (forceReprocessEveryNTicks > 0)
+        {
+            logColorToScreen("INFO", "Force reprocess every "
+                + std::to_string(forceReprocessEveryNTicks) + " ticks (TEST ONLY)");
+        }
+    }
+
+    if (result.count("force-broadcast-ant-solution"))
+    {
+        const std::string mode = result["force-broadcast-ant-solution"].as<std::string>();
+        forceBroadcastAntSolution = true;
+        if (mode == "valid")             forceAntInjectMode = TestInvalidSolution::AntInjectMode::Valid;
+        else if (mode == "badclaim")     forceAntInjectMode = TestInvalidSolution::AntInjectMode::BadClaim;
+        else if (mode == "noncanon")     forceAntInjectMode = TestInvalidSolution::AntInjectMode::NonCanonical;
+        else if (mode == "wrongtree")    forceAntInjectMode = TestInvalidSolution::AntInjectMode::WrongTree;
+        else if (mode == "stale")        forceAntInjectMode = TestInvalidSolution::AntInjectMode::Stale;
+        else if (mode == "futureparent") forceAntInjectMode = TestInvalidSolution::AntInjectMode::FutureParent;
+        else if (mode == "leparent")     forceAntInjectMode = TestInvalidSolution::AntInjectMode::LeParent;
+        else
+        {
+            forceBroadcastAntSolution = false;
+            logColorToScreen("ERROR", "Unknown --force-broadcast-ant-solution mode: " + mode);
+        }
+        if (forceBroadcastAntSolution)
+        {
+            logColorToScreen("INFO", "Force broadcast ant solution enabled, mode " + mode + " (TEST ONLY)");
+        }
     }
 }
 
