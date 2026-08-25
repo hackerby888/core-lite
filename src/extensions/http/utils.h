@@ -62,7 +62,8 @@ public:
         assetJson["name"] = std::string(asset->name);
         assetJson["type"] = ASSET_ISSUANCE;
         assetJson["numberOfDecimalPlaces"] = asset->numberOfDecimalPlaces;
-        for (int i = 0; i < 8; i++)
+        // char[7]: the old i < 8 ran past the struct.
+        for (size_t i = 0; i < sizeof(asset->unitOfMeasurement); i++)
         {
             unitOfMeasurementArray.append(asset->unitOfMeasurement[i]);
         }
@@ -124,7 +125,8 @@ public:
         getIdentity(digest, txHashStr, true);
         CHAR16 humanId[61] = {0};
         jsonObject["hash"] = wchar_to_string(txHashStr);
-        jsonObject["amount"] = Json::UInt64(tx->amount);
+        // int64 as string, per protobuf JSON: a number loses precision past 2^53.
+        jsonObject["amount"] = std::to_string(tx->amount);
         getIdentity((const unsigned char *)&tx->sourcePublicKey, humanId, false);
         jsonObject["source"] = wchar_to_string(humanId);
         getIdentity((const unsigned char *)&tx->destinationPublicKey, humanId, false);
