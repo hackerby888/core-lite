@@ -5654,44 +5654,44 @@ static void processTick(unsigned long long processorNumber)
         {
             TestInvalidSolution::broadcastRandom(score->currentRandomSeed, txTick, claimedScore);
         }
+    }
 
-        // TEST: mine ant solutions against our own colony to drive the inputType-12 path. A walk
-        // takes seconds, so it runs on its own thread like an external miner would, never on the
-        // tick processor.
-        if (forceBroadcastAntSolution && computorSeedsCount > 0)
+    // TEST: mine ant solutions against our own colony to drive the inputType-12 path. A walk
+    // takes seconds, so it runs on its own thread like an external miner would, never on the
+    // tick processor.
+    if (forceBroadcastAntSolution && computorSeedsCount > 0)
+    {
+        static bool antMinerStarted = false;
+        if (!antMinerStarted)
         {
-            static bool antMinerStarted = false;
-            if (!antMinerStarted)
+            antMinerStarted = true;
+            std::thread([]()
             {
-                antMinerStarted = true;
-                std::thread([]()
+                unsigned int lastMinedTick = 0;
+                unsigned int published = 0;
+                while (!shutDownNode && published < forceAntSolutionBudget)
                 {
-                    unsigned int lastMinedTick = 0;
-                    unsigned int published = 0;
-                    while (!shutDownNode && published < forceAntSolutionBudget)
+                    const unsigned int tick = system.tick;
+                    if (tick != lastMinedTick && tick > system.initialTick)
                     {
-                        const unsigned int tick = system.tick;
-                        if (tick != lastMinedTick && tick > system.initialTick)
+                        lastMinedTick = tick;
+                        // Engine slot is processorNumber % solutionBufferCount; the tick processor is
+                        // processor 1, so use 0 to keep the miner's walk off the verifier's lock.
+                        if (TestInvalidSolution::broadcastAntSolution(gAntColony, *score, 0,
+                                                                      tick - 1,
+                                                                      forceAntInjectMode, 1))
                         {
-                            lastMinedTick = tick;
-                            // Engine slot is processorNumber % solutionBufferCount; the tick processor is
-                            // processor 1, so use 0 to keep the miner's walk off the verifier's lock.
-                            if (TestInvalidSolution::broadcastAntSolution(gAntColony, *score, 0,
-                                                                          tick - 1,
-                                                                          forceAntInjectMode, 1))
-                            {
-                                published++;
-                            }
+                            published++;
                         }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
                     }
-                    CHAR16 doneLine[128];
-                    setText(doneLine, L"ANT-INJECT budget spent, miner thread exiting after ");
-                    appendNumber(doneLine, published, FALSE);
-                    appendText(doneLine, L" solution(s)");
-                    logToConsole(doneLine);
-                }).detach();
-            }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                CHAR16 doneLine[128];
+                setText(doneLine, L"ANT-INJECT budget spent, miner thread exiting after ");
+                appendNumber(doneLine, published, FALSE);
+                appendText(doneLine, L" solution(s)");
+                logToConsole(doneLine);
+            }).detach();
         }
     }
 
