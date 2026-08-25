@@ -58,6 +58,10 @@ inline long gForkRssBeforeKb = 0;        // parent RSS just before fork
 
 namespace tickFork
 {
+    // Whether a tick can be undone at all. Anything that trusts a claimed score instead of computing
+    // it depends on this: without a checkpoint a disagreement with quorum has no way back.
+    inline constexpr bool gRollbackAvailable = true;
+
     inline std::atomic<bool> gForkRequest{ false };  // tickProcessor -> BSP: fork now
     inline std::atomic<pid_t> gChildPid{ -2 };       // BSP -> tickProcessor: child pid (>=0) / -1 fail / -2 idle
     inline int gPipe[2] = { -1, -1 };                // verdict channel: parent writes [1], child reads [0]
@@ -523,6 +527,10 @@ namespace tickFork
 #include <atomic>
 namespace tickFork
 {
+    // No checkpoint on this build, so every optimistic shortcut stays off: a tick processed on a
+    // trusted score could disagree with quorum and nothing here could undo it.
+    inline constexpr bool gRollbackAvailable = false;
+
     inline std::atomic<bool> gIsForkChild{ false };
     inline std::atomic<bool> gForkRequest{ false };
     inline void maybeForkBeforeTick(unsigned long long) {}

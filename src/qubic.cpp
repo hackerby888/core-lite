@@ -1219,10 +1219,13 @@ static bool isLastTickInEpoch() {
 // AUX outside the strict paths takes a solution's claimed score instead of computing it. A tick
 // processed that way can disagree with quorum, which is what the fork checkpoint undoes - and every
 // path that fails to establish one sets gReRunStrict, so this is never true on a tick with no
-// checkpoint behind it.
+// checkpoint behind it. Builds without a checkpoint at all never take the shortcut: MAIN, a strict
+// re-run, --force-verify-solutions and the last tick of an epoch all compute, and so does every
+// platform where the rollback does not exist.
 static bool isTrustingClaimedSolutionScore()
 {
-    return !isMainMode() && !gReRunStrict && !forceVerifySolutions && !isLastTickInEpoch();
+    return tickFork::gRollbackAvailable
+        && !isMainMode() && !gReRunStrict && !forceVerifySolutions && !isLastTickInEpoch();
 }
 
 // NOTE: this function doesn't work well on a few CPUs, some bits will be flipped after calling this. It's probably microcode bug.
@@ -3834,7 +3837,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
         score_engine::AlgoType selectedAlgo = score_engine::getAlgoType(transaction->nonce.m256i_u8);
         const int threshold = getSolutionThreshold(selectedAlgo);
         unsigned int solutionScore;
-        if (isMainMode() || gReRunStrict || isLastTickInEpoch() || forceVerifySolutions)
+        if (!isTrustingClaimedSolutionScore())
         {
             solutionScore = (*::score)(processorNumber, transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce);
         }
