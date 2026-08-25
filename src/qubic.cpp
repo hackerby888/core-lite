@@ -461,12 +461,18 @@ static AntColonyBpp9000T::Ann gAntChildAnnScratch[MAX_NUMBER_OF_PROCESSORS];
 static AntColonyBpp9000T::Ann gAntRebuildParentScratch[MAX_NUMBER_OF_PROCESSORS];
 static AntColonyBpp9000T::Ann gAntRebuildChildScratch[MAX_NUMBER_OF_PROCESSORS];
 
+// Ant tracing is compiled into every build and switched on with --ant-debug, so a release node can
+// be traced without rebuilding it. Debug builds keep tracing on by default.
 #ifndef NDEBUG
+static bool gAntDebugEnabled = true;
+#else
+static bool gAntDebugEnabled = false;
+#endif
 static constexpr unsigned int ANT_DEBUG_PRINTS_PER_EPOCH = 512;
 static unsigned int gAntDebugPrintBudget = ANT_DEBUG_PRINTS_PER_EPOCH;
 static bool antDebugCanPrint()
 {
-    if (gAntDebugPrintBudget == 0)
+    if (!gAntDebugEnabled || gAntDebugPrintBudget == 0)
     {
         return false;
     }
@@ -477,21 +483,17 @@ static bool antDebugCanPrint()
     }
     return true;
 }
-#endif
 
 static void antDebugLine(const CHAR16* text)
 {
-#ifndef NDEBUG
     if (antDebugCanPrint())
     {
         logToConsole(text);
     }
-#endif
 }
 
 static void antDebugPoolDrop(const CHAR16* reason, const AntSolutionBroadcastPayload& payload)
 {
-#ifndef NDEBUG
     if (!antDebugCanPrint())
     {
         return;
@@ -508,12 +510,10 @@ static void antDebugPoolDrop(const CHAR16* reason, const AntSolutionBroadcastPay
     appendText(msg, L" nonce0=");
     appendNumber(msg, payload.nonce.m256i_u64[0], FALSE);
     logToConsole(msg);
-#endif
 }
 
 static void antDebugPending(const CHAR16* outcome, const AntPendingSolution& entry, unsigned int targetTick)
 {
-#ifndef NDEBUG
     if (!antDebugCanPrint())
     {
         return;
@@ -532,13 +532,11 @@ static void antDebugPending(const CHAR16* outcome, const AntPendingSolution& ent
     appendText(msg, L" target=");
     appendNumber(msg, targetTick, FALSE);
     logToConsole(msg);
-#endif
 }
 
 static void antDebugAccepted(const AntColonyMiningSolutionTransaction* transaction, unsigned int score,
-    unsigned int depth, unsigned int transactionIndex, ValidityResult result)
+    unsigned int depth, unsigned int transactionIndex, ValidityResult result, bool trustedScore)
 {
-#ifndef NDEBUG
     if (result != ValidityResult::Valid && result != ValidityResult::ValidNotStored)
     {
         return;
@@ -558,8 +556,9 @@ static void antDebugAccepted(const AntColonyMiningSolutionTransaction* transacti
     appendNumber(msg, depth, FALSE);
     appendText(msg, L" stored=");
     appendNumber(msg, (result == ValidityResult::Valid) ? 1 : 0, FALSE);
+    appendText(msg, L" trusted=");
+    appendNumber(msg, trustedScore ? 1 : 0, FALSE);
     logToConsole(msg);
-#endif
 }
 
 // Pre-scored ant solutions for the current tick, indexed by TRANSACTION index. Each transaction is
@@ -745,6 +744,7 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
     }
 
     // Owned from here on, so every exit below either publishes or releases the claim.
+    const unsigned long long rebuildStart = __rdtsc();
     const AntSolutionRecord* rec = gAntColony.recordAt(idx);
     if (rec == nullptr)
     {
@@ -798,6 +798,18 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
     unsigned int annHash;
     KangarooTwelve(&childAnn, sizeof(childAnn), &annHash, sizeof(annHash));
     gAntColony.publishAnn(idx, childAnn, annHash);
+
+    // A rebuild costs a full walk, so an operator seeing a tick take tens of seconds should be able
+    // to attribute it here rather than to the fork machinery around it.
+    CHAR16 okLine[224];
+    setText(okLine, L"[ant-colony] rebuilt the network of record ");
+    appendNumber(okLine, idx, FALSE);
+    appendText(okLine, L" score ");
+    appendNumber(okLine, rebuiltScore, FALSE);
+    appendText(okLine, L" in ");
+    appendNumber(okLine, (__rdtsc() - rebuildStart) / (frequency / 1000), FALSE);
+    appendText(okLine, L" ms");
+    logToConsole(okLine);
     return true;
 }
 
@@ -810,6 +822,11 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
 static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int recordIdx,
     AntColonyBpp9000T::Ann& out)
 {
+    if (!gAntColony.isAnnMaterialised(recordIdx))
+    {
+        antDebugLine(L"[ant-colony] rebuilding a missing parent network, this costs a full walk");
+    }
+
     while (!gAntColony.isAnnMaterialised(recordIdx))
     {
         // The shallowest record on this chain still missing a network. Its parent is the root or
@@ -840,6 +857,14 @@ static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int 
 
         if (!materialiseOneAntRecord(processorNumber, target))
         {
+            // The caller turns this into RejectParentNotRegistered, which no other node reaches -
+            // the one divergence a rollback cannot repair, so say so rather than failing quietly.
+            CHAR16 failLine[224];
+            setText(failLine, L"[ant-colony] could not rebuild the network of record ");
+            appendNumber(failLine, target, FALSE);
+            appendText(failLine, L" needed by record ");
+            appendNumber(failLine, recordIdx, FALSE);
+            logToConsole(failLine);
             return false;
         }
     }
@@ -4078,7 +4103,35 @@ static void processTickTransactionAntColonySolution(
 
     result = gAntColony.commit(in, parentRec, childScore, childAnn, childAnnHash, trustClaimedScore);
     logAntSolutionOutcome(transaction, childScore, result);
-    antDebugAccepted(transaction, childScore, (parentRec != nullptr) ? (parentRec->depth + 1) : 1, transactionIndex, result);
+    antDebugAccepted(transaction, childScore, (parentRec != nullptr) ? (parentRec->depth + 1) : 1,
+        transactionIndex, result, trustClaimedScore);
+
+    // An accept that only stood because the score was trusted is exactly the one that will disagree
+    // with quorum. Naming it makes a rollback later in this tick explainable rather than mysterious.
+    if (trustClaimedScore
+        && (result == ValidityResult::Valid || result == ValidityResult::ValidNotStored))
+    {
+        const unsigned int parentScore = (parentRec != nullptr) ? parentRec->score : WORST_SCORE;
+        const bool wouldHaveRejected = (childScore > gAntColony.errorThreshold())
+            || (childScore >= parentScore)
+            || !score->isValidScore(childScore, score_engine::AlgoType::Bpp9000);
+        if (wouldHaveRejected && antDebugCanPrint())
+        {
+            CHAR16 msg[256];
+            setText(msg, L"[ant-colony] over-accepted on a trusted score, tick ");
+            appendNumber(msg, system.tick, FALSE);
+            appendText(msg, L" idx ");
+            appendNumber(msg, transactionIndex, FALSE);
+            appendText(msg, L" score ");
+            appendNumber(msg, childScore, FALSE);
+            appendText(msg, L" threshold ");
+            appendNumber(msg, gAntColony.errorThreshold(), FALSE);
+            appendText(msg, L" parentScore ");
+            appendNumber(msg, parentScore, FALSE);
+            appendText(msg, L" - expect a spectrum disagreement this tick");
+            logToConsole(msg);
+        }
+    }
     // ValidNotStored is the store being full: the solution passed every rule and only missed a slot,
     // so it earns its refund and its ranking exactly like a stored one
     if (result != ValidityResult::Valid && result != ValidityResult::ValidNotStored)
@@ -10571,6 +10624,17 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     // ── strict-replay window ──
     gReRunStrict = true;
     gReRunStrictUntilTick = strictUntilTick;
+    {
+        // The range explains the catch-up that follows: every solution in it is recomputed, and an
+        // ant solution whose parent was accepted on trust also has that parent's network rebuilt.
+        CHAR16 strictLine[192];
+        setText(strictLine, L"[FORK] CHILD: replaying ticks ");
+        appendNumber(strictLine, (unsigned long long)system.tick, FALSE);
+        appendText(strictLine, L"..");
+        appendNumber(strictLine, (unsigned long long)strictUntilTick, FALSE);
+        appendText(strictLine, L" strict");
+        logToConsole(strictLine);
+    }
 
     // ── networking — drop parent connection state, keep COW-shared buffers ──
     Overload::resetForChildPromote();
@@ -11691,6 +11755,7 @@ void processArgs(int argc, const char* argv[]) {
         ("fbas,force-broadcast-ant-solution", "TEST: mine ant-colony solutions against our own colony and publish them, as <mode> or <mode>:<count> (default 3; a walk costs seconds of CPU and each publish burns a deposit). Mode selects which accept rule it aims at: valid, badclaim, noncanon, wrongtree, stale, futureparent, leparent", cxxopts::value<std::string>())
         ("fbas-warmup", "TEST: publish this many valid ant solutions before switching to the --fbas mode", cxxopts::value<int>()->default_value("0"))
         ("fbas-gap", "TEST: minimum ticks between ant publishes; a gap wider than the fork window makes each window retire", cxxopts::value<int>()->default_value("0"))
+        ("ant-debug", "Trace ant-colony accepts, over-accepts and network rebuilds (budgeted per epoch)", cxxopts::value<bool>())
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
@@ -11903,6 +11968,13 @@ void processArgs(int argc, const char* argv[]) {
     {
         isTestnetGoBehindTrick = true;
         logColorToScreen("INFO", "Using testnet go behind trick");
+    }
+
+    if (result.count("ant-debug"))
+    {
+        gAntDebugEnabled = true;
+        logColorToScreen("INFO", "Ant colony tracing enabled, "
+            + std::to_string(ANT_DEBUG_PRINTS_PER_EPOCH) + " lines per epoch");
     }
 
     if (result.count("rebuild-tx-hashmap"))
