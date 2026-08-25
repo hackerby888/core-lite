@@ -84,10 +84,6 @@ add_executable(
 		oracle_engine.cpp
 )
 
-if(DEFINED LITE_ANT_TICK_ROLLBACK AND NOT LITE_ANT_TICK_ROLLBACK)
-    target_compile_definitions(qubic_core_tests PRIVATE LITE_ANT_TICK_ROLLBACK=0)
-endif()
-
 # Apply test-specific compiler flags from the centralized detection module
 apply_test_compiler_flags(qubic_core_tests)
 

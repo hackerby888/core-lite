@@ -73,6 +73,7 @@
 
 // #define INCLUDE_CONTRACT_TEST_EXAMPLES
 
+// #define OLD_QRAFFLE
 
 // contract_def.h needs to be included first to make sure that contracts have minimal access
 #include "contract_core/contract_def.h"
@@ -188,7 +189,6 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/lite_checkin.h"
 #include "extensions/test_invalid_solution.h"
 #include "extensions/k12_state_digest_cache.h"
-#include "extensions/ant_colony_rollback.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
 #ifdef _WIN32
@@ -627,15 +627,8 @@ static bool isAntSolutionSeen(const unsigned int* flagIndices)
 
 static void markAntSolutionSeen(const unsigned int* flagIndices)
 {
-    for (unsigned int i = 0; i < 2; i++)
-    {
-        const unsigned int index = flagIndices[i];
-        const unsigned long long mask = 1ULL << (index & 63);
-#if LITE_ANT_TICK_ROLLBACK
-        gAntTickRollback.noteFlagSet(index, (gAntSolutionFlags[index >> 6] & mask) != 0);
-#endif
-        gAntSolutionFlags[index >> 6] |= mask;
-    }
+    gAntSolutionFlags[flagIndices[0] >> 6] |= (1ULL << (flagIndices[0] & 63));
+    gAntSolutionFlags[flagIndices[1] >> 6] |= (1ULL << (flagIndices[1] & 63));
 }
 
 // The anchor digest a solution's mutation walk seeds from, K12(tick || transactionDigest)
@@ -1690,6 +1683,52 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
                         const m256i& solutionMiningSeed = *(m256i*)request->inputPtr();
                         const m256i& solutionNonce = *(m256i*)(request->inputPtr() + 32);
                         (*score)(processorNumber, request->sourcePublicKey, solutionMiningSeed, solutionNonce);
+                    }
+                }
+            }
+
+            // Same latency hiding for ant solution transactions, we do simple check first then the last
+            // is the score engine that where the heavy load stay
+            if (preprocessSolutionFlags[processorNumber]
+                && AntColonyMiningSolutionTransaction::isSolutionTransaction(request))
+            {
+                const AntColonyMiningSolutionTransaction* antTx = (const AntColonyMiningSolutionTransaction*)request;
+                const SolutionRef preParentRef = { antTx->parentTick, antTx->parentSolutionIndexInTick };
+                unsigned int preFlagIndices[2];
+                computeAntSolutionFlagIndices(antTx->sourcePublicKey, antTx->nonce, preParentRef, preFlagIndices);
+                const int spectrumIdx = spectrumIndex(antTx->sourcePublicKey);
+                if (spectrumIdx >= 0
+                    && energy(spectrumIdx) >= AntColonyMiningSolutionTransaction::minAmount()
+                    && !isAntSolutionSeen(preFlagIndices)
+                    && score_engine::ScoreEngineT::isCanonicalAntNonce(antTx->nonce.m256i_u8))
+                {
+                    const AntSolutionRecord* preParentRec = nullptr;
+                    m256i preAnchorDigest;
+                    if (gAntColony.tryGetParent(preParentRef, &preParentRec) == ValidityResult::Valid
+                        && gAntColony.getAnchorDigest(antTx->anchorTick, preAnchorDigest))
+                    {
+                        const AntColonyBpp9000T::Ann* preParentAnn = nullptr;
+                        bool preParentOk = true;
+                        if (preParentRec != nullptr)
+                        {
+                            preParentOk = gAntColony.annOfNonRoot(*preParentRec, gAntParentAnnScratch[processorNumber]);
+                            preParentAnn = &gAntParentAnnScratch[processorNumber];
+                        }
+                        if (preParentOk)
+                        {
+                            const AntColonyBpp9000T::ReplayKey preKey = makeAntReplayKey(
+                                antTx->sourcePublicKey, antTx->nonce, preParentAnn, preAnchorDigest);
+                            unsigned int preScore = 0;
+                            if (!gAntColony.tryGetReplayScore(preKey, preScore, gAntChildAnnScratch[processorNumber]))
+                            {
+                                preScore = score->computeAntChildScore(processorNumber, preParentAnn,
+                                    antTx->sourcePublicKey, antTx->nonce, preAnchorDigest,
+                                    gAntChildAnnScratch[processorNumber]);
+                                // cache this score so later can skip the heavy score computation,
+                                // invalid ones included
+                                gAntColony.putReplayScore(preKey, preScore, gAntChildAnnScratch[processorNumber]);
+                            }
+                        }
                     }
                 }
             }
@@ -3781,16 +3820,7 @@ static void processTickTransactionAntColonySolution(
 
     unsigned int childScore;
     const AntColonyBpp9000T::Ann* childAnn;
-    if (antTrustClaimedScore && !isReprocessingSolutions)
-    {
-        // TEST: an optimistic aux node that takes the claim without walking. Its first pass is wrong
-        // whenever the claim is, so the quorum mismatch and the rollback that repairs it are
-        // exercised for real. The replay above runs the walk.
-        childScore = transaction->claimedScore;
-        setMem(&childAnnScratch, sizeof(childAnnScratch), 0);
-        childAnn = &childAnnScratch;
-    }
-    else if (gAntScoredReady[transactionIndex])
+    if (gAntScoredReady[transactionIndex])
     {
         childScore = gAntScoredValue[transactionIndex];
         childAnn = &gAntScoredAnn[transactionIndex];
@@ -3873,12 +3903,8 @@ static void processTickTransactionAntColonySolution(
         // Refund if this score == its claimed score and the ann tree check
         increaseEnergy(transaction->sourcePublicKey, transaction->amount);
 
-        if (!isReprocessingSolutions)
-        {
-            gSolutionTxReturned[transactionIndex] = true; // deposit return applied; for reprocess undo
-            const QuTransfer quTransfer = { m256i::zero(), transaction->sourcePublicKey, transaction->amount };
-            logger.logQuTransfer(quTransfer);
-        }
+        const QuTransfer quTransfer = { m256i::zero(), transaction->sourcePublicKey, transaction->amount };
+        logger.logQuTransfer(quTransfer);
 
         // A miner is ranked by its single best score of the epoch
         const unsigned int newScore = childScore * gScoreMultiplier[score_engine::AlgoType::Bpp9000];
@@ -4010,7 +4036,6 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
 
                 case AntColonyMiningSolutionTransaction::transactionType():
                 {
-                    gSolutionTxPaid[transactionIndex] = true; // deposit paid; reaching here means decreaseEnergy succeeded
                     // Exact inputSize, not >=: the payload is fixed and a longer one is not a
                     // forward-compatible variant, it is a different transaction.
                     if (transaction->amount >= AntColonyMiningSolutionTransaction::minAmount()
@@ -4553,8 +4578,7 @@ static void processTick(unsigned long long processorNumber)
                                 }
                             }
                             // Ant solutions ride the same async queue
-                            else if (!antTrustClaimedScore
-                                && isZero(transaction->destinationPublicKey)
+                            else if (isZero(transaction->destinationPublicKey)
                                 && transaction->amount >= AntColonyMiningSolutionTransaction::minAmount()
                                 && transaction->inputType == AntColonyMiningSolutionTransaction::transactionType()
                                 && transaction->inputSize == AntColonyMiningSolutionTransaction::minInputSize())
@@ -4666,14 +4690,6 @@ static void processTick(unsigned long long processorNumber)
 
         gLastTickHadSolutionTx = isThisTickHasSolution || isThisTickHasAntSolution;
 
-#if LITE_ANT_TICK_ROLLBACK
-        // Only a tick carrying an ant solution can move colony state, so ordinary ticks pay nothing.
-        gAntTickRollback.disarm();
-        if (isThisTickHasAntSolution)
-        {
-            gAntTickRollback.capture(gAntColony, system.tick);
-        }
-#endif
 
         for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
         {
@@ -7259,16 +7275,6 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
     copyMem((void*)minerBestScoreTicks, (void*)minerBestScoreTicksRollback, sizeof(minerBestScoreTicksRollback));
     numberOfMiners = numberOfMinersRollback;
 
-#if LITE_ANT_TICK_ROLLBACK
-    // Undo the colony writes of the discarded pass. resourceTestingDigest was restored wholesale by
-    // the caller, so the replay below re-applies the ant contributions from a clean tree.
-    gAntTickRollback.restore(gAntColony, gAntSolutionFlags);
-    setMem(gAntScoredReady, sizeof(gAntScoredReady), 0);
-    // The colony now matches the original capture point, so re-arm: this function can be entered
-    // again for the same tick if the digest still disagrees, and a disarmed second restore would
-    // leave the first replay's commits in the tree.
-    gAntTickRollback.capture(gAntColony, system.tick);
-#endif
 
     auto tsCurrentTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(system.tick);
 
@@ -7302,22 +7308,6 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                             score->addTask(scoreLegacySolutionTask, data, sizeof(data));
                         }
                     }
-#if LITE_ANT_TICK_ROLLBACK
-                    // Ant solutions ride the same queue on the replay, as they do on the first pass.
-                    else if (AntColonyMiningSolutionTransaction::isSolutionTransaction(transaction))
-                    {
-                        const AntColonyMiningSolutionTransaction* antTx =
-                            (const AntColonyMiningSolutionTransaction*)transaction;
-                        AntScoreTaskPayload task;
-                        task.pubkey = antTx->sourcePublicKey;
-                        task.nonce = antTx->nonce;
-                        task.parentRef.tick = antTx->parentTick;
-                        task.parentRef.solutionIndexInTick = antTx->parentSolutionIndexInTick;
-                        task.anchorTick = antTx->anchorTick;
-                        task.txIdx = transactionIndex;
-                        score->addTask(scoreAntSolutionTask, &task, sizeof(task));
-                    }
-#endif
                 }
             }
         }
@@ -7404,54 +7394,6 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                         }
                         RELEASE(spectrumLock);
                     }
-#if LITE_ANT_TICK_ROLLBACK
-                    // Ant solutions replay in transaction order alongside the legacy ones:
-                    // resourceTestingDigest folds each score in turn, so grouping them would
-                    // produce a different digest.
-                    else if (AntColonyMiningSolutionTransaction::isSolutionTransaction(transaction))
-                    {
-                        setText(message, L"Reprocess ant sol tx #");
-                        appendNumber(message, transactionIndex, FALSE);
-                        logToConsole(message);
-
-                        // Undo this transaction's optimistic deposit payment and return, then replay
-                        // the balance-gated path.
-                        ACQUIRE(spectrumLock);
-                        if (gSolutionTxReturned[transactionIndex])
-                        {
-                            spectrum[spectrumIndex].incomingAmount -= transaction->amount;
-                            spectrum[spectrumIndex].numberOfIncomingTransfers--;
-                            spectrumInfo.totalAmount -= transaction->amount;
-                        }
-                        if (gSolutionTxPaid[transactionIndex])
-                        {
-                            spectrum[spectrumIndex].outgoingAmount -= transaction->amount;
-                            spectrum[spectrumIndex].numberOfOutgoingTransfers--;
-                            spectrumInfo.totalAmount += transaction->amount;
-                        }
-                        spectrum[spectrumIndex].latestIncomingTransferTick = spectrumDataRollback[transactionIndex].latestIncomingTransferTick;
-                        auto antBackupNumberOfIncomingTransfers = spectrum[spectrumIndex].numberOfIncomingTransfers;
-                        RELEASE(spectrumLock);
-
-                        // The colony was rolled back above, so the replay sees a clean tree and
-                        // reaches the same verdict the first pass did.
-                        if (decreaseEnergy(spectrumIndex, transaction->amount))
-                        {
-                            processTickTransactionAntColonySolution(
-                                (AntColonyMiningSolutionTransaction*)transaction, transactionIndex, processorNumber);
-                        }
-
-                        // Re-resolve the index: a refund may have triggered reorganizeSpectrum().
-                        const int antSpectrumIndexAfter = ::spectrumIndex(transaction->sourcePublicKey);
-                        ACQUIRE(spectrumLock);
-                        if (antSpectrumIndexAfter >= 0
-                            && spectrum[antSpectrumIndexAfter].numberOfIncomingTransfers != antBackupNumberOfIncomingTransfers)
-                        {
-                            latestIncomingTransferTickPreservePubkeys.push_back(transaction->sourcePublicKey);
-                        }
-                        RELEASE(spectrumLock);
-                    }
-#endif
                 }
             }
             else

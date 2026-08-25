@@ -331,6 +331,7 @@ public:
         return _nTask - _nFinished;
     }
 
+public:
     void resetTaskQueue()
     {
         LockGuard guard(taskQueueLock);

@@ -254,9 +254,6 @@ struct AnchorRing
 template<typename ScoreT>
 class AntColony
 {
-    // Tick fork-rollback needs to undo the writes commit() makes; delete with the extension header.
-    friend struct AntColonyTickRollback;
-
 public:
     // The ANN state will depend on score type
     using Ann = typename ScoreT::ANN;
