@@ -81,7 +81,8 @@ namespace tickFork
         gWinState.store((int)state, std::memory_order_release);
     }
 
-    // Only ticks carrying a mining-solution tx can mismatch quorum.
+    // Only ticks carrying a mining-solution tx can mismatch quorum. Ant solutions count because an
+    // AUX node commits them on their claimed score, so any tick carrying one can disagree.
     inline bool tickHasSolution(unsigned int tick)
     {
         TickData tickDataCopy;
@@ -101,7 +102,8 @@ namespace tickFork
             Transaction* transaction = ts.tickTransactions(offsets[i]);
             if (!transaction->checkValidity())
                 continue;
-            if (MiningSolutionTransaction::isSolutionTransaction(transaction))
+            if (MiningSolutionTransaction::isSolutionTransaction(transaction)
+                || AntColonyMiningSolutionTransaction::isSolutionTransaction(transaction))
                 return true;
         }
         return false;

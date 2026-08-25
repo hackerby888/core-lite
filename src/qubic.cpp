@@ -1186,6 +1186,15 @@ static bool isLastTickInEpoch() {
 #endif
 }
 
+// AUX outside the strict paths takes a solution's claimed score instead of computing it. A tick
+// processed that way can disagree with quorum, which is what the fork checkpoint undoes - and every
+// path that fails to establish one sets gReRunStrict, so this is never true on a tick with no
+// checkpoint behind it.
+static bool isTrustingClaimedSolutionScore()
+{
+    return !isMainMode() && !gReRunStrict && !forceVerifySolutions && !isLastTickInEpoch();
+}
+
 // NOTE: this function doesn't work well on a few CPUs, some bits will be flipped after calling this. It's probably microcode bug.
 static void enableAVX()
 {
@@ -1908,6 +1917,7 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
             // Same latency hiding for ant solution transactions, we do simple check first then the last
             // is the score engine that where the heavy load stay
             if (preprocessSolutionFlags[processorNumber]
+                && !isTrustingClaimedSolutionScore()
                 && AntColonyMiningSolutionTransaction::isSolutionTransaction(request))
             {
                 const AntColonyMiningSolutionTransaction* antTx = (const AntColonyMiningSolutionTransaction*)request;
@@ -3976,9 +3986,17 @@ static void processTickTransactionAntColonySolution(
         return;
     }
 
+    // Taking the claim means no walk and no network for this solution. A lie shows up as a refund
+    // this node makes and the quorum does not, so the disagreement lands in the same tick.
+    const bool trustClaimedScore = isTrustingClaimedSolutionScore();
+
     unsigned int childScore;
-    const AntColonyBpp9000T::Ann* childAnn;
-    if (gAntScoredReady[transactionIndex])
+    const AntColonyBpp9000T::Ann* childAnn = nullptr;
+    if (trustClaimedScore)
+    {
+        childScore = transaction->claimedScore;
+    }
+    else if (gAntScoredReady[transactionIndex])
     {
         childScore = gAntScoredValue[transactionIndex];
         childAnn = &gAntScoredAnn[transactionIndex];
@@ -4015,7 +4033,11 @@ static void processTickTransactionAntColonySolution(
         childAnn = &childAnnScratch;
     }
 
-    if (!score->isValidScore(childScore, score_engine::AlgoType::Bpp9000))
+    // This and the two score rules inside commit() are the only checks decided by the score itself,
+    // and none of them may fire on a score this node trusted rather than computed: rejecting leaves
+    // no refund for the quorum to disagree with, so the tree diverges in silence. Accepting turns
+    // the same lie into a spectrum disagreement the checkpoint can undo.
+    if (!trustClaimedScore && !score->isValidScore(childScore, score_engine::AlgoType::Bpp9000))
     {
         gAntColony.recordReject(ValidityResult::RejectNonCanonicalNonce);
         logAntSolutionOutcome(transaction, 0, ValidityResult::RejectNonCanonicalNonce);
@@ -4023,8 +4045,11 @@ static void processTickTransactionAntColonySolution(
     }
 
     // Keep previous behavior, we fold both good and bad score into resource testing digest
-    unsigned int childAnnHash;
-    KangarooTwelve(childAnn, sizeof(*childAnn), &childAnnHash, sizeof(childAnnHash));
+    unsigned int childAnnHash = 0;
+    if (childAnn != nullptr)
+    {
+        KangarooTwelve(childAnn, sizeof(*childAnn), &childAnnHash, sizeof(childAnnHash));
+    }
     resourceTestingDigest ^= childScore;
     resourceTestingDigest ^= childAnnHash;
     KangarooTwelve(&resourceTestingDigest, sizeof(resourceTestingDigest), &resourceTestingDigest, sizeof(resourceTestingDigest));
@@ -4046,7 +4071,7 @@ static void processTickTransactionAntColonySolution(
         }
     }
 
-    result = gAntColony.commit(in, parentRec, childScore, childAnn, childAnnHash);
+    result = gAntColony.commit(in, parentRec, childScore, childAnn, childAnnHash, trustClaimedScore);
     logAntSolutionOutcome(transaction, childScore, result);
     antDebugAccepted(transaction, childScore, (parentRec != nullptr) ? (parentRec->depth + 1) : 1, transactionIndex, result);
     // ValidNotStored is the store being full: the solution passed every rule and only missed a slot,
@@ -4708,8 +4733,10 @@ static void processTick(unsigned long long processorNumber)
 #if ADDON_TX_STATUS_REQUEST
         txStatusData.tickTxIndexStart[system.tick - system.initialTick] = numberOfTransactions; // qli: part of tx_status_request add-on
 #endif
-        // Only apply skipping compute solution when in Mainnet with Aux node (except for last tick)
-        if (isMainMode() || isTestnet() || isLastTickInEpoch() || forceVerifySolutions)
+        // Only apply skipping compute solution when in Mainnet with Aux node (except for last tick).
+        // A strict replay belongs on the computing side too, and it is also what clears the
+        // per-transaction pre-score gates so the replay cannot read the previous tick's answers.
+        if (isMainMode() || isTestnet() || isLastTickInEpoch() || forceVerifySolutions || gReRunStrict)
         {
             PROFILE_NAMED_SCOPE_BEGIN("processTick(): pre-scan solutions");
             unsigned long long _bPrescanStart = __rdtsc();
@@ -4768,10 +4795,11 @@ static void processTick(unsigned long long processorNumber)
                                 task.parentRef.solutionIndexInTick = antTx->parentSolutionIndexInTick;
                                 task.anchorTick = antTx->anchorTick;
                                 task.txIdx = transactionIndex;
-                                // Skip anything this node has already looked at, accepted or not
+                                // Skip anything this node has already looked at, accepted or not,
+                                // and anything this tick will take on its claimed score anyway
                                 unsigned int antFlagIndices[2];
                                 computeAntSolutionFlagIndices(task.pubkey, task.nonce, task.parentRef, antFlagIndices);
-                                if (!isAntSolutionSeen(antFlagIndices))
+                                if (!isAntSolutionSeen(antFlagIndices) && !isTrustingClaimedSolutionScore())
                                 {
                                     score->addTask(scoreAntSolutionTask, &task, sizeof(task));
                                 }

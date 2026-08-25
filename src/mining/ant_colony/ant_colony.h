@@ -534,13 +534,17 @@ public:
 
     // Admission rules for a proposed child: freshness, tree ownership, threshold, parent, per-parent
     // child cap. Static and pure, so the rule set is testable without a colony. Lower score is better.
+    // trustedScore drops the two rules that judge the score itself, for a caller that took the score
+    // on trust rather than computing it.
     static ValidityResult validateChild(const ChildCandidate& child,
-        const AntSolutionRecord* parentRecord, unsigned int childCount, unsigned int threshold);
+        const AntSolutionRecord* parentRecord, unsigned int childCount, unsigned int threshold,
+        bool trustedScore = false);
 
     // Validates and, if accepted, appends the record and its network to the store. A null childAnn
     // commits the record with its slot marked unmaterialised, for a score accepted without walking.
     ValidityResult commit(const AntCommitInput& in, const AntSolutionRecord* parentRec,
-        unsigned int score, const Ann* childAnn, unsigned int childAnnHash);
+        unsigned int score, const Ann* childAnn, unsigned int childAnnHash,
+        bool trustedScore = false);
 
 private:
     // Children already recorded under this parent, capped at ANT_MAX_CHILDREN_PER_PARENT. Root
@@ -1173,7 +1177,8 @@ inline ValidityResult AntColony<ScoreT>::tryGetParent(const SolutionRef& parentR
 
 template<typename ScoreT>
 inline ValidityResult AntColony<ScoreT>::validateChild(const ChildCandidate& child,
-    const AntSolutionRecord* parentRecord, unsigned int childCount, unsigned int threshold)
+    const AntSolutionRecord* parentRecord, unsigned int childCount, unsigned int threshold,
+    bool trustedScore)
 {
     // Freshness, the anchor cannot be in the future, and publication cannot lag it by more than N.
     if (child.anchorTick > child.publishTick
@@ -1194,13 +1199,20 @@ inline ValidityResult AntColony<ScoreT>::validateChild(const ChildCandidate& chi
         parentScore = parentRecord->score;
     }
 
-    if (child.score > threshold)
+    // A score taken on trust cannot be judged against the threshold or the parent: both would
+    // reject on a number this node did not compute, and a reject produces no refund for the quorum
+    // to disagree with, so a wrong score would never be caught. The freshness, tree and cap rules
+    // below and above read only metadata, which every node reads the same way, so they stay on.
+    if (!trustedScore)
     {
-        return ValidityResult::RejectBelowThreshold;
-    }
-    if (child.score >= parentScore)
-    {
-        return ValidityResult::RejectLeParent;
+        if (child.score > threshold)
+        {
+            return ValidityResult::RejectBelowThreshold;
+        }
+        if (child.score >= parentScore)
+        {
+            return ValidityResult::RejectLeParent;
+        }
     }
     // Per-parent breadth cap. 0 means unbound - no cap.
     if (ANT_MAX_CHILDREN_PER_PARENT != 0 && childCount >= ANT_MAX_CHILDREN_PER_PARENT)
@@ -1212,12 +1224,12 @@ inline ValidityResult AntColony<ScoreT>::validateChild(const ChildCandidate& chi
 
 template<typename ScoreT>
 inline ValidityResult AntColony<ScoreT>::commit(const AntCommitInput& in, const AntSolutionRecord* parentRec,
-    unsigned int score, const Ann* childAnn, unsigned int childAnnHash)
+    unsigned int score, const Ann* childAnn, unsigned int childAnnHash, bool trustedScore)
 {
     const unsigned int childCount = countChildren(in.parentRef, in.pubkey);
     const ChildCandidate child{ in.pubkey, score, in.anchorTick, in.publishTick };
 
-    const ValidityResult result = validateChild(child, parentRec, childCount, _errorThreshold);
+    const ValidityResult result = validateChild(child, parentRec, childCount, _errorThreshold, trustedScore);
     if (result != ValidityResult::Valid)
     {
         recordReject(result);
