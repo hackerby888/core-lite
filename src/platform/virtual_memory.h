@@ -6,6 +6,7 @@
 #include "platform/memory_util.h"
 #include "platform/debugging.h"
 #include "platform/file_io.h"
+#include "extensions/disk_shadow.h"
 
 #include "four_q.h"
 #include "kangaroo_twelve.h"
@@ -414,6 +415,9 @@ public:
                 addDebugMessage(dbg);
 #endif
             }
+#ifdef __linux__
+            gShadow.registerDir(pageDir);
+#endif
         }
 
         reset();
@@ -1076,7 +1080,7 @@ private:
                 if (gSwapCompressionEnabled)
                 {
                     sz = 0;
-                    long long compressedSize = getFileSize((CHAR16*)pageName, (CHAR16*)pageDir);
+                    long long compressedSize = getFileSize((CHAR16*)pageName, pageDir);
                     if (compressedSize > 0)
                     {
                         std::vector<unsigned char> tmp((size_t)compressedSize);
@@ -1101,7 +1105,8 @@ private:
                     break;
 
                 // Loud exact cause (missing vs size-mismatch + full path) so a torn/missing .pg is hand-recoverable.
-                long long onDiskSize = getFileSize((CHAR16*)pageName, (CHAR16*)pageDir);
+                long long onDiskSize = getFileSize((CHAR16*)pageName, pageDir);
+                const CHAR16* diagnosticDir = liteShadowReadDir(pageDir, pageName);
                 bool compOn = false;
 #ifdef __linux__
                 compOn = gSwapCompressionEnabled;
@@ -1109,7 +1114,7 @@ private:
                 setText(message, L"swapVM load FAILED page ");
                 appendNumber(message, pageId, true);
                 appendText(message, L" | file ");
-                appendText(message, pageDir);
+                appendText(message, diagnosticDir);
                 appendText(message, L"/");
                 appendText(message, (CHAR16*)pageName);
                 appendText(message, L" | wantPageBytes ");
@@ -1307,6 +1312,15 @@ public:
     SwapVirtualMemory()
     {
         VMBase();
+    }
+
+    ~SwapVirtualMemory()
+    {
+#if defined(__linux__)
+        // Drop the dirty-track registry entry before &currentPage dies (only tests destroy SwapVMs;
+        // the node's are static). Else the SIGSEGV fault path derefs a dangling stack pointer.
+        SwapDirtyTrack::unregisterPool((unsigned char**)&currentPage);
+#endif
     }
 
     void reset() {
@@ -1510,6 +1524,42 @@ public:
     unsigned long long getDirtyEvicts() const { return dirtyEvicts; }
     static constexpr unsigned long long getNumCachePage() { return numCachePage; }
 
+    // Clear inherited locks and dead parent-thread pins before the promoted child starts workers.
+    void resetPinsForChildPromote()
+    {
+        memLock = 0;
+        memReaders = 0;
+        // pinCount is volatile, so clear it element by element.
+        for (int i = 0; i <= numCachePage; i++)
+            pinCount[i] = 0;
+
+        // Orphan loading slots have no surviving worker and would block later dedup waits.
+        for (int i = 0; i <= numCachePage; i++)
+        {
+            if (cachePageId[i] == LOADING_PAGE_ID)
+                cachePageId[i] = INVALID_PAGE_ID;
+        }
+        setMem(loadingTarget, sizeof(loadingTarget), 0xff);   // INVALID_PAGE_ID
+        setMem(evictingPage, sizeof(evictingPage), 0xff);
+        pinnedNow = 0;
+    }
+
+    // Wait for unlocked miss I/O before fork or commit after callers have blocked new I/O sources.
+    // A timeout leaves recovery to resetPinsForChildPromote().
+    bool drainInflightIO(int timeoutMs)
+    {
+        for (int elapsedMs = 0; elapsedMs <= timeoutMs; elapsedMs++)
+        {
+            acquireMemLock();
+            const bool hasInflightIO = anyInflightIO();
+            RELEASE(memLock);
+            if (!hasInflightIO)
+                return true;
+            sleepMilliseconds(1);
+        }
+        return false;
+    }
+
     T* operator[](unsigned long long offset)
     requires (mode == SwapMode::OFFSET_MODE)
     {
@@ -1662,6 +1712,7 @@ public:
     unsigned long long loadVMState(unsigned char* buffer)
     {
         acquireMemLock();
+        unprotectWholePool();   // the bulk restore writes into (possibly armed) slots must not fault
         unsigned long long ret = 0;
         for (int i = 0; i <= numCachePage; i++)
         {
@@ -1704,6 +1755,11 @@ public:
                 cachePageId[i] = INVALID_PAGE_ID;
         setMem(loadingTarget, sizeof(loadingTarget), 0xff);
         setMem(evictingPage, sizeof(evictingPage), 0xff);
+
+        // Snapshot cache bytes may be newer than or absent from their .pg backing.
+        for (int i = 0; i <= numCachePage; i++)
+            if (cachePageId[i] != INVALID_PAGE_ID)
+                dirtyFlags[i] = 1;
 
         currentPageId = *((unsigned long long*)buffer);
         buffer += 8;

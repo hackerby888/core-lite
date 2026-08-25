@@ -15,6 +15,9 @@
 #include "console_logging.h"
 #include "concurrency.h"
 #include "memory.h"
+#ifdef NO_UEFI
+#include "extensions/disk_shadow.h"
+#endif
 
 #ifdef NO_UEFI
 static_assert(sizeof(CHAR16) == 2);
@@ -86,8 +89,9 @@ static long long getFileSize(CHAR16* fileName, CHAR16* directory = NULL)
         return -1;
     }
 
+    const CHAR16* readDirectory = liteShadowReadDir(directory, fileName);
     std::error_code error;
-    const std::uintmax_t fileSize = std::filesystem::file_size(getHostFilePath(fileName, directory), error);
+    const std::uintmax_t fileSize = std::filesystem::file_size(getHostFilePath(fileName, readDirectory), error);
     if (error || fileSize > static_cast<std::uintmax_t>(std::numeric_limits<long long>::max()))
     {
         return -1;
@@ -222,8 +226,9 @@ static bool removeFile(CHAR16* directory, CHAR16* fileName)
         return false;
     }
 
+    const CHAR16* removeDirectory = liteShadowRemoveDir(directory, fileName);
     std::error_code error;
-    std::filesystem::remove(getHostFilePath(fileName, directory), error);
+    std::filesystem::remove(getHostFilePath(fileName, removeDirectory), error);
     return !error;
 #else
     ASSERT(isMainProcessor());
@@ -351,8 +356,9 @@ static bool removeDir(CHAR16* dirName)
 static long long load(const CHAR16* fileName, unsigned long long totalSize, unsigned char* buffer, const CHAR16* directory = NULL)
 {
 #ifdef NO_UEFI
+    const CHAR16* readDirectory = liteShadowReadDir(directory, fileName);
     FILE* file = nullptr;
-    if (openHostFile(&file, getHostFilePath(fileName, directory), HostFileMode::ReadBinary) != 0 || !file)
+    if (openHostFile(&file, getHostFilePath(fileName, readDirectory), HostFileMode::ReadBinary) != 0 || !file)
     {
 #ifdef _MSC_VER
         wprintf(L"Error opening file %s!\n", fileName);
@@ -439,12 +445,13 @@ static long long load(const CHAR16* fileName, unsigned long long totalSize, unsi
 static long long save(const CHAR16* fileName, unsigned long long totalSize, const unsigned char* buffer, const CHAR16* directory = NULL)
 {
 #ifdef NO_UEFI
+    const CHAR16* writeDirectory = liteShadowWriteDir(directory, fileName);
     FILE* file = nullptr;
-    if (hasHostDirectory(directory) && !createDir(directory))
+    if (hasHostDirectory(writeDirectory) && !createDir(writeDirectory))
     {
         return -1;
     }
-    if (openHostFile(&file, getHostFilePath(fileName, directory), HostFileMode::WriteBinary) != 0 || !file)
+    if (openHostFile(&file, getHostFilePath(fileName, writeDirectory), HostFileMode::WriteBinary) != 0 || !file)
     {
 #ifdef _MSC_VER
         wprintf(L"Error opening file %s!\n", fileName);
@@ -942,10 +949,33 @@ public:
 
         // Flush all remained tasks
         flush();
-        if (mpSaveBuffer == NULL)
+        if (mpSaveBuffer != NULL)
         {
             freePool(mpSaveBuffer);
+            mpSaveBuffer = NULL;
         }
+    }
+
+    // In a promoted child, drop inherited queues without allocating, flushing, or replaying writes.
+    // Reuse the save buffer because no file worker survives fork on the OS port.
+    void reinitForChildPromote()
+    {
+        mIsStop = false;
+        mEnableNonBlockSave = false;
+        mFileBlockingReadQueue.initializeQueue(NULL);
+        mFileBlockingWriteQueue.initializeQueue(NULL);
+        if (mpSaveBuffer != NULL)
+        {
+            mFileWriteQueue.initializeQueue(mpSaveBuffer);
+            mEnableNonBlockSave = true;
+        }
+        setMem(mRemoveFileNameQueue, sizeof(mRemoveFileNameQueue), 0);
+        setMem(mRemoveFileDirQueue, sizeof(mRemoveFileDirQueue), 0);
+        mRemoveFilePathQueueCount = 0;
+        mRemoveFilePathQueueLock = 0;
+        setMem(mCreateDirQueue, sizeof(mCreateDirQueue), 0);
+        mCreateDirQueueCount = 0;
+        mCreateDirQueueLock = 0;
     }
 
     bool isMainThread()
@@ -1433,7 +1463,7 @@ static int flushAsyncFileIOBuffer(int numberOfItemsPerQueue = 0)
 OPTIMIZE_ON()
 
 // add epoch number as an extension to a filename
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 static void addEpochToFileName(wchar_t* filename, int nameSize, short epoch)
 {
     filename[nameSize - 4] = epoch / 100 + L'0';

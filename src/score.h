@@ -73,6 +73,11 @@ struct ScoreFunction
 
     void initMiningData(m256i randomSeed)
     {
+#if defined(TESTNET) && defined(LITE_WASM_SC)
+        // Development nodes do not need the mining random2 pool.
+        currentRandomSeed = randomSeed;
+        return;
+#endif
         // Below assume when a new mining seed is provided, we need to re-calculate the random2 pool
         // Check if random pool need to be re-generated
         if (!isZero(randomSeed))

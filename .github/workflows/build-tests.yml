@@ -6,14 +6,7 @@
 name: BuildTests
 
 on:
-  push:
-    branches: [ "main", "develop" ]
-    paths-ignore:
-      - 'doc/**'
-  pull_request:
-    branches: [ "main", "develop" ]
-    paths-ignore:
-      - 'doc/**'
+  workflow_call:
 
 env:
   # Path to the solution file relative to the root of the project.
@@ -29,20 +22,23 @@ permissions:
 
 jobs:
   build:
+    name: build
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      with:
+        persist-credentials: false
 
     - name: Add MSBuild to PATH
-      uses: microsoft/setup-msbuild@v1.0.2
+      uses: microsoft/setup-msbuild@c26a08ba26249b81327e26f6ef381897b6a8754d  # v1.0.2
 
     - name: Restore NuGet packages
       working-directory: ${{env.GITHUB_WORKSPACE}}
-      run: nuget restore ${{env.SOLUTION_FILE_PATH}} -Verbosity detailed
+      run: nuget restore $env:SOLUTION_FILE_PATH -Verbosity detailed
 
     - name: Build
       working-directory: ${{env.GITHUB_WORKSPACE}}
       # Add additional options to the MSBuild command line here (like platform or verbosity level).
       # See https://docs.microsoft.com/visualstudio/msbuild/msbuild-command-line-reference
-      run: msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} ${{env.SOLUTION_FILE_PATH}} /t:test:Rebuild /warnaserror
+      run: msbuild /m /p:Configuration=$env:BUILD_CONFIGURATION $env:SOLUTION_FILE_PATH /t:test:Rebuild /warnaserror

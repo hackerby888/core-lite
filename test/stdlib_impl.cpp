@@ -9,7 +9,7 @@
 
 #include "platform/time.h"
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #include <sched.h>
 #include <unistd.h>
 #include <stdio.h>

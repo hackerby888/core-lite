@@ -211,6 +211,10 @@ static volatile long long numberOfTransmittedBytes = 0, prevNumberOfTransmittedB
 static int numberOfAcceptedIncommingConnection = 0;
 // Max incoming slots allowed to arm Accept() (--max-inbound / /set-max-inbound); default = all.
 static int maxInboundAccepts = NUMBER_OF_INCOMING_CONNECTIONS;
+// Max incoming slots per single IP (--max-inbound-per-ip); 0 = unlimited (default).
+static int maxIncomingConnectionsPerIp = 0;
+// Extra inbound slots armed beyond --max-inbound; admit loopback only (local RPC/tooling always connects).
+static constexpr unsigned int LOOPBACK_INBOUND_RESERVE = 4;
 
 static volatile char publicPeersLock = 0;
 static unsigned int numberOfPublicPeers = 0;
@@ -237,6 +241,8 @@ static volatile long long numberOfProcessedRequests = 0, prevNumberOfProcessedRe
 static volatile long long numberOfDiscardedRequests = 0, prevNumberOfDiscardedRequests = 0;
 static volatile long long numberOfDuplicateRequests = 0, prevNumberOfDuplicateRequests = 0;
 static volatile long long numberOfDisseminatedRequests = 0, prevNumberOfDisseminatedRequests = 0;
+static volatile long long numberOfDroppedTransmits = 0, prevNumberOfDroppedTransmits = 0;   // messages dropped on a full send buffer (peer kept alive)
+static volatile long long numberOfSkippedBroadcasts = 0, prevNumberOfSkippedBroadcasts = 0; // broadcasts skipped to a backlogged peer
 
 static unsigned char* requestQueueBuffer = NULL;
 static unsigned char* responseQueueBuffer = NULL;
@@ -422,7 +428,8 @@ static void push(Peer* peer, RequestResponseHeader* requestResponseHeader)
         const unsigned int msgSize = requestResponseHeader->size();
         if (peer->dataToTransmitSize + msgSize > BUFFER_SIZE)
         {
-            // Buffer is full, which indicates a problem
+            // Send buffer full: drop this message (peer re-requests on timeout) instead of culling.
+            // A slow consumer (log reader, save-frozen peer) must survive, not get disconnected.
 #ifndef NDEBUG
             {
                 CHAR16 debugMessage[256];
@@ -435,7 +442,7 @@ static void push(Peer* peer, RequestResponseHeader* requestResponseHeader)
                 addDebugMessage(debugMessage);
             }
 #endif
-            closePeer(peer);
+            _InterlockedIncrement64(&numberOfDroppedTransmits);
         }
         else
         {
@@ -461,6 +468,13 @@ static void pushCustom(RequestResponseHeader* requestResponseHeader, int numberO
         {
             if ((filterFullNode && peers[i].isFullNode()) || (!filterFullNode))
             {
+                // Throttle: skip peers whose send buffer is already backed up so the broadcast firehose
+                // doesn't overflow (and drop on) a slow consumer. Direct peer-addressed push() is unaffected.
+                if (peers[i].dataToTransmitSize > BUFFER_SIZE / 4)
+                {
+                    _InterlockedIncrement64(&numberOfSkippedBroadcasts);
+                    continue;
+                }
                 suitablePeerIndices[numberOfSuitablePeers++] = i;
             }
         }
@@ -815,7 +829,22 @@ static bool isAddressInKnownPublicPeers(const IPv4Address& address)
 }
 
 
-// Forget public peer (no matter if verified or not) if we have more than the minium number of peers
+// Inactive pool: forgotten (bad/unresponsive) peers are parked here instead of dropped, then
+// recycled into candidates when active peers fall to the keep-floor.
+static IPv4Address inactivePublicPeers[MAX_NUMBER_OF_PUBLIC_PEERS];
+static unsigned int numberOfInactivePublicPeers = 0;
+
+// Park an address in the inactive pool (dedup, bounded). Caller holds publicPeersLock.
+static void pushInactivePublicPeer(const IPv4Address& address)
+{
+    for (unsigned int i = 0; i < numberOfInactivePublicPeers; i++)
+        if (inactivePublicPeers[i] == address)
+            return;
+    if (numberOfInactivePublicPeers < MAX_NUMBER_OF_PUBLIC_PEERS)
+        inactivePublicPeers[numberOfInactivePublicPeers++] = address;
+}
+
+// Forget a peer: park it in the inactive pool and drop it from active candidates.
 static void forgetPublicPeer(const IPv4Address& address)
 {
     // if address is one of our initial peers we don't forget it
@@ -831,10 +860,11 @@ static void forgetPublicPeer(const IPv4Address& address)
 
     ACQUIRE(publicPeersLock);
 
-    for (unsigned int i = 0; numberOfPublicPeers > NUMBER_OF_PUBLIC_PEERS_TO_KEEP && i < numberOfPublicPeers; i++)
+    for (unsigned int i = 0; i < numberOfPublicPeers; i++)
     {
         if (publicPeers[i].address == address)
         {
+            pushInactivePublicPeer(address); // park for recycling, don't drop
             if (i != --numberOfPublicPeers)
             {
                 copyMem(&publicPeers[i], &publicPeers[numberOfPublicPeers], sizeof(PublicPeer));
@@ -914,6 +944,22 @@ static void addPublicPeer(const IPv4Address& address)
     }
 
     RELEASE(publicPeersLock);
+}
+
+// Recycle the inactive pool back into candidates when active peers hit the keep-floor.
+static void refillPublicPeersFromInactive()
+{
+    if (listOfPeersIsStatic || numberOfPublicPeers > NUMBER_OF_PUBLIC_PEERS_TO_KEEP || numberOfInactivePublicPeers == 0)
+        return;
+    IPv4Address recycled[MAX_NUMBER_OF_PUBLIC_PEERS];
+    ACQUIRE(publicPeersLock);
+    unsigned int n = numberOfInactivePublicPeers;
+    for (unsigned int i = 0; i < n; i++)
+        recycled[i] = inactivePublicPeers[i];
+    numberOfInactivePublicPeers = 0;
+    RELEASE(publicPeersLock);
+    for (unsigned int i = 0; i < n; i++)
+        addPublicPeer(recycled[i]); // re-add as fresh candidates (dedups internally)
 }
 
 static bool peerConnectionNewlyEstablished(unsigned int i)
@@ -1029,8 +1075,39 @@ static bool peerConnectionNewlyEstablished(unsigned int i)
         {
             if (peers[i].isIncommingConnection)
             {
+                // Loopback (local RPC/tooling) is never capped: unlimited slots, unlimited per-IP.
+                const bool isLoopback = (peers[i].address.u8[0] == 127);
+
+                // Count before the cap rejects so each reject's closePeer() decrement stays balanced.
                 numberOfAcceptedIncommingConnection++;
                 ASSERT(numberOfAcceptedIncommingConnection <= NUMBER_OF_INCOMING_CONNECTIONS);
+
+                // Total inbound cap (--max-inbound): reserve-band slots admit only loopback, so local
+                // connections get in even when remotes saturate the cap.
+                if (!isLoopback && (i - NUMBER_OF_OUTGOING_CONNECTIONS) >= (unsigned int)maxInboundAccepts)
+                {
+                    closePeer(&peers[i]);
+                    return false;
+                }
+
+                // Per-IP cap (--max-inbound-per-ip; 0 = unlimited; loopback exempt): one peer can't flood
+                // many slots (wastes slots + redundant sends -> churn).
+                if (maxIncomingConnectionsPerIp > 0 && !isLoopback && peers[i].address.u32 != 0)
+                {
+                    unsigned int sameIp = 0;
+                    for (unsigned int k = 0; k < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; k++)
+                    {
+                        if (k != i && (unsigned long long)peers[k].tcp4Protocol > 1 && peers[k].isIncommingConnection
+                            && peers[k].isConnectedAccepted && !peers[k].isClosing && peers[k].address == peers[i].address)
+                        {
+                            if (++sameIp >= (unsigned int)maxIncomingConnectionsPerIp)
+                            {
+                                closePeer(&peers[i]);
+                                return false;
+                            }
+                        }
+                    }
+                }
             }
             return true;
         }
@@ -1447,8 +1524,12 @@ static void peerReconnectIfInactive(unsigned int i, unsigned short port)
                 peers[i].isOMNode = FALSE;
                 peers[i].isOcMachine = FALSE;
                 // randomly select public peer and try to connect if we do not
-                // yet have an outgoing connection to it
-                peers[i].address = publicPeers[random(numberOfPublicPeers)].address;
+                // yet have an outgoing connection to it. Guard the empty case:
+                // random(0) is a modulo-by-zero (SIGFPE) — a node started with no
+                // public peers (e.g. only a self/loopback --peers entry) hits it.
+                refillPublicPeersFromInactive();
+                if (numberOfPublicPeers)
+                    peers[i].address = publicPeers[random(numberOfPublicPeers)].address;
             }
 
             if (peers[i].address.u32 != 0)
@@ -1494,8 +1575,9 @@ static void peerReconnectIfInactive(unsigned int i, unsigned short port)
         else
         {
             // incoming connection:
-            // accept connections if peer list is not static and inbound cap not reached
-            if (!listOfPeersIsStatic && (i - NUMBER_OF_OUTGOING_CONNECTIONS) < (unsigned int)maxInboundAccepts)
+            // Arm Accept on the cap plus a small reserve band; the reserve admits only loopback (checked at
+            // accept time) so local RPC/tooling connects even when remotes saturate --max-inbound.
+            if (!listOfPeersIsStatic && (i - NUMBER_OF_OUTGOING_CONNECTIONS) < (unsigned int)maxInboundAccepts + LOOPBACK_INBOUND_RESERVE)
             {
                 peers[i].isIncommingConnection = TRUE;
                 peers[i].receiveData.FragmentTable[0].FragmentBuffer = peers[i].receiveBuffer;

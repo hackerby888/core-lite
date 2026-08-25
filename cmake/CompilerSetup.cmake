@@ -27,6 +27,13 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     message(STATUS "Linux platform detected")
 endif()
 
+# Detect macOS without changing the existing Linux and Windows flags.
+set(IS_MACOS FALSE CACHE INTERNAL "macOS platform detected")
+if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "Darwin")
+    set(IS_MACOS TRUE CACHE INTERNAL "macOS platform detected" FORCE)
+    message(STATUS "macOS (Darwin) platform detected")
+endif()
+
 # Detect MSVC compiler
 if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     set(IS_MSVC TRUE CACHE INTERNAL "MSVC compiler detected" FORCE)
@@ -64,6 +71,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     endif()
 endif()
 
+# ARM uses SIMDe instead of native AVX instructions.
+set(IS_ARM FALSE CACHE INTERNAL "ARM/aarch64 detected")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64|armv8")
+    set(IS_ARM TRUE CACHE INTERNAL "ARM/aarch64 detected" FORCE)
+    message(STATUS "ARM/aarch64 detected -- x86 intrinsics simulated via SIMDe (no -mavx flags)")
+endif()
+
 # --- Clear all default flags to use only specified ones ---
 set(CMAKE_CONFIGURATION_TYPES Debug Release CACHE STRING "Available build types" FORCE)
 
@@ -71,7 +85,8 @@ message(STATUS "CLEARING CMAKE DEFAULT FLAGS")
 # Set all default flag variables to an empty string to take full control.
 set(CMAKE_C_FLAGS "" CACHE INTERNAL "")
 set(CMAKE_CXX_FLAGS "" CACHE INTERNAL "")
-set(CMAKE_EXE_LINKER_FLAGS "" CACHE INTERNAL "")
+# CMAKE_EXE_LINKER_FLAGS is left alone: CMake defaults it to empty outside MSVC, so clearing it
+# would only discard a -DCMAKE_EXE_LINKER_FLAGS passed on the command line (CACHE INTERNAL forces).
 
 set(CMAKE_C_FLAGS_DEBUG "" CACHE INTERNAL "")
 set(CMAKE_CXX_FLAGS_DEBUG "" CACHE INTERNAL "")
@@ -171,6 +186,18 @@ elseif(IS_CLANG OR IS_GCC)
     set(OS_CXX_FLAGS "${OS_C_FLAGS}" CACHE INTERNAL "OS-specific C++ compiler flags" FORCE)
 endif()
 
+# The codebase relies on type-punning that is unsafe under strict aliasing.
+if(IS_GCC)
+    set(
+        COMMON_C_FLAGS "${COMMON_C_FLAGS} -fno-strict-aliasing"
+        CACHE INTERNAL "Common C compiler flags" FORCE
+    )
+    set(
+        COMMON_CXX_FLAGS "${COMMON_CXX_FLAGS} -fno-strict-aliasing"
+        CACHE INTERNAL "Common C++ compiler flags" FORCE
+    )
+endif()
+
 # --- CPU Instruction Set Flags ---
 
 # Allow the user to enable AVX-512
@@ -189,7 +216,11 @@ if(IS_MSVC)
         message(STATUS "AVX-512 is disabled. If you would like to activate make sure you set ENABLE_AVX512 to ON while running cmake.")
     endif()
 elseif(IS_CLANG OR IS_GCC)
-    if(ENABLE_AVX512)
+    if(IS_ARM)
+        # FourQ stores signed wNAF digits in char arrays.
+        set(CPU_INSTRUCTION_FLAGS "-fsigned-char" CACHE INTERNAL "CPU instruction set flags" FORCE)
+        message(STATUS "ARM: x86 SIMD simulated via SIMDe -- no -mavx flags, -fsigned-char on")
+    elseif(ENABLE_AVX512)
         set(CPU_INSTRUCTION_FLAGS "-mavx -mavx512vbmi -mavx512vbmi2 -mavx2 -mavx512f -mavx512cd -mavx512vl -mavx512bw -mavx512dq -mavx512vpopcntdq" CACHE INTERNAL "CPU instruction set flags" FORCE)
         message(STATUS "GCC/Clang: Enabling AVX-512 and AVX/AVX2")
     else()
@@ -204,6 +235,10 @@ set(TEST_SPECIFIC_FLAGS "" CACHE INTERNAL "Test-specific compiler flags")
 
 if(IS_MSVC)
     set(TEST_SPECIFIC_FLAGS "/WX /EHsc" CACHE INTERNAL "Test-specific compiler flags" FORCE)
+elseif(IS_ARM)
+    # ARM uses SIMDe and needs signed char for FourQ wNAF digits.
+    set(TEST_SPECIFIC_FLAGS "-Wcast-align -fsigned-char -w" CACHE INTERNAL "Test-specific compiler flags" FORCE)
+    set(TEST_SPECIFIC_LINK_FLAGS "" CACHE INTERNAL "Test-specific linker flags" FORCE)
 elseif(IS_CLANG OR IS_GCC)
     if(USE_SANITIZER)
         set(TEST_SPECIFIC_FLAGS "-Wpedantic -Werror -mrdrnd -Wcast-align -fsanitize=alignment -fno-sanitize-recover=alignment" CACHE INTERNAL "Test-specific compiler flags" FORCE)

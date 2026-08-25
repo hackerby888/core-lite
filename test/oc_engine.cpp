@@ -10,8 +10,8 @@
 // standalone padding test below. Do NOT include K12/kangaroo_twelve_xkcp.h
 // here: its external-linkage XKCP backend would clash at link with
 // test/kangaroo_twelve.cpp, which also defines those symbols.
-#include "../src/kangaroo_twelve.h"
 #include "../src/platform/m256.h"
+#include "../src/kangaroo_twelve.h"
 #include "../src/platform/memory.h"
 #include <lib/platform_common/qintrin.h>
 

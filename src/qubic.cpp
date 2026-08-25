@@ -4,6 +4,7 @@
 #include <vector>
 #include <thread>
 #include <string>
+#include <atomic>
 #include <lib/platform_efi/uefi_globals.h>
 #ifdef __linux__
 #define BOOST_STACKTRACE_USE_BACKTRACE // Use libbacktrace for filenames/lines
@@ -11,6 +12,19 @@
 #include <cstring>
 #include <cstdio>
 #include <byteswap.h>
+#include <codecvt>
+#include <locale>
+#include <csignal>
+#include <cstdlib>
+#include <unistd.h>
+#include "extensions/utils.h"
+#include "platform/msvc_polyfill.h"
+#elif defined(__APPLE__)
+// macOS uses the POSIX path without byteswap or libbacktrace.
+#define BOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED
+#include <boost/stacktrace.hpp>
+#include <cstring>
+#include <cstdio>
 #include <codecvt>
 #include <locale>
 #include <csignal>
@@ -40,6 +54,7 @@
 // #define TESTNET
 // #define TESTNET_PREFILL_QUS
 // #define TESTNET_LITE_RAM
+// #define LITE_WASM_SC
 // #define LONG_RUN_LOCAL_TESTNET
 #define USE_SWAP
 
@@ -92,6 +107,7 @@
 #include "platform/m256.h"
 #include "platform/concurrency.h"
 #include "platform/concurrency_impl.h"
+#include "extensions/fork_census.h"   // SmartMutex/SmartSharedMutex (census-aware; before overload.h/rpc_core.h)
 // TODO: Use "long long" instead of "int" for DB indices
 
 
@@ -164,7 +180,7 @@
 #include "revenue.h"
 
 #include <csignal>
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #include <sys/wait.h>
 #endif
 
@@ -176,16 +192,29 @@ static bool loadMiningSeedFromFile = false;
 static bool loadAllNodeStateFromFile = false;
 
 static volatile int shutDownNode = 0;
+static std::atomic<bool> gracefulShutdownRequested{ false };
+static void requestGracefulShutdown()
+{
+    gracefulShutdownRequested.store(true, std::memory_order_release);
+}
 static volatile char enableBadBoySpammer = 0;
 static volatile bool spammerWithRpc = false;
-static volatile bool isReprocessingSolutions = false;
+
+static void enableAVX();
 
 #include "extensions/global_data.h"
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
+#if (defined(__linux__) || defined(__APPLE__) || defined(_WIN32)) && defined(LITE_WASM_SC)
+#include "extensions/contract_state_pager.h"
+#endif
+#include "extensions/wasm/runtime/extension.h"
 #include "extensions/test_invalid_solution.h"
+#if !defined(LITE_WASM_SC)
 #include "extensions/k12_state_digest_cache.h"
+#endif
+#include "extensions/tick_storage_scan.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
 #ifdef _WIN32
@@ -264,6 +293,9 @@ static int misalignedState = 0;
 
 static bool forceVerifySolutions = false;
 static bool forceBroadcastInvalidSolution = false;
+static unsigned int gFbisCount = 1;          // test: number of solution txs to inject per tick
+static bool gFbisSameComputor = false;       // test: all from one computor (drains it -> out-of-qus)
+static int gTestSolutionThreshold = -1;      // test: override runtime Bpp9000 threshold (-1 = off)
 
 static volatile unsigned char epochTransitionState = 0;
 static volatile unsigned char epochTransitionCleanMemoryFlag = 1;
@@ -288,6 +320,14 @@ static ExecutionFeeReportCollector executionFeeReportCollector;
 static TickData nextTickData;
 static PendingTxsPool pendingTxsPool;
 
+// opt/fast-tx headers reference pendingTxsPool, so include them after it.
+#include "optimizations/opt_config.h"
+#include "optimizations/opt_eager_tx_fetch.h"
+#include "extensions/fast_tx_window.h"
+#include "extensions/tx_slot_index.h"
+#include "extensions/tick_bench.h"
+#include "extensions/tx_stats.h"
+
 static m256i uniqueNextTickTransactionDigests[NUMBER_OF_COMPUTORS];
 static m256i uniqueCurrentSpectrumDigests[NUMBER_OF_COMPUTORS];
 static unsigned int uniqueNextTickTransactionDigestCounters[NUMBER_OF_COMPUTORS];
@@ -297,7 +337,7 @@ static unsigned int resourceTestingDigest = 0;
 
 static unsigned int numberOfTransactions = 0;
 
-static unsigned long long spectrumChangeFlags[SPECTRUM_CAPACITY / (sizeof(unsigned long long) * 8)];
+// spectrumChangeFlags + the dirty-leaf list now live in spectrum/spectrum.h (shared with the transfer sites).
 
 static unsigned long long mainLoopNumerator = 0, mainLoopDenominator = 0;
 static volatile unsigned char contractProcessorState = 0;
@@ -348,13 +388,8 @@ static volatile char solutionsLock = 0;
 static unsigned long long* minerSolutionFlags = NULL;
 static volatile m256i minerPublicKeys[MAX_NUMBER_OF_MINERS + 1];
 static volatile unsigned int minerScores[MAX_NUMBER_OF_MINERS + 1];
-static volatile m256i minerPublicKeysRollback[MAX_NUMBER_OF_MINERS + 1];
-static volatile unsigned int minerScoresRollback[MAX_NUMBER_OF_MINERS + 1];
-// Tick in which each miner reached its currently recorded best score, used as ranking tie-breaker
 static volatile unsigned int minerBestScoreTicks[MAX_NUMBER_OF_MINERS + 1];
-static volatile unsigned int minerBestScoreTicksRollback[MAX_NUMBER_OF_MINERS + 1];
 static volatile unsigned int numberOfMiners = NUMBER_OF_COMPUTORS;
-static unsigned int numberOfMinersRollback = NUMBER_OF_COMPUTORS;
 static m256i competitorPublicKeys[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
 static unsigned int competitorScores[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
 static unsigned int competitorTicks[(NUMBER_OF_COMPUTORS - QUORUM) * 2];
@@ -439,7 +474,10 @@ static struct
     m256i id;
 } latestCreatedTickInfo;
 
-#include "extensions/http/http.h"
+unsigned long long httpPasscodes[4] = {};
+
+#include "extensions/rpc/rpc_core.h"
+#include "extensions/rpc/rpc_proxy.h"
 
 static struct
 {
@@ -556,14 +594,21 @@ void logToConsole(const CHAR16* message)
 #endif
 }
 
-#include "extensions/missing_tx_debug.h"
-#include "extensions/peer_reaper.h"
-
-
 static inline bool isMainMode()
 {
     return (mainAuxStatus & 1) == 1;
 }
+
+// Fork rollback uses isLastTickInEpoch() before its definition.
+static bool isLastTickInEpoch();
+// These headers depend on logToConsole() and isMainMode() above.
+#include "extensions/supervisor_shim.h"
+#include "extensions/fork_stats.h"
+#include "extensions/tick_fork_rollback.h"
+#include "extensions/rpc/rpc_routes.h"
+#include "extensions/http/http.h"
+#include "extensions/missing_tx_debug.h"
+#include "extensions/peer_reaper.h"
 
 static inline bool isTestnet()
 {
@@ -611,7 +656,11 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
     {
         if (contractStateChangeFlags[digestIndex >> 6] & (1ULL << (digestIndex & 63)))
         {
+#ifdef LITE_WASM_SC
+            const unsigned long long size = digestIndex < contractCount ? Wasm::Runtime::effectiveStateSize(digestIndex, contractDescriptions[digestIndex].stateSize) : 0;
+#else
             const unsigned long long size = digestIndex < contractCount ? contractDescriptions[digestIndex].stateSize : 0;
+#endif
             if (!size)
             {
                 contractStateDigests[digestIndex] = m256i::zero();
@@ -626,10 +675,14 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
                 contractStateLock[digestIndex].acquireRead();
 
                 const unsigned long long startTime = __rdtsc();
+#if defined(LITE_WASM_SC)
+                Wasm::Runtime::hashContractState(digestIndex, contractStateDigests[digestIndex].m256i_u8, size);
+#else
                 if (!bypassCache && K12StateDigestCache::gK12StateDigestCacheEnabled && K12StateDigestCache::isCached(digestIndex))
                     K12StateDigestCache::computeDigest(digestIndex, &contractStateDigests[digestIndex]);
                 else
                     KangarooTwelve(contractStates[digestIndex], (unsigned int)size, &contractStateDigests[digestIndex], 32);
+#endif
                 const unsigned long long executionTime = __rdtsc() - startTime;
 
                 contractStateLock[digestIndex].releaseRead();
@@ -677,12 +730,14 @@ static void getComputerDigest(m256i& digest, bool bypassCache = false)
 
 // Quorum-mismatch recovery: rebuild every contract digest canonically (cache bypassed) and resync the
 // incremental cache, so a digest-cache error self-heals instead of forking the node.
+#if !defined(LITE_WASM_SC)
 static void recomputeComputerDigestFull(m256i& digest)
 {
     setMem(contractStateChangeFlags, MAX_NUMBER_OF_CONTRACTS / 8, 0xFF);
     K12StateDigestCache::invalidateAll();
     getComputerDigest(digest, /*bypassCache=*/true);
 }
+#endif
 
 static void getSpectrumDigest(m256i& digest)
 {
@@ -1036,10 +1091,6 @@ static void processBroadcastTick(Peer* peer, RequestResponseHeader* header)
     }
 }
 
-#include "optimizations/opt_config.h"
-#include "optimizations/opt_eager_tx_fetch.h"
-#include "extensions/fast_tx_window.h"
-
 static FastTxWindow fastTxWindow;
 
 static void processBroadcastFutureTickData(Peer* peer, RequestResponseHeader* header)
@@ -1231,8 +1282,7 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
 
             unsigned int tickIndex = ts.tickToIndexCurrentEpoch(request->tick);
             ts.tickData.acquireLock();
-            if (request->tick == system.tick + 1
-                && ts.tickData[tickIndex].epoch == system.epoch)
+            if (request->tick == system.tick + 1 && ts.tickData[tickIndex].epoch == system.epoch)
             {
                 KangarooTwelve(request, transactionSize, digest, sizeof(digest));
                 auto* tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
@@ -1853,7 +1903,7 @@ static void processSpecialCommand(Peer* peer, RequestResponseHeader* header)
             {
             case SPECIAL_COMMAND_SHUT_DOWN:
             {
-                shutDownNode = 1;
+                requestGracefulShutdown();
             }
             break;
 
@@ -2140,8 +2190,11 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
     RequestResponseHeader* header = (RequestResponseHeader*)processor->buffer;
     while (!shutDownNode)
     {
-        PinScope _pinScope; // release swap-page pins taken while handling this request
+        PinScope pinScope;
         checkinTime(processorNumber);
+        tickFork::requestProcessorParkPoint(processorNumber);
+        if (shutDownNode)
+            break;
         std::this_thread::sleep_for(std::chrono::microseconds(50));
         // in epoch transition, wait here
         if (epochTransitionState)
@@ -2771,7 +2824,7 @@ static bool ranksBelow(unsigned int scoreA, unsigned int tickA, unsigned int sco
     return tickA > tickB;
 }
 
-static void processTickTransactionSolution(const MiningSolutionTransaction* transaction, unsigned int transactionIndex, const unsigned long long processorNumber, bool isRevalidation = false)
+static void processTickTransactionSolution(const MiningSolutionTransaction* transaction, unsigned int transactionIndex, const unsigned long long processorNumber)
 {
     PROFILE_SCOPE();
 
@@ -2793,14 +2846,14 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
     flagIndices[1] &= (unsigned int)(NUMBER_OF_MINER_SOLUTION_FLAGS - 1);
     // Two independent flag checks to reduce false-positive collision probability from ~N/2^32 to ~N^2/2^64
     if (!(minerSolutionFlags[flagIndices[0] >> 6] & (1ULL << (flagIndices[0] & 63)))
-        || !(minerSolutionFlags[flagIndices[1] >> 6] & (1ULL << (flagIndices[1] & 63))) || isRevalidation)
+        || !(minerSolutionFlags[flagIndices[1] >> 6] & (1ULL << (flagIndices[1] & 63))))
     {
         minerSolutionFlags[flagIndices[0] >> 6] |= (1ULL << (flagIndices[0] & 63));
         minerSolutionFlags[flagIndices[1] >> 6] |= (1ULL << (flagIndices[1] & 63));
         score_engine::AlgoType selectedAlgo = score_engine::getAlgoType(transaction->nonce.m256i_u8);
         const int threshold = getSolutionThreshold(selectedAlgo);
         unsigned int solutionScore;
-        if (isMainMode() || isRevalidation || isLastTickInEpoch() || forceVerifySolutions)
+        if (isMainMode() || gReRunStrict || isLastTickInEpoch() || forceVerifySolutions)
         {
             solutionScore = (*::score)(processorNumber, transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce);
         }
@@ -2821,12 +2874,8 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
                 {
                     increaseEnergy(transaction->sourcePublicKey, transaction->amount);
 
-                    if (!isRevalidation)
-                    {
-                        gSolutionTxReturned[transactionIndex] = true; // deposit return applied; for reprocess undo
-                        const QuTransfer quTransfer = { m256i::zero(), transaction->sourcePublicKey, transaction->amount };
-                        logger.logQuTransfer(quTransfer);
-                    }
+                    const QuTransfer quTransfer = { m256i::zero(), transaction->sourcePublicKey, transaction->amount };
+                    logger.logQuTransfer(quTransfer);
                 }
 
                 for (unsigned int i = 0; i < computorSeedsCount; i++)
@@ -3002,23 +3051,10 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
             }
             else
             {
-#if ENABLE_QUBIC_LOGGING_EVENT
-                if (isRevalidation)
-                {
-                    logger.tx.removeReturnDepositLogOfSolutionTransaction(transactionIndex);
-                }
-#endif
-
             }
         }
         else
         {
-#if ENABLE_QUBIC_LOGGING_EVENT
-            if (isRevalidation)
-            {
-                logger.tx.removeReturnDepositLogOfSolutionTransaction(transactionIndex);
-            }
-#endif
         }
     }
     else
@@ -3129,6 +3165,13 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                 moneyFlew = true;
             }
 
+#ifdef LITE_WASM_SC
+            if (transaction->destinationPublicKey == Wasm::Runtime::DeploymentProtocol::DeploymentAddress)
+            {
+                Wasm::Runtime::dispatchDeploymentTransaction(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
+            }
+            else
+#endif
             if (isZero(transaction->destinationPublicKey))
             {
                 // Destination is system
@@ -3172,7 +3215,6 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
 
                 case MiningSolutionTransaction::transactionType():
                 {
-                    gSolutionTxPaid[transactionIndex] = true; // deposit paid; reaching here means decreaseEnergy succeeded
                     if (transaction->amount >= MiningSolutionTransaction::minAmount()
                         && transaction->inputSize >= MiningSolutionTransaction::minInputSize())
                     {
@@ -3467,6 +3509,11 @@ static void processTick(unsigned long long processorNumber)
     PROFILE_SCOPE();
     TickBench::Scope _btTotal(TickBench::TICK_TOTAL);
 
+    if (gTestSolutionThreshold >= 0 && system.epoch < MAX_NUMBER_EPOCH)
+    {
+        solutionThreshold[system.epoch][score_engine::AlgoType::Bpp9000] = gTestSolutionThreshold;
+    }
+
 #ifdef TESTNET
     if (tickDelay > 0) {
         bs->Stall(tickDelay * 1'000);
@@ -3557,6 +3604,14 @@ static void processTick(unsigned long long processorNumber)
         PROFILE_SCOPE_END();
     }
 
+#ifdef LITE_WASM_SC
+    // Activate armed contracts under SC_INITIALIZE_TX framing.
+    if (Wasm::Runtime::hasPendingActivation())
+    {
+        logger.registerNewTx(system.tick, logger.SC_INITIALIZE_TX);
+        Wasm::Runtime::activatePendingContracts();
+    }
+#endif
     PROFILE_NAMED_SCOPE_BEGIN("processTick(): BEGIN_TICK");
     unsigned long long _btBeginTickStart = __rdtsc();
     logger.registerNewTx(system.tick, logger.SC_BEGIN_TICK_TX);
@@ -3565,8 +3620,6 @@ static void processTick(unsigned long long processorNumber)
     WAIT_WHILE(contractProcessorState);
     TickBench::add(TickBench::BEGIN_TICK, _btBeginTickStart, __rdtsc());
     PROFILE_SCOPE_END();
-
-    latestIncomingTransferTickPreservePubkeys.clear();
 
     bool isThereQearnTx = false;
     unsigned int tickIndex = ts.tickToIndexCurrentEpoch(system.tick);
@@ -3645,17 +3698,6 @@ static void processTick(unsigned long long processorNumber)
 
         solutionTotalExecutionTicks = __rdtsc() - solutionProcessStartTick; // for tracking the time processing solutions
 
-        // Setup spectrum rollback data
-        setMem(spectrumDataRollback, sizeof(spectrumDataRollback), 0);
-        setMem(gSolutionTxPaid, sizeof(gSolutionTxPaid), 0);
-        setMem(gSolutionTxReturned, sizeof(gSolutionTxReturned), 0);
-        resourceTestingDigestRollback = resourceTestingDigest;
-
-        copyMem((void*)minerPublicKeysRollback, (void*)minerPublicKeys, sizeof(minerPublicKeys));
-        copyMem((void*)minerScoresRollback, (void*)minerScores, sizeof(minerScores));
-        copyMem((void*)minerBestScoreTicksRollback, (void*)minerBestScoreTicks, sizeof(minerBestScoreTicks));
-        numberOfMinersRollback = numberOfMiners;
-
         // Process all transaction of the tick
         PROFILE_NAMED_SCOPE_BEGIN("processTick(): process transactions");
         unsigned long long _bProcTxsStart = __rdtsc();
@@ -3666,50 +3708,6 @@ static void processTick(unsigned long long processorNumber)
         setMem(gTxObservation, sizeof(gTxObservation), 0);
 
         const m256i& tickLeaderKey = broadcastedComputors.computors.publicKeys[system.tick % NUMBER_OF_COMPUTORS];
-
-        bool isThisTickHasSolution = false;
-
-        // Sources of solution txs in this tick (deduped). Only these addresses can be
-        // affected by the rollback inside reprocessSolutionTransaction(), so they are
-        // the only ones whose latestIncomingTransferTick we need to track during
-        // non-solution tx processing below.
-        m256i solutionTxSourcePubKeys[NUMBER_OF_TRANSACTIONS_PER_TICK];
-        unsigned int solutionSrcLastNIT[NUMBER_OF_TRANSACTIONS_PER_TICK];
-        unsigned int numSolutionTxSources = 0;
-
-        // Backup the spectrum data first
-        for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
-        {
-            if (!isZero(nextTickData.transactionDigests[transactionIndex]))
-            {
-                if (tsCurrentTickTransactionOffsets[transactionIndex])
-                {
-                    Transaction* transaction = ts.tickTransactions(tsCurrentTickTransactionOffsets[transactionIndex]);
-                    // Store spectrum data for rollback if there is invalid solutions in the tick
-                    auto sourceSpectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
-                    spectrumDataRollback[transactionIndex] = spectrum[sourceSpectrumIndex];
-
-                    if (MiningSolutionTransaction::isSolutionTransaction(transaction))
-                    {
-                        isThisTickHasSolution = true;
-
-                        bool alreadyTracked = false;
-                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
-                        {
-                            if (solutionTxSourcePubKeys[k] == transaction->sourcePublicKey)
-                            {
-                                alreadyTracked = true;
-                                break;
-                            }
-                        }
-                        if (!alreadyTracked)
-                        {
-                            solutionTxSourcePubKeys[numSolutionTxSources++] = transaction->sourcePublicKey;
-                        }
-                    }
-                }
-            }
-        }
 
         for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
         {
@@ -3725,35 +3723,7 @@ static void processTick(unsigned long long processorNumber)
                         isThereQearnTx = true;
                     }
 
-                    const bool shouldTrackSolutionSrc =
-                        isThisTickHasSolution
-                        && numSolutionTxSources > 0
-                        && !MiningSolutionTransaction::isSolutionTransaction(transaction);
-
-                    if (shouldTrackSolutionSrc)
-                    {
-                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
-                        {
-                            const int spectrumIdx = ::spectrumIndex(solutionTxSourcePubKeys[k]);
-                            solutionSrcLastNIT[k] =
-                                (spectrumIdx >= 0) ? spectrum[spectrumIdx].numberOfIncomingTransfers : 0;
-                        }
-                    }
-
                     processTickTransaction(transaction, transactionIndex, tsCurrentTickTransactionOffsets[transactionIndex], processorNumber);
-
-                    if (shouldTrackSolutionSrc)
-                    {
-                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
-                        {
-                            const int spectrumIdx = ::spectrumIndex(solutionTxSourcePubKeys[k]);
-                            if (spectrumIdx >= 0
-                                && spectrum[spectrumIdx].numberOfIncomingTransfers != solutionSrcLastNIT[k])
-                            {
-                                latestIncomingTransferTickPreservePubkeys.push_back(solutionTxSourcePubKeys[k]);
-                            }
-                        }
-                    }
 
                     // Multi-dim revenue: categorize this tx into the REVENUE_TX_DIM observation
                     if (isZero(transaction->destinationPublicKey))
@@ -4037,34 +4007,77 @@ static void processTick(unsigned long long processorNumber)
     unsigned long long _bDigSpecStart = __rdtsc();
     unsigned int digestIndex;
     ACQUIRE(spectrumLock);
-    for (digestIndex = 0; digestIndex < SPECTRUM_CAPACITY; digestIndex++)
+    if (spectrumDirtyOverflow)
     {
-        if (spectrum[digestIndex].latestIncomingTransferTick == system.tick || spectrum[digestIndex].latestOutgoingTransferTick == system.tick)
+        // Fallback (rare): too many distinct leaves changed this tick — discover them by full scan.
+        for (digestIndex = 0; digestIndex < SPECTRUM_CAPACITY; digestIndex++)
         {
-            KangarooTwelve64To32(&spectrum[digestIndex], &spectrumDigests[digestIndex]);
-            spectrumChangeFlags[digestIndex >> 6] |= (1ULL << (digestIndex & 63));
+            if (spectrum[digestIndex].latestIncomingTransferTick == system.tick || spectrum[digestIndex].latestOutgoingTransferTick == system.tick)
+            {
+                KangarooTwelve64To32(&spectrum[digestIndex], &spectrumDigests[digestIndex]);
+                spectrumChangeFlags[digestIndex >> 6] |= (1ULL << (digestIndex & 63));
+            }
         }
     }
+    else
+    {
+        // Re-hash only the leaves touched this tick; their flags were set by markSpectrumDirty().
+        for (unsigned int k = 0; k < spectrumDirtyCount; k++)
+        {
+            const unsigned int idx = spectrumDirtyIndices[k];
+            KangarooTwelve64To32(&spectrum[idx], &spectrumDigests[idx]);
+        }
+    }
+    // Parent write index is computed from i (writeBase + i/2), decoupled from a running
+    // counter, so a whole clean 64-bit flag word (32 pairs) can be skipped at once — the per-tick
+    // dirty set is tiny, so the Merkle walk becomes ~O(dirty) instead of O(SPECTRUM_CAPACITY).
     unsigned int previousLevelBeginning = 0;
+    unsigned int writeBase = SPECTRUM_CAPACITY; // Merkle walk writes parent nodes starting at this index
     unsigned int numberOfLeafs = SPECTRUM_CAPACITY;
     while (numberOfLeafs > 1)
     {
         for (unsigned int i = 0; i < numberOfLeafs; i += 2)
         {
+            if ((i & 63) == 0 && spectrumChangeFlags[i >> 6] == 0) { i += 62; continue; } // skip 32 clean pairs
             if (spectrumChangeFlags[i >> 6] & (3ULL << (i & 63)))
             {
-                KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[digestIndex]);
+                KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[writeBase + (i >> 1)]);
                 spectrumChangeFlags[i >> 6] &= ~(3ULL << (i & 63));
                 spectrumChangeFlags[i >> 7] |= (1ULL << ((i >> 1) & 63));
             }
-            digestIndex++;
         }
         previousLevelBeginning += numberOfLeafs;
+        writeBase += (numberOfLeafs >> 1);
         numberOfLeafs >>= 1;
     }
     spectrumChangeFlags[0] = 0;
+    spectrumDirtyCount = 0;        // consumed — ready for next tick
+    spectrumDirtyOverflow = false;
 
     etalonTick.saltedSpectrumDigest = spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1];
+#ifdef VERIFY_SPECTRUM_DIGEST
+    // Self-check: recompute the whole tree from scratch and assert the incremental result matches.
+    {
+        const m256i _dirtyRoot = etalonTick.saltedSpectrumDigest;
+        unsigned int _wi;
+        for (_wi = 0; _wi < SPECTRUM_CAPACITY; _wi++)
+            KangarooTwelve64To32(&spectrum[_wi], &spectrumDigests[_wi]);
+        unsigned int _plb = 0, _nl = SPECTRUM_CAPACITY;
+        while (_nl > 1)
+        {
+            for (unsigned int i = 0; i < _nl; i += 2)
+                KangarooTwelve64To32(&spectrumDigests[_plb + i], &spectrumDigests[_wi++]);
+            _plb += _nl;
+            _nl >>= 1;
+        }
+        if (spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1] != _dirtyRoot)
+        {
+            setText(message, L"FATAL: spectrum dirty-digest != full recompute at tick ");
+            appendNumber(message, system.tick, FALSE);
+            while (true) { logToConsole(message); bs->Stall(1'000'000); }
+        }
+    }
+#endif
     RELEASE(spectrumLock);
     TickBench::add(TickBench::DIGEST_SPECTRUM, _bDigSpecStart, __rdtsc());
     PROFILE_SCOPE_END();
@@ -4479,12 +4492,20 @@ static void processTick(unsigned long long processorNumber)
             }
         }
 
-        // TEST: synthesize an invalid solution tx to exercise replay on receiving nodes.
-        if (forceBroadcastInvalidSolution && computorSeedsCount > 0)
+    }
+
+    // Keep the test injector available in AUX mode so a rollback node can self-inject.
+    if (forceBroadcastInvalidSolution && computorSeedsCount > 0)
+    {
+        const unsigned int txTick = system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET;
+        const unsigned int claimedScore = (unsigned int)getSolutionThreshold(score_engine::AlgoType::Bpp9000);
+        if (gFbisCount > 1 || gFbisSameComputor)
         {
-            TestInvalidSolution::broadcastRandom(score->currentRandomSeed,
-                                                 system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET,
-                                                 getSolutionThreshold(score_engine::AlgoType::Bpp9000));
+            TestInvalidSolution::broadcastN(score->currentRandomSeed, txTick, gFbisCount, gFbisSameComputor, claimedScore);
+        }
+        else
+        {
+            TestInvalidSolution::broadcastRandom(score->currentRandomSeed, txTick, claimedScore);
         }
     }
 
@@ -4718,12 +4739,15 @@ static void endEpoch()
             oracleEngine.getRevenuePoints(oracleRevPoints);
             copyMemory(gEpochRevenueData.oracleScore, oracleRevPoints.computorRevPoints);
         }
+        // Development epochs can have no revenue window, so skip windowed formulas.
+#if !(defined(TESTNET) && defined(LITE_WASM_SC))
         computeRevenueV2(gEpochRevenueData);
 
         // Multi-dimension revenue: computed for offline comparison; paid to computors
         // only when USE_REVENUE_MULTI_DIMENSION is set (see src/revenue.h).
         gMultiDimRevenue.totalTicks = system.tick - system.initialTick;
         computeMultiDimRevenue();
+#endif
 
         // Get revenue donation data by calling contract GQMPROP::GetRevenueDonation()
         QpiContextUserFunctionCall qpiContext(GQMPROP::__contract_index);
@@ -4737,7 +4761,10 @@ static void endEpoch()
         for (unsigned int computorIndex = 0; computorIndex < NUMBER_OF_COMPUTORS; computorIndex++)
         {
             // Compute initial computor revenue, reducing arbitrator revenue
-#if USE_REVENUE_MULTI_DIMENSION
+#if defined(TESTNET) && defined(LITE_WASM_SC)
+            // Split development issuance evenly when windowed formulas are disabled.
+            long long revenue = issuancePerComputor;
+#elif USE_REVENUE_MULTI_DIMENSION
             long long revenue = gMultiDimRevenue.revenue[computorIndex];
 #else
             long long revenue = gEpochRevenueData.v2Revenue[computorIndex];
@@ -4846,7 +4873,7 @@ static void initializeFirstTick()
     int uniqueVoteCount[NUMBER_OF_COMPUTORS];
     int uniqueCount = 0;
     const unsigned int firstTickIndex = ts.tickToIndexCurrentEpoch(system.initialTick);
-    while (!shutDownNode)
+    while (!shutDownNode && !gracefulShutdownRequested.load(std::memory_order_acquire))
     {
         if (broadcastedComputors.computors.epoch == system.epoch)
         {
@@ -6169,172 +6196,6 @@ static bool isTickTimeOut()
     return (__rdtsc() - tickTicks[sizeof(tickTicks) / sizeof(tickTicks[0]) - 1] > TARGET_TICK_DURATION * NEXT_TICK_TIMEOUT_THRESHOLD * frequency / 1000);
 }
 
-void reprocessSolutionTransaction(unsigned long long processorNumber)
-{
-    isReprocessingSolutions = true;
-
-    TickData currentTickData;
-    // copy system.tick data
-    ts.tickData.acquireLock();
-    copyMem(&currentTickData, ts.tickData.getByTickIfNotEmpty(system.tick), sizeof(TickData));
-    ts.tickData.releaseLock();
-
-    // first rollback the miner scores data
-    copyMem((void*)minerPublicKeys, (void*)minerPublicKeysRollback, sizeof(minerPublicKeysRollback));
-    copyMem((void*)minerScores, (void*)minerScoresRollback, sizeof(minerScoresRollback));
-    copyMem((void*)minerBestScoreTicks, (void*)minerBestScoreTicksRollback, sizeof(minerBestScoreTicksRollback));
-    numberOfMiners = numberOfMinersRollback;
-
-    auto tsCurrentTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(system.tick);
-
-    unsigned long long solutionProcessStartTick = __rdtsc(); // for tracking the time processing solutions
-    // reset solution task queue
-    score->resetTaskQueue();
-    // pre-scan any solution tx and add them to solution task queue
-    for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
-    {
-        if (!isZero(currentTickData.transactionDigests[transactionIndex]))
-        {
-            if (tsCurrentTickTransactionOffsets[transactionIndex])
-            {
-                Transaction* transaction = ts.tickTransactions(tsCurrentTickTransactionOffsets[transactionIndex]);
-                ASSERT(transaction->checkValidity());
-                ASSERT(transaction->tick == system.tick);
-                const int spectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
-                if (spectrumIndex >= 0)
-                {
-                    // Solution transactions
-                    if (isZero(transaction->destinationPublicKey)
-                        && transaction->amount >= MiningSolutionTransaction::minAmount()
-                        && transaction->inputType == MiningSolutionTransaction::transactionType())
-                    {
-                        if (transaction->inputSize == MiningSolutionTransaction::minInputSize())
-                        {
-                            const m256i& solution_miningSeed = *(m256i*)transaction->inputPtr();
-                            const m256i& solution_nonce = *(m256i*)(transaction->inputPtr() + 32);
-                            score->addTask(transaction->sourcePublicKey, solution_miningSeed, solution_nonce);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    {
-        // Process solutions in this tick and store in cache. In parallel, score->tryProcessSolution() is called by
-        // request processors to speed up solution processing.
-        score->startProcessTaskQueue();
-        while (!score->isTaskQueueProcessed())
-        {
-            score->tryProcessSolution(processorNumber);
-        }
-        score->stopProcessTaskQueue();
-    }
-
-    solutionTotalExecutionTicks = __rdtsc() - solutionProcessStartTick; // for tracking the time processing solutions
-
-    ts.tickData.acquireLock();
-    for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
-    {
-        if (!isZero(currentTickData.transactionDigests[transactionIndex]))
-        {
-            if (tsCurrentTickTransactionOffsets[transactionIndex])
-            {
-                Transaction *transaction = ts.tickTransactions(tsCurrentTickTransactionOffsets[transactionIndex]);
-                ASSERT(transaction->checkValidity());
-                ASSERT(transaction->tick == system.tick);
-                const int spectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
-                if (spectrumIndex >= 0)
-                {
-                    // Solution transactions
-                    if (isZero(transaction->destinationPublicKey)
-                        && transaction->amount >= MiningSolutionTransaction::minAmount()
-                        && transaction->inputType == MiningSolutionTransaction::transactionType())
-                    {
-                        CHAR16 srcChars[60 + 1];
-                        CHAR16 seedChars[60 + 1];
-                        CHAR16 nonceChars[60 + 1];
-                        getIdentity(transaction->sourcePublicKey.m256i_u8, srcChars, true);
-                        getIdentity(transaction->inputPtr(), seedChars, true);
-                        getIdentity(transaction->inputPtr() + 32, nonceChars, true);
-                        setText(message, L"Reprocess sol tx #");
-                        appendNumber(message, transactionIndex, FALSE);
-                        appendText(message, L" src=");
-                        appendText(message, srcChars);
-                        appendText(message, L" seed=");
-                        appendText(message, seedChars);
-                        appendText(message, L" nonce=");
-                        appendText(message, nonceChars);
-                        logToConsole(message);
-
-                        // Undo this solution tx's optimistic deposit payment and return, then replay the balance-gated path.
-                        ACQUIRE(spectrumLock);
-                        if (gSolutionTxReturned[transactionIndex]) // optimistic deposit return existed
-                        {
-                            spectrum[spectrumIndex].incomingAmount -= transaction->amount;
-                            spectrum[spectrumIndex].numberOfIncomingTransfers--;
-                            spectrumInfo.totalAmount -= transaction->amount;
-                        }
-                        if (gSolutionTxPaid[transactionIndex]) // optimistic deposit payment existed
-                        {
-                            spectrum[spectrumIndex].outgoingAmount -= transaction->amount;
-                            spectrum[spectrumIndex].numberOfOutgoingTransfers--;
-                            spectrumInfo.totalAmount += transaction->amount;
-                        }
-                        spectrum[spectrumIndex].latestIncomingTransferTick = spectrumDataRollback[transactionIndex].latestIncomingTransferTick;
-                        auto backupNumberOfIncomingTransfers = spectrum[spectrumIndex].numberOfIncomingTransfers;
-                        RELEASE(spectrumLock);
-
-                        // Replay deposit payment (balance-gated) then re-score; mirrors the solution branch of processTickTransaction().
-                        if (decreaseEnergy(spectrumIndex, transaction->amount))
-                        {
-                            // Skip dedup re-submissions (minerSolutionFlags set in a prior tick) -> stay burned, no return.
-                            if (gSolutionTxReturned[transactionIndex])
-                            {
-                                processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber, true);
-                            }
-                        }
-
-                        // A good solution re-adds the return; preserve its tick so a later same-source undo can't reset it.
-                        // Re-resolve the index: the good-path increaseEnergy may have triggered reorganizeSpectrum().
-                        const int spectrumIndexAfter = ::spectrumIndex(transaction->sourcePublicKey);
-                        ACQUIRE(spectrumLock);
-                        if (spectrumIndexAfter >= 0
-                            && spectrum[spectrumIndexAfter].numberOfIncomingTransfers != backupNumberOfIncomingTransfers)
-                        {
-                            latestIncomingTransferTickPreservePubkeys.push_back(transaction->sourcePublicKey);
-                        }
-                        RELEASE(spectrumLock);
-                    }
-                }
-            }
-            else
-            {
-                while (true)
-                {
-                    logToConsole(L"Error: transaction missing in tickTransaction storage during reprocessSolutionTransaction()");
-                    bs->Stall(1'000'000);
-                }
-            }
-        }
-    }
-
-
-    for (const m256i &pubkey : latestIncomingTransferTickPreservePubkeys)
-    {
-        int spectrumIndex = ::spectrumIndex(pubkey);
-        if (spectrumIndex >= 0)
-        {
-            ACQUIRE(spectrumLock);
-            spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
-            RELEASE(spectrumLock);
-        }
-    }
-
-    ts.tickData.releaseLock();
-    isReprocessingSolutions = false;
-}
-
 void checkAllContractLocksReleased()
 {
     int currentIndex = 0;
@@ -6359,7 +6220,7 @@ void checkAllContractLocksReleased()
 
 void doBadBoySpam()
 {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #ifdef TESTNET
     const std::string rpcApi = "http://127.0.0.1:41841";
 #else
@@ -6596,7 +6457,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
 
 #if !START_NETWORK_FROM_SCRATCH
     // only init first tick if it doesn't load all node states from file
-    if (!loadAllNodeStateFromFile)
+    if (!loadAllNodeStateFromFile && !tickFork::gIsForkChild)
     {
         initializeFirstTick();
     }
@@ -6606,6 +6467,14 @@ static void tickProcessor(void*, unsigned long long processorNumber)
     unsigned int latestProcessedTick = 0;
     while (!shutDownNode)
     {
+        if (gracefulShutdownRequested.load(std::memory_order_acquire))
+        {
+#if defined(__linux__) && !defined(LITE_WASM_SC)
+            tickFork::retireCheckpointForShutdown();
+#endif
+            shutDownNode = 1;
+            break;
+        }
 #ifdef TESTNET
         std::this_thread::sleep_for(std::chrono::microseconds(500));
 #endif
@@ -6624,7 +6493,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 logToConsole(pinLeakMsg);
             }
         }
-        PinScope _pinScope; // release swap-page pins taken during this tick-processing iteration
+        PinScope pinScope;
 
         checkinTime(processorNumber);
 
@@ -6721,7 +6590,11 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     doBadBoySpam();
                 });
                 spamThread.detach();
+                tickFork::maybeForkBeforeTick(processorNumber);
                 processTick(processorNumber);
+                // Strict replay spans the complete checkpoint window.
+                if ((unsigned)system.tick >= gReRunStrictUntilTick)
+                    gReRunStrict = false;
                 latestProcessedTick = system.tick;
 
                 // safety check for contract locks
@@ -6813,70 +6686,23 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     int status = findCurrentDigestsFromNextTickVotes(spectrumDigestFromQuorum, resourceTestingDigestFromQuorum);
                     if (status == 1)
                     {
-                        // If the spectrum digest from quorum doesn't match with etalonTick, that indicates there is invalid solutions in current tick
-                        if (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum)
+                        const bool spectrumMismatch = etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum;
+                        if (tickFork::verdict(spectrumMismatch, spectrumDigestFromQuorum, processorNumber))
                         {
-                            CHAR16 localDigestChars[60 + 1];
-                            CHAR16 quorumDigestChars[60 + 1];
-                            getIdentity(etalonTick.saltedSpectrumDigest.m256i_u8, localDigestChars, true);
-                            getIdentity(spectrumDigestFromQuorum.m256i_u8, quorumDigestChars, true);
-                            setText(message, L"Invalid solutions detected at tick ");
-                            appendNumber(message, system.tick, FALSE);
-                            appendText(message, L": local=");
-                            appendText(message, localDigestChars);
-                            appendText(message, L" quorum=");
-                            appendText(message, quorumDigestChars);
-                            appendText(message, L". Reprocessing solutions...");
-                            logToConsole(message);
-                            resourceTestingDigest = resourceTestingDigestRollback;
+                            resourceTestingDigest = resourceTestingDigestFromQuorum;
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
-                            reprocessSolutionTransaction(processorNumber);
-                            etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
-
-                            // Update etalonTick.saltedSpectrumDigest
-                            unsigned int digestIndex;
-                            ACQUIRE(spectrumLock);
-                            for (digestIndex = 0; digestIndex < SPECTRUM_CAPACITY; digestIndex++)
-                            {
-                                if (spectrum[digestIndex].latestIncomingTransferTick == system.tick || spectrum[digestIndex].latestOutgoingTransferTick == system.tick)
-                                {
-                                    KangarooTwelve64To32(&spectrum[digestIndex], &spectrumDigests[digestIndex]);
-                                    spectrumChangeFlags[digestIndex >> 6] |= (1ULL << (digestIndex & 63));
-                                }
-                            }
-                            unsigned int previousLevelBeginning = 0;
-                            unsigned int numberOfLeafs = SPECTRUM_CAPACITY;
-                            while (numberOfLeafs > 1)
-                            {
-                                for (unsigned int i = 0; i < numberOfLeafs; i += 2)
-                                {
-                                    if (spectrumChangeFlags[i >> 6] & (3ULL << (i & 63)))
-                                    {
-                                        KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[digestIndex]);
-                                        spectrumChangeFlags[i >> 6] &= ~(3ULL << (i & 63));
-                                        spectrumChangeFlags[i >> 7] |= (1ULL << ((i >> 1) & 63));
-                                    }
-                                    digestIndex++;
-                                }
-                                previousLevelBeginning += numberOfLeafs;
-                                numberOfLeafs >>= 1;
-                            }
-                            spectrumChangeFlags[0] = 0;
-
-                            etalonTick.saltedSpectrumDigest = spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1];
-                            RELEASE(spectrumLock);
-
+                        }
+                        else
+                        {
+                            // Without a usable checkpoint, child promotion cannot recover a mismatch.
                             if (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum)
                             {
                                 while (true)
                                 {
-                                    logToConsole(L"Error: Solutions invalid detected, but cannot recover spectrum digest");
+                                    logToConsole(L"Error: spectrum digest mismatch with no fork rollback available");
                                     bs->Stall(1'000'000);
                                 }
                             }
-                        }
-                        else
-                        {
                             resourceTestingDigest = resourceTestingDigestFromQuorum;
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
                         }
@@ -7010,8 +6836,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
 
                 if (numberOfKnownNextTickTransactions != numberOfNextTickTransactions)
                 {
-                    if (!targetNextTickDataDigestIsKnown
-                        && isTickTimeOut())
+                    if (!targetNextTickDataDigestIsKnown && isTickTimeOut())
                     {
                         // If we don't have enough txs data for the next tick, and current/next tick votes not reach quorum
                         // and tick duration exceed 5*TARGET_TICK_DURATION, then it will temporarily discard next tickData, that will lead to zero expectedNextTickTransactionDigest
@@ -7107,6 +6932,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     gTickNumberOfComputors = tickNumberOfComputors;
                     gTickTotalNumberOfComputors = tickTotalNumberOfComputors;
 
+#if !defined(LITE_WASM_SC)
                     // K12 state-cache safety net: only at ticks where the computer digest is consensus-validated.
                     // If enough computors voted but quorum doesn't match our etalon, an incremental-cache error
                     // could be the cause, so recompute the computer digest canonically (cache bypassed) and re-tally
@@ -7130,6 +6956,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                             }
                         }
                     }
+#endif
 
                     if (tickNumberOfComputors >= QUORUM)
                     {
@@ -7394,6 +7221,9 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 }
             }
         }
+#ifdef LITE_WASM_SC
+        Wasm::Runtime::evictContractState();
+#endif
         tickerLoopNumerator += __rdtsc() - curTimeTick;
         tickerLoopDenominator++;
     }
@@ -7591,10 +7421,15 @@ static bool saveContractStateFiles(CHAR16* directory)
         CONTRACT_FILE_NAME[sizeof(CONTRACT_FILE_NAME) / sizeof(CONTRACT_FILE_NAME[0]) - 7] = (contractIndex % 100) / 10 + L'0';
         CONTRACT_FILE_NAME[sizeof(CONTRACT_FILE_NAME) / sizeof(CONTRACT_FILE_NAME[0]) - 6] = contractIndex % 10 + L'0';
         contractStateLock[contractIndex].acquireRead();
-        savedSize = save(CONTRACT_FILE_NAME, contractDescriptions[contractIndex].stateSize, contractStates[contractIndex], directory);
+#ifdef LITE_WASM_SC
+        const unsigned long long saveSize = Wasm::Runtime::effectiveStateSize(contractIndex, contractDescriptions[contractIndex].stateSize);
+#else
+        const unsigned long long saveSize = contractDescriptions[contractIndex].stateSize;
+#endif
+        savedSize = save(CONTRACT_FILE_NAME, saveSize, contractStates[contractIndex], directory);
         contractStateLock[contractIndex].releaseRead();
         totalSize += savedSize;
-        if (savedSize != contractDescriptions[contractIndex].stateSize)
+        if (savedSize != saveSize)
         {
             return false;
         }
@@ -7816,27 +7651,34 @@ static bool initialize()
         for (unsigned int contractIndex = 0; contractIndex < contractCount; contractIndex++)
         {
             unsigned long long size = contractDescriptions[contractIndex].stateSize;
-            // cached contracts need page-aligned state for per-chunk mprotect; off-path keeps the 64-byte alloc
+#if defined(LITE_WASM_SC)
+            const bool contractStateAllocOk = Wasm::Runtime::allocateContractState(contractIndex, size);
+#else
+            // cached contracts need page-aligned state for per-chunk mprotect; off-path keeps the plain alloc
             const bool contractStateAllocOk = K12StateDigestCache::wantsPageAlignedAlloc(size)
                 ? K12StateDigestCache::allocStatePool(size, (void**)&contractStates[contractIndex])
                 : allocPoolWithErrorLog(L"contractStates", size, (void**)&contractStates[contractIndex], __LINE__);
+#endif
             if (!contractStateAllocOk)
             {
                 return false;
             }
         }
 
-        if (!allocPoolWithErrorLog(L"score", sizeof(*score), (void**)&score, __LINE__))
+        // Commit the large score pools on demand.
+        if (!allocPoolWithErrorLog(L"score", sizeof(*score), (void**)&score, __LINE__, true, true, /*lazyCommit=*/true))
         {
             return false;
         }
+        if (!allocPoolWithErrorLog(L"score", sizeof(*score_qpi), (void**)&score_qpi, __LINE__, true, true, /*lazyCommit=*/true))
+        {
+            return false;
+        }
+#if !(defined(TESTNET) && defined(LITE_WASM_SC))
+        // Full mining builds still initialize the pools eagerly.
         setMem(score, sizeof(*score), 0);
-
-        if (!allocPoolWithErrorLog(L"score", sizeof(*score_qpi), (void**)&score_qpi, __LINE__))
-        {
-            return false;
-        }
         setMem(score_qpi, sizeof(*score_qpi), 0);
+#endif
 
         setMem(&solutionThreshold[0][0], sizeof(int) * MAX_NUMBER_EPOCH * score_engine::AlgoType::MaxAlgoCount, 0);
         if (!allocPoolWithErrorLog(L"minserSolutionFlag", NUMBER_OF_MINER_SOLUTION_FLAGS / 8, (void**)&minerSolutionFlags, __LINE__))
@@ -7952,6 +7794,7 @@ static bool initialize()
 
                 ASSERT(energy(::spectrumIndex(publicKey)) == (10'000'000'000 + currentAmount));
             }
+
 #endif
 
 #if defined(TESTNET)
@@ -8098,6 +7941,10 @@ static bool initialize()
 
     // universe needs to be initialized before initializing contract errors
     initializeContractErrors();
+#ifdef LITE_WASM_SC
+    Wasm::Runtime::initializeDeployment();
+    Wasm::Runtime::initializeEngine();
+#endif
 
     if (loadMiningSeedFromFile)
     {
@@ -8248,8 +8095,10 @@ static bool initialize()
     emptyTickResolver.tick = 0;
     emptyTickResolver.lastTryClock = 0;
 
-    // contract states are now allocated, loaded and constructed; arm the per-chunk K12 digest cache
+    // Wasm state has its own protection and paging lifecycle.
+#if !defined(LITE_WASM_SC)
     K12StateDigestCache::init();
+#endif
 
     return true;
 }
@@ -8288,7 +8137,11 @@ static void deinitialize()
     {
         if (contractStates[contractIndex])
         {
+#ifdef LITE_WASM_SC
+            Wasm::Runtime::freeContractState(contractIndex);
+#else
             freePool(contractStates[contractIndex]);
+#endif
         }
     }
 
@@ -8300,36 +8153,36 @@ static void deinitialize()
 
     if (score)
     {
-        freePool(score);
+        freePoolOrVirtual(score);
     }
     if (minerSolutionFlags)
     {
-        freePool(minerSolutionFlags);
+        freePoolOrVirtual(minerSolutionFlags);
     }
 
     if (dejavu0)
     {
-        freePool((void*)dejavu0);
+        freePoolOrVirtual((void*)dejavu0);
     }
     if (dejavu1)
     {
-        freePool((void*)dejavu1);
+        freePoolOrVirtual((void*)dejavu1);
     }
 
     if (requestQueueBuffer)
     {
-        freePool(requestQueueBuffer);
+        freePoolOrVirtual(requestQueueBuffer);
     }
     if (responseQueueBuffer)
     {
-        freePool(responseQueueBuffer);
+        freePoolOrVirtual(responseQueueBuffer);
     }
 
     for (unsigned int processorIndex = 0; processorIndex < MAX_NUMBER_OF_PROCESSORS; processorIndex++)
     {
         if (processors[processorIndex].buffer)
         {
-            freePool(processors[processorIndex].buffer);
+            freePoolOrVirtual(processors[processorIndex].buffer);
         }
     }
 
@@ -8337,15 +8190,15 @@ static void deinitialize()
     {
         if (peers[i].receiveBuffer)
         {
-            freePool(peers[i].receiveBuffer);
+            freePoolOrVirtual(peers[i].receiveBuffer);
         }
         if (peers[i].transmitData.FragmentTable[0].FragmentBuffer)
         {
-            freePool(peers[i].transmitData.FragmentTable[0].FragmentBuffer);
+            freePoolOrVirtual(peers[i].transmitData.FragmentTable[0].FragmentBuffer);
         }
         if (peers[i].dataToTransmit)
         {
-            freePool(peers[i].dataToTransmit);
+            freePoolOrVirtual(peers[i].dataToTransmit);
 
             closeEvent(peers[i].connectAcceptToken.CompletionToken.Event);
             closeEvent(peers[i].receiveToken.CompletionToken.Event);
@@ -8395,6 +8248,10 @@ static void logInfo()
     appendNumber(message, numberOfDuplicateRequests - prevNumberOfDuplicateRequests, TRUE);
     appendText(message, L" /");
     appendNumber(message, numberOfDisseminatedRequests - prevNumberOfDisseminatedRequests, TRUE);
+    appendText(message, L" !");
+    appendNumber(message, numberOfDroppedTransmits - prevNumberOfDroppedTransmits, TRUE);
+    appendText(message, L" ?");
+    appendNumber(message, numberOfSkippedBroadcasts - prevNumberOfSkippedBroadcasts, TRUE);
     appendText(message, L"] ");
 
     unsigned int numberOfConnectingSlots = 0, numberOfConnectedSlots = 0, numberOfHandshakedSlots = 0;
@@ -8493,6 +8350,8 @@ static void logInfo()
     prevNumberOfDiscardedRequests = numberOfDiscardedRequests;
     prevNumberOfDuplicateRequests = numberOfDuplicateRequests;
     prevNumberOfDisseminatedRequests = numberOfDisseminatedRequests;
+    prevNumberOfDroppedTransmits = numberOfDroppedTransmits;
+    prevNumberOfSkippedBroadcasts = numberOfSkippedBroadcasts;
     prevNumberOfReceivedBytes = numberOfReceivedBytes;
     prevNumberOfTransmittedBytes = numberOfTransmittedBytes;
 
@@ -9238,7 +9097,7 @@ static void processKeyPresses()
         */
         case 0x17:
         {
-            shutDownNode = 1;
+            requestGracefulShutdown();
         }
         break;
 
@@ -9256,6 +9115,363 @@ static void processKeyPresses()
 }
 
 #include "optimizations/opt_future_tick_prefetch.h"
+
+static unsigned int computingProcessorNumber;
+static unsigned long long numberOfAllProcessors;
+
+// Spawn the AP threads (tick + request) and set up the contract-processor slot.
+// Extracted from efi_main so the promoted fork child can re-spawn the same workers.
+// numberOfAllProcessors must be populated (GetNumberOfProcessors) before calling.
+static void spawnAPs()
+{
+    numberOfProcessors = 0;
+    nTickProcessorIDs = 0;
+    nRequestProcessorIDs = 0;
+    nContractProcessorIDs = 0;
+    nSolutionProcessorIDs = 0;
+
+    for (int i = 0; i < MAX_NUMBER_OF_PROCESSORS; i++)
+    {
+        solutionProcessorFlags[i] = false;
+        preprocessSolutionFlags[i] = false;
+    }
+
+    for (unsigned int i = 0; i < numberOfAllProcessors && numberOfProcessors < MAX_NUMBER_OF_PROCESSORS; i++)
+    {
+        EFI_PROCESSOR_INFORMATION processorInformation;
+        mpServicesProtocol->GetProcessorInfo(mpServicesProtocol, i, &processorInformation);
+        if (processorInformation.StatusFlag == (PROCESSOR_ENABLED_BIT | PROCESSOR_HEALTH_STATUS_BIT))
+        {
+            // Reuse buffers already allocated (the fork child inherits them via COW); re-allocating
+            // each promotion would leak ~BUFFER_SIZE+STACK_SIZE per processor every fork.
+#if defined(TESTNET) && defined(LITE_WASM_SC)
+            // Commit low-RAM development network buffers on demand.
+            if (!processors[numberOfProcessors].buffer
+                && !allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__, true, true, /*lazyCommit=*/true))
+#else
+            if (!processors[numberOfProcessors].buffer
+                && !allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))
+#endif
+            {
+                numberOfProcessors = 0;
+                break;
+            }
+            if (!processors[numberOfProcessors].stackBottom && !processors[numberOfProcessors].alloc(STACK_SIZE))
+            {
+                logToConsole(L"Failed to allocate stack for processor!");
+                numberOfProcessors = 0;
+                break;
+            }
+
+            if (numberOfProcessors == 2)
+            {
+                processors[numberOfProcessors].type = Processor::ContractProcessor;
+                processors[numberOfProcessors].setupFunction(contractProcessor, 0);
+                computingProcessorNumber = numberOfProcessors;
+                contractProcessorIDs[nContractProcessorIDs++] = i;
+            }
+            else
+            {
+                if (numberOfProcessors == 1)
+                {
+                    processors[numberOfProcessors].type = Processor::TickProcessor;
+                    processors[numberOfProcessors].setupFunction(tickProcessor, &processors[numberOfProcessors]);
+                    tickProcessorIDs[nTickProcessorIDs++] = i;
+                }
+                else
+                {
+                    processors[numberOfProcessors].type = Processor::RequestProcessor;
+                    processors[numberOfProcessors].setupFunction(requestProcessor, &processors[numberOfProcessors]);
+                    requestProcessorIDs[nRequestProcessorIDs++] = i;
+                }
+
+                createEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK, (void*)&shutdownCallback, NULL, &processors[numberOfProcessors].event);
+                mpServicesProtocol->StartupThisAP(mpServicesProtocol, Processor::runFunction, i, processors[numberOfProcessors].event, 0, &processors[numberOfProcessors], NULL);
+
+                if (!solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS] && !solutionProcessorFlags[i])
+                {
+                    solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS] = true;
+                    solutionProcessorFlags[i] = true;
+                    if (nSolutionProcessorIDs < NUMBER_OF_PREPROCESS_SOLUTION_PROCESSORS)
+                    {
+                        preprocessSolutionFlags[i] = true;
+                    }
+                    solutionProcessorIDs[nSolutionProcessorIDs++] = i;
+                }
+            }
+            numberOfProcessors++;
+        }
+    }
+}
+
+#if defined(__linux__) && !defined(LITE_WASM_SC)
+#if !defined(NO_RPC) && !defined(TESTNET)
+void watchAndCheckin();
+#endif
+
+// Promoted fork child: drop the donor role, rebuild the AP workers, re-run the tick strict.
+static void tickForkChildPromote(unsigned int strictUntilTick)
+{
+    tickForkLog("CHILD: promote begin (rebuild net + APs, replay window strict)");
+
+    // ── fork protocol atomics ──
+    tickFork::gIsForkChild = true;
+    tickFork::gForkRequest = false;
+    tickFork::gChildPid = -2;
+    tickForkControl::gBspRetireHandoff.resetForChild();
+    tickFork::setWinState(tickFork::WindowState::Idle);
+    close(tickFork::gPipe[0]);
+    tickFork::gPipe[0] = -1;
+#if !defined(NO_RPC)
+    gRpcUnixRunning = false;
+    const std::string rpcPath = rpcUnixPath(httpPort);
+    tickForkControl::closeInheritedRpcUnixSocketsForPromote(gRpcUnixListenFd.exchange(-1), rpcPath.c_str());
+#endif
+
+    // ── disk shadow + swap pin recovery ──
+    // Inherited structures may be mid-operation in a non-surviving parent thread.
+    gShadow.reinitForChildPromote();
+    const bool shadowClean = gShadow.purgeOrphans();
+    ts.resetSwapPinsForChildPromote();
+    forkCensusResetForChildPromote();
+    if (!shadowClean)
+    {
+        forceVerifySolutions = true;
+        tickForkLog("CHILD: shadow cleanup failed -> disabling future checkpoints");
+    }
+
+    // ── strict-replay window ──
+    gReRunStrict = true;
+    gReRunStrictUntilTick = strictUntilTick;
+
+    // ── networking — drop parent connection state, keep COW-shared buffers ──
+    Overload::resetForChildPromote();
+    for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
+    {
+        peers[i].reset();
+        // Status 0 would make peerConnectionNewlyEstablished treat a half-armed Accept as completed.
+        peers[i].connectAcceptToken.CompletionToken.Status = -1;
+        peers[i].receiveToken.CompletionToken.Status = -1;
+        peers[i].transmitToken.CompletionToken.Status = -1;
+        peers[i].receiveData.FragmentTable[0].FragmentBuffer = peers[i].receiveBuffer;
+    }
+    PeerReaper::resetForChildPromote();
+    if (gAsyncFileIO)
+    {
+        gAsyncFileIO->reinitForChildPromote();
+    }
+
+    // ── compute threads ──
+    spawnAPs();
+    if (numberOfProcessors < 3)
+    {
+        tickForkLog("spawnAPs failed: too few processors -> fatal child exit (supervisor restart)");
+        _exit(71);
+    }
+
+    // ── RPC rebind ──
+#if defined(__linux__) && !defined(NO_RPC)
+    new (&gRpcDispatchLock) SmartSharedMutex("gRpcDispatchLock");
+    rpcUnixStart(rpcPath);
+#ifndef TESTNET
+    watchAndCheckin();
+#endif
+#endif
+    if (gForkBench)
+    {
+        fprintf(stderr, "[FORK-BENCH] child promoted rss=%ldMB\n", tickForkRssKb() / 1024);
+        fflush(stderr);
+    }
+    tickForkLog("CHILD: promote done, now the live node");
+}
+
+// BSP-only shadow commit. The caller has stopped tick/request/RPC writers, so after the BSP
+// drains its own queued and in-flight IO no thread can create a late shadow write.
+static bool bspCommitCheckpoint()
+{
+    tickForkLog("BSP retire begin");
+    flushAsyncFileIOBuffer(0);
+    if (!ts.drainSwapIoForFork(tickFork::gForkQuiesceTimeoutMs))
+    {
+        ForkStats::onForkSkipped(ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "retire_vm_io");
+        tickForkLog("BSP retire failed: VM IO drain timeout");
+        return false;
+    }
+
+    // Once the donor is gone, a partial disk commit can only restart from a saved snapshot.
+    tickFork::reapCheckpointChild();
+    gShadow.commit();
+    tickFork::setWinState(tickFork::WindowState::Idle);
+    tickForkLog("BSP retire complete");
+    return true;
+}
+
+static bool bspRetireCheckpoint(bool commitCheckpoint, bool shutDownAfterCommit)
+{
+    tickFork::BspRetireQuiescence quiescence;
+    if (!quiescence.acquire(tickFork::gForkQuiesceTimeoutMs))
+    {
+        ForkStats::onForkSkipped(ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "retire_writers");
+        tickForkLog("BSP retire failed: writer quiesce timeout");
+        return false;
+    }
+
+    const bool succeeded = !commitCheckpoint || bspCommitCheckpoint();
+    if (succeeded && shutDownAfterCommit)
+    {
+#if !defined(NO_RPC)
+        gRpcNodeReady.store(false, std::memory_order_release);
+#endif
+        shutDownNode = 1;
+    }
+    quiescence.release();
+    return succeeded;
+}
+
+static bool bspServiceRetireRequest()
+{
+    bool shutDownAfterCommit = false;
+    if (!tickForkControl::gBspRetireHandoff.tryStart(shutDownAfterCommit))
+        return false;
+
+    const bool commitCheckpoint = !shutDownAfterCommit || tickFork::winState() == tickFork::WindowState::Retiring;
+    const bool succeeded = bspRetireCheckpoint(commitCheckpoint, shutDownAfterCommit);
+    if (!tickForkControl::gBspRetireHandoff.finish(succeeded))
+    {
+        tickForkLog("BSP retire acknowledgement failed -> supervisor restart");
+        _exit(70);
+    }
+    return succeeded && shutDownAfterCommit;
+}
+
+// Autosave already runs on the BSP while the tick processor waits, so it commits directly.
+static void bspRetireCheckpointForAutosave()
+{
+    if (tickFork::winState() != tickFork::WindowState::Live)
+        return;
+
+    tickFork::setWinState(tickFork::WindowState::Retiring);
+    if (bspRetireCheckpoint(true, false))
+        return;
+
+    const char commandTag = tickForkControl::promoteTag;
+    const unsigned int targetTick = (unsigned)system.tick;
+    write(tickFork::gPipe[1], &commandTag, 1);
+    write(tickFork::gPipe[1], &targetTick, sizeof(targetTick));
+    tickForkLog("FATAL: BSP autosave retirement failed -> child promoted");
+    _exit(70);
+}
+
+// Called from the BSP main-loop top (no networkingLock held) when a fork is requested.
+static void bspForkPoint()
+{
+    // Claim first: the tick thread may time out only while the request is still unclaimed.
+    tickFork::gForkRequest = false;
+    const long long quiesceStartedNs = gForkBench ? tickForkNowNs() : 0;
+    tickForkLog("BSP fork: quiescing writers");
+    tickFork::BspForkQuiescence quiescence;
+    const auto quiescenceResult = quiescence.acquire(tickFork::gForkQuiesceTimeoutMs);
+    if (quiescenceResult != tickFork::BspForkQuiescence::AcquireResult::Acquired)
+    {
+        if (quiescenceResult == tickFork::BspForkQuiescence::AcquireResult::ParkTimeout)
+        {
+            ForkStats::onForkSkipped(ForkStats::PARK_TIMEOUT, (unsigned)system.tick, "request_processors");
+            tickForkLog("request processor park timeout -> skip fork, run current tick strict");
+        }
+        else
+        {
+            ForkStats::onForkSkipped(ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "snapshot_locks");
+            tickForkLog("snapshot lock timeout -> skip fork, run current tick strict");
+        }
+        quiescence.release();
+        tickFork::gChildPid = -1;
+        tickFork::setWinState(tickFork::WindowState::Idle);
+        return;
+    }
+    flushAsyncFileIOBuffer(0);
+    const int remainingDrainMs = quiescence.remainingDrainMs();
+    const bool swapIoDrained = remainingDrainMs > 0 && ts.drainSwapIoForFork(remainingDrainMs);
+    if (!swapIoDrained)
+    {
+        ForkStats::onForkSkipped(ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "vm_io");
+        tickForkLog("VM IO drain timeout -> skip fork, run current tick strict");
+        quiescence.release();
+        tickFork::gChildPid = -1;
+        tickFork::setWinState(tickFork::WindowState::Idle);
+        return;
+    }
+    if (gForkBench)
+        gForkQuiesceNs = tickForkNowNs() - quiesceStartedNs;
+
+    // Fork-eligibility gate: if another thread holds a lock, child inherits it deadlocked.
+    // Skip fork → strict (degrade, never crash). Brief grace for a handler about to release.
+    if (gForkCensus)
+    {
+        const long long censusDeadlineMs = tickForkNowMs() + 500; // Grace for a transient holder.
+        while (forkCensusSumExcept() != 0 && tickForkNowMs() < censusDeadlineMs)
+            _mm_pause();
+        if (forkCensusSumExcept() != 0)
+        {
+            const char* offendingLock = forkCensusOffender();
+            ForkStats::onForkSkipped(ForkStats::CENSUS, (unsigned)system.tick, offendingLock ? offendingLock : "?");
+            fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n", offendingLock ? offendingLock : "?",
+                (unsigned)system.tick);
+            fflush(stderr);
+            quiescence.release();
+            tickFork::gChildPid = -1;
+            tickFork::setWinState(tickFork::WindowState::Idle);
+            return;
+        }
+    }
+
+    if (!gShadow.arm())
+    {
+        ForkStats::onForkSkipped(ForkStats::QUIESCE_TIMEOUT, (unsigned)system.tick, "shadow_arm");
+        tickForkLog("shadow cleanup failed -> skip fork, run current tick strict");
+        quiescence.release();
+        tickFork::gChildPid = -1;
+        tickFork::setWinState(tickFork::WindowState::Idle);
+        return;
+    }
+
+    // If the matching return log is absent, fork() itself stalled.
+    tickForkLog("BSP fork: locks held, calling fork() now");
+    const long long forkStartedNs = gForkBench ? tickForkNowNs() : 0;
+    const pid_t childPid = fork();
+    if (gForkBench && childPid != 0)
+        gForkSyscallNs = tickForkNowNs() - forkStartedNs;
+    if (childPid == 0)
+    {
+        // CHILD BSP: block until parent's verdict, then become the node.
+        quiescence.abandonInChild();
+        close(tickFork::gPipe[1]);
+        const auto childCommand = tickForkControl::readChildCommand(tickFork::gPipe[0], (unsigned)system.tick + tickFork::gForkWindowK);
+        if (childCommand.action == tickForkControl::ChildAction::Retire)
+        {
+            close(tickFork::gPipe[0]);
+            tickFork::gPipe[0] = -1;
+            _exit(0);
+        }
+        tickForkChildPromote(childCommand.targetTick);
+        return;
+    }
+
+    tickForkLog("BSP fork: fork() returned to parent");
+    if (childPid < 0)
+        gShadow.discard();
+    quiescence.release();
+    if (childPid < 0)
+    {
+        tickForkLog("fork() failed -> parent strict fallback (no checkpoint)");
+        ForkStats::onForkSkipped(ForkStats::FORK_FAIL, (unsigned)system.tick, "");
+    }
+    tickFork::gChildPid = childPid;
+    if (childPid < 0)
+    {
+        tickFork::setWinState(tickFork::WindowState::Idle);
+    }
+}
+#endif // __linux__ && !LITE_WASM_SC
 
 EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 {
@@ -9283,92 +9499,25 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
         debugLogOnlyMainProcessorRunning = false;
         #endif
 
-        unsigned int computingProcessorNumber;
         EFI_GUID mpServiceProtocolGuid = EFI_MP_SERVICES_PROTOCOL_GUID;
         bs->LocateProtocol(&mpServiceProtocolGuid, NULL, (void**)&mpServicesProtocol);
-        unsigned long long numberOfAllProcessors, numberOfEnabledProcessors;
+        unsigned long long numberOfEnabledProcessors;
         mpServicesProtocol->GetNumberOfProcessors(mpServicesProtocol, &numberOfAllProcessors, &numberOfEnabledProcessors);
         mpServicesProtocol->WhoAmI(mpServicesProtocol, &mainThreadProcessorID); // get the proc Id of main thread (for later use)
         registerAsynFileIO(mpServicesProtocol);
-        
+
         // Initialize resource management
         // ASSUMPTION: - each processor (CPU core) is bound to different functional thread.
         //             - there are potentially 2+ tick processors in the future
         // procId is guaranteed lower than MAX_NUMBER_OF_PROCESSORS (https://github.com/tianocore/edk2/blob/master/MdePkg/Include/Protocol/MpService.h#L615)
-        // First part: tick processors always process solutions         
-        nTickProcessorIDs = 0;
-        nRequestProcessorIDs = 0;
-        nContractProcessorIDs = 0;
-        nSolutionProcessorIDs = 0;
-        
-        for (int i = 0; i < MAX_NUMBER_OF_PROCESSORS; i++)
-        {
-            solutionProcessorFlags[i] = false;
-            preprocessSolutionFlags[i] = false;
-        }
-
-        for (unsigned int i = 0; i < numberOfAllProcessors && numberOfProcessors < MAX_NUMBER_OF_PROCESSORS; i++)
-        {
-            EFI_PROCESSOR_INFORMATION processorInformation;
-            mpServicesProtocol->GetProcessorInfo(mpServicesProtocol, i, &processorInformation);
-            if (processorInformation.StatusFlag == (PROCESSOR_ENABLED_BIT | PROCESSOR_HEALTH_STATUS_BIT))
-            {
-                if (!allocPoolWithErrorLog(L"processor[i]", BUFFER_SIZE, &processors[numberOfProcessors].buffer, __LINE__))
-                {
-                    numberOfProcessors = 0;
-
-                    break;
-                }
-                if (!processors[numberOfProcessors].alloc(STACK_SIZE))
-                {
-                    logToConsole(L"Failed to allocate stack for processor!");
-                    numberOfProcessors = 0;
-                    break;
-                }
-
-                if (numberOfProcessors == 2)
-                {
-                    processors[numberOfProcessors].type = Processor::ContractProcessor;
-                    processors[numberOfProcessors].setupFunction(contractProcessor, 0);
-                    computingProcessorNumber = numberOfProcessors;
-                    contractProcessorIDs[nContractProcessorIDs++] = i;
-                }
-                else
-                {
-                    if (numberOfProcessors == 1)
-                    {
-                        processors[numberOfProcessors].type = Processor::TickProcessor;
-                        processors[numberOfProcessors].setupFunction(tickProcessor, &processors[numberOfProcessors]);
-                        tickProcessorIDs[nTickProcessorIDs++] = i;
-                    }
-                    else
-                    {
-                        processors[numberOfProcessors].type = Processor::RequestProcessor;
-                        processors[numberOfProcessors].setupFunction(requestProcessor, &processors[numberOfProcessors]);
-                        requestProcessorIDs[nRequestProcessorIDs++] = i;
-                    }
-
-                    createEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK, (void*)&shutdownCallback, NULL, &processors[numberOfProcessors].event);
-                    mpServicesProtocol->StartupThisAP(mpServicesProtocol, Processor::runFunction, i, processors[numberOfProcessors].event, 0, &processors[numberOfProcessors], NULL);
-
-                    if (!solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS]
-                        && !solutionProcessorFlags[i])
-                    {
-                        solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS] = true;
-                        solutionProcessorFlags[i] = true;
-                        if (nSolutionProcessorIDs < NUMBER_OF_PREPROCESS_SOLUTION_PROCESSORS)
-                        {
-                            preprocessSolutionFlags[i] = true;
-                        }
-                        solutionProcessorIDs[nSolutionProcessorIDs++] = i;
-                    }
-                }
-                numberOfProcessors++;
-            }
-        }
+        // First part: tick processors always process solutions
+        spawnAPs();
         if (numberOfProcessors < 3)
         {
             logToConsole(L"At least 4 healthy enabled processors are required! Exiting...");
+            // main() raises SIGTERM before returning, so a status returned from here is never
+            // observed — without this the node lingers on its HTTP threads and reads as a clean exit.
+            std::exit(1);
         }
         else
         {
@@ -9429,12 +9578,22 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             autoResendTickVotes.lastTick = system.initialTick;
             autoResendTickVotes.lastCheck = __rdtsc();
             logToConsole(L"Init complete! Entering main loop ...");
+// Mirrors where gRpcNodeReady is defined: the unix-socket transport and the in-process Wasm server.
+#if !defined(NO_RPC) && (defined(__linux__) || defined(LITE_WASM_SC))
+            gRpcNodeReady.store(true, std::memory_order_release);   // RPC dispatch may now read node state
+#endif
             while (!shutDownNode)
             {
 #ifdef TESTNET
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
 #endif
-                PinScope _pinScope; // release swap-page pins taken during this main-loop iteration
+                PinScope pinScope;
+#if defined(__linux__) && !defined(LITE_WASM_SC)
+                if (bspServiceRetireRequest())
+                    break;
+                if (tickFork::gForkRequest)
+                    bspForkPoint();
+#endif
                 if (criticalSituation == 1)
                 {
                     logToConsole(L"CRITICAL SITUATION #1!!!");
@@ -9646,7 +9805,8 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     unsigned short numberOfSuitablePeers = 0;
                     for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS + NUMBER_OF_INCOMING_CONNECTIONS; i++)
                     {
-                        if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing)
+                        // Don't cull handshaked (productive) peers — only rotate unproductive ones.
+                        if (peers[i].tcp4Protocol && peers[i].isConnectedAccepted && !peers[i].isClosing && !peers[i].exchangedPublicPeers)
                         {
                             if (!peers[i].isFullNode()
                                 && !peers[i].isOracleMachineNode()
@@ -9671,6 +9831,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                 {
                     // Request ticks
                     tickRequestingTick = curTimeTick;
+
 #if TICK_STORAGE_AUTOSAVE_MODE
                     const bool isNewTick = system.tick >= ts.getPreloadTick();
                     const bool isNewTickPlus1 = system.tick + 1 >= ts.getPreloadTick();
@@ -9680,8 +9841,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     const bool isNewTickPlus1 = true;
                     const bool isNewTickPlus2 = true;
 #endif
-                    if (tickRequestingIndicator == gTickTotalNumberOfComputors
-                        && isNewTick)
+                    if (tickRequestingIndicator == gTickTotalNumberOfComputors && isNewTick)
                     {
                         requestedQuorumTick.header.randomizeDejavu();
                         requestedQuorumTick.requestQuorumTick.quorumTick.tick = system.tick;
@@ -9877,6 +10037,12 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     closeAllPeers(true);
 
                     logToConsole(L"Saving node state...");
+#if defined(__linux__) && !defined(LITE_WASM_SC)
+                    if (tickFork::winState() == tickFork::WindowState::Live)
+                    {
+                        bspRetireCheckpointForAutosave();
+                    }
+#endif
                     const bool savedAllNodeStates = saveAllNodeStates();
 #ifdef ENABLE_PROFILING
                     gProfilingDataCollector.writeToFile();
@@ -9937,16 +10103,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                             // state persisting for at least a second -> also log to debug.log
                             misalignedState = 2;
                         }
-                        if (!isReprocessingSolutions)
-                        {
-                            logToConsole(L"MISALIGNED STATE DETECTED");
-                        } else
-                        {
-                            setText(message, L"REPROCESSING SOLUTIONS - STATE IS NOT FINALIZED YET | Solutions in queue: ");
-                            appendNumber(message, score->_nTask - score->_nFinished, TRUE);
-                            appendText(message, L".");
-                            logToConsole(message);
-                        }
+                        logToConsole(L"MISALIGNED STATE DETECTED");
                         if (misalignedState == 2)
                         {
                             // print health status and stop repeated logging to debug.log
@@ -9998,7 +10155,9 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 #ifdef ENABLE_PROFILING
             gProfilingDataCollector.writeToFile();
 #endif
+#if defined(LITE_WASM_SC) && !defined(NO_RPC)
             QubicHttpServer::stop();
+#endif
             setText(message, L"Qubic ");
             appendQubicVersion(message);
             appendText(message, L" is shut down.");
@@ -10143,6 +10302,7 @@ void processArgs(int argc, const char* argv[]) {
     cxxopts::Options options("Qubic Core Lite", "The lite version of Qubic Core that can run directly on the OS without a UEFI environment.");
     options.allow_unrecognised_options();
     options.add_options()
+        // ── production ──
         ("p,peers", "Public peers", cxxopts::value<std::string>())
         ("m,mode", "Core mode", cxxopts::value<std::string>())
         ("g,testnet-gbt", "Enable testnet go behind trick in aux node", cxxopts::value<bool>())
@@ -10152,29 +10312,63 @@ void processArgs(int argc, const char* argv[]) {
         // no default_value: cxxopts defaults don't register in count()
         ("tick-duration", "Target wall-clock duration of one tick in milliseconds (0 = unpaced, default 1000, max 30000).", cxxopts::value<int>())
 #endif
-        ("sm, node-mode", "Set start mode to Main&aux,....", cxxopts::value<int>())
+        ("sm,node-mode", "Set start mode (1=MAIN, 2=AUX, 3=MAIN&AUX)", cxxopts::value<int>())
         ("seeds", "Set seeds (IDs) to run on this node (only apply for main node)", cxxopts::value<std::string>())
-        ("rp, reader-passcode", "Passcode to access log reader", cxxopts::value<std::string>())
-        ("hp, http-passcode", "Passcode to access http server", cxxopts::value<std::string>())
-        ("o, operator", "Operator id", cxxopts::value<std::string>())
-        ("op, operator-seed", "Lite node seed", cxxopts::value<std::string>())
-		("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
-        ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
-        ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the reprocessSolutionTransaction() rollback path", cxxopts::value<bool>())
-        ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"))
-        ("static-peers", "Run in static peer mode: do not add/remove peers, do not churn 25% of non-fullnode peers every 2 minutes, do not accept new incoming connections. Useful for nodes far from the network's center of mass where the default churn drops good peers before they're classified as fullnodes.")
-        ("swap-compression", "Compress SwapVM disk pages with blosc2 on save/load (Linux only). Trades CPU for less disk I/O and footprint. Off by default.")
-        ("swap-dirty-track", "Auto-track dirty SwapVM cache pages via mprotect+SIGSEGV (Linux only): skip the writeback (and compression) for pages never modified since load. Trades a small mprotect/fault cost for less disk I/O. Off by default.")
-        ("auto-flush-stuck-seconds", "If the tick processor sits on the same system.tick for longer than N seconds, automatically wipe the local tickData of system.tick+1 so the request loop re-fetches it from peers. 0 disables. Reasonable production values: 60-120. Recovers automatically from corrupt-tickData stalls.", cxxopts::value<int>()->default_value("0"))
-        ("no-k12-state-cache", "Disable the incremental smart-contract state digest cache (Linux). Default on: only changed 8KB chunks are re-hashed via mprotect+SIGSEGV dirty tracking. Pass to fall back to full one-shot K12 every tick.")
-        ("k12-state-cache-verify", "Self-check the K12 state-digest cache: each digest also runs the one-shot and stalls loudly on any mismatch. For soak/CI; small per-tick cost. Off by default.")
-        ("max-inbound", "Max number of inbound connection slots that may accept. Lower during catch-up to stop serving inbound peers (0 = reject all inbound, like static). Default = all incoming slots.", cxxopts::value<int>()->default_value("-1"));
+        ("rp,reader-passcode", "Passcode to access log reader", cxxopts::value<std::string>())
+        ("hp,http-passcode", "Passcode to access http server", cxxopts::value<std::string>())
+        ("o,operator", "Operator id", cxxopts::value<std::string>())
+        ("op,operator-seed", "Lite node seed", cxxopts::value<std::string>())
+        ("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
+        ("fv,force-verify-solutions", "Force strict solution verification on every tick", cxxopts::value<bool>())
+        ("http-port", "HTTP/RPC server port", cxxopts::value<int>()->default_value("41841"))
+        ("static-peers", "Run in static peer mode: no peer churn, no new incoming connections")
+        ("swap-compression", "Compress SwapVM disk pages with blosc2 (Linux only)")
+        ("swap-dirty-track", "Track dirty SwapVM pages via mprotect+SIGSEGV (Linux only)")
+        ("auto-flush-stuck-seconds", "Seconds stuck on same tick before auto-rewipe tickData and re-fetch from peers (0=off)", cxxopts::value<int>()->default_value("0"))
+#if defined(__linux__) && !defined(LITE_WASM_SC)
+        ("rollback-mode", "DEPRECATED: accepted but ignored", cxxopts::value<std::string>()->default_value("fork"))
+#endif
+        ("max-inbound-per-ip", "Max inbound connections per IP (0=unlimited)", cxxopts::value<int>()->default_value("0"))
+        ("max-inbound", "Max inbound connection slots (0=none, -1=all)", cxxopts::value<int>()->default_value("-1"))
+#if !defined(LITE_WASM_SC)
+        ("no-k12-state-cache", "Disable K12 state-digest incremental cache (Linux)")
+        ("k12-state-cache-verify", "Verify K12 state-digest cache against one-shot (soak/CI)")
+#endif
+#ifdef LITE_SC_PAGER
+        ("max-sc-mem", "Contract-state RAM target in GB; cold state remains compressed in memory.", cxxopts::value<unsigned long long>()->default_value("1"))
+#endif
+
+        // ── debug / test ──
+        ("fbis,force-broadcast-invalid-solution", "TEST: broadcast random-nonce solution tx each tick to exercise fork rollback", cxxopts::value<bool>())
+        ("fbis-count", "TEST: number of solution txs per tick with --fbis", cxxopts::value<int>()->default_value("1"))
+        ("fbis-same", "TEST: inject all --fbis solutions from one computor", cxxopts::value<bool>())
+        ("test-solution-threshold", "TEST: override runtime Bpp9000 solution threshold", cxxopts::value<int>()->default_value("-1"))
+#if defined(__linux__) && !defined(LITE_WASM_SC)
+        ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
+        ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
+        ("fork-force-match", "TEST: force verdict to match branch", cxxopts::value<bool>())
+        ("fork-force-mismatch", "TEST: force verdict to mismatch branch (promote child)", cxxopts::value<bool>())
+        ("fork-bench", "TEST: print per-fork timing + RSS", cxxopts::value<bool>())
+        ("fork-force-rollback-every", "TEST: force fork + rollback every N ticks (0=off)", cxxopts::value<unsigned int>()->default_value("0"))
+#endif
+
+        // ── internal ──
+        ("rpc-proxy", "INTERNAL: run as the RPC sidecar", cxxopts::value<bool>())
+        ("rpc-listen", "INTERNAL: sidecar HTTP listen port", cxxopts::value<int>()->default_value("41850"))
+        ("rpc-node", "INTERNAL: sidecar node port for unix-socket key", cxxopts::value<int>()->default_value("41841"));
     auto result = options.parse(argc, argv);
 
     auto unmatched = result.unmatched();
     for (auto& u : unmatched) {
         std::cerr << "Warning: unknown option: " << u << "\n";
     }
+
+#ifdef LITE_SC_PAGER
+    if (result.count("max-sc-mem"))
+    {
+        Wasm::Runtime::setContractStateMemoryLimit(result["max-sc-mem"].as<unsigned long long>() * 1024ULL * 1024 * 1024);
+    }
+#endif
 
 #ifdef __linux__
     if (result.count("swap-compression")) {
@@ -10185,6 +10379,7 @@ void processArgs(int argc, const char* argv[]) {
         gSwapDirtyTrackEnabled = true;
         logColorToScreen("INFO", "Swap dirty tracking enabled: clean SwapVM cache pages skip writeback on eviction");
     }
+#if !defined(LITE_WASM_SC)
     if (result.count("no-k12-state-cache")) {
         K12StateDigestCache::gK12StateDigestCacheEnabled = false;
         logColorToScreen("INFO", "K12 state-digest cache disabled: full one-shot K12 every tick");
@@ -10194,6 +10389,71 @@ void processArgs(int argc, const char* argv[]) {
         logColorToScreen("INFO", "K12 state-digest cache self-verify enabled: each digest also runs the one-shot");
     }
 #endif
+#endif
+
+#if defined(__linux__) && !defined(LITE_WASM_SC)
+    if (result.count("rollback-mode"))
+    {
+        const std::string rollbackMode = result["rollback-mode"].as<std::string>();
+        if (rollbackMode != "fork")
+            logColorToScreen("WARNING", "rollback-mode is deprecated; tick rollback is always fork-on-BSP child-promote now");
+    }
+    logColorToScreen("INFO", "Tick rollback: fork-on-BSP child-promote");
+    if (result.count("verify-fork-rollback"))
+    {
+        gVerifyForkRollback = true;
+        logColorToScreen("INFO", "Fork rollback self-verify enabled");
+    }
+    if (result.count("fork-force-fork"))
+    {
+        gForkForceFork = true;
+        logColorToScreen("INFO", "TEST: fork every tick (MATCH path on clean ticks)");
+    }
+    if (result.count("fork-force-match"))
+    {
+        gForkForceMatch = true;
+        logColorToScreen("INFO", "TEST: fork verdict forced to match");
+    }
+    if (result.count("fork-force-mismatch"))
+    {
+        gForkForceMismatch = true;
+        logColorToScreen("INFO", "TEST: fork verdict forced to mismatch (promote every fork)");
+    }
+    if (result.count("fork-bench"))
+    {
+        gForkBench = true;
+        logColorToScreen("INFO", "TEST: per-fork timing + RSS benchmark enabled");
+    }
+
+    if (result.count("fork-force-rollback-every"))
+    {
+        gForkForceRollbackEvery = result["fork-force-rollback-every"].as<unsigned int>();
+        if (gForkForceRollbackEvery)
+        {
+            logColorToScreen("INFO", "TEST: forcing a fork + single-tick rollback every " + std::to_string(gForkForceRollbackEvery) + " ticks");
+        }
+    }
+#endif
+    if (result.count("fbis-count"))
+    {
+        const int solutionCount = result["fbis-count"].as<int>();
+        if (solutionCount > 0)
+            gFbisCount = (unsigned int)solutionCount;
+        logColorToScreen("INFO", std::string("TEST: fbis solutions per tick = ") + std::to_string(gFbisCount));
+    }
+    if (result.count("fbis-same"))
+    {
+        gFbisSameComputor = true;
+        logColorToScreen("INFO", "TEST: fbis solutions all from one computor (out-of-qus)");
+    }
+    if (result.count("test-solution-threshold"))
+    {
+        gTestSolutionThreshold = result["test-solution-threshold"].as<int>();
+        if (gTestSolutionThreshold >= 0)
+        {
+            logColorToScreen("INFO", std::string("TEST: solution threshold override = ") + std::to_string(gTestSolutionThreshold));
+        }
+    }
 
     if (result.count("peers")) {
         std::string peersStr = result["peers"].as<std::string>();
@@ -10246,6 +10506,13 @@ void processArgs(int argc, const char* argv[]) {
         if (mi >= 0) {
             maxInboundAccepts = mi > NUMBER_OF_INCOMING_CONNECTIONS ? NUMBER_OF_INCOMING_CONNECTIONS : mi;
             logColorToScreen("INFO", "Max inbound accepts capped at " + std::to_string(maxInboundAccepts));
+        }
+    }
+    {
+        int mp = result["max-inbound-per-ip"].as<int>();
+        if (mp > 0) {
+            maxIncomingConnectionsPerIp = mp;
+            logColorToScreen("INFO", "Max inbound per IP capped at " + std::to_string(maxIncomingConnectionsPerIp));
         }
     }
     if (result.count("auto-flush-stuck-seconds")) {
@@ -10445,7 +10712,7 @@ void processArgs(int argc, const char* argv[]) {
     }
 }
 
-#if defined(__linux__) && !defined(NO_RPC)
+#if defined(__linux__) && !defined(NO_RPC) && !defined(TESTNET)
 void watchAndCheckin()
 {
     // start watch thread
@@ -10504,16 +10771,34 @@ void watchAndCheckin()
 }
 #endif
 
-#ifdef __linux__
+static bool argEquals(const char* arg, const char* expected)
+{
+    return arg && std::string(arg) == expected;
+}
+
+#if defined(__linux__) || defined(__APPLE__)
 void signalHandler(int sig, siginfo_t* si, void* /*ucontext*/) {
+#ifdef LITE_SC_PAGER
+    // Contract-state pager fault: commit the page and resume before the crash path.
+    if ((sig == SIGSEGV || sig == SIGBUS) && si && Wasm::Runtime::handleManagedStateFault(si->si_addr))
+    {
+        return;
+    }
+#endif
+#ifdef __linux__
     // Component B fast path: a write to an armed read-only SwapVM cache page faults here. Mark the
     // slot dirty, restore write access, and resume the store. Any other fault hits the crash path below.
     if (sig == SIGSEGV && si && SwapDirtyTrack::tryMarkDirty(si->si_addr))
         return;
+#if !defined(LITE_WASM_SC)
     // A write to an armed read-only contract-state chunk faults here: mark the chunk dirty (needs si_addr),
     // restore write access, resume the store. Only changed chunks are re-hashed on the next digest.
     if (sig == SIGSEGV && si && K12StateDigestCache::tryMarkDirty(si->si_addr))
         return;
+#endif
+#else
+    (void)si;
+#endif
     boost::stacktrace::safe_dump_to("crash.dump");
     // Send to server in a child process
     pid_t pid = fork();
@@ -10556,6 +10841,8 @@ void setupSignalHandlers() {
     sa.sa_sigaction = signalHandler;       // SA_SIGINFO form: handler receives siginfo_t* (si_addr)
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGSEGV);
+    sigaddset(&sa.sa_mask, SIGBUS);
 
     // Common crash signals to catch:
     sigaction(SIGSEGV, &sa, NULL); // Segmentation fault (Invalid memory)
@@ -10566,29 +10853,90 @@ void setupSignalHandlers() {
 }
 #endif
 
-int main(int argc, const char* argv[]) {
-#ifdef __linux__
-    setupSignalHandlers();
-#endif
-    logColorToScreen("INFO", "================== Qubic Core Lite ==================");
-	processArgs(argc, argv);
-    logColorToScreen("INFO", "================== ~~~~~~~~~~~~~~~ ==================\n");
+#if defined(__linux__) && !defined(NO_RPC) && !defined(LITE_WASM_SC)
+static bool hasArg(int argc, const char* argv[], const char* name)
+{
+    for (int i = 1; i < argc; i++)
+        if (argEquals(argv[i], name))
+            return true;
+    return false;
+}
 
-    Overload::initializeUefi();
-#if defined(__linux__) && !defined(NO_RPC)
-    QubicHttpServer::start(httpPort);
-#ifndef LONG_RUN_LOCAL_TESTNET // a self-contained local testnet never phones home to api.qubic.global
+static int intArgOrDefault(int argc, const char* argv[], const char* name, int defaultValue)
+{
+    for (int i = 1; i + 1 < argc; i++)
+        if (argEquals(argv[i], name))
+            return atoi(argv[i + 1]);
+    return defaultValue;
+}
+
+static bool runRpcProxyIfRequested(int argc, const char* argv[], int& exitCode)
+{
+    if (!hasArg(argc, argv, "--rpc-proxy"))
+        return false;
+
+    const int listenPort = intArgOrDefault(argc, argv, "--rpc-listen", 41850);
+    const int nodePort = intArgOrDefault(argc, argv, "--rpc-node", 41841);
+    exitCode = rpcProxyMain(listenPort, rpcUnixPath(nodePort));
+    return true;
+}
+
+static void startRpcServices()
+{
+    rpcUnixStart(rpcUnixPath(httpPort));
+#ifndef TESTNET
     watchAndCheckin();
 #endif
+}
+#endif
+
+#ifdef __linux__
+static void prepareLinuxRuntime(int argc, const char* argv[])
+{
+    runUnderSupervisor(argc, argv);
+    setupSignalHandlers();
+}
+#endif
+
+static void processStartupArgs(int argc, const char* argv[])
+{
+    logColorToScreen("INFO", "================== Qubic Core Lite ==================");
+    processArgs(argc, argv);
+    logColorToScreen("INFO", "================== ~~~~~~~~~~~~~~~ ==================\n");
+}
+
+int main(int argc, const char* argv[])
+{
+    // MSVC rejects size 0 (its invalid-parameter handler fast-fails) and maps _IOLBF to
+    // _IOFBF anyway; unbuffered keeps the log intact when the node dies.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+#ifdef __linux__
+    if (tickStorageScan::requested(argc, argv))
+    {
+        return tickStorageScan::scan();
+    }
+#endif
+#if defined(__linux__) && !defined(NO_RPC) && !defined(LITE_WASM_SC)
+    int rpcProxyExitCode = 0;
+    if (runRpcProxyIfRequested(argc, argv, rpcProxyExitCode))
+        return rpcProxyExitCode;
+#endif
+#ifdef __linux__
+    prepareLinuxRuntime(argc, argv);
+#elif defined(__APPLE__)
+    setupSignalHandlers();
+#endif
+    processStartupArgs(argc, argv);
+
+    Overload::initializeUefi();
+#if defined(__linux__) && !defined(NO_RPC) && !defined(LITE_WASM_SC)
+    startRpcServices();
+#endif
+#if defined(LITE_WASM_SC) && !defined(NO_RPC)
+    // Wasm testnet serves HTTP in-process; the unix-socket/sidecar stack is compiled out.
+    QubicHttpServer::start(httpPort);
 #endif
     auto status = (int)efi_main(ih, st);
     std::raise(SIGTERM);
     return status;
 }
-
-
-
-
-
-
-

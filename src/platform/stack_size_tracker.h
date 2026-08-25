@@ -3,7 +3,7 @@
 
 #include "debugging.h"
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 void *_AddressOfReturnAddress()
 {
     return __builtin_frame_address(0);

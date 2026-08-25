@@ -10,7 +10,7 @@ on:
     inputs:
       configuration:
         description: "Build configuration"
-        required: true
+        required: false
         default: "RelWithDebInfo"
         type: string
       build_dir:
@@ -24,11 +24,14 @@ permissions:
 
 jobs:
   build:
+    name: build
     runs-on: ubuntu-22.04
     steps:
       # Checkout source
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
 
       # Install dependencies
       - name: Install CMake and dependencies
@@ -44,22 +47,28 @@ jobs:
           # NOTE: BUILD_TESTS is OFF on purpose. GitHub runners do not support
           # AVX-512, and CMake's gtest_discover_tests runs the test binary at
           # build time, which would SIGILL (Illegal instruction) here.
-          cmake -S . -B ${{ inputs.build_dir || 'build' }} \
-            -DCMAKE_BUILD_TYPE=${{ inputs.configuration || 'RelWithDebInfo' }} \
+          cmake -S . -B "${INPUTS_BUILD_DIR}" \
+            -DCMAKE_BUILD_TYPE="${INPUTS_CONFIGURATION}" \
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
             -DBUILD_TESTS:BOOL=OFF \
             -DBUILD_BINARY:BOOL=ON \
             -DENABLE_AVX512=1 \
             -DUSE_SANITIZER=OFF \
             -DONLY_LOGGING=ON
+        env:
+          INPUTS_BUILD_DIR: ${{ inputs.build_dir || 'build' }}
+          INPUTS_CONFIGURATION: ${{ inputs.configuration || 'RelWithDebInfo' }}
 
       # Build the project
       - name: Build with Make
-        run: cmake --build ${{ inputs.build_dir || 'build' }} --config ${{ inputs.configuration || 'RelWithDebInfo' }} -- -j$(nproc)
+        run: cmake --build "${INPUTS_BUILD_DIR}" --config "${INPUTS_CONFIGURATION}" -- -j"$(nproc)"
+        env:
+          INPUTS_BUILD_DIR: ${{ inputs.build_dir || 'build' }}
+          INPUTS_CONFIGURATION: ${{ inputs.configuration || 'RelWithDebInfo' }}
 
       # Upload build artifacts
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: QubicLiteLinuxBuild-AVX512-${{ inputs.configuration || 'RelWithDebInfo' }}
           path: |

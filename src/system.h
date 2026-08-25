@@ -7,7 +7,7 @@
 
 #define MAX_NUMBER_OF_SOLUTIONS 65536 // Must be 2^N
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #ifdef REAL_NODE
 #define system qsystem
 #endif

@@ -13,14 +13,22 @@ namespace PeerReaper
 {
 // Per-reason reap totals are exposed at rpc/stats via PeerDisc (closePeer records the reason).
 static volatile bool gEnabled = true;                            // runtime kill-switch
-static constexpr unsigned long long CONNECT_TIMEOUT_SECS = 5;   // stuck connecting -> reap
-static constexpr unsigned long long RX_STALL_SECS = 10;          // established, no rx -> reap
+static constexpr unsigned long long CONNECT_TIMEOUT_SECS = 10;   // stuck connecting -> reap
+static constexpr unsigned long long RX_STALL_SECS = 60;          // established, no rx -> reap
 
 // Reaper-side per-slot state; no core fields added. Zero-initialized (static storage).
 static bool sActive[NUMBER_OF_OUTGOING_CONNECTIONS];                     // slot was live last scan
 static unsigned long long sConnStartTsc[NUMBER_OF_OUTGOING_CONNECTIONS]; // rising-edge connect time
 static unsigned long long sLastRxBytes[NUMBER_OF_OUTGOING_CONNECTIONS];  // last observed gSlotRxBytes
 static unsigned long long sRxProgressTsc[NUMBER_OF_OUTGOING_CONNECTIONS];// when rx last advanced
+
+// Promoted fork child inherits parent scan baselines; drop them so every slot re-arms via the
+// rising edge on its first post-promote scan instead of being judged against stale timestamps.
+static void resetForChildPromote()
+{
+    for (unsigned int i = 0; i < NUMBER_OF_OUTGOING_CONNECTIONS; i++)
+        sActive[i] = false;
+}
 
 // True if the IP came from CLI --peers; keep these in the pool so a false positive cannot evict our bootstrap set.
 static bool isCliSeedPeer(const IPv4Address& address)

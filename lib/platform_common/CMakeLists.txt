@@ -24,6 +24,12 @@ set(C_SOURCES
 set(ASM_OBJECT_LIBS "") # Store object libraries generated from assembly
 
 if(IS_WINDOWS AND ASM_LANG STREQUAL ASM_MASM)
+    # Force EDK2's X64 assembly through MASM instead of NASM.
+    set_source_files_properties(
+        edk2_mdepkg/Library/BaseLib/X64/LongJump.asm
+        edk2_mdepkg/Library/BaseLib/X64/SetJump.asm
+        PROPERTIES LANGUAGE ASM_MASM
+    )
     # Add MASM files directly if using MSVC
     add_library(platform_common_asm STATIC
         edk2_mdepkg/Library/BaseLib/X64/LongJump.asm
@@ -67,7 +73,17 @@ elseif(IS_LINUX_CLANG AND ASM_LANG STREQUAL ASM_NASM)
 endif()
 
 # --- Target Definition ---
-add_library(platform_common STATIC ${C_SOURCES} ${CMAKE_CURRENT_BINARY_DIR}/LongJump.nasm.o ${CMAKE_CURRENT_BINARY_DIR}/SetJump.nasm.o)
+# Only Linux builds generate the custom stack assembly objects.
+if(IS_LINUX_CLANG AND ASM_LANG STREQUAL ASM_NASM)
+    add_library(
+        platform_common STATIC
+        ${C_SOURCES}
+        ${CMAKE_CURRENT_BINARY_DIR}/LongJump.nasm.o
+        ${CMAKE_CURRENT_BINARY_DIR}/SetJump.nasm.o
+    )
+else()
+    add_library(platform_common STATIC ${C_SOURCES})
+endif()
 
 # Apply common compiler flags from the centralized detection module
 apply_common_compiler_flags(platform_common)
