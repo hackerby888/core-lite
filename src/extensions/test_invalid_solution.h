@@ -338,9 +338,7 @@ inline bool broadcastAntSolution(ColonyT& colony,
 
         const bool beatsParent = (childScore < parentScore);
         const bool clearsThreshold = (childScore <= colony.errorThreshold());
-        // LeParent needs a parent to fail against, and against the root's WORST_SCORE every walk
-        // wins, so the rule is unreachable from a cold tree. Seed the identity with a normal
-        // solution first; from the second one on, the parent exists and the rule is aimed at.
+        // Every walk beats the root's WORST_SCORE, so LeParent is unreachable until the identity has a real parent: seed one first.
         found = (mode == AntInjectMode::LeParent && parentRec != nullptr)
             ? (clearsThreshold && !beatsParent)
             : (beatsParent && clearsThreshold);

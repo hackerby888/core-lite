@@ -108,9 +108,8 @@ TEST(TestAntColonyValidate, MustStrictlyBeatParent)
     EXPECT_EQ(admit(makeChild(me, 3801), &parent, 0), ValidityResult::RejectLeParent);
 }
 
-// A trusted score is not this node's own answer, so neither rule that judges the score may run on
-// it: rejecting would leave no refund for the quorum to disagree with, and the tree would diverge
-// with nothing to detect it.
+// Neither rule that judges the score may run on a trusted one: rejecting leaves no refund for the
+// quorum to disagree with, so the tree would diverge with nothing to detect it.
 TEST(TestAntColonyValidate, TrustedScoreSkipsBothScoreRules)
 {
     const m256i me = makeKey(20);
@@ -126,8 +125,8 @@ TEST(TestAntColonyValidate, TrustedScoreSkipsBothScoreRules)
     EXPECT_EQ(admitTrusted(makeChild(me, WORST_SCORE), &parent, 0), ValidityResult::Valid);
 }
 
-// The rules that read only metadata still apply: every node reads those the same way, so
-// over-accepting them would manufacture a disagreement with nothing behind it.
+// Metadata rules still apply: every node reads those the same way, so over-accepting them would
+// manufacture a disagreement with nothing behind it.
 TEST(TestAntColonyValidate, TrustedScoreStillHonoursTheMetadataRules)
 {
     const m256i me = makeKey(21);
@@ -362,8 +361,7 @@ static long long commitChild(AntColonyBpp9000T* colony, const m256i& owner, cons
 
 // commit() head-inserts, so children chain from newest to oldest. countChildren() walks this chain
 // from the head, so it must stay intact and terminate.
-// Commits one child of the root with no network at all, the way an AUX node commits a solution it
-// took on its claimed score. Returns its index or ANT_INVALID_INDEX.
+// Commits one root child with no network, the way an AUX node commits a solution it took on trust.
 static long long commitRootChildWithoutAnn(AntColonyBpp9000T* colony, const m256i& owner,
     unsigned int score, unsigned int txIdx, unsigned long long nonceSeed, unsigned int tick = 100000)
 {
@@ -384,8 +382,7 @@ static long long commitRootChildWithoutAnn(AntColonyBpp9000T* colony, const m256
     return landsAt;
 }
 
-// The record is in the tree and addressable, but its network is not there yet - a later rebuild
-// supplies it, and until then every reader must see "no network" rather than pool garbage.
+// The record is addressable but has no network yet, so every reader must see that rather than pool garbage.
 TEST(TestAntColonyStore, RecordCommitsWithoutItsNetwork)
 {
     AntColonyBpp9000T* colony = freshColony();
@@ -403,8 +400,7 @@ TEST(TestAntColonyStore, RecordCommitsWithoutItsNetwork)
     EXPECT_FALSE(colony->annOfNonRoot(*colony->recordAt(idx), out));
 }
 
-// One claim wins, the loser is told to wait rather than repeat a walk that costs seconds, and the
-// published network reads back byte for byte with its hash recorded.
+// One claim wins and the loser is told to wait; the published network reads back byte for byte.
 TEST(TestAntColonyStore, ClaimThenPublishSuppliesTheNetwork)
 {
     AntColonyBpp9000T* colony = freshColony();
@@ -632,9 +628,8 @@ TEST(TestAntColonySnapshot, RoundTripRestoresTheStoredNetwork)
     }
 }
 
-// A record with no network must survive the round trip: the loader re-derives childAnnHash from the
-// stored network, and there is none to derive it from. And a claim saved mid-rebuild is held by no
-// thread in the loaded process, so it has to come back rebuildable rather than stuck.
+// A record with no network must survive the round trip, since the loader re-derives childAnnHash from
+// a network that is not there. A claim saved mid-rebuild must come back rebuildable, not stuck.
 TEST(TestAntColonySnapshot, UnmaterialisedRecordsSurviveTheRoundTrip)
 {
     AntColonyBpp9000T* colony = freshColony();

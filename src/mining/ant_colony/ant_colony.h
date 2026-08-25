@@ -36,10 +36,8 @@ static constexpr unsigned long long ANT_SNAPSHOT_SCRATCH_BYTES = 2ULL * 1024 * 1
 static constexpr unsigned int NO_SIBLING = 0xFFFFFFFFU;
 static constexpr unsigned int WORST_SCORE = 0xFFFFFFFFU;
 
-// annStateSlot values for a record committed without its network. Both sit above
-// ANT_MAX_NODES_PER_EPOCH, so the bounds check in annOfNonRoot() already reads them as "no network".
-// ANT_ANN_MATERIALISING is the claim a thread holds while it walks, so siblings skip the slot
-// instead of repeating a walk that costs seconds.
+// annStateSlot values for a record committed without its network. Both sit above ANT_MAX_NODES_PER_EPOCH,
+// so annOfNonRoot()'s bounds check already reads them as "no network". MATERIALISING is a walk in progress.
 static constexpr unsigned int ANT_ANN_UNMATERIALISED = 0xFFFFFFFFU;
 static constexpr unsigned int ANT_ANN_MATERIALISING = 0xFFFFFFFEU;
 static constexpr long long ANT_INVALID_INDEX = -1;
@@ -295,9 +293,8 @@ public:
     {
         m256i pubkey;
         m256i nonce;
-        // The parent's address, not a hash of its network. A parent's ANN is a deterministic function
-        // of its ref, so the two name the same score, but only this one can be built without holding
-        // the parent's network - which a record committed on a claimed score does not have.
+        // The parent's address, not a hash of its network: both name the same score, but only this one
+        // can be built without holding that network, which a record accepted on a claimed score lacks.
         m256i parentKey;
         m256i anchorDigest;    // the digest the walk consumed, not the tick it came from
 
@@ -446,8 +443,7 @@ public:
     }
 
     // Unpacks a stored network into the caller's buffer. ROOT is never a record, so callers must
-    // handle parentRef.isRoot() before reaching here. False also means the record was committed
-    // without a network, which only a rebuild can supply.
+    // handle parentRef.isRoot() before reaching here. False also means the record has no network yet.
     bool annOfNonRoot(const AntSolutionRecord& rec, Ann& out) const
     {
         if (rec.annStateSlot >= _solutionCount)
@@ -465,11 +461,10 @@ public:
 
     bool isAnnClaimHeld(unsigned int idx) const
     {
-        return (idx < _solutionCount)
-            && (ATOMIC_LOAD32(_records[idx].annStateSlot) == ANT_ANN_MATERIALISING);
+        return (idx < _solutionCount) && (ATOMIC_LOAD32(_records[idx].annStateSlot) == ANT_ANN_MATERIALISING);
     }
 
-    // What a caller that wants to rebuild a record's network gets back.
+    // Outcome of claiming a record's network for rebuild.
     enum AnnClaim
     {
         AnnClaimReady,     // the network is already in the pool
@@ -498,9 +493,8 @@ public:
         return AnnClaimOwned;
     }
 
-    // The network lands before the slot index, so a reader that sees the index never reads a
-    // half-written network. childAnnHash is written here because a record committed without a
-    // network was committed without its hash too.
+    // The network lands before the slot index, so a reader that sees the index never reads a half-written
+    // one. The hash is written here too: a record committed without a network had none to hash.
     void publishAnn(unsigned int idx, const Ann& ann, unsigned int annHash)
     {
         _annPool[idx].pack(ann.lut);
@@ -508,8 +502,7 @@ public:
         ATOMIC_STORE32(_records[idx].annStateSlot, (long)idx);
     }
 
-    // Drops a claim whose rebuild produced nothing, so a later attempt retries instead of waiting
-    // on a walk that is not happening.
+    // Drops a claim whose rebuild produced nothing, so a later attempt retries instead of waiting on it.
     void releaseAnnClaim(unsigned int idx)
     {
         if (idx >= _solutionCount)
@@ -534,14 +527,13 @@ public:
 
     // Admission rules for a proposed child: freshness, tree ownership, threshold, parent, per-parent
     // child cap. Static and pure, so the rule set is testable without a colony. Lower score is better.
-    // trustedScore drops the two rules that judge the score itself, for a caller that took the score
-    // on trust rather than computing it.
+    // trustedScore drops the rules that judge the score itself, for a caller that took it on trust.
     static ValidityResult validateChild(const ChildCandidate& child,
         const AntSolutionRecord* parentRecord, unsigned int childCount, unsigned int threshold,
         bool trustedScore = false);
 
-    // Validates and, if accepted, appends the record and its network to the store. A null childAnn
-    // commits the record with its slot marked unmaterialised, for a score accepted without walking.
+    // Validates and, if accepted, appends the record and its network. A null childAnn marks the slot
+    // unmaterialised, for a score accepted without walking.
     ValidityResult commit(const AntCommitInput& in, const AntSolutionRecord* parentRec,
         unsigned int score, const Ann* childAnn, unsigned int childAnnHash,
         bool trustedScore = false);
@@ -659,8 +651,7 @@ private:
     ReplayEntry* _replayCache;
     volatile char _replayCacheLock;
 
-    // Guards only the annStateSlot transitions, never a rebuild itself: a walk takes seconds and
-    // runs with this released.
+    // Guards the annStateSlot transitions only; the walk itself runs with this released.
     volatile char _annClaimLock;
 
     // Serial scratch for save/load and the solution export
@@ -1199,10 +1190,9 @@ inline ValidityResult AntColony<ScoreT>::validateChild(const ChildCandidate& chi
         parentScore = parentRecord->score;
     }
 
-    // A score taken on trust cannot be judged against the threshold or the parent: both would
-    // reject on a number this node did not compute, and a reject produces no refund for the quorum
-    // to disagree with, so a wrong score would never be caught. The freshness, tree and cap rules
-    // below and above read only metadata, which every node reads the same way, so they stay on.
+    // A trusted score cannot be judged against the threshold or the parent: rejecting on a number this node
+    // did not compute leaves no refund for the quorum to disagree with, so the lie would go uncaught. The
+    // metadata rules around this stay on, since every node reads those the same way.
     if (!trustedScore)
     {
         if (child.score > threshold)

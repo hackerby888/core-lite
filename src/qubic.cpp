@@ -304,8 +304,8 @@ static bool forceBroadcastAntSolution = false;
 static unsigned int forceAntSolutionBudget = 3;
 // Honest solutions published before the mode under test, so it has a tree to aim at.
 static unsigned int forceAntInjectWarmup = 0;
-// Ticks left between publishes. A gap wider than the checkpoint window lets each window retire, which
-// is what leaves an optimistically committed record in place to be a later solution's parent.
+// Ticks left between publishes. A gap wider than the checkpoint window lets each window retire, which is
+// what leaves an optimistically committed record in place to parent a later one.
 static unsigned int forceAntInjectGapTicks = 0;
 static TestInvalidSolution::AntInjectMode forceAntInjectMode = TestInvalidSolution::AntInjectMode::Valid;
 static unsigned int gFbisCount = 1;          // test: number of solution txs to inject per tick
@@ -456,13 +456,12 @@ static AntColonyBpp9000T gAntColony;
 static AntPendingSolutions gAntPendingSolutions;
 static AntColonyBpp9000T::Ann gAntParentAnnScratch[MAX_NUMBER_OF_PROCESSORS];
 static AntColonyBpp9000T::Ann gAntChildAnnScratch[MAX_NUMBER_OF_PROCESSORS];
-// Separate from the two above because a rebuild runs underneath a caller that is already holding
-// those for the solution it came in for.
+// Separate from the two above: a rebuild runs underneath a caller already holding those.
 static AntColonyBpp9000T::Ann gAntRebuildParentScratch[MAX_NUMBER_OF_PROCESSORS];
 static AntColonyBpp9000T::Ann gAntRebuildChildScratch[MAX_NUMBER_OF_PROCESSORS];
 
-// Ant tracing is compiled into every build and switched on with --ant-debug, so a release node can
-// be traced without rebuilding it. Debug builds keep tracing on by default.
+// Compiled into every build and switched on with --ant-debug, so a release node can be traced without
+// rebuilding it. Debug builds keep it on by default.
 #ifndef NDEBUG
 static bool gAntDebugEnabled = true;
 #else
@@ -578,11 +577,9 @@ struct AntScoreTaskPayload
 };
 static_assert(sizeof(AntScoreTaskPayload) <= 128, "ant score payload must fit TASK_PAYLOAD_MAX");
 
-// The parent is named by its on-chain address rather than by a hash of its network. Within an
-// epoch a ref names one transaction in one tick, so it selects the same parent network on every
-// node - and unlike the hash, it can be formed without holding that network, which is what lets a
-// record committed on a claimed score take part in the cache at all. The cache file is epoch-scoped,
-// so a ref never carries into an epoch where it would mean something else.
+// The parent is named by its on-chain address, not a hash of its network: within an epoch a ref selects
+// the same parent on every node, and unlike the hash it can be formed without holding that network.
+// The cache file is epoch-scoped, so a ref never means something else in a later epoch.
 static AntColonyBpp9000T::ReplayKey makeAntReplayKey(const m256i& pubkey, const m256i& nonce,
     const SolutionRef& parentRef, const m256i& anchorDigest)
 {
@@ -685,10 +682,8 @@ static void computeAntAnchorDigest(unsigned int tick, const m256i& transactionDi
     KangarooTwelve(preimage, sizeof(preimage), &out, sizeof(out));
 }
 
-// The anchor ring spans only the freshness window, but a record lives the whole epoch, so rebuilding
-// an old solution's walk needs its anchor after the ring has wrapped past it. Tick storage keeps the
-// epoch, and only non-empty ticks ever recorded an anchor, so this reproduces exactly what
-// processTick() folded in: K12 over that tick's stored TickData.
+// A record outlives the anchor ring, so a rebuild needs its anchor after the ring has wrapped past it.
+// Tick storage keeps the whole epoch; only non-empty ticks recorded an anchor, which this reproduces.
 static bool recomputeAntAnchorDigest(unsigned int tick, m256i& out)
 {
     m256i anchorTxDigest;
@@ -708,9 +703,8 @@ static bool recomputeAntAnchorDigest(unsigned int tick, m256i& out)
     return true;
 }
 
-// Ring first, tick storage once the ring no longer holds the tick. Only rebuild paths use this: the
-// live paths must keep rejecting an anchor outside the freshness window, which is what the bare ring
-// lookup gives them.
+// Ring first, tick storage once it has wrapped past the tick. Rebuild paths only: the live paths must
+// keep rejecting an anchor outside the freshness window, which the bare ring lookup already does.
 static bool getAntAnchorDigestForRebuild(unsigned int tick, m256i& out)
 {
     if (gAntColony.getAnchorDigest(tick, out))
@@ -734,8 +728,7 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
     }
     if (claim == AntColonyBpp9000T::AnnClaimBusy)
     {
-        // Waiting costs the same seconds the walk does, and walking it here as well would cost them
-        // a second time on top.
+        // Waiting costs what the walk costs; walking it here as well would pay that twice.
         while (gAntColony.isAnnClaimHeld(idx))
         {
             sleepMilliseconds(20);
@@ -778,9 +771,8 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
     const unsigned int rebuiltScore = score->computeAntChildScore(processorNumber, parentAnn,
         rec->pubkey, rec->nonce, anchorDigest, childAnn);
 
-    // The record was admitted on a score this node did not compute, and this walk is that
-    // computation. A disagreement means the acceptance was wrong, so publish nothing: a network
-    // built for a score no other node holds is worse than no network at all.
+    // This walk is the computation the record was admitted without. A disagreement means the acceptance
+    // was wrong, so publish nothing: a network built for a score no other node holds is worse than none.
     if (rebuiltScore != rec->score)
     {
         gAntColony.releaseAnnClaim(idx);
@@ -799,8 +791,7 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
     KangarooTwelve(&childAnn, sizeof(childAnn), &annHash, sizeof(annHash));
     gAntColony.publishAnn(idx, childAnn, annHash);
 
-    // A rebuild costs a full walk, so an operator seeing a tick take tens of seconds should be able
-    // to attribute it here rather than to the fork machinery around it.
+    // A rebuild costs a full walk, so a tick that takes tens of seconds is attributable here.
     CHAR16 okLine[224];
     setText(okLine, L"[ant-colony] rebuilt the network of record ");
     appendNumber(okLine, idx, FALSE);
@@ -813,12 +804,9 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
     return true;
 }
 
-// Supplies the network of a record that was committed without one, walking its lineage down from
-// the nearest ancestor that still has a network. One level costs a full score walk - seconds - so
-// each result is published into the pool for every later reader.
-// Deliberately unbounded in depth: a record this node cannot rebuild would be rejected here and
-// accepted elsewhere, and a colony tree that disagrees is the one divergence no rollback repairs.
-// A deep lineage costs time instead.
+// Supplies the network of a record committed without one, walking its lineage down from the nearest
+// ancestor that still has one and publishing each level for later readers. Unbounded in depth on
+// purpose: a record this node cannot rebuild would be rejected here and accepted elsewhere.
 static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int recordIdx,
     AntColonyBpp9000T::Ann& out)
 {
@@ -829,8 +817,7 @@ static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int 
 
     while (!gAntColony.isAnnMaterialised(recordIdx))
     {
-        // The shallowest record on this chain still missing a network. Its parent is the root or
-        // already rebuilt, so it is the next one that can actually be walked.
+        // The shallowest record still missing a network: its parent is the root or already rebuilt.
         unsigned int target = recordIdx;
         for (;;)
         {
@@ -857,8 +844,8 @@ static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int 
 
         if (!materialiseOneAntRecord(processorNumber, target))
         {
-            // The caller turns this into RejectParentNotRegistered, which no other node reaches -
-            // the one divergence a rollback cannot repair, so say so rather than failing quietly.
+            // The caller turns this into RejectParentNotRegistered, which no other node reaches, so say
+            // so rather than failing quietly.
             CHAR16 failLine[224];
             setText(failLine, L"[ant-colony] could not rebuild the network of record ");
             appendNumber(failLine, target, FALSE);
@@ -1216,12 +1203,9 @@ static bool isLastTickInEpoch() {
 #endif
 }
 
-// AUX outside the strict paths takes a solution's claimed score instead of computing it. A tick
-// processed that way can disagree with quorum, which is what the fork checkpoint undoes - and every
-// path that fails to establish one sets gReRunStrict, so this is never true on a tick with no
-// checkpoint behind it. Builds without a checkpoint at all never take the shortcut: MAIN, a strict
-// re-run, --force-verify-solutions and the last tick of an epoch all compute, and so does every
-// platform where the rollback does not exist.
+// AUX outside the strict paths takes a solution's claimed score instead of computing it, and the fork
+// checkpoint undoes the tick if that disagrees with quorum. Every path that fails to establish one sets
+// gReRunStrict, so this is never true without a checkpoint behind it, nor on a build with no rollback.
 static bool isTrustingClaimedSolutionScore()
 {
     return tickFork::gRollbackAvailable
@@ -4019,8 +4003,8 @@ static void processTickTransactionAntColonySolution(
         return;
     }
 
-    // Taking the claim means no walk and no network for this solution. A lie shows up as a refund
-    // this node makes and the quorum does not, so the disagreement lands in the same tick.
+    // No walk and no network for this solution. A lie shows up as a refund this node makes and the
+    // quorum does not, so the disagreement lands in the same tick.
     const bool trustClaimedScore = isTrustingClaimedSolutionScore();
 
     unsigned int childScore;
@@ -4066,10 +4050,9 @@ static void processTickTransactionAntColonySolution(
         childAnn = &childAnnScratch;
     }
 
-    // This and the two score rules inside commit() are the only checks decided by the score itself,
-    // and none of them may fire on a score this node trusted rather than computed: rejecting leaves
-    // no refund for the quorum to disagree with, so the tree diverges in silence. Accepting turns
-    // the same lie into a spectrum disagreement the checkpoint can undo.
+    // This and the two score rules inside commit() are the only checks decided by the score itself, and none
+    // may fire on a trusted one: rejecting leaves no refund for the quorum to disagree with, so the tree
+    // diverges in silence. Accepting turns the lie into a spectrum disagreement instead.
     if (!trustClaimedScore && !score->isValidScore(childScore, score_engine::AlgoType::Bpp9000))
     {
         gAntColony.recordReject(ValidityResult::RejectNonCanonicalNonce);
@@ -4109,8 +4092,7 @@ static void processTickTransactionAntColonySolution(
     antDebugAccepted(transaction, childScore, (parentRec != nullptr) ? (parentRec->depth + 1) : 1,
         transactionIndex, result, trustClaimedScore);
 
-    // An accept that only stood because the score was trusted is exactly the one that will disagree
-    // with quorum. Naming it makes a rollback later in this tick explainable rather than mysterious.
+    // An accept that only stood because the score was trusted is the one that will disagree with quorum.
     if (trustClaimedScore
         && (result == ValidityResult::Valid || result == ValidityResult::ValidNotStored))
     {
@@ -4795,8 +4777,8 @@ static void processTick(unsigned long long processorNumber)
         txStatusData.tickTxIndexStart[system.tick - system.initialTick] = numberOfTransactions; // qli: part of tx_status_request add-on
 #endif
         // Only apply skipping compute solution when in Mainnet with Aux node (except for last tick).
-        // A strict replay belongs on the computing side too, and it is also what clears the
-        // per-transaction pre-score gates so the replay cannot read the previous tick's answers.
+        // A strict replay computes too, and this is what clears the per-transaction pre-score gates so it
+        // cannot read the previous tick's answers.
         if (isMainMode() || isTestnet() || isLastTickInEpoch() || forceVerifySolutions || gReRunStrict)
         {
             PROFILE_NAMED_SCOPE_BEGIN("processTick(): pre-scan solutions");
@@ -4992,8 +4974,7 @@ static void processTick(unsigned long long processorNumber)
             gAntColony.recordAnchorDigest(system.tick, anchorDigest);
 
 #if !defined(NDEBUG)
-            // Rebuilds recompute this digest from tick storage after the ring has wrapped past it.
-            // Check the two agree here, the one moment both sources are available.
+            // Rebuilds recompute this from tick storage; check the two agree while both are available.
             m256i recomputedAnchorDigest;
             if (!recomputeAntAnchorDigest(system.tick, recomputedAnchorDigest)
                 || recomputedAnchorDigest != anchorDigest)
@@ -10628,8 +10609,8 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     gReRunStrict = true;
     gReRunStrictUntilTick = strictUntilTick;
     {
-        // The range explains the catch-up that follows: every solution in it is recomputed, and an
-        // ant solution whose parent was accepted on trust also has that parent's network rebuilt.
+        // The range explains the catch-up that follows: every solution in it is recomputed, and a parent
+        // accepted on trust is rebuilt too.
         CHAR16 strictLine[192];
         setText(strictLine, L"[FORK] CHILD: replaying ticks ");
         appendNumber(strictLine, (unsigned long long)system.tick, FALSE);
@@ -12158,8 +12139,8 @@ void processArgs(int argc, const char* argv[]) {
             forceBroadcastAntSolution = false;
             logColorToScreen("ERROR", "Unknown --force-broadcast-ant-solution mode: " + mode);
         }
-        // Clamped with a comparison rather than std::max: the legacy Qubic.sln build does not define
-        // NOMINMAX, so <windows.h>'s max macro would eat the call.
+        // Clamped by comparison, not std::max: the legacy Qubic.sln build has no NOMINMAX, so
+        // <windows.h>'s max macro would eat the call.
         if (result.count("fbas-warmup"))
         {
             const int warmup = result["fbas-warmup"].as<int>();

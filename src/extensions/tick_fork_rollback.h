@@ -58,8 +58,7 @@ inline long gForkRssBeforeKb = 0;        // parent RSS just before fork
 
 namespace tickFork
 {
-    // Whether a tick can be undone at all. Anything that trusts a claimed score instead of computing
-    // it depends on this: without a checkpoint a disagreement with quorum has no way back.
+    // Trusting a claimed score is only safe where a tick can be undone.
     inline constexpr bool gRollbackAvailable = true;
 
     inline std::atomic<bool> gForkRequest{ false };  // tickProcessor -> BSP: fork now
@@ -85,8 +84,7 @@ namespace tickFork
         gWinState.store((int)state, std::memory_order_release);
     }
 
-    // Only ticks carrying a mining-solution tx can mismatch quorum. Ant solutions count because an
-    // AUX node commits them on their claimed score, so any tick carrying one can disagree.
+    // Only ticks carrying a mining-solution tx can mismatch quorum. Ant counts too: AUX commits it on the claimed score.
     inline bool tickHasSolution(unsigned int tick)
     {
         TickData tickDataCopy;
@@ -106,8 +104,7 @@ namespace tickFork
             Transaction* transaction = ts.tickTransactions(offsets[i]);
             if (!transaction->checkValidity())
                 continue;
-            if (MiningSolutionTransaction::isSolutionTransaction(transaction)
-                || AntColonyMiningSolutionTransaction::isSolutionTransaction(transaction))
+            if (MiningSolutionTransaction::isSolutionTransaction(transaction) || AntColonyMiningSolutionTransaction::isSolutionTransaction(transaction))
                 return true;
         }
         return false;
@@ -527,8 +524,7 @@ namespace tickFork
 #include <atomic>
 namespace tickFork
 {
-    // No checkpoint on this build, so every optimistic shortcut stays off: a tick processed on a
-    // trusted score could disagree with quorum and nothing here could undo it.
+    // No checkpoint on this build, so every optimistic shortcut stays off.
     inline constexpr bool gRollbackAvailable = false;
 
     inline std::atomic<bool> gIsForkChild{ false };
