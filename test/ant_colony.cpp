@@ -274,7 +274,7 @@ static long long commitRootChild(AntColonyBpp9000T* colony, const m256i& owner, 
     KangarooTwelve(&ann, sizeof(ann), &annHash, sizeof(annHash));
 
     const long long landsAt = (long long)colony->solutionCount();
-    if (colony->commit(in, nullptr, score, ann, annHash) != ValidityResult::Valid)
+    if (colony->commit(in, nullptr, score, &ann, annHash) != ValidityResult::Valid)
     {
         return ANT_INVALID_INDEX;
     }
@@ -307,7 +307,7 @@ static long long commitChild(AntColonyBpp9000T* colony, const m256i& owner, cons
     KangarooTwelve(&ann, sizeof(ann), &annHash, sizeof(annHash));
 
     const long long landsAt = (long long)colony->solutionCount();
-    if (colony->commit(in, parentRec, score, ann, annHash) != ValidityResult::Valid)
+    if (colony->commit(in, parentRec, score, &ann, annHash) != ValidityResult::Valid)
     {
         return ANT_INVALID_INDEX;
     }
@@ -642,7 +642,7 @@ static AntColonyBpp9000T::ReplayKey makeReplayKey(unsigned long long n)
     AntColonyBpp9000T::ReplayKey k;
     k.pubkey = makeKey(n);
     k.nonce = makeKey(n + 1000);
-    k.parentAnnHash = makeKey(n + 2000);
+    k.parentKey = makeKey(n + 2000);
     k.anchorDigest = makeKey(n + 3000);
     return k;
 }
@@ -707,7 +707,7 @@ TEST(TestAntColonyReplayCache, EveryKeyComponentIsPartOfTheLookup)
         {
         case 0: altered.pubkey = makeKey(90001); break;
         case 1: altered.nonce = makeKey(90002); break;
-        case 2: altered.parentAnnHash = makeKey(90003); break;
+        case 2: altered.parentKey = makeKey(90003); break;
         case 3: altered.anchorDigest = makeKey(90004); break;
         }
         EXPECT_FALSE(colony->tryGetReplayScore(altered, score, out)) << "component " << component;

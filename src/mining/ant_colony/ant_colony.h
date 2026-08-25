@@ -35,6 +35,13 @@ static constexpr unsigned long long ANT_SNAPSHOT_SCRATCH_BYTES = 2ULL * 1024 * 1
 
 static constexpr unsigned int NO_SIBLING = 0xFFFFFFFFU;
 static constexpr unsigned int WORST_SCORE = 0xFFFFFFFFU;
+
+// annStateSlot values for a record committed without its network. Both sit above
+// ANT_MAX_NODES_PER_EPOCH, so the bounds check in annOfNonRoot() already reads them as "no network".
+// ANT_ANN_MATERIALISING is the claim a thread holds while it walks, so siblings skip the slot
+// instead of repeating a walk that costs seconds.
+static constexpr unsigned int ANT_ANN_UNMATERIALISED = 0xFFFFFFFFU;
+static constexpr unsigned int ANT_ANN_MATERIALISING = 0xFFFFFFFEU;
 static constexpr long long ANT_INVALID_INDEX = -1;
 
 // Anchor digests for recent ticks, indexed by tick & (size - 1). Smallest power of two holding
@@ -288,15 +295,26 @@ public:
     {
         m256i pubkey;
         m256i nonce;
-        m256i parentAnnHash;   // K12 of the parent's ANN bytes; zero for a child of the root
+        // The parent's address, not a hash of its network. A parent's ANN is a deterministic function
+        // of its ref, so the two name the same score, but only this one can be built without holding
+        // the parent's network - which a record committed on a claimed score does not have.
+        m256i parentKey;
         m256i anchorDigest;    // the digest the walk consumed, not the tick it came from
 
         bool operator==(const ReplayKey& other) const
         {
             return (pubkey == other.pubkey) && (nonce == other.nonce)
-                && (parentAnnHash == other.parentAnnHash) && (anchorDigest == other.anchorDigest);
+                && (parentKey == other.parentKey) && (anchorDigest == other.anchorDigest);
         }
     };
+
+    // ROOT_REF encodes distinctly from every real ref, so a root child never shares a key with one.
+    static m256i replayParentKey(const SolutionRef& parentRef)
+    {
+        m256i out = m256i::zero();
+        copyMem(&out, &parentRef, sizeof(parentRef));
+        return out;
+    }
     static_assert(sizeof(ReplayKey) == 4 * sizeof(m256i), "ReplayKey must be padding-free");
 
     struct ReplayEntry
@@ -428,7 +446,8 @@ public:
     }
 
     // Unpacks a stored network into the caller's buffer. ROOT is never a record, so callers must
-    // handle parentRef.isRoot() before reaching here.
+    // handle parentRef.isRoot() before reaching here. False also means the record was committed
+    // without a network, which only a rebuild can supply.
     bool annOfNonRoot(const AntSolutionRecord& rec, Ann& out) const
     {
         if (rec.annStateSlot >= _solutionCount)
@@ -437,6 +456,71 @@ public:
         }
         _annPool[rec.annStateSlot].unpack(out.lut);
         return true;
+    }
+
+    bool isAnnMaterialised(unsigned int idx) const
+    {
+        return (idx < _solutionCount) && (ATOMIC_LOAD32(_records[idx].annStateSlot) == idx);
+    }
+
+    bool isAnnClaimHeld(unsigned int idx) const
+    {
+        return (idx < _solutionCount)
+            && (ATOMIC_LOAD32(_records[idx].annStateSlot) == ANT_ANN_MATERIALISING);
+    }
+
+    // What a caller that wants to rebuild a record's network gets back.
+    enum AnnClaim
+    {
+        AnnClaimReady,     // the network is already in the pool
+        AnnClaimOwned,     // this caller owns the rebuild and must end it with publishAnn or releaseAnnClaim
+        AnnClaimBusy,      // another thread is rebuilding it
+        AnnClaimInvalid,   // no such record
+    };
+
+    AnnClaim tryClaimAnn(unsigned int idx)
+    {
+        if (idx >= _solutionCount)
+        {
+            return AnnClaimInvalid;
+        }
+        LockGuard guard(_annClaimLock);
+        const unsigned int state = _records[idx].annStateSlot;
+        if (state == idx)
+        {
+            return AnnClaimReady;
+        }
+        if (state == ANT_ANN_MATERIALISING)
+        {
+            return AnnClaimBusy;
+        }
+        _records[idx].annStateSlot = ANT_ANN_MATERIALISING;
+        return AnnClaimOwned;
+    }
+
+    // The network lands before the slot index, so a reader that sees the index never reads a
+    // half-written network. childAnnHash is written here because a record committed without a
+    // network was committed without its hash too.
+    void publishAnn(unsigned int idx, const Ann& ann, unsigned int annHash)
+    {
+        _annPool[idx].pack(ann.lut);
+        _records[idx].childAnnHash = annHash;
+        ATOMIC_STORE32(_records[idx].annStateSlot, (long)idx);
+    }
+
+    // Drops a claim whose rebuild produced nothing, so a later attempt retries instead of waiting
+    // on a walk that is not happening.
+    void releaseAnnClaim(unsigned int idx)
+    {
+        if (idx >= _solutionCount)
+        {
+            return;
+        }
+        LockGuard guard(_annClaimLock);
+        if (_records[idx].annStateSlot == ANT_ANN_MATERIALISING)
+        {
+            _records[idx].annStateSlot = ANT_ANN_UNMATERIALISED;
+        }
     }
 
     long long findIndexBySolutionRef(const SolutionRef& ref) const;
@@ -453,9 +537,10 @@ public:
     static ValidityResult validateChild(const ChildCandidate& child,
         const AntSolutionRecord* parentRecord, unsigned int childCount, unsigned int threshold);
 
-    // Validates and, if accepted, appends the record and its network to the store.
+    // Validates and, if accepted, appends the record and its network to the store. A null childAnn
+    // commits the record with its slot marked unmaterialised, for a score accepted without walking.
     ValidityResult commit(const AntCommitInput& in, const AntSolutionRecord* parentRec,
-        unsigned int score, const Ann& childAnn, unsigned int childAnnHash);
+        unsigned int score, const Ann* childAnn, unsigned int childAnnHash);
 
 private:
     // Children already recorded under this parent, capped at ANT_MAX_CHILDREN_PER_PARENT. Root
@@ -569,6 +654,10 @@ private:
 
     ReplayEntry* _replayCache;
     volatile char _replayCacheLock;
+
+    // Guards only the annStateSlot transitions, never a rebuild itself: a walk takes seconds and
+    // runs with this released.
+    volatile char _annClaimLock;
 
     // Serial scratch for save/load and the solution export
     unsigned char* _snapshotScratch;
@@ -1123,7 +1212,7 @@ inline ValidityResult AntColony<ScoreT>::validateChild(const ChildCandidate& chi
 
 template<typename ScoreT>
 inline ValidityResult AntColony<ScoreT>::commit(const AntCommitInput& in, const AntSolutionRecord* parentRec,
-    unsigned int score, const Ann& childAnn, unsigned int childAnnHash)
+    unsigned int score, const Ann* childAnn, unsigned int childAnnHash)
 {
     const unsigned int childCount = countChildren(in.parentRef, in.pubkey);
     const ChildCandidate child{ in.pubkey, score, in.anchorTick, in.publishTick };
@@ -1147,7 +1236,10 @@ inline ValidityResult AntColony<ScoreT>::commit(const AntCommitInput& in, const 
     if (_solutionCount >= ANT_MAX_NODES_PER_EPOCH)
     {
         // The record is dropped, the network is not, still note this sols for end of epoch exppot
-        noteExportCandidate(in.pubkey, score, (parentRec != nullptr) ? (parentRec->depth + 1) : 1, childAnn);
+        if (childAnn != nullptr)
+        {
+            noteExportCandidate(in.pubkey, score, (parentRec != nullptr) ? (parentRec->depth + 1) : 1, *childAnn);
+        }
         _stats.acceptedNotStored++;
         return ValidityResult::ValidNotStored;
     }
@@ -1195,7 +1287,10 @@ inline ValidityResult AntColony<ScoreT>::commit(const AntCommitInput& in, const 
 
     // The record and its network share an index, which keeps the used portion of the allocation a
     // contiguous prefix.
-    _annPool[newIdx].pack(childAnn.lut);
+    if (childAnn != nullptr)
+    {
+        _annPool[newIdx].pack(childAnn->lut);
+    }
 
     AntSolutionRecord& newRec = _records[newIdx];
     newRec.pubkey = in.pubkey;
@@ -1206,7 +1301,7 @@ inline ValidityResult AntColony<ScoreT>::commit(const AntCommitInput& in, const 
     newRec.anchorTick = in.anchorTick;
     newRec.depth = (parentRec != nullptr) ? (parentRec->depth + 1) : 1;
     newRec.childAnnHash = childAnnHash;
-    newRec.annStateSlot = newIdx;
+    newRec.annStateSlot = (childAnn != nullptr) ? newIdx : ANT_ANN_UNMATERIALISED;
     newRec.nextSiblingIdx = prevHead;
 
     AntTickSlot& tslot = _tickIndex[selfSlot];
@@ -1224,7 +1319,10 @@ inline ValidityResult AntColony<ScoreT>::commit(const AntCommitInput& in, const 
     ATOMIC_STORE32(_solutionCount, (long)(newIdx + 1));
     ATOMIC_STORE32(tslot.count, (long)(tslot.count + 1));
 
-    noteExportCandidate(in.pubkey, score, newRec.depth, childAnn);
+    if (childAnn != nullptr)
+    {
+        noteExportCandidate(in.pubkey, score, newRec.depth, *childAnn);
+    }
 
     _stats.acceptedSolutions++;
     _stats.treeSizeCurrent = _solutionCount;
@@ -1504,11 +1602,21 @@ inline bool AntColony<ScoreT>::rebuildDerivedState()
         }
         // commit() writes the record and its network at the same index, and findIndexBySolutionRef
         // and annOfNonRoot both rely on it
-        // annStateSlot point to the ANN that must have similar index to the record
-        if (rec.annStateSlot != i)
+        // annStateSlot point to the ANN that must have similar index to the record, unless the
+        // record was committed without one
+        const bool annMaterialised = (rec.annStateSlot == i);
+        if (!annMaterialised
+            && rec.annStateSlot != ANT_ANN_UNMATERIALISED
+            && rec.annStateSlot != ANT_ANN_MATERIALISING)
         {
             antSnapshotFailure(L"annStateSlot is not the record index, record/slot", i, rec.annStateSlot);
             return false;
+        }
+        // A claim saved mid-walk is held by no thread in this process, so drop it back to
+        // unmaterialised rather than leaving the slot permanently unbuildable.
+        if (rec.annStateSlot == ANT_ANN_MATERIALISING)
+        {
+            _records[i].annStateSlot = ANT_ANN_UNMATERIALISED;
         }
 
         // The freshness rule validateChild() applied at admission, re-checked here so a tampered
@@ -1574,14 +1682,18 @@ inline bool AntColony<ScoreT>::rebuildDerivedState()
             return false;
         }
 
-        // Re-derive the hash from the stored network
-        _annPool[i].unpack(annBuffer.lut);
-        unsigned int annHash;
-        KangarooTwelve(&annBuffer, sizeof(annBuffer), &annHash, sizeof(annHash));
-        if (annHash != rec.childAnnHash)
+        // Re-derive the hash from the stored network. An unmaterialised record has none yet, and
+        // gets its hash when the walk that builds one publishes it.
+        if (annMaterialised)
         {
-            antSnapshotFailure(L"stored network does not match childAnnHash, record", i, 0);
-            return false;
+            _annPool[i].unpack(annBuffer.lut);
+            unsigned int annHash;
+            KangarooTwelve(&annBuffer, sizeof(annBuffer), &annHash, sizeof(annHash));
+            if (annHash != rec.childAnnHash)
+            {
+                antSnapshotFailure(L"stored network does not match childAnnHash, record", i, 0);
+                return false;
+            }
         }
 
         const AntDedupKey key{ rec.pubkey, rec.nonce, rec.parentRef };

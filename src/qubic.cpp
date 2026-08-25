@@ -451,6 +451,10 @@ static AntColonyBpp9000T gAntColony;
 static AntPendingSolutions gAntPendingSolutions;
 static AntColonyBpp9000T::Ann gAntParentAnnScratch[MAX_NUMBER_OF_PROCESSORS];
 static AntColonyBpp9000T::Ann gAntChildAnnScratch[MAX_NUMBER_OF_PROCESSORS];
+// Separate from the two above because a rebuild runs underneath a caller that is already holding
+// those for the solution it came in for.
+static AntColonyBpp9000T::Ann gAntRebuildParentScratch[MAX_NUMBER_OF_PROCESSORS];
+static AntColonyBpp9000T::Ann gAntRebuildChildScratch[MAX_NUMBER_OF_PROCESSORS];
 
 #ifndef NDEBUG
 static constexpr unsigned int ANT_DEBUG_PRINTS_PER_EPOCH = 512;
@@ -570,23 +574,25 @@ struct AntScoreTaskPayload
 };
 static_assert(sizeof(AntScoreTaskPayload) <= 128, "ant score payload must fit TASK_PAYLOAD_MAX");
 
-// The cache is keyed by what the score is a function of, not by where the inputs were found. A
-// parent named by position and an anchor named by tick number both depend on this node already
-// holding the same tree, which is exactly what a node replaying after a restart is still building.
+// The parent is named by its on-chain address rather than by a hash of its network. Within an
+// epoch a ref names one transaction in one tick, so it selects the same parent network on every
+// node - and unlike the hash, it can be formed without holding that network, which is what lets a
+// record committed on a claimed score take part in the cache at all. The cache file is epoch-scoped,
+// so a ref never carries into an epoch where it would mean something else.
 static AntColonyBpp9000T::ReplayKey makeAntReplayKey(const m256i& pubkey, const m256i& nonce,
-    const AntColonyBpp9000T::Ann* parentAnn, const m256i& anchorDigest)
+    const SolutionRef& parentRef, const m256i& anchorDigest)
 {
     AntColonyBpp9000T::ReplayKey key;
     key.pubkey = pubkey;
     key.nonce = nonce;
-    key.parentAnnHash = m256i::zero();   // a child of the root has no parent network to name
-    if (parentAnn != nullptr)
-    {
-        KangarooTwelve(parentAnn, sizeof(*parentAnn), &key.parentAnnHash, sizeof(key.parentAnnHash));
-    }
+    key.parentKey = AntColonyBpp9000T::replayParentKey(parentRef);
     key.anchorDigest = anchorDigest;
     return key;
 }
+
+// Defined below, next to the anchor-digest fallback it needs.
+static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int recordIdx,
+    AntColonyBpp9000T::Ann& out);
 
 // Score one ant solution ahead of the transaction loop, on whichever processor drains the queue.
 static void scoreAntSolutionTask(unsigned long long processorNumber, void* payload)
@@ -608,7 +614,10 @@ static void scoreAntSolutionTask(unsigned long long processorNumber, void* paylo
     const AntColonyBpp9000T::Ann* parentAnn = nullptr;
     if (parentRec != nullptr)
     {
-        if (!gAntColony.annOfNonRoot(*parentRec, gAntParentAnnScratch[processorNumber]))
+        const long long parentIdx = gAntColony.findIndexBySolutionRef(task->parentRef);
+        if (parentIdx == ANT_INVALID_INDEX
+            || !ensureAntRecordAnn(processorNumber, (unsigned int)parentIdx,
+                gAntParentAnnScratch[processorNumber]))
         {
             return;
         }
@@ -616,7 +625,7 @@ static void scoreAntSolutionTask(unsigned long long processorNumber, void* paylo
     }
 
     const AntColonyBpp9000T::ReplayKey replayKey =
-        makeAntReplayKey(task->pubkey, task->nonce, parentAnn, anchorDigest);
+        makeAntReplayKey(task->pubkey, task->nonce, task->parentRef, anchorDigest);
 
     // Check in the cache first if this sol was computed
     if (!gAntColony.tryGetReplayScore(replayKey, gAntScoredValue[task->txIdx], gAntScoredAnn[task->txIdx]))
@@ -670,6 +679,168 @@ static void computeAntAnchorDigest(unsigned int tick, const m256i& transactionDi
     copyMem(preimage, &tick, sizeof(tick));
     copyMem(preimage + sizeof(tick), &transactionDigest, sizeof(transactionDigest));
     KangarooTwelve(preimage, sizeof(preimage), &out, sizeof(out));
+}
+
+// The anchor ring spans only the freshness window, but a record lives the whole epoch, so rebuilding
+// an old solution's walk needs its anchor after the ring has wrapped past it. Tick storage keeps the
+// epoch, and only non-empty ticks ever recorded an anchor, so this reproduces exactly what
+// processTick() folded in: K12 over that tick's stored TickData.
+static bool recomputeAntAnchorDigest(unsigned int tick, m256i& out)
+{
+    m256i anchorTxDigest;
+    ts.tickData.acquireLock();
+    const TickData* storedTickData = ts.tickData.getByTickIfNotEmpty(tick);
+    const bool usable = (storedTickData != nullptr) && (storedTickData->epoch == system.epoch);
+    if (usable)
+    {
+        KangarooTwelve(storedTickData, sizeof(TickData), &anchorTxDigest, sizeof(anchorTxDigest));
+    }
+    ts.tickData.releaseLock();
+    if (!usable)
+    {
+        return false;
+    }
+    computeAntAnchorDigest(tick, anchorTxDigest, out);
+    return true;
+}
+
+// Ring first, tick storage once the ring no longer holds the tick. Only rebuild paths use this: the
+// live paths must keep rejecting an anchor outside the freshness window, which is what the bare ring
+// lookup gives them.
+static bool getAntAnchorDigestForRebuild(unsigned int tick, m256i& out)
+{
+    if (gAntColony.getAnchorDigest(tick, out))
+    {
+        return true;
+    }
+    return recomputeAntAnchorDigest(tick, out);
+}
+
+// Rebuilds one record's network. Its parent must already have one, or be the root.
+static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned int idx)
+{
+    const AntColonyBpp9000T::AnnClaim claim = gAntColony.tryClaimAnn(idx);
+    if (claim == AntColonyBpp9000T::AnnClaimReady)
+    {
+        return true;
+    }
+    if (claim == AntColonyBpp9000T::AnnClaimInvalid)
+    {
+        return false;
+    }
+    if (claim == AntColonyBpp9000T::AnnClaimBusy)
+    {
+        // Waiting costs the same seconds the walk does, and walking it here as well would cost them
+        // a second time on top.
+        while (gAntColony.isAnnClaimHeld(idx))
+        {
+            sleepMilliseconds(20);
+        }
+        return gAntColony.isAnnMaterialised(idx);
+    }
+
+    // Owned from here on, so every exit below either publishes or releases the claim.
+    const AntSolutionRecord* rec = gAntColony.recordAt(idx);
+    if (rec == nullptr)
+    {
+        gAntColony.releaseAnnClaim(idx);
+        return false;
+    }
+
+    const AntColonyBpp9000T::Ann* parentAnn = nullptr;
+    if (!rec->parentRef.isRoot())
+    {
+        const long long parentIdx = gAntColony.findIndexBySolutionRef(rec->parentRef);
+        const AntSolutionRecord* parentRec =
+            (parentIdx == ANT_INVALID_INDEX) ? nullptr : gAntColony.recordAt(parentIdx);
+        if (parentRec == nullptr
+            || !gAntColony.annOfNonRoot(*parentRec, gAntRebuildParentScratch[processorNumber]))
+        {
+            gAntColony.releaseAnnClaim(idx);
+            return false;
+        }
+        parentAnn = &gAntRebuildParentScratch[processorNumber];
+    }
+
+    m256i anchorDigest;
+    if (!getAntAnchorDigestForRebuild(rec->anchorTick, anchorDigest))
+    {
+        gAntColony.releaseAnnClaim(idx);
+        return false;
+    }
+
+    AntColonyBpp9000T::Ann& childAnn = gAntRebuildChildScratch[processorNumber];
+    const unsigned int rebuiltScore = score->computeAntChildScore(processorNumber, parentAnn,
+        rec->pubkey, rec->nonce, anchorDigest, childAnn);
+
+    // The record was admitted on a score this node did not compute, and this walk is that
+    // computation. A disagreement means the acceptance was wrong, so publish nothing: a network
+    // built for a score no other node holds is worse than no network at all.
+    if (rebuiltScore != rec->score)
+    {
+        gAntColony.releaseAnnClaim(idx);
+        CHAR16 msg[256];
+        setText(msg, L"[ant-colony] rebuilt score disagrees with the accepted record, index ");
+        appendNumber(msg, idx, FALSE);
+        appendText(msg, L" accepted ");
+        appendNumber(msg, rec->score, FALSE);
+        appendText(msg, L" rebuilt ");
+        appendNumber(msg, rebuiltScore, FALSE);
+        logToConsole(msg);
+        return false;
+    }
+
+    unsigned int annHash;
+    KangarooTwelve(&childAnn, sizeof(childAnn), &annHash, sizeof(annHash));
+    gAntColony.publishAnn(idx, childAnn, annHash);
+    return true;
+}
+
+// Supplies the network of a record that was committed without one, walking its lineage down from
+// the nearest ancestor that still has a network. One level costs a full score walk - seconds - so
+// each result is published into the pool for every later reader.
+// Deliberately unbounded in depth: a record this node cannot rebuild would be rejected here and
+// accepted elsewhere, and a colony tree that disagrees is the one divergence no rollback repairs.
+// A deep lineage costs time instead.
+static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int recordIdx,
+    AntColonyBpp9000T::Ann& out)
+{
+    while (!gAntColony.isAnnMaterialised(recordIdx))
+    {
+        // The shallowest record on this chain still missing a network. Its parent is the root or
+        // already rebuilt, so it is the next one that can actually be walked.
+        unsigned int target = recordIdx;
+        for (;;)
+        {
+            const AntSolutionRecord* rec = gAntColony.recordAt(target);
+            if (rec == nullptr)
+            {
+                return false;
+            }
+            if (rec->parentRef.isRoot())
+            {
+                break;
+            }
+            const long long parentIdx = gAntColony.findIndexBySolutionRef(rec->parentRef);
+            if (parentIdx == ANT_INVALID_INDEX)
+            {
+                return false;
+            }
+            if (gAntColony.isAnnMaterialised((unsigned int)parentIdx))
+            {
+                break;
+            }
+            target = (unsigned int)parentIdx;
+        }
+
+        if (!materialiseOneAntRecord(processorNumber, target))
+        {
+            return false;
+        }
+    }
+
+    const AntSolutionRecord* rec = gAntColony.recordAt(recordIdx);
+    return (rec != nullptr) && gAntColony.annOfNonRoot(*rec, out);
 }
 
 // A pool miner's solution, arriving over BroadcastMessage
@@ -732,7 +903,7 @@ static void queueAntSolution(unsigned long long processorNumber, const m256i& co
 
     // Building the key is far cheaper than a miss, so the cache is consulted first.
     const AntColonyBpp9000T::ReplayKey replayKey =
-        makeAntReplayKey(computorPublicKey, payload.nonce, parentAnn, anchorDigest);
+        makeAntReplayKey(computorPublicKey, payload.nonce, parentRef, anchorDigest);
     unsigned int childScore = 0;
     if (!gAntColony.tryGetReplayScore(replayKey, childScore, gAntChildAnnScratch[processorNumber]))
     {
@@ -1764,7 +1935,7 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
                         if (preParentOk)
                         {
                             const AntColonyBpp9000T::ReplayKey preKey = makeAntReplayKey(
-                                antTx->sourcePublicKey, antTx->nonce, preParentAnn, preAnchorDigest);
+                                antTx->sourcePublicKey, antTx->nonce, preParentRef, preAnchorDigest);
                             unsigned int preScore = 0;
                             if (!gAntColony.tryGetReplayScore(preKey, preScore, gAntChildAnnScratch[processorNumber]))
                             {
@@ -3819,7 +3990,9 @@ static void processTickTransactionAntColonySolution(
         const AntColonyBpp9000T::Ann* parentAnn = nullptr;
         if (parentRec != nullptr)
         {
-            if (!gAntColony.annOfNonRoot(*parentRec, parentAnnScratch))
+            const long long parentIdx = gAntColony.findIndexBySolutionRef(parentRef);
+            if (parentIdx == ANT_INVALID_INDEX
+                || !ensureAntRecordAnn(processorNumber, (unsigned int)parentIdx, parentAnnScratch))
             {
                 gAntColony.recordReject(ValidityResult::RejectParentNotRegistered);
                 logAntSolutionOutcome(transaction, 0, ValidityResult::RejectParentNotRegistered);
@@ -3831,7 +4004,7 @@ static void processTickTransactionAntColonySolution(
         // Same cache the async path uses. Reached when the pre-scan did not enqueue this one or the
         // queue did not drain in time, which is exactly the catch-up case the cache exists for.
         const AntColonyBpp9000T::ReplayKey replayKey =
-            makeAntReplayKey(transaction->sourcePublicKey, transaction->nonce, parentAnn, anchorDigest);
+            makeAntReplayKey(transaction->sourcePublicKey, transaction->nonce, parentRef, anchorDigest);
         if (!gAntColony.tryGetReplayScore(replayKey, childScore, childAnnScratch))
         {
             childScore = score->computeAntChildScore(
@@ -3873,7 +4046,7 @@ static void processTickTransactionAntColonySolution(
         }
     }
 
-    result = gAntColony.commit(in, parentRec, childScore, *childAnn, childAnnHash);
+    result = gAntColony.commit(in, parentRec, childScore, childAnn, childAnnHash);
     logAntSolutionOutcome(transaction, childScore, result);
     antDebugAccepted(transaction, childScore, (parentRec != nullptr) ? (parentRec->depth + 1) : 1, transactionIndex, result);
     // ValidNotStored is the store being full: the solution passed every rule and only missed a slot,
@@ -4728,6 +4901,17 @@ static void processTick(unsigned long long processorNumber)
             m256i anchorDigest;
             computeAntAnchorDigest(system.tick, anchorTxDigest, anchorDigest);
             gAntColony.recordAnchorDigest(system.tick, anchorDigest);
+
+#if !defined(NDEBUG)
+            // Rebuilds recompute this digest from tick storage after the ring has wrapped past it.
+            // Check the two agree here, the one moment both sources are available.
+            m256i recomputedAnchorDigest;
+            if (!recomputeAntAnchorDigest(system.tick, recomputedAnchorDigest)
+                || recomputedAnchorDigest != anchorDigest)
+            {
+                addDebugMessage(L"ant anchor recomputed from tick storage disagrees with the ring");
+            }
+#endif
         }
     }
     else
