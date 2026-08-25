@@ -12158,13 +12158,17 @@ void processArgs(int argc, const char* argv[]) {
             forceBroadcastAntSolution = false;
             logColorToScreen("ERROR", "Unknown --force-broadcast-ant-solution mode: " + mode);
         }
+        // Clamped with a comparison rather than std::max: the legacy Qubic.sln build does not define
+        // NOMINMAX, so <windows.h>'s max macro would eat the call.
         if (result.count("fbas-warmup"))
         {
-            forceAntInjectWarmup = (unsigned int)std::max(0, result["fbas-warmup"].as<int>());
+            const int warmup = result["fbas-warmup"].as<int>();
+            forceAntInjectWarmup = (warmup > 0) ? (unsigned int)warmup : 0u;
         }
         if (result.count("fbas-gap"))
         {
-            forceAntInjectGapTicks = (unsigned int)std::max(0, result["fbas-gap"].as<int>());
+            const int gapTicks = result["fbas-gap"].as<int>();
+            forceAntInjectGapTicks = (gapTicks > 0) ? (unsigned int)gapTicks : 0u;
         }
         if (forceBroadcastAntSolution)
         {
