@@ -302,6 +302,11 @@ static bool forceVerifySolutions = false;
 static bool forceBroadcastInvalidSolution = false;
 static bool forceBroadcastAntSolution = false;
 static unsigned int forceAntSolutionBudget = 3;
+// Honest solutions published before the mode under test, so it has a tree to aim at.
+static unsigned int forceAntInjectWarmup = 0;
+// Ticks left between publishes. A gap wider than the checkpoint window lets each window retire, which
+// is what leaves an optimistically committed record in place to be a later solution's parent.
+static unsigned int forceAntInjectGapTicks = 0;
 static TestInvalidSolution::AntInjectMode forceAntInjectMode = TestInvalidSolution::AntInjectMode::Valid;
 static unsigned int gFbisCount = 1;          // test: number of solution txs to inject per tick
 static bool gFbisSameComputor = false;       // test: all from one computor (drains it -> out-of-qus)
@@ -5669,19 +5674,26 @@ static void processTick(unsigned long long processorNumber)
             {
                 unsigned int lastMinedTick = 0;
                 unsigned int published = 0;
+                unsigned int lastPublishTick = 0;
                 while (!shutDownNode && published < forceAntSolutionBudget)
                 {
                     const unsigned int tick = system.tick;
-                    if (tick != lastMinedTick && tick > system.initialTick)
+                    const bool gapElapsed = (lastPublishTick == 0)
+                        || (tick - lastPublishTick >= forceAntInjectGapTicks);
+                    if (tick != lastMinedTick && tick > system.initialTick && gapElapsed)
                     {
                         lastMinedTick = tick;
+                        const TestInvalidSolution::AntInjectMode mode =
+                            (published < forceAntInjectWarmup)
+                                ? TestInvalidSolution::AntInjectMode::Valid
+                                : forceAntInjectMode;
                         // Engine slot is processorNumber % solutionBufferCount; the tick processor is
                         // processor 1, so use 0 to keep the miner's walk off the verifier's lock.
                         if (TestInvalidSolution::broadcastAntSolution(gAntColony, *score, 0,
-                                                                      tick - 1,
-                                                                      forceAntInjectMode, 1))
+                                                                      tick - 1, mode, 1))
                         {
                             published++;
+                            lastPublishTick = tick;
                         }
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -11677,6 +11689,8 @@ void processArgs(int argc, const char* argv[]) {
         ("fbis-same", "TEST: inject all --fbis solutions from one computor", cxxopts::value<bool>())
         ("test-solution-threshold", "TEST: override runtime Bpp9000 solution threshold", cxxopts::value<int>()->default_value("-1"))
         ("fbas,force-broadcast-ant-solution", "TEST: mine ant-colony solutions against our own colony and publish them, as <mode> or <mode>:<count> (default 3; a walk costs seconds of CPU and each publish burns a deposit). Mode selects which accept rule it aims at: valid, badclaim, noncanon, wrongtree, stale, futureparent, leparent", cxxopts::value<std::string>())
+        ("fbas-warmup", "TEST: publish this many valid ant solutions before switching to the --fbas mode", cxxopts::value<int>()->default_value("0"))
+        ("fbas-gap", "TEST: minimum ticks between ant publishes; a gap wider than the fork window makes each window retire", cxxopts::value<int>()->default_value("0"))
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
@@ -12069,10 +12083,20 @@ void processArgs(int argc, const char* argv[]) {
             forceBroadcastAntSolution = false;
             logColorToScreen("ERROR", "Unknown --force-broadcast-ant-solution mode: " + mode);
         }
+        if (result.count("fbas-warmup"))
+        {
+            forceAntInjectWarmup = (unsigned int)std::max(0, result["fbas-warmup"].as<int>());
+        }
+        if (result.count("fbas-gap"))
+        {
+            forceAntInjectGapTicks = (unsigned int)std::max(0, result["fbas-gap"].as<int>());
+        }
         if (forceBroadcastAntSolution)
         {
             logColorToScreen("INFO", "Force broadcast ant solution enabled, mode " + mode
-                + ", budget " + std::to_string(forceAntSolutionBudget) + " solution(s) (TEST ONLY)");
+                + ", budget " + std::to_string(forceAntSolutionBudget) + " solution(s)"
+                + ", warmup " + std::to_string(forceAntInjectWarmup)
+                + ", gap " + std::to_string(forceAntInjectGapTicks) + " tick(s) (TEST ONLY)");
         }
     }
 }
