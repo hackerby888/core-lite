@@ -1,10 +1,77 @@
 name: CI
 on:
+  workflow_call:
+    outputs:
+      qinit_repository:
+        value: ${{ jobs.resolve-qinit.outputs.repository }}
+      qinit_pin:
+        value: ${{ jobs.resolve-qinit.outputs.pin }}
+  workflow_dispatch:
   push:
-    branches: [ "**" ]
+    branches: ["**"]
   pull_request:
-    branches: [ "**" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  resolve-qinit:
+    name: resolve-qinit
+    runs-on: ubuntu-22.04
+    outputs:
+      repository: ${{ steps.source.outputs.repository }}
+      pin: ${{ steps.resolved.outputs.pin }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - name: Select qinit source
+        id: source
+        shell: bash
+        run: |
+          repository=$(jq -r .repository .github/compat/qinit.json)
+          development_ref=$(jq -r '.developmentRef // empty' .github/compat/qinit.json)
+          pinned_commit=$(jq -r '.pinnedCommit // empty' .github/compat/qinit.json)
+
+          if [[ ! "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::invalid GitHub repository: $repository"
+            exit 1
+          fi
+          if [ -n "$pinned_commit" ] && [[ ! "$pinned_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pinnedCommit must be empty or a full lowercase commit SHA"
+            exit 1
+          fi
+
+          pin="${pinned_commit:-$development_ref}"
+          if [ -z "$pin" ]; then
+            echo "::error::pinnedCommit and developmentRef are both empty"
+            exit 1
+          fi
+
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+      - name: Resolve qinit commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: ${{ steps.source.outputs.repository }}
+          ref: ${{ steps.source.outputs.pin }}
+          path: resolved-qinit
+          persist-credentials: false
+      - name: Record qinit commit
+        id: resolved
+        shell: bash
+        run: |
+          pin=$(git -C resolved-qinit rev-parse HEAD)
+          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+          echo "::notice::qinit = ${STEPS_SOURCE_OUTPUTS_REPOSITORY}@${STEPS_SOURCE_OUTPUTS_PIN} ($pin)"
+        env:
+          STEPS_SOURCE_OUTPUTS_REPOSITORY: ${{ steps.source.outputs.repository }}
+          STEPS_SOURCE_OUTPUTS_PIN: ${{ steps.source.outputs.pin }}
+
   build-linux:
     uses: ./.github/workflows/linux-build.yml
     with:
@@ -19,3 +86,19 @@ jobs:
     uses: ./.github/workflows/windows-build.yml
     with:
       configuration: Release
+
+  windows-test-build:
+    uses: ./.github/workflows/build-tests.yml
+
+  contract-verification:
+    uses: ./.github/workflows/contract-verify.yml
+
+  platform-tests:
+    uses: ./.github/workflows/platform-tests.yml
+
+  dynamic-contract-tests:
+    needs: resolve-qinit
+    uses: ./.github/workflows/dynamic-contracts.yml
+    with:
+      qinit_repository: ${{ needs.resolve-qinit.outputs.repository }}
+      qinit_pin: ${{ needs.resolve-qinit.outputs.pin }}

@@ -5,8 +5,17 @@ on:
     # Run every 5 minutes on Wednesdays
     - cron: "*/5 * * * 3"
 
+permissions: {}
+
+concurrency:
+  group: docker-weekly-scheduler
+  cancel-in-progress: false
+
 jobs:
   trigger:
+    name: trigger
+    permissions:
+      actions: write  # gh workflow run dispatches docker-weekly.yml
     runs-on: ubuntu-latest
     steps:
       - name: Check if within 12:05 UTC window
@@ -15,13 +24,13 @@ jobs:
           HOUR=$(date -u +%H)
           MIN=$(date -u +%M)
           if [ "$HOUR" = "12" ] && [ "$MIN" -ge 5 ] && [ "$MIN" -lt 10 ]; then
-            echo "should_trigger=true" >> $GITHUB_OUTPUT
+            echo "should_trigger=true" >> "$GITHUB_OUTPUT"
           else
-            echo "should_trigger=false" >> $GITHUB_OUTPUT
+            echo "should_trigger=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Trigger Docker Weekly workflow
         if: steps.check.outputs.should_trigger == 'true'
-        run: gh workflow run docker-weekly.yml --repo ${{ github.repository }}
+        run: gh workflow run docker-weekly.yml --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

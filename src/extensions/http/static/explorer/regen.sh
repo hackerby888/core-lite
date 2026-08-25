@@ -7,6 +7,8 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 OUT="$(cd "$SRC/../.." && pwd)/controller/explorer_assets.generated.h"
 DELIM="EXPLORER_DELIM"
 
+mkdir -p "$(dirname "$OUT")"
+
 for f in "$SRC/index.html" "$SRC/style.css" "$SRC/app.js"; do
   if [[ ! -f "$f" ]]; then
     echo "ERROR: missing asset: $f" >&2

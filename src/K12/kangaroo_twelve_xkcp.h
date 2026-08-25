@@ -4,6 +4,9 @@
 
 #include "platform/memory.h"
 
+// Give header definitions internal linkage in each translation unit.
+namespace
+{
 namespace XKCP{
 
 typedef unsigned char uint8_t;
@@ -1504,4 +1507,5 @@ namespace K12xkcp
     }
 } // namespace K12xkcp
 #endif
-} // namespace XKPC
+} // namespace XKCP
+} // namespace

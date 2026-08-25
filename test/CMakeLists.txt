@@ -18,6 +18,10 @@ FetchContent_MakeAvailable(googletest)
 
 get_filename_component(PROJECT_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
+if(IS_ARM)
+    # Prefer the ARM shim over the system x86 CPUID header.
+    include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_common/arm_shims)
+endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_common)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_os)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_efi) # Currently still needed due to various imports
@@ -33,6 +37,7 @@ add_executable(
 		assets.cpp
    		common_def.cpp
    		contract_core.cpp
+		contract_invocation_alignment.cpp
    		contract_gqmprop.cpp
    		contract_msvault.cpp
    		contract_nostromo.cpp
@@ -56,7 +61,7 @@ add_executable(
 		custom_qubic_mining_storage.cpp
 		fast_tx_window.cpp
    		file_io.cpp
-   		# fourq.cpp
+   		fourq.cpp
    		kangaroo_twelve.cpp
    		m256.cpp
    		math_lib.cpp
@@ -81,25 +86,50 @@ add_executable(
    		vote_counter.cpp
 		read_write_lock.cpp
 		setjump.cpp
+		oc_engine.cpp
 		oracle_engine.cpp
+		windows_lazy_memory.cpp
 )
 
-# Apply test-specific compiler flags from the centralized detection module
-apply_test_compiler_flags(qubic_core_tests)
-
-# Add additional test-specific flags if needed
-if(IS_CLANG OR IS_GCC)
-  target_compile_options(
-          qubic_core_tests
-          PRIVATE
-          -mrdrnd -Wno-error
-          -mbmi
-          -mlzcnt
-          -fshort-wchar
-          -w
-  )
+# Fork rollback is Linux-only (fork/pipe/disk-shadow); its test needs the real implementation.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(qubic_core_tests PRIVATE fork_rollback.cpp)
 endif()
 
+add_executable(
+  qubic_state_tests
+    contract_state_pager.cpp
+    k12_digest_cache.cpp
+    state_memory.cpp
+)
+
+set(LOGGING_VM_TEST_CONFIG
+    "${CMAKE_CURRENT_SOURCE_DIR}/logging_vm_test_config.h")
+set(SPECTRUM_GLOBAL_CONFIG
+    "${PROJECT_ROOT_DIR}/src/platform/global_var.h")
+if(MSVC)
+    target_compile_options(qubic_core_tests PRIVATE
+        "/FI${LOGGING_VM_TEST_CONFIG}")
+    set_property(SOURCE spectrum.cpp APPEND PROPERTY COMPILE_OPTIONS
+        "/FI${SPECTRUM_GLOBAL_CONFIG}")
+else()
+    target_compile_options(qubic_core_tests PRIVATE
+        -include "${LOGGING_VM_TEST_CONFIG}")
+    set_property(SOURCE spectrum.cpp APPEND PROPERTY COMPILE_OPTIONS
+        -include "${SPECTRUM_GLOBAL_CONFIG}")
+endif()
+
+foreach(TEST_TARGET IN ITEMS qubic_core_tests qubic_state_tests)
+    apply_test_compiler_flags(${TEST_TARGET})
+    if(IS_MSVC)
+        target_compile_options(${TEST_TARGET} PRIVATE /DNOMINMAX /Zc:wchar_t- /WX-)
+    elseif((IS_CLANG OR IS_GCC) AND IS_ARM)
+        target_compile_options(${TEST_TARGET} PRIVATE -fshort-wchar -w)
+    elseif(IS_CLANG OR IS_GCC)
+        target_compile_options(${TEST_TARGET} PRIVATE
+            -mrdrnd -Wno-error -mbmi -mlzcnt -fshort-wchar -w)
+    endif()
+endforeach()
 
 target_link_libraries(
   qubic_core_tests PRIVATE
@@ -109,5 +139,67 @@ target_link_libraries(
   Blosc2::blosc2_static
 )
 
+target_link_libraries(
+  qubic_state_tests PRIVATE
+  GTest::gtest_main
+  platform_common
+  platform_os
+  Blosc2::blosc2_static
+)
+
+# Keep Wasm node settings isolated from the default core gtests.
+if(LITE_WASM_SC)
+    if(NOT TARGET vmlib)
+        if(APPLE)
+            set(WAMR_BUILD_PLATFORM "darwin")
+        elseif(WIN32)
+            set(WAMR_BUILD_PLATFORM "windows")
+        else()
+            set(WAMR_BUILD_PLATFORM "linux")
+        endif()
+        if(IS_ARM)
+            set(WAMR_BUILD_TARGET "AARCH64")
+        else()
+            set(WAMR_BUILD_TARGET "X86_64")
+        endif()
+        set(WAMR_BUILD_INTERP 1)
+        set(WAMR_BUILD_FAST_INTERP 0)
+        set(WAMR_BUILD_DUMP_CALL_STACK 1)
+        set(WAMR_BUILD_AOT 0)
+        set(WAMR_BUILD_JIT 0)
+        set(WAMR_BUILD_LIBC_BUILTIN 0)
+        set(WAMR_BUILD_LIBC_WASI 0)
+        set(WAMR_BUILD_MULTI_MODULE 0)
+        set(WAMR_BUILD_REF_TYPES 1)
+        set(WAMR_DISABLE_HW_BOUND_CHECK 1)
+        include(${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
+        add_library(vmlib STATIC ${WAMR_RUNTIME_LIB_SOURCE})
+    endif()
+
+    add_executable(qubic_wasm_tests wasm_contracts.cpp wasm_state_write.cpp wasm_state_journal.cpp)
+    target_compile_definitions(qubic_wasm_tests PRIVATE
+        LITE_WASM_SC
+        TESTNET
+        TESTNET_LITE_RAM
+    )
+    apply_test_compiler_flags(qubic_wasm_tests)
+    if(MSVC)
+        target_compile_definitions(qubic_wasm_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    target_include_directories(
+        qubic_wasm_tests PRIVATE
+        ${WAMR_ROOT_DIR}/core/iwasm/include
+    )
+    target_link_libraries(
+        qubic_wasm_tests PRIVATE
+        GTest::gtest_main
+        vmlib
+    )
+endif()
+
 include(GoogleTest)
 gtest_discover_tests(qubic_core_tests)
+gtest_discover_tests(qubic_state_tests)
+if(TARGET qubic_wasm_tests)
+    gtest_discover_tests(qubic_wasm_tests)
+endif()

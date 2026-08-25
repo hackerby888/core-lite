@@ -3,16 +3,22 @@
 ////////////////// Extensions \\\\\\\\\\\\
 
 #if defined(_WIN32)
+#include <atomic>
 #include <condition_variable>
+#include <memory>
+#include <mutex>
 #include <queue>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <Windows.h>
 #include <conio.h>
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")   // timeBeginPeriod
 #define MSG_DONTWAIT 0
 #define MSG_NOSIGNAL 0
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <sched.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -25,13 +31,20 @@
 #include <poll.h>
 #include <sys/mman.h>
 #include <cstddef>
+#include <atomic>
+#include <memory>
 #include <mutex>
 #include <condition_variable>
 #include <queue>
 #endif
 
 #include <atomic>
+#include <chrono>
+#include <new>
 #include <memory>
+
+// Fork quiesce: the BSP fork point holds networkingLock across fork() for a consistent map snapshot.
+// Per-socket workers are cv-blocked when idle (no busy-spin), so they don't starve the fork.
 
 static volatile bool listOfPeersIsStaticLiteNode = false;
 
@@ -40,6 +53,43 @@ static volatile bool listOfPeersIsStaticLiteNode = false;
 #undef CreateEvent
 #define CreateEvent CreateEvent
 #include "platform/console_logging.h"
+#include "extensions/fork_census.h"   // SmartMutex (census-aware networkingLock/eventMapLock)
+#include "platform/processor_count.h"
+
+// Use a high-resolution Windows timer for the network retry loops.
+#ifdef _MSC_VER
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+static inline void preciseSleepMicros(long long microseconds)
+{
+    if (microseconds <= 0)
+    {
+        return;
+    }
+
+    static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (timer)
+    {
+        LARGE_INTEGER dueTime;
+        dueTime.QuadPart = -(microseconds * 10);
+        if (SetWaitableTimer(timer, &dueTime, 0, nullptr, nullptr, FALSE))
+        {
+            WaitForSingleObject(timer, INFINITE);
+            return;
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(microseconds));
+}
+#else
+static inline void preciseSleepMicros(long long microseconds)
+{
+    if (microseconds > 0)
+    {
+        std::this_thread::sleep_for(std::chrono::microseconds(microseconds));
+    }
+}
+#endif
 
 //////////// Custom Data \\\\\\\\\\\
 
@@ -55,7 +105,8 @@ static std::string nodeAlias = "My Qubic Lite Node";
 static const auto liteNodeStartTime = std::chrono::system_clock::now();
 
 
-#if defined(__linux__)
+// The legacy Windows solution opts out because it does not link the RPC dependencies.
+#if defined(__linux__) || defined(__APPLE__) || (defined(_WIN32) && !defined(NO_RPC))
 #include <json/config.h>
 #include <json/value.h>
 #include <json/writer.h>
@@ -146,13 +197,6 @@ bool isNextTickIsSecurityTick()
     return true;
 }
 
-////////// Skip Solution Transaction Verification Feature \\\\\\\\\\
-
-static inline EntityRecord spectrumDataRollback[NUMBER_OF_TRANSACTIONS_PER_TICK];
-static inline bool gSolutionTxPaid[NUMBER_OF_TRANSACTIONS_PER_TICK];     // optimistic decreaseEnergy succeeded for the solution tx at this index
-static inline bool gSolutionTxReturned[NUMBER_OF_TRANSACTIONS_PER_TICK]; // optimistic deposit-return increaseEnergy applied for the solution tx at this index
-unsigned int resourceTestingDigestRollback = 0;
-
 uint32_t getCurrentCpuIndex() {
 #if defined(_WIN32)
     return GetCurrentProcessorNumber();
@@ -228,12 +272,97 @@ inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size
 	}
     return VirtualAlloc(address, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE) != address;
 }
+
+// Emulate demand-zero overcommit by committing Windows pages on first access.
+struct LazyCommitRegion
+{
+    uintptr_t base;
+    uintptr_t end;
+};
+inline LazyCommitRegion g_lazyCommitRegions[4096 * 2];
+inline volatile long g_lazyCommitRegionCount = 0;
+inline volatile long g_lazyCommitVehInstalled = 0;
+inline unsigned long g_lazyCommitPageSize = 4096;
+
+inline bool inLazyCommitRegion(uintptr_t address)
+{
+    const long regionCount = g_lazyCommitRegionCount;
+    for (long i = 0; i < regionCount; i++)
+    {
+        if (address >= g_lazyCommitRegions[i].base && address < g_lazyCommitRegions[i].end)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Commit reserved pages on first access and let genuine allocation failures propagate.
+static LONG WINAPI lazyCommitVeh(EXCEPTION_POINTERS* exception)
+{
+    if (exception->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const uintptr_t faultAddress = (uintptr_t)exception->ExceptionRecord->ExceptionInformation[1];
+    if (!inLazyCommitRegion(faultAddress))
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const uintptr_t page = faultAddress & ~((uintptr_t)g_lazyCommitPageSize - 1);
+    if (VirtualAlloc((void*)page, g_lazyCommitPageSize, MEM_COMMIT, PAGE_READWRITE))
+    {
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Use lazy allocation only for pages written from user mode, not kernel I/O buffers.
+inline void* qVirtualAllocLazy(const unsigned long long size)
+{
+    if (!_InterlockedCompareExchange(&g_lazyCommitVehInstalled, 1, 0))
+    {
+        SYSTEM_INFO systemInfo;
+        GetSystemInfo(&systemInfo);
+        g_lazyCommitPageSize = systemInfo.dwPageSize ? systemInfo.dwPageSize : 4096;
+        AddVectoredExceptionHandler(1 /*first*/, lazyCommitVeh);
+    }
+
+    void* address = VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE, PAGE_READWRITE);
+    if (!address)
+    {
+        logToConsole(L"CRITIAL: VirtualAlloc(MEM_RESERVE) failed in qVirtualAllocLazy");
+        return nullptr;
+    }
+
+    const long regionIndex = g_lazyCommitRegionCount;
+    if (regionIndex < (long)(sizeof(g_lazyCommitRegions) / sizeof(g_lazyCommitRegions[0])))
+    {
+        g_lazyCommitRegions[regionIndex].base = (uintptr_t)address;
+        g_lazyCommitRegions[regionIndex].end = (uintptr_t)address + size;
+        _ReadWriteBarrier();
+        g_lazyCommitRegionCount = regionIndex + 1;
+    }
+    else
+    {
+        VirtualAlloc(address, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE);
+    }
+
+    commitMemMap[(unsigned long long)address] = true;
+    return address;
+}
 #else
 inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false) {
     int prot = commitMem ? (PROT_READ | PROT_WRITE) : PROT_NONE;
     void* addr = mmap(nullptr, size, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (addr != MAP_FAILED)
     {
+        // THP hint: fewer PTEs -> cheaper fork() of the large-RSS node. Unprivileged; no-op if THP off.
+#if defined(__linux__)
+        madvise(addr, size, MADV_HUGEPAGE);   // MADV_HUGEPAGE is Linux-only (absent on macOS/Darwin)
+#endif
         commitMemMap[(unsigned long long)addr] = commitMem;
         return addr;
     }
@@ -264,6 +393,23 @@ inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size
 }
 
 #endif
+
+// Route shutdown cleanup according to the original allocator.
+inline void freePoolOrVirtual(void* pointer)
+{
+    if (!pointer)
+    {
+        return;
+    }
+
+    auto allocation = commitMemMap.find((unsigned long long)pointer);
+    if (allocation != commitMemMap.end())
+    {
+        commitMemMap.erase(allocation);
+        return;
+    }
+    freePool(pointer);
+}
 
 void updateTime() {
     std::time_t t = std::time(nullptr);
@@ -335,32 +481,16 @@ enum class ConnectStatus
     Error
 };
 
-template <typename T>
-class EventQueue {
-public:
-    void push(const T& value) {
-        {
-            std::unique_lock<std::mutex> lock(mtx_);
-            q_.push(value);
-        }
-        cv_.notify_one(); // event triggered here
-    }
-
-    T pop() {
-        std::unique_lock<std::mutex> lock(mtx_);
-        cv_.wait(lock, [&] { return !q_.empty(); }); // wait for event
-        T val = q_.front();
-        q_.pop();
-        return val;
-    }
-
-private:
-    std::queue<T> q_;
-    std::mutex mtx_;
-    std::condition_variable cv_;
-};
-
 struct Overload {
+
+    struct PerSocketIo {
+        std::mutex mtx;   // SMARTMUTEX-EXEMPT: per-socket IO lock, dropped via tcpDataMap.clear() in resetForChildPromote; never held over node state
+        std::condition_variable cv;
+        EFI_TCP4_IO_TOKEN* pendingToken = nullptr;
+        bool hasPending = false;
+        SOCKET socket = INVALID_SOCKET;
+        std::atomic<bool> stop{false};
+    };
 
     struct TcpData {
         EFI_TCP4_CONFIG_DATA configData;
@@ -369,6 +499,8 @@ struct Overload {
         volatile char receiveLock;
         volatile char sendLock;
         ConnectStatus connectStatus;
+        std::shared_ptr<PerSocketIo> sendIo;
+        std::shared_ptr<PerSocketIo> recvIo;
     };
 
     struct EventData {
@@ -377,109 +509,182 @@ struct Overload {
         void* notifyFunction;
     };
 
-    struct TransmitRequest
-    {
-        SOCKET socket;
-        EFI_TCP4_IO_TOKEN *token;
-    };
-
-    struct ReceiveRequest
-    {
-        SOCKET socket;
-        EFI_TCP4_IO_TOKEN *token;
-    };
-
     inline static std::vector<std::thread> threads;
     inline static std::unordered_map<unsigned long long, SOCKET> incomingSocketMap;
-    // shared_ptr ownership: detached connect/accept threads capture the element by value so it
-    // survives a concurrent DestroyChild() erase (was a use-after-free on epoch-end teardown).
+    // shared_ptr: detached connect/accept threads capture the element by value so it survives a
+    // concurrent DestroyChild() erase (was a use-after-free on epoch-end teardown).
     inline static std::unordered_map<unsigned long long, std::shared_ptr<TcpData>> tcpDataMap;
     inline static std::unordered_map<unsigned long long, EventData> eventDataMap;
     inline static std::unordered_map<unsigned long long, bool> isReceiveThreadSetupMap;
     inline static std::unordered_map<unsigned long long, bool> isSendThreadSetupMap;
-    inline static EventQueue<TransmitRequest> transmitQueue;
-    inline static EventQueue<ReceiveRequest> receiveQueue;
 
-    inline static std::mutex networkingLock;
-    inline static std::mutex eventMapLock; // guards eventDataMap (CreateEvent/CloseEvent vs startThread callback lookup on AP worker threads)
+    inline static SmartMutex networkingLock{ "networkingLock" };   // census-aware: a non-AP holder at fork trips the gate
+    inline static SmartMutex eventMapLock{ "eventMapLock" };       // guards eventDataMap (CreateEvent/CloseEvent on main vs callback lookup on AP worker threads)
+
+    // Only the calling thread survives fork. Keep the inherited listening socket, but drop
+    // per-peer sockets and stale worker references so reconnects spawn fresh workers lazily.
+    static void resetForChildPromote()
+    {
+        const unsigned long long listenKey = (unsigned long long)peerTcp4Protocol;
+        std::shared_ptr<TcpData> listenData;
+        if (auto it = tcpDataMap.find(listenKey); it != tcpDataMap.end())
+            listenData = it->second;
+
+        for (auto &kv : tcpDataMap)
+            if (kv.first != listenKey && kv.second && kv.second->socket != INVALID_SOCKET)
+                closesocket(kv.second->socket);
+        for (auto &kv : incomingSocketMap)
+            if (kv.second != INVALID_SOCKET)
+                closesocket(kv.second);
+        tcpDataMap.clear();
+        incomingSocketMap.clear();
+        eventDataMap.clear();
+        isReceiveThreadSetupMap.clear();
+        isSendThreadSetupMap.clear();
+        // The kept listen socket's inherited per-socket worker refs are stale (threads gone); null
+        // them so the next op lazy-spawns fresh workers.
+        if (listenData)
+        {
+            listenData->sendIo.reset();
+            listenData->recvIo.reset();
+            tcpDataMap.emplace(listenKey, listenData);
+        }
+
+        new (&networkingLock) SmartMutex("networkingLock");
+        new (&eventMapLock) SmartMutex("eventMapLock");
+    }
+
+    // Stop a socket's workers; each worker's shared_ptr keeps its state alive until exit.
+    static void signalPerSocketWorkers(TcpData& tcpData)
+    {
+        auto signalWorker = [](std::shared_ptr<PerSocketIo>& worker)
+        {
+            if (!worker)
+                return;
+
+            {
+                std::lock_guard<std::mutex> lock(worker->mtx);
+                worker->stop.store(true, std::memory_order_release);
+            }
+            worker->cv.notify_all();
+        };
+        signalWorker(tcpData.sendIo);
+        signalWorker(tcpData.recvIo);
+    }
+
+#ifndef _MSC_VER
+    // std::thread cannot size its stack, and the linker flag that gives the Linux build 8 MB has no ld64
+    // equivalent reaching a secondary thread — Darwin hands one 512 KB. processTick's own frame is about
+    // 144 KB before the Wasm interpreter runs on top of it, so the size is asked for outright.
+    static constexpr size_t PROCESSOR_THREAD_STACK_SIZE = 8u * 1024u * 1024u;
+
+    struct ProcessorThreadArgs
+    {
+        void* data;
+        unsigned long long processorNumber;
+        std::shared_ptr<std::atomic<bool>> finished;
+    };
+
+    static void* processorThreadEntry(void* argument) {
+        ProcessorThreadArgs* args = (ProcessorThreadArgs*)argument;
+        CustomStack* me = reinterpret_cast<CustomStack*>(args->data);
+        me->setupFuncToCall(me->setupDataToPass, args->processorNumber);
+        args->finished->store(true);
+        delete args;
+        return nullptr;
+    }
+#endif
 
     // Directly call the setup function without using custom stack.
     static void startThread(EFI_AP_PROCEDURE procedure, void* data, unsigned long long ProcessorNumber, EFI_EVENT WaitEvent, unsigned long long TimeoutInMicroseconds) {
-		bool isThreadFinished = false;
-        std::thread thread([&isThreadFinished, procedure, data, ProcessorNumber]() {
-           /* while (true) {
-                unsigned long long currentProcessorNumber;
-                WhoAmI(NULL, &currentProcessorNumber);
-                if (currentProcessorNumber == ProcessorNumber) {
-                    break;
-                } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-            }*/
-            CustomStack* me = reinterpret_cast<CustomStack*>(data);
-            me->setupFuncToCall(me->setupDataToPass, ProcessorNumber);
-            isThreadFinished = true;
-            });
+        (void)procedure;
+        // Shared with the thread because the timeout path below detaches and then reads this flag.
+        auto isThreadFinished = std::make_shared<std::atomic<bool>>(false);
 
         #ifdef _MSC_VER
+        std::thread thread([isThreadFinished, data, ProcessorNumber]() {
+            CustomStack* me = reinterpret_cast<CustomStack*>(data);
+            me->setupFuncToCall(me->setupDataToPass, ProcessorNumber);
+            isThreadFinished->store(true);
+            });
         HANDLE hThread = (HANDLE)thread.native_handle();
         SetThreadAffinityMask(hThread, 1ULL << ProcessorNumber);
         #else
+        pthread_attr_t attributes;
+        pthread_attr_init(&attributes);
+        pthread_attr_setstacksize(&attributes, PROCESSOR_THREAD_STACK_SIZE);
+
+        pthread_t thread{};
+        ProcessorThreadArgs* args = new ProcessorThreadArgs{ data, ProcessorNumber, isThreadFinished };
+        const int startError = pthread_create(&thread, &attributes, processorThreadEntry, args);
+        pthread_attr_destroy(&attributes);
+        if (startError != 0) {
+            delete args;
+            logToConsole(L"Error calling pthread_create");
+            return;
+        }
+        #ifdef __linux__
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(ProcessorNumber, &cpuset);
-        int rc = pthread_setaffinity_np(thread.native_handle(),
-                                    sizeof(cpu_set_t),
-                                    &cpuset);
+        int rc = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
         if (rc != 0) {
             logToConsole(L"Error calling pthread_setaffinity_np");
         }
+        #endif // macOS: no cpu affinity API (scheduler handles placement)
         #endif
 
         if (TimeoutInMicroseconds > 0) {
+            #ifdef _MSC_VER
             thread.detach();
+            #else
+            pthread_detach(thread);
+            #endif
         }
         else {
-			thread.join(); // Wait for the thread to finish if no timeout is specified
-			isThreadFinished = true; // Mark the thread as finished
+            #ifdef _MSC_VER
+            thread.join(); // Wait for the thread to finish if no timeout is specified
+            #else
+            pthread_join(thread, nullptr);
+            #endif
+            isThreadFinished->store(true); // Mark the thread as finished
         }
 
         if (TimeoutInMicroseconds > 0) {
-            while (!isThreadFinished && TimeoutInMicroseconds > 0) {
+            while (!isThreadFinished->load() && TimeoutInMicroseconds > 0) {
                 // Sleep for a short duration to avoid busy waiting
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                preciseSleepMicros(100);
                 TimeoutInMicroseconds -= 100;
             }
 
-            if (!isThreadFinished) {
+            if (!isThreadFinished->load()) {
                 #ifdef _MSC_VER
                 TerminateThread(hThread, 0); // Forcefully terminate the thread if it doesn't finish
                 #else
-                pthread_cancel(thread.native_handle());
+                pthread_cancel(thread);
                 #endif
             }
         }
 
         // call the event call back
         if (WaitEvent) {
-            // Copy the callback out under the lock, then release before invoking it: the callback may
-            // re-enter CloseEvent (which takes eventMapLock), so holding it here would self-deadlock.
-            void* context = nullptr;
-            void (*notifyFunction)(void*, void*) = nullptr;
+            void* notifyFn = nullptr;
+            void* ctx = nullptr;
             bool found = false;
             {
-                std::lock_guard<std::mutex> lock(eventMapLock);
+                // Copy under lock, call the callback outside it (the callback may re-enter Create/CloseEvent).
+                std::lock_guard<SmartMutex> lk(eventMapLock);
                 auto it = eventDataMap.find((unsigned long long)WaitEvent);
                 if (it != eventDataMap.end()) {
+                    notifyFn = it->second.notifyFunction;
+                    ctx = it->second.context;
                     found = true;
-                    context = it->second.context;
-                    notifyFunction = reinterpret_cast<void (*)(void*, void*)>(it->second.notifyFunction);
                 }
             }
             if (found) {
-                if (notifyFunction) {
-                    // Call the notify function with the context
-                    notifyFunction(WaitEvent, context);
+                if (notifyFn) {
+                    void (*notifyFunction)(void*, void*) = reinterpret_cast<void (*)(void*, void*)>(notifyFn);
+                    notifyFunction(WaitEvent, ctx);
                 }
             }
             else {
@@ -507,7 +712,7 @@ struct Overload {
 
     static EFI_STATUS Stall(IN unsigned long long Microseconds) {
         // Simulate a stall by doing nothing for the specified time
-        std::this_thread::sleep_for(std::chrono::microseconds(Microseconds));
+        preciseSleepMicros((long long)Microseconds);
         return EFI_SUCCESS;
     }
 
@@ -549,7 +754,7 @@ struct Overload {
     }
 
     static EFI_STATUS OpenProtocol(IN EFI_HANDLE Handle, IN EFI_GUID* Protocol, OUT void** Interface OPTIONAL, IN EFI_HANDLE AgentHandle, IN EFI_HANDLE ControllerHandle, IN unsigned int Attributes) {
-        std::lock_guard<std::mutex> lock(networkingLock);
+        std::lock_guard<SmartMutex> lock(networkingLock);
 
         if (Handle == nullptr || Protocol == nullptr || Interface == nullptr) {
             return EFI_INVALID_PARAMETER;
@@ -559,9 +764,8 @@ struct Overload {
             *Interface = new EFI_TCP4_PROTOCOL;
             // Check if this is a incomming socket and set socket instance if it is
             if (incomingSocketMap.contains((unsigned long long)Handle)) {
-                auto tcpDataPtr = std::make_shared<TcpData>();
-                tcpDataMap[(unsigned long long) * Interface] = tcpDataPtr;
-                TcpData& tcpData = *tcpDataPtr;
+                tcpDataMap[(unsigned long long) * Interface] = std::make_shared<TcpData>();
+                TcpData& tcpData = *tcpDataMap[(unsigned long long) * Interface];
                 tcpData.socket = incomingSocketMap[(unsigned long long)Handle];
 
                 incomingSocketMap.erase((unsigned long long)Handle);
@@ -601,7 +805,7 @@ struct Overload {
             eventData.context = NotifyContext;
             eventData.notifyFunction = NotifyFunction;
             {
-                std::lock_guard<std::mutex> lock(eventMapLock);
+                std::lock_guard<SmartMutex> lk(eventMapLock);
                 eventDataMap[(unsigned long long) * Event] = eventData;
             }
             return EFI_SUCCESS;
@@ -616,8 +820,8 @@ struct Overload {
             eventData.context = NotifyContext;
             eventData.notifyFunction = NotifyFunction;
             {
-                std::lock_guard<std::mutex> lock(eventMapLock);
-                eventDataMap[(unsigned long long) * Event] = eventData;
+                std::lock_guard<SmartMutex> lk(eventMapLock);
+                eventDataMap[(unsigned long long)*Event] = eventData;
             }
             return EFI_SUCCESS;
         }
@@ -627,7 +831,7 @@ struct Overload {
     }
 
     static EFI_STATUS CloseEvent(IN EFI_EVENT Event) {
-        std::lock_guard<std::mutex> lock(eventMapLock);
+        std::lock_guard<SmartMutex> lk(eventMapLock);
         auto it = eventDataMap.find((unsigned long long)Event);
         if (it != eventDataMap.end()) {
             delete (unsigned long long*)Event; // Free the allocated memory for the event
@@ -738,7 +942,9 @@ struct Overload {
     ////////////// MP Services Protocol Implementation //////////////
 
     static EFI_STATUS GetNumberOfProcessors(IN void* This, OUT unsigned long long* NumberOfProcessors, OUT unsigned long long* NumberOfEnabledProcessors) {
-        *NumberOfProcessors = (unsigned long long)std::thread::hardware_concurrency();
+        // Counted before the main thread pinned itself — hardware_concurrency() answers 1 after that on
+        // builds whose libc reads the affinity mask.
+        *NumberOfProcessors = (unsigned long long)totalProcessorCount();
         *NumberOfEnabledProcessors = *NumberOfProcessors; // Assume all processors are enabled
         return EFI_SUCCESS;
     }
@@ -755,8 +961,8 @@ struct Overload {
         return EFI_SUCCESS;
     }
 
-    // Use custom stack in std:thread will break the runtime because it expectes the OS-provided stack
-    // so we can bypass the custom stack because stack size in window/linux already is large enough
+    // Using the custom stack here breaks the runtime, which expects the OS-provided one — startThread asks
+    // the OS for a stack large enough instead, so the custom stack can be bypassed.
     static EFI_STATUS StartupThisAP(IN void* This, IN EFI_AP_PROCEDURE Procedure, IN unsigned long long ProcessorNumber, IN EFI_EVENT WaitEvent OPTIONAL, IN unsigned long long TimeoutInMicroseconds, IN void* ProcedureArgument OPTIONAL, OUT BOOLEAN* Finished OPTIONAL) {
         std::thread thread(startThread, Procedure, ProcedureArgument, ProcessorNumber, WaitEvent, TimeoutInMicroseconds);
         thread.detach();
@@ -772,19 +978,22 @@ struct Overload {
         return EFI_SUCCESS;
     }
 
-    static EFI_STATUS DestroyChild(IN void* This, IN EFI_HANDLE ChildHandle) {
-		// Remove tcp4Protocol data from handle
-        unsigned long long key = *(unsigned long long*)ChildHandle;
-		if (tcpDataMap.contains(key)) {
-			TcpData& tcpData = *tcpDataMap[key];
-			if (tcpData.socket != INVALID_SOCKET) {
-				closesocket(tcpData.socket);
-				tcpData.socket = INVALID_SOCKET;
-			}
-			tcpDataMap.erase(key);
-		    isReceiveThreadSetupMap.erase(key);
+    static EFI_STATUS DestroyChild(IN void* This, IN EFI_HANDLE ChildHandle)
+    {
+        const unsigned long long key = *(unsigned long long*)ChildHandle;
+        if (tcpDataMap.contains(key))
+        {
+            TcpData& tcpData = *tcpDataMap[key];
+            signalPerSocketWorkers(tcpData);
+            if (tcpData.socket != INVALID_SOCKET)
+            {
+                closesocket(tcpData.socket);
+                tcpData.socket = INVALID_SOCKET;
+            }
+            tcpDataMap.erase(key);
+            isReceiveThreadSetupMap.erase(key);
             isSendThreadSetupMap.erase(key);
-		}
+        }
         freePool(ChildHandle);
         return EFI_SUCCESS;
     }
@@ -810,10 +1019,10 @@ struct Overload {
     }
 
     static EFI_STATUS Transmit(IN void* This, IN EFI_TCP4_IO_TOKEN* Token) {
-        TcpData* tcpData = nullptr;
+        std::shared_ptr<TcpData> tcpData;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpData = tcpDataMap[key].get();
+            tcpData = tcpDataMap[key];
         }
         else {
             logToConsole(L"No Tcp Data For This Connect!");
@@ -825,23 +1034,34 @@ struct Overload {
             return EFI_UNSUPPORTED;
         }
 
-        RELEASE(tcpData->sendLock);
-
         if (tcpData->connectStatus == ConnectStatus::Disconnected || tcpData->connectStatus == ConnectStatus::Error) {
             Token->CompletionToken.Status = EFI_ABORTED;
             return EFI_ABORTED;
         }
 
-        transmitQueue.push({ tcpData->socket, Token});
+        // Lazy-spawn one dedicated send worker per socket (only the main thread calls Transmit per peer).
+        if (!tcpData->sendIo) {
+            tcpData->sendIo = std::make_shared<PerSocketIo>();
+            tcpData->sendIo->socket = tcpData->socket;
+            auto io = tcpData->sendIo;
+            std::thread([io]() { sendWorkerLoop(io); }).detach();
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(tcpData->sendIo->mtx);
+            tcpData->sendIo->pendingToken = Token;
+            tcpData->sendIo->hasPending = true;
+        }
+        tcpData->sendIo->cv.notify_one();
 
         return EFI_SUCCESS;
     }
 
     static EFI_STATUS Receive(IN void* This, IN EFI_TCP4_IO_TOKEN* Token) {
-        TcpData* tcpData = nullptr;
+        std::shared_ptr<TcpData> tcpData;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpData = tcpDataMap[key].get();
+            tcpData = tcpDataMap[key];
         }
         else {
             logToConsole(L"No Tcp Data For This Connect!");
@@ -861,7 +1081,19 @@ struct Overload {
             return EFI_ABORTED;
         }
 
-        receiveQueue.push({ tcpData->socket, Token});
+        if (!tcpData->recvIo) {
+            tcpData->recvIo = std::make_shared<PerSocketIo>();
+            tcpData->recvIo->socket = tcpData->socket;
+            auto io = tcpData->recvIo;
+            std::thread([io]() { recvWorkerLoop(io); }).detach();
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(tcpData->recvIo->mtx);
+            tcpData->recvIo->pendingToken = Token;
+            tcpData->recvIo->hasPending = true;
+        }
+        tcpData->recvIo->cv.notify_one();
 
         return EFI_SUCCESS;
     }
@@ -931,6 +1163,19 @@ struct Overload {
     static EFI_STATUS Configure(IN void* This, IN EFI_TCP4_CONFIG_DATA* TcpConfigData OPTIONAL) {
         static bool isGlobalSocketInitialized = false;
         if (!TcpConfigData) {
+            // Teardown via Configure(NULL): shutdown socket so in-flight send/recv abort and
+            // isTransmitting can clear (else slot stuck isClosing). fd closed in DestroyChild.
+            auto it = tcpDataMap.find((unsigned long long)This);
+            if (it != tcpDataMap.end() && it->second) {
+                it->second->connectStatus = ConnectStatus::Disconnected;
+                if (it->second->socket != INVALID_SOCKET) {
+#ifdef _MSC_VER
+                    shutdown(it->second->socket, SD_BOTH);
+#else
+                    shutdown(it->second->socket, SHUT_RDWR);
+#endif
+                }
+            }
             return EFI_SUCCESS;
         }
 
@@ -987,25 +1232,27 @@ struct Overload {
         }
 
         unsigned long long key = (unsigned long long)This;
+        if (tcpDataMap.contains(key))
+            return EFI_ACCESS_DENIED;
+
         tcpDataMap.emplace(key, std::make_shared<TcpData>(data));
         return EFI_SUCCESS;
     }
 
     // Note: Only global tcp4Protocol call this function, peers don't call
     static EFI_STATUS Accept(IN void* This, IN EFI_TCP4_LISTEN_TOKEN* ListenToken, IN void* peer) {
-        std::shared_ptr<TcpData> tcpDataPtr;
+        std::shared_ptr<TcpData> tcpData;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpDataPtr = tcpDataMap[key];
+            tcpData = tcpDataMap[key];
         }
         else {
             logToConsole(L"No Tcp Data For Global Tcp Connect!");
             return EFI_UNSUPPORTED;
         }
 
-        // accept in a thread (capture shared_ptr by value so tcpData survives a concurrent DestroyChild)
-        std::thread acceptThread([tcpDataPtr, ListenToken, peer]() {
-            TcpData* tcpData = tcpDataPtr.get();
+        // accept in a thread
+        std::thread acceptThread([tcpData, ListenToken, peer]() {
             sockaddr_in addr{};
             addr.sin_family = AF_INET;
             addr.sin_port = htons(tcpData->configData.AccessPoint.StationPort);
@@ -1021,6 +1268,11 @@ struct Overload {
             int buf_size = 16 * 1024 * 1024; // 16MB
             setsockopt(clientSocket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
             setsockopt(clientSocket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
+#ifdef _MSC_VER
+            // Disable Nagle for small per-vote messages on Windows loopback.
+            int nodelay = 1;
+            setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+#endif
 
             bool isLocal = false;
             if (peer)
@@ -1052,10 +1304,9 @@ struct Overload {
 #endif
 
             CreateChild(NULL, &ListenToken->NewChildHandle);
-            // At this point we dont know the tcp4Protocol for this peer (tcp4Protocol will be inititialzed in peerConnectionNewlyEstablished())
-            // so we map the clientSocket to the handle to process it later in peerConnectionNewlyEstablished()
+            // Save the socket until peerConnectionNewlyEstablished initializes the protocol.
             {
-                std::lock_guard<std::mutex> lock(networkingLock);
+                std::lock_guard<SmartMutex> lock(networkingLock);
                 incomingSocketMap[(unsigned long long)ListenToken->NewChildHandle] = clientSocket;
             }
             ListenToken->CompletionToken.Status = EFI_SUCCESS;
@@ -1066,20 +1317,24 @@ struct Overload {
     }
 
     static EFI_STATUS Connect(IN void* This, IN EFI_TCP4_CONNECTION_TOKEN* ConnectionToken) {
-        static std::map<int, long long> latestConnectTimestampMap; // map of <ip, timestamp>
-        static std::mutex latestConnectTimestampMapMutex;          // guards latestConnectTimestampMap (concurrent detached connect threads)
-        std::shared_ptr<TcpData> tcpDataPtr;
-        TcpData* tcpData = nullptr;
+        std::shared_ptr<TcpData> tcpData;
         unsigned long long key = (unsigned long long)This;
         if (tcpDataMap.contains(key)) {
-            tcpDataPtr = tcpDataMap[key];
-            tcpData = tcpDataPtr.get();
+            tcpData = tcpDataMap[key];
         }
         else {
             logToConsole(L"No Tcp Data For This Connect!");
             return EFI_UNSUPPORTED;
         }
+        // Non-blocking socket so connect() returns immediately (EINPROGRESS) and we can bound the wait.
+#ifdef _MSC_VER
         SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock != INVALID_SOCKET) { u_long nb = 1; ioctlsocket(sock, FIONBIO, &nb); }
+#else
+        // SOCK_NONBLOCK is a Linux extension; set the flag separately so BSD/macOS builds too.
+        SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock != INVALID_SOCKET) { fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) | O_NONBLOCK); }
+#endif
         if (sock == INVALID_SOCKET) {
             logToConsole(L"Socket creation failed!!");
 
@@ -1096,37 +1351,39 @@ struct Overload {
         serverAddr.sin_addr.s_addr = *((unsigned int*)tcpData->configData.AccessPoint.RemoteAddress.Addr);
         #endif
 
-        unsigned int ipInNumber = *(unsigned int*)tcpData->configData.AccessPoint.RemoteAddress.Addr;
-        // connect in a thread (capture shared_ptr by value so tcpData survives a concurrent DestroyChild)
-        std::thread connectThread([tcpDataPtr, serverAddr, ConnectionToken, ipInNumber]() {
-            TcpData* tcpData = tcpDataPtr.get();
-            auto now = std::chrono::system_clock::now();
-            long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-            long long lastTs;
-            {
-                std::lock_guard<std::mutex> g(latestConnectTimestampMapMutex);
-                lastTs = latestConnectTimestampMap[ipInNumber];
-            }
-            if (ms - lastTs < 2'000) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
+        // 4s-bounded connect (< 5s reaper so it self-resolves first): a dead peer can't pin the slot
+        // for the OS SYN timeout (~127s); Configure(NULL)'s shutdown wakes the poll early.
+        std::thread connectThread([tcpData, serverAddr, ConnectionToken, sock]() {
             tcpData->connectStatus = ConnectStatus::Connecting;
-            if (connect(tcpData->socket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-                tcpData->connectStatus = ConnectStatus::Error;
-                ConnectionToken->CompletionToken.Status = EFI_ABORTED;
+            bool ok = false;
+            if (connect(sock, (const sockaddr*)&serverAddr, sizeof(serverAddr)) == 0) {
+                ok = true;
+            } else {
+#ifdef _MSC_VER
+                bool inProgress = (WSAGetLastError() == WSAEWOULDBLOCK);
+                WSAPOLLFD pfd{}; pfd.fd = sock; pfd.events = POLLOUT;
+                int pr = inProgress ? WSAPoll(&pfd, 1, 4000) : -1;
+#else
+                bool inProgress = (errno == EINPROGRESS);
+                pollfd pfd{}; pfd.fd = sock; pfd.events = POLLOUT;
+                int pr = inProgress ? poll(&pfd, 1, 4000) : -1;
+#endif
+                if (pr > 0 && (pfd.revents & POLLOUT) && !(pfd.revents & (POLLERR | POLLHUP))) {
+                    int soerr = 0; socklen_t len = sizeof(soerr);
+                    getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&soerr, &len);
+                    ok = (soerr == 0);
+                }
             }
-            else {
+            if (ok) {
                 tcpData->connectStatus = ConnectStatus::Connected;
                 ConnectionToken->CompletionToken.Status = EFI_SUCCESS;
 #ifdef _MSC_VER
-                u_long mode = 1;
-                ioctlsocket(tcpData->socket, FIONBIO, &mode);
+                int nodelay = 1;
+                setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
 #endif
-            }
-
-            {
-                std::lock_guard<std::mutex> g(latestConnectTimestampMapMutex);
-                latestConnectTimestampMap[ipInNumber] = ms;
+            } else {
+                tcpData->connectStatus = ConnectStatus::Error;
+                ConnectionToken->CompletionToken.Status = EFI_ABORTED;
             }
             });
         connectThread.detach();
@@ -1134,144 +1391,180 @@ struct Overload {
         return EFI_SUCCESS;
     }
 
-    static void transmitProcessor()
+    // One dedicated send worker per socket. Consumes hasPending under mtx at start of work,
+    // does the send unlocked, then writes Token Status last as the completion signal to main.
+    // Main never sees Status != -1 until the worker has finished touching pendingToken/Token.
+    static void sendWorkerLoop(std::shared_ptr<PerSocketIo> io)
     {
-        while (true)
+        while (!io->stop.load(std::memory_order_acquire))
         {
-            TransmitRequest request = transmitQueue.pop();
+            EFI_TCP4_IO_TOKEN* token = nullptr;
+            {
+                std::unique_lock<std::mutex> lk(io->mtx);
+                io->cv.wait(lk, [&] {
+                    return io->hasPending || io->stop.load(std::memory_order_acquire);
+                });
+                if (io->stop.load(std::memory_order_acquire)) return;
+                token = io->pendingToken;
+                io->hasPending = false;
+            }
+
             int totalSentBytes = 0;
-            auto& fragment = request.token->Packet.TxData->FragmentTable[0];
+            auto& fragment = token->Packet.TxData->FragmentTable[0];
+            EFI_STATUS finalStatus = EFI_SUCCESS;
+            bool abandoned = false;
             // Abort a send only after 5s of zero progress (not total time) so big transfers aren't cut mid-stream.
             constexpr unsigned long long NO_PROGRESS_TIMEOUT_NS = 5'000'000'000ULL;
             auto lastProgress = std::chrono::high_resolution_clock::now();
             while ((unsigned int)totalSentBytes < fragment.FragmentLength)
             {
+                // Stop (DestroyChild/reconfigure): abandon WITHOUT touching token — the socket is being
+                // torn down and the peer slot's token may already be re-armed for a new connection.
+                if (io->stop.load(std::memory_order_acquire)) { abandoned = true; break; }
                 auto now = std::chrono::high_resolution_clock::now();
                 if ((unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(now - lastProgress).count() > NO_PROGRESS_TIMEOUT_NS) {
-                    request.token->CompletionToken.Status = EFI_TIMEOUT;
+                    finalStatus = EFI_TIMEOUT;
                     break;
                 }
-                auto n = send(request.socket, (const char*)fragment.FragmentBuffer + totalSentBytes, fragment.FragmentLength - totalSentBytes, MSG_DONTWAIT | MSG_NOSIGNAL);
-                if (n > 0)
+                auto sentBytes = send(io->socket, (const char*)fragment.FragmentBuffer + totalSentBytes, fragment.FragmentLength - totalSentBytes, MSG_DONTWAIT | MSG_NOSIGNAL);
+                if (sentBytes > 0)
                 {
-                    totalSentBytes += n;
+                    totalSentBytes += sentBytes;
                     lastProgress = now;
-                } else if (n == 0)
+                }
+                else if (sentBytes == 0)
                 {
-                    // connection closed
-                    request.token->CompletionToken.Status = EFI_ABORTED;
+                    finalStatus = EFI_ABORTED;
                     break;
                 }
-                else if (n == SOCKET_ERROR)
+                else if (sentBytes == SOCKET_ERROR)
                 {
 #ifdef _MSC_VER
-					int err = WSAGetLastError();
+                    int err = WSAGetLastError();
                     if (err == WSAEWOULDBLOCK)
                     {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        preciseSleepMicros(1000);
                         continue;
                     }
-                    else
-                    {
-                        logToConsole(L"Closed a transmit socket");
-                        request.token->CompletionToken.Status = EFI_ABORTED;
-                        break;
-                    }
+                    logToConsole(L"Closed a transmit socket");
+                    finalStatus = EFI_ABORTED;
+                    break;
 #else
                     if (errno == EWOULDBLOCK || errno == EAGAIN)
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         continue;
                     }
-                    else
-                    {
-                        logToConsole(L"Closed a transmit socket");
-                        request.token->CompletionToken.Status = EFI_ABORTED;
-                        break;
-                    }
+                    logToConsole(L"Closed a transmit socket");
+                    finalStatus = EFI_ABORTED;
+                    break;
 #endif
                 }
             }
 
-            if ((unsigned int)totalSentBytes >= fragment.FragmentLength)
+            if (!abandoned)
             {
-                request.token->CompletionToken.Status = EFI_SUCCESS;
+                if ((unsigned int)totalSentBytes >= fragment.FragmentLength)
+                    finalStatus = EFI_SUCCESS;
+                // Status write MUST be the last touch on `token` for this op — main may
+                // immediately reuse the Token / FragmentBuffer once it sees Status != -1.
+                token->CompletionToken.Status = finalStatus;
             }
         }
     }
 
-    static void receiveProcessor()
+    static void recvWorkerLoop(std::shared_ptr<PerSocketIo> io)
     {
-        while (true)
+        while (!io->stop.load(std::memory_order_acquire))
         {
-            ReceiveRequest request = receiveQueue.pop();
-            // Read at most the free space the caller reserved in its receive buffer
-            // (receiveData() sets this in FragmentLength = BUFFER_SIZE - bytesAlreadyBuffered).
-            // Passing BUFFER_SIZE here overruns peers[i].receiveBuffer whenever it already
-            // holds a partial message, clobbering the adjacent peer's buffer — which then
-            // parses as malformed (size() < header) and gets force-forgotten.
-            const unsigned int maxReceiveSize = (unsigned int)request.token->Packet.RxData->FragmentTable[0].FragmentLength;
-            auto n = recv(request.socket, (char *)request.token->Packet.RxData->FragmentTable[0].FragmentBuffer, maxReceiveSize, MSG_DONTWAIT);
-            if (n > 0)
+            EFI_TCP4_IO_TOKEN* token = nullptr;
             {
-                request.token->Packet.RxData->DataLength = n;
-                // Publish DataLength before Status. The main loop reads Status first, then
-                // DataLength; without this barrier it can observe SUCCESS together with the
-                // stale, buffer-sized DataLength pre-set in receiveData(), over-advancing the
-                // receive cursor into zero-filled buffer so the parser reads size()==0.
-                std::atomic_thread_fence(std::memory_order_release);
-                request.token->CompletionToken.Status = EFI_SUCCESS;
+                std::unique_lock<std::mutex> lk(io->mtx);
+                io->cv.wait(lk, [&] {
+                    return io->hasPending || io->stop.load(std::memory_order_acquire);
+                });
+                if (io->stop.load(std::memory_order_acquire)) return;
+                token = io->pendingToken;
+                io->hasPending = false;
             }
-            else if (n == 0)
+
+            // Read at most the free space the caller reserved (FragmentLength), NOT BUFFER_SIZE:
+            // BUFFER_SIZE overruns receiveBuffer when it holds a partial message, clobbering the
+            // adjacent peer's buffer (parses as malformed -> force-forgotten).
+            const unsigned int maxReceiveSize = (unsigned int)token->Packet.RxData->FragmentTable[0].FragmentLength;
+            auto receivedBytes = recv(io->socket, (char*)token->Packet.RxData->FragmentTable[0].FragmentBuffer, maxReceiveSize, MSG_DONTWAIT);
+            EFI_STATUS finalStatus;
+            unsigned int dataLen = 0;
+            if (receivedBytes > 0)
             {
-                request.token->CompletionToken.Status = EFI_ABORTED;
+                dataLen = (unsigned int)receivedBytes;
+                finalStatus = EFI_SUCCESS;
             }
-            else if (n == SOCKET_ERROR)
+            else if (receivedBytes == 0)
+            {
+                finalStatus = EFI_ABORTED;
+            }
+            else
             {
 #ifdef _MSC_VER
-				int err = WSAGetLastError();
-				if (err == WSAEWOULDBLOCK)
-				{
-					request.token->Packet.RxData->DataLength = 0;
-					std::atomic_thread_fence(std::memory_order_release);
-					request.token->CompletionToken.Status = EFI_SUCCESS;
-					continue;
-				}
-				else
-				{
-					request.token->CompletionToken.Status = EFI_ABORTED;
-				}
-#else
-                if (errno == EWOULDBLOCK || errno == EAGAIN)
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK)
                 {
-                    request.token->Packet.RxData->DataLength = 0;
-                    std::atomic_thread_fence(std::memory_order_release);
-                    request.token->CompletionToken.Status = EFI_SUCCESS;
-                    continue;
+                    finalStatus = EFI_SUCCESS;
                 }
                 else
                 {
-                    request.token->CompletionToken.Status = EFI_ABORTED;
+                    finalStatus = EFI_ABORTED;
+                }
+#else
+                if (errno == EWOULDBLOCK || errno == EAGAIN)
+                {
+                    finalStatus = EFI_SUCCESS;
+                }
+                else
+                {
+                    finalStatus = EFI_ABORTED;
                 }
 #endif
             }
+            // Stop (DestroyChild/reconfigure): abandon WITHOUT touching token — the slot may be re-armed.
+            if (io->stop.load(std::memory_order_acquire)) continue;
+            token->Packet.RxData->DataLength = dataLen;
+            // Publish DataLength before Status: the main loop reads Status first, then DataLength;
+            // without this barrier it can see SUCCESS with a stale buffer-sized DataLength.
+            std::atomic_thread_fence(std::memory_order_release);
+            // Status write MUST be the last touch on `token` for this op.
+            token->CompletionToken.Status = finalStatus;
         }
     }
 
     static void initializeUefi() {
-        const unsigned int hwConcurrency = std::thread::hardware_concurrency();
+        const unsigned int hwConcurrency = totalProcessorCount();
         const unsigned int lastCpu = hwConcurrency > 0 ? hwConcurrency - 1 : 0;
         #ifndef _MSC_VER
         setNonBlockingInput(true);
-
+        #if defined(__linux__)
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(lastCpu, &cpuset);
         pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+        #endif // macOS: no cpu affinity API
         #else
 		// NOTE: In MSVC Release Mode, so the scheduler often just keeps the main thread on one CPU core (the best core), dont need to set affinity because it will slow down the main thread performance
         HANDLE hThread = GetCurrentThread();
         SetThreadAffinityMask(hThread, 1ULL << lastCpu);
+        // Keep one-millisecond network retries precise on Windows.
+        timeBeginPeriod(1);
+        // Disable background throttling that overrides the requested timer resolution.
+        PROCESS_POWER_THROTTLING_STATE pt;
+        memset(&pt, 0, sizeof(pt));
+        pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        pt.StateMask = 0;
+        pt.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
+        pt.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
+
         #endif
 
         ih = new EFI_HANDLE;
@@ -1304,14 +1597,7 @@ struct Overload {
         st->ConOut->ClearScreen = Overload::ClearScreen;
         st->ConIn->ReadKeyStroke = Overload::ReadKeyStroke;
 
-        // Open transmit and receive processor threads
-        for (int i = 0; i < NUMBER_OF_INCOMING_CONNECTIONS + NUMBER_OF_OUTGOING_CONNECTIONS; i++)
-        {
-            std::thread transmitProcessorThread(transmitProcessor);
-            transmitProcessorThread.detach();
-            std::thread receiveProcessorThread(receiveProcessor);
-            receiveProcessorThread.detach();
-        }
+        // Per-socket send/recv worker threads are spawned lazily on first Transmit/Receive call.
 
         // Reserve space
         incomingSocketMap.reserve(1024);

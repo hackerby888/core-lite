@@ -658,7 +658,8 @@ static void initAVX512KangarooTwelveConstants()
 
 typedef struct
 {
-    unsigned char state[200];
+    // Permutation paths read this state as 64-bit and 256-bit lanes.
+    alignas(32) unsigned char state[200];
     unsigned char byteIOIndex;
 } KangarooTwelve_F;
 
@@ -2497,7 +2498,8 @@ static void KangarooTwelve64To32(const void* input, void* output)
 
 static void random(const unsigned char* publicKey, const unsigned char* nonce, unsigned char* output, unsigned long long outputSize)
 {
-    unsigned char state[200];
+    // Permutation paths access this state through aligned lane types.
+    alignas(32) unsigned char state[200];
 #ifdef _MSC_VER
     *((__m256i*)&state[0]) = *((__m256i*)publicKey);
     *((__m256i*)&state[32]) = *((__m256i*)nonce);

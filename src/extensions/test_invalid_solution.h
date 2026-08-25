@@ -50,7 +50,48 @@ inline void broadcastTransfer(unsigned int sourceComputorIdx,
     enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
 }
 
+inline void broadcastSolution(unsigned int computorIdx, const m256i& currentMiningSeed, unsigned int txTick, unsigned int claimedScore)
+{
+    MiningSolutionTransaction payload{};
+    payload.sourcePublicKey      = computorPublicKeys[computorIdx];
+    payload.destinationPublicKey = m256i::zero();
+    payload.amount               = MiningSolutionTransaction::minAmount();
+    payload.tick                 = txTick;
+    payload.inputType            = MiningSolutionTransaction::transactionType();
+    payload.inputSize            = MiningSolutionTransaction::minInputSize();
+
+    payload.miningSeed = currentMiningSeed;
+    payload.miningSeed.m256i_u64[0] ^= 1;
+    payload.nonce.setRandomValue();
+    payload.nonce.m256i_u8[0] = (unsigned char)score_engine::AlgoType::Bpp9000;
+    payload.score = claimedScore;
+    payload.reserved = 0;
+
+    unsigned char digest[32];
+    KangarooTwelve(&payload, sizeof(Transaction) + MiningSolutionTransaction::minInputSize(), digest, sizeof(digest));
+    sign(computorSubseeds[computorIdx].m256i_u8, computorPublicKeys[computorIdx].m256i_u8, digest, payload.signature);
+
+    enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
+}
+
 } // namespace detail
+
+inline bool broadcastN(const m256i& currentMiningSeed, unsigned int txTick, unsigned int count, bool sameComputor, unsigned int claimedScore)
+{
+    if (computorSeedsCount == 0)
+        return false;
+
+    m256i randomValue;
+    randomValue.setRandomValue();
+    const unsigned int firstComputorIndex = (unsigned int)(randomValue.m256i_u64[0] % computorSeedsCount);
+    for (unsigned int solutionIndex = 0; solutionIndex < count; solutionIndex++)
+    {
+        const unsigned int computorIndex = sameComputor ? firstComputorIndex
+            : (unsigned int)((firstComputorIndex + solutionIndex) % computorSeedsCount);
+        detail::broadcastSolution(computorIndex, currentMiningSeed, txTick, claimedScore);
+    }
+    return true;
+}
 
 inline bool broadcastRandom(const m256i& currentMiningSeed, unsigned int txTick, unsigned int claimedScore)
 {
@@ -59,63 +100,28 @@ inline bool broadcastRandom(const m256i& currentMiningSeed, unsigned int txTick,
         return false;
     }
 
-    // Pick a random one of our computors.
-    m256i rnd;
-    rnd.setRandomValue();
-    const unsigned int computorIdx = (unsigned int)(rnd.m256i_u64[0] % computorSeedsCount);
+    m256i randomValue;
+    randomValue.setRandomValue();
+    const unsigned int computorIndex = (unsigned int)(randomValue.m256i_u64[0] % computorSeedsCount);
 
-    // ---- 1) Invalid solution tx ----
-    {
-        MiningSolutionTransaction payload;
-        payload.sourcePublicKey      = computorPublicKeys[computorIdx];
-        payload.destinationPublicKey = m256i::zero();
-        payload.amount               = MiningSolutionTransaction::minAmount();
-        payload.tick                 = txTick;
-        payload.inputType            = MiningSolutionTransaction::transactionType();
-        payload.inputSize            = MiningSolutionTransaction::minInputSize();
+    // Exercise rollback with an invalid solution followed by ordinary transfers that must survive.
+    detail::broadcastSolution(computorIndex, currentMiningSeed, txTick, claimedScore);
 
-        payload.miningSeed = currentMiningSeed;
-        payload.miningSeed.m256i_u64[0] ^= 1;
-        payload.nonce.setRandomValue();
-        payload.nonce.m256i_u8[0] = (unsigned char)score_engine::AlgoType::Bpp9000;
-        payload.score = claimedScore;
-        payload.reserved = 0;
-
-        unsigned char digest[32];
-        KangarooTwelve(&payload,
-                       sizeof(Transaction) + MiningSolutionTransaction::minInputSize(),
-                       digest,
-                       sizeof(digest));
-        sign(computorSubseeds[computorIdx].m256i_u8,
-             computorPublicKeys[computorIdx].m256i_u8,
-             digest,
-             payload.signature);
-
-        enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
-    }
-
-    // ---- 2) Standard QU transfer to the id that signed the wrong sol ----
     const long long transferAmount = 1;
-    detail::broadcastTransfer(computorIdx,
-                              computorPublicKeys[computorIdx],
+    detail::broadcastTransfer(computorIndex, computorPublicKeys[computorIndex],
                               transferAmount,
                               txTick);
 
-    // ---- 3) Standard QU transfer to a random network computor ----
-    m256i randomComputorRnd;
-    randomComputorRnd.setRandomValue();
-    const unsigned int randomComputorIdx =
-        (unsigned int)(randomComputorRnd.m256i_u64[0] % NUMBER_OF_COMPUTORS);
-    detail::broadcastTransfer(computorIdx,
-                              broadcastedComputors.computors.publicKeys[randomComputorIdx],
+    m256i randomComputorSelector;
+    randomComputorSelector.setRandomValue();
+    const unsigned int randomComputorIndex = (unsigned int)(randomComputorSelector.m256i_u64[0] % NUMBER_OF_COMPUTORS);
+    detail::broadcastTransfer(computorIndex, broadcastedComputors.computors.publicKeys[randomComputorIndex],
                               transferAmount,
                               txTick);
 
-    // ---- 4) Standard QU transfer to a fully random id ----
-    m256i randomId;
-    randomId.setRandomValue();
-    detail::broadcastTransfer(computorIdx,
-                              randomId,
+    m256i randomDestination;
+    randomDestination.setRandomValue();
+    detail::broadcastTransfer(computorIndex, randomDestination,
                               transferAmount,
                               txTick);
 

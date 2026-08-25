@@ -333,10 +333,6 @@ public:
     inline static VirtualMemory<TickBlobInfo, TEXT_IMAP_AS_NUMBER, TEXT_LOGS_AS_NUMBER, IMAP_LOG_PAGE_SIZE, VM_NUM_CACHE_PAGE> mapTxToLogId;
     inline static TickBlobInfo currentTickTxToId;
     inline static char responseBuffers[MAX_NUMBER_OF_PROCESSORS][RequestResponseHeader::max_size];
-    inline static std::map<unsigned long long, BlobInfo> blobInfoTmp;
-    inline static std::map<unsigned long long, char*> tmpLogBuffer;
-    inline static std::map<unsigned long long, unsigned long long> tmpLogSize;
-    inline static std::map<unsigned long long, unsigned int> logIdToTxIdMap;
 
 #if LOG_STATE_DIGEST
     // Digests of log data:
@@ -360,7 +356,6 @@ public:
     inline static unsigned int lastUpdatedTick; // tick number that the system has generated all log
     inline static unsigned int currentTxId;
     inline static unsigned int currentTick;
-    inline static unsigned long long currentTickStartLogId;
     inline static bool isPausing;
 
     static unsigned long long getLogId(const char* ptr)
@@ -408,15 +403,8 @@ public:
     {
 #if ENABLED_LOGGING
         if (isPausing) return;
-        // A log must be paired with a transaction: tx.addLogId() returns false
-        // when currentTick / currentTxId are not in a valid range (typically
-        // because the call happened between logger.reset() and the first
-        // registerNewTx() of the epoch — e.g. testnet asset-bootstrap code).
-        // Reject the event entirely so logId stays densely sequential.
-        if (!tx.addLogId())
-        {
-            return;
-        }
+        // Drop events with no valid tx context (keeps logId dense + digest network-compatible).
+        if (!tx.addLogId()) return;
         char buffer[LOG_HEADER_SIZE];
         logBuf.set(logId, logBufferTail, LOG_HEADER_SIZE + messageSize);
         *((unsigned short*)(buffer)) = system.epoch;
@@ -427,14 +415,8 @@ public:
         KangarooTwelve(message, messageSize, &logDigest, 8);
         *((unsigned long long*)(buffer + 18)) = logDigest;
         logBufferTail += LOG_HEADER_SIZE + messageSize;
-        // logBuffer.appendMany(buffer, LOG_HEADER_SIZE);
-        // logBuffer.appendMany((char*)message, messageSize);
-        char* tmpLog = new char[LOG_HEADER_SIZE + messageSize];
-        setMem(tmpLog, LOG_HEADER_SIZE + messageSize, 0);
-        copyMem(tmpLog, buffer, LOG_HEADER_SIZE);
-        copyMem(tmpLog + LOG_HEADER_SIZE, (char*)message, messageSize);
-        tmpLogBuffer[logId - 1] = tmpLog;
-        tmpLogSize[logId - 1] = LOG_HEADER_SIZE + messageSize;
+        logBuffer.appendMany(buffer, LOG_HEADER_SIZE);
+        logBuffer.appendMany((char*)message, messageSize);
 #if LOG_STATE_DIGEST
         if (messageType == QU_TRANSFER || messageType == ASSET_ISSUANCE || messageType == ASSET_OWNERSHIP_CHANGE || messageType == ASSET_POSSESSION_CHANGE ||
             messageType == BURNING || messageType == DUST_BURNING || messageType == SPECTRUM_STATS || messageType == ASSET_OWNERSHIP_MANAGING_CONTRACT_CHANGE ||
@@ -503,12 +485,11 @@ public:
 
         static void set(unsigned long long logId, long long index, long long length)
         {
-            //ASSERT(logId == mapLogIdToBufferIndex.size());
+            ASSERT(logId == mapLogIdToBufferIndex.size());
             BlobInfo res;
             res.startIndex = index;
             res.length = length;
-            //mapLogIdToBufferIndex.append(res);
-            blobInfoTmp[logId] = res;
+            mapLogIdToBufferIndex.append(res);
         }
 
         static void get(char* dst, unsigned long long logId)
@@ -574,11 +555,6 @@ public:
 
         static void _registerNewTx(const unsigned int tick, const unsigned int txId)
         {
-            if (currentTick != tick)
-            {
-                currentTickStartLogId = logId;
-            }
-
             if (currentTick != tick || currentTxId != txId)
             {
                 currentTick = tick;
@@ -586,25 +562,19 @@ public:
             }
         }
 
-        // Returns true if the log was successfully attributed to the current
-        // (tick, txId); false otherwise. A false return means the caller (logMessage)
-        // must drop the event entirely — logs without a tx association break the
-        // invariant that logIds are densely sequential from 0 and would create
-        // "orphan" entries that cannot be looked up via mapLogIdToBufferIndex.
+        // Returns false when (currentTick, currentTxId) are not a valid tx context
+        // (e.g. an event logged between logger.reset() and the first registerNewTx()
+        // of the epoch — testnet asset-bootstrap). The caller drops the event so logId
+        // stays densely sequential and the log-state digest matches the network.
         static bool addLogId()
         {
-            // Both fields are unsigned int; check ordering explicitly so the
-            // intent is obvious to readers (no reliance on unsigned-wrap
-            // semantics to land out of range).
             if (currentTick < tickBegin) return false;
             const unsigned long long offsetTick =
                 (unsigned long long)currentTick - (unsigned long long)tickBegin;
             if (offsetTick >= MAX_NUMBER_OF_TICKS_PER_EPOCH) return false;
             if (currentTxId >= LOG_TX_PER_TICK) return false;
-
             auto& startIndex = currentTickTxToId.fromLogId[currentTxId];
             auto& length = currentTickTxToId.length[currentTxId];
-            logIdToTxIdMap[logId] = currentTxId;
             if (startIndex == -1)
             {
                 startIndex = logId;
@@ -617,26 +587,6 @@ public:
             return true;
         }
 
-        static void removeReturnDepositLogOfSolutionTransaction(unsigned int txId)
-        {
-            if (txId < LOG_TX_PER_TICK)
-            {
-                auto& startIndex = currentTickTxToId.fromLogId[txId];
-                auto& length = currentTickTxToId.length[txId];
-                // Solution tx have max 2 logs, the last one is return deposit log. So if decrease length by 1, it will remove the return deposit log
-                if (startIndex != -1 && length == 2)
-                {
-                    length--;
-
-                    // Remove the BlobInfo of this logId
-                    blobInfoTmp.erase(startIndex + 1);
-                } else
-                {
-                    logToConsole(L"Warning: cannot remove return deposit log of solution transaction, invalid length");
-                }
-            }
-        }
-
         static void cleanCurrentTickTxToId()
         {
             for (int i = 0; i < LOG_TX_PER_TICK; i++)
@@ -646,101 +596,9 @@ public:
             }
         }
 
-        // Few conditions to make the logging working properly:
-        // 1. The deleted log id must be a log of invalid solution tx
         static void _commit()
         {
-            std::unordered_map<unsigned int, bool> txInfoBlobAdjusted;
-            txInfoBlobAdjusted.reserve(LOG_TX_PER_TICK);
-            // commit the tmp blob info and logBuffer to the VM
-            unsigned long long currentDeletedLogs = 0;
-            unsigned long long totalBytesOfLogsDeleted = 0;
-#ifdef LOGGING_PROBE
-            unsigned long long probeStartLogId = currentTickStartLogId;
-            unsigned long long probeEndLogId = logId;
-            unsigned long long probeBlobTmpSize = blobInfoTmp.size();
-            unsigned long long probeMapSizeBefore = mapLogIdToBufferIndex.size();
-#endif
-            for (unsigned long long i = currentTickStartLogId; i < logId; i++)
-            {
-                auto it = blobInfoTmp.find(i);
-                if (it == blobInfoTmp.end())
-                {
-                    // this log id is deleted
-#ifdef LOGGING_PROBE
-                    {
-                        CHAR16 dbg[256];
-                        setText(dbg, L"[LOGPROBE] ORPHAN logId=");
-                        appendNumber(dbg, i, FALSE);
-                        appendText(dbg, L" tick=");
-                        appendNumber(dbg, currentTick, FALSE);
-                        appendText(dbg, L" txId=");
-                        appendNumber(dbg, currentTxId, FALSE);
-                        appendText(dbg, L" startLogId=");
-                        appendNumber(dbg, currentTickStartLogId, FALSE);
-                        appendText(dbg, L" logIdNow=");
-                        appendNumber(dbg, logId, FALSE);
-                        logToConsole(dbg);
-                    }
-#endif
-                    currentDeletedLogs++;
-                    unsigned long long deletedBytes = tmpLogSize[i];
-                    totalBytesOfLogsDeleted += deletedBytes;
-                } else
-                {
-                    BlobInfo& blobInfo = blobInfoTmp[i];
-                    blobInfo.startIndex -= totalBytesOfLogsDeleted;
-                    mapLogIdToBufferIndex.append(blobInfo);
-                    char * tmpLog = tmpLogBuffer[i];
-                    // change the log id in the log header
-                    *((unsigned long long*)(tmpLog + 10)) = i - currentDeletedLogs;
-                    // append the log to the log buffer
-                    logBuffer.appendMany(tmpLog, blobInfo.length);
-                    // adjust the txInfoBlob (once per tx)
-                    if (txInfoBlobAdjusted.find(logIdToTxIdMap[i]) == txInfoBlobAdjusted.end())
-                    {
-                        unsigned int txId = logIdToTxIdMap[i];
-                        currentTickTxToId.fromLogId[txId] -= currentDeletedLogs;
-                        txInfoBlobAdjusted[txId] = true;
-                    }
-                }
-            }
-            // Reset the tmp buffer
-            blobInfoTmp.clear();
-            for (auto& it : tmpLogBuffer)
-            {
-                delete[] it.second;
-            }
-            tmpLogBuffer.clear();
-            tmpLogSize.clear();
-            logIdToTxIdMap.clear();
-            // Adjust the logId and logBufferTail
-            logId -= currentDeletedLogs;
-            logBufferTail -= totalBytesOfLogsDeleted;
-
             mapTxToLogId.append(currentTickTxToId);
-#ifdef LOGGING_PROBE
-            {
-                CHAR16 dbg[256];
-                setText(dbg, L"[LOGPROBE] COMMIT tick=");
-                appendNumber(dbg, currentTick, FALSE);
-                appendText(dbg, L" startLogId=");
-                appendNumber(dbg, probeStartLogId, FALSE);
-                appendText(dbg, L" endLogId=");
-                appendNumber(dbg, probeEndLogId, FALSE);
-                appendText(dbg, L" deleted=");
-                appendNumber(dbg, currentDeletedLogs, FALSE);
-                appendText(dbg, L" tmpSize=");
-                appendNumber(dbg, probeBlobTmpSize, FALSE);
-                appendText(dbg, L" mapBefore=");
-                appendNumber(dbg, probeMapSizeBefore, FALSE);
-                appendText(dbg, L" mapAfter=");
-                appendNumber(dbg, mapLogIdToBufferIndex.size(), FALSE);
-                appendText(dbg, L" logIdAfter=");
-                appendNumber(dbg, logId, FALSE);
-                logToConsole(dbg);
-            }
-#endif
         }
 
         static void commitAndCleanCurrentTxToLogId()
@@ -793,7 +651,6 @@ public:
         logId = 0;
         lastUpdatedTick = 0;
         tickBegin = _tickBegin;
-        currentTickStartLogId = 0;
         tx.cleanCurrentTickTxToId();
 #if LOG_STATE_DIGEST
         XKCP::KangarooTwelve_Initialize(&k12, 128, 32);

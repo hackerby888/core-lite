@@ -1,8 +1,12 @@
 #pragma once
 
 #include "console_logging.h"
+#include "pointer_align.h"
 #include <lib/platform_efi/uefi.h>
 #include "memory.h"
+
+#include <cstddef>
+#include <cstdint>
 
 #ifdef NO_UEFI
 
@@ -13,20 +17,31 @@
 inline void* qVirtualAlloc(const unsigned long long size, bool commitMem);
 inline void* qVirtualCommit(void* address, const unsigned long long size);
 inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size);
+#ifdef _MSC_VER
+// Reserve memory and commit pages on first touch.
+inline void* qVirtualAllocLazy(const unsigned long long size);
+#endif
 
 // useVirtualMem indicates whether to use VirtualAlloc or malloc
 // commitMem indicates whether to commit memory when using VirtualAlloc
 // NOTE: commitMem only used if host machine have enough RAM+Pagefile, otherwise VirtualAlloc will fail
-static bool allocPoolWithErrorLog(const wchar_t* name, const unsigned long long size, void** buffer, const int LINE, bool useVirtualMem = false, bool commitMem = false)
+// lazyCommit is only safe for buffers written from user mode.
+static bool allocPoolWithErrorLog(const wchar_t* name, const unsigned long long size, void** buffer, const int LINE, bool useVirtualMem = false,
+    bool commitMem = false, bool lazyCommit = false)
 {
     static unsigned long long totalMemoryUsed = 0;
     static unsigned long long totalVirtualMemoryUsed = 0;
     size_t padded_size = (size + 64 - 1) & ~(64 - 1);
     if (useVirtualMem) {
+#ifdef _MSC_VER
+		*buffer = lazyCommit ? qVirtualAllocLazy(size) : qVirtualAlloc(size, commitMem);
+#else
+		(void)lazyCommit;
 		*buffer = qVirtualAlloc(size, commitMem);
+#endif
     }
     else {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
         *buffer = std::aligned_alloc(64, padded_size);
 #else
 		*buffer = _aligned_malloc(padded_size, 64);

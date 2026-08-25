@@ -2810,7 +2810,7 @@ protected:
 		state.mut().quRaffleMemberSet.reset();
 		if (state.get().registers.needsCleanup()) { state.mut().registers.cleanup(); }
 	}
-	
+
 	MIGRATE()
 	{
 		copyMemory(state.mut().registers,                oldState.registers);

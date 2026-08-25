@@ -3,13 +3,22 @@
 // Helper functions for wchar_t strings in linux (linux expects 32-bit wchar_t, while we use 16-bit wchar_t everywhere else)
 #include "lib/platform_efi/uefi.h"
 #include <codecvt>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <stdarg.h>
 #include <vector>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #ifdef _MSC_VER
 #pragma warning(disable: 4996)
+#endif
+
+// Page size used by the contract-state pager.
+#ifndef _WIN32
+#define SYSTEM_PAGE_SIZE sysconf(_SC_PAGESIZE)
 #endif
 static std::string wchar_to_string(const wchar_t* wstr) {
     if (!wstr)
@@ -72,7 +81,7 @@ static bool isAllBytesZero(void *buffer, unsigned long long length) {
     return true;
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 static int exec(const char* cmd) {
     FILE* pipe = popen(cmd, "r");   // "r" = read output (even if we ignore it)
     if (!pipe) return -1;
@@ -85,6 +94,23 @@ static int exec(const char* cmd) {
 
     int status = pclose(pipe);      // wait for command to finish
     return WEXITSTATUS(status);     // return exit code like system()
+}
+#elif defined(_WIN32)
+static int exec(const char* command)
+{
+    FILE* pipe = _popen(command, "r");
+    if (!pipe)
+    {
+        return -1;
+    }
+
+    char buffer[128];
+    while (fgets(buffer, sizeof(buffer), pipe))
+    {
+        // Discard command output.
+    }
+
+    return _pclose(pipe);
 }
 #endif
 
@@ -106,7 +132,11 @@ static void hexToByte(const std::string& hex, const int sizeInByte, unsigned cha
 {
     if (hex.length() != sizeInByte * 2)
     {
+#if defined(LITEDYN_CONTRACT_TU)
+        return;
+#else
         throw std::invalid_argument("Hex string length does not match the expected size");
+#endif
     }
 
     for (size_t i = 0; i < sizeInByte; ++i)
@@ -180,3 +210,12 @@ static inline std::vector<uint8_t> base64_decode(const std::string &in) {
 
     return out;
 }
+
+#ifndef _WIN32
+// Round up to the system page size.
+static size_t alignToPageSize(size_t address)
+{
+    const size_t pageSize = SYSTEM_PAGE_SIZE;
+    return (address + pageSize - 1) & ~(pageSize - 1);
+}
+#endif

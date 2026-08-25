@@ -781,6 +781,39 @@ public:
 #endif
     }
 
+    // In the promoted child, clear inherited pins from dead parent threads while retaining cache pages.
+    // This runs single-threaded before strict replay.
+    static void resetSwapPinsForChildPromote()
+    {
+#ifdef USE_SWAP
+        tickDataSwapVM.resetPinsForChildPromote();
+        ticksSwapVM.resetPinsForChildPromote();
+        tickTransactionsSwapVM.resetPinsForChildPromote();
+        tickTransactionOffsetsSwapVM.resetPinsForChildPromote();
+        tickTransactionsDigestSwapVM.resetPinsForChildPromote();
+        // Clear the surviving thread's stale pin arena after resetting every pin count.
+        releaseThreadPins();
+#endif
+    }
+
+    // Wait out in-flight unlocked swap miss-IO across all swap VMs before a fork() / shadow commit
+    // (neither runs reset()'s drain). Caller must have parked/locked the new-IO sources first.
+    static bool drainSwapIoForFork(int timeoutMs)
+    {
+#ifdef USE_SWAP
+        bool allDrained = true;
+        allDrained &= tickDataSwapVM.drainInflightIO(timeoutMs);
+        allDrained &= ticksSwapVM.drainInflightIO(timeoutMs);
+        allDrained &= tickTransactionsSwapVM.drainInflightIO(timeoutMs);
+        allDrained &= tickTransactionOffsetsSwapVM.drainInflightIO(timeoutMs);
+        allDrained &= tickTransactionsDigestSwapVM.drainInflightIO(timeoutMs);
+        return allDrained;
+#else
+        (void)timeoutMs;
+        return true;
+#endif
+    }
+
     static bool init()
     {
         // TODO: allocate everything with one continuous buffer

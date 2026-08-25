@@ -11,8 +11,8 @@
 // random seed is now obtained from spectrumDigests
 
 #ifdef TESTNET
-#define MAX_NUMBER_OF_PROCESSORS 6
-#define NUMBER_OF_SOLUTION_PROCESSORS 2
+#define MAX_NUMBER_OF_PROCESSORS 20
+#define NUMBER_OF_SOLUTION_PROCESSORS 10
 #else
 #define MAX_NUMBER_OF_PROCESSORS 32
 #define NUMBER_OF_SOLUTION_PROCESSORS (MAX_NUMBER_OF_PROCESSORS - 4)
@@ -102,7 +102,13 @@ static_assert(AUTO_FORCE_NEXT_TICK_THRESHOLD* TARGET_TICK_DURATION >= PEER_REFRE
 #define START_NETWORK_FROM_SCRATCH 1
 #endif
 // Addons: If you don't know it, leave it 0.
-#define ADDON_TX_STATUS_REQUEST 0
+#ifndef ADDON_TX_STATUS_REQUEST
+  #if defined(LITE_WASM_SC)
+    #define ADDON_TX_STATUS_REQUEST 1
+  #else
+    #define ADDON_TX_STATUS_REQUEST 0
+  #endif
+#endif
 
 
 //////////////////////////////////////////////////////////////////////////

@@ -1,5 +1,9 @@
 #pragma once
 
+#include "platform/concurrency.h"
+#include <drogon/drogon.h>   // fetch() below takes drogon types; do not rely on include order
+#include <trantor/net/EventLoopThread.h>
+
 class HttpUtils
 {
 public:
@@ -206,7 +210,15 @@ public:
 
     static void fetch(const std::string &url, const std::string &path, const drogon::HttpMethod method, const Json::Value &body, const std::map<std::string, std::string> &headers = {}, std::function<void(drogon::ReqResult &result, const drogon::HttpResponsePtr &resp)> callback = nullptr)
     {
-        auto client = drogon::HttpClient::newHttpClient(url);
+        struct ForkCensusScope
+        {
+            ForkCensusScope() { forkCensusEnter("HttpUtils::fetch"); }
+            ~ForkCensusScope() { forkCensusLeave(); }
+        } forkCensusScope;
+
+        trantor::EventLoopThread loopThread("qubic-http-client");
+        loopThread.run();
+        auto client = drogon::HttpClient::newHttpClient(url, loopThread.getLoop());
 
         // Serialize per-call: newHttpJsonRequest() shares a process-wide static StreamWriterBuilder that this background thread races against drogon's loop threads (SIGSEGV in newStreamWriter()).
         auto req = drogon::HttpRequest::newHttpRequest();
@@ -225,12 +237,10 @@ public:
             req->addHeader(header.first, header.second);
         }
 
-        // Capture client + callback by value: the request is async and outlives this frame, so by-reference captures dangle on completion.
-        client->sendRequest(req, [client, callback](drogon::ReqResult _result, const drogon::HttpResponsePtr &_resp) {
-            if (callback != nullptr)
-            {
-                callback(_result, _resp);
-            }
-        });
+        auto [result, resp] = client->sendRequest(req, 30.0);
+        if (callback != nullptr)
+        {
+            callback(result, resp);
+        }
     }
 };
