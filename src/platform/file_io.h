@@ -353,6 +353,19 @@ static bool removeDir(CHAR16* dirName)
 #endif
 }
 
+static bool renameDir(CHAR16* fromDirName, CHAR16* toDirName)
+{
+#ifdef NO_UEFI
+    ASSERT(isMainProcessor());
+    std::error_code error;
+    std::filesystem::rename(getHostPath(fromDirName), getHostPath(toDirName), error);
+    return !error;
+#else
+    logToConsole(L"renameDir is not supported in UEFI mode");
+    return false;
+#endif
+}
+
 static long long load(const CHAR16* fileName, unsigned long long totalSize, unsigned char* buffer, const CHAR16* directory = NULL)
 {
 #ifdef NO_UEFI

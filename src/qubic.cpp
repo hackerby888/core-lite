@@ -88,6 +88,7 @@
 
 // #define INCLUDE_CONTRACT_TEST_EXAMPLES
 
+// #define OLD_QRAFFLE
 
 // contract_def.h needs to be included first to make sure that contracts have minimal access
 #include "contract_core/contract_def.h"
@@ -163,10 +164,12 @@
 #include "mining/mining.h"
 #include "mining/custom_qubic_mining_storage.h"
 #include "mining/bpp9000_task.generated.h"
+#include "mining/ant_colony/ant_colony_bpp9000.h"
 
 #include "oracle_core/oracle_engine.h"
 #include "oracle_core/net_msg_impl.h"
 #include "oracle_core/snapshot_files.h"
+#include "mining/ant_colony/ant_pending_solutions.h"
 #include "oracle_core/oracle_interfaces_def.h"
 #include "qpi/impl/qpi_oracle_impl.h"
 
@@ -227,19 +230,23 @@ TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
 #define CONTRACT_STATES_DEPTH 10 // Is derived from MAX_NUMBER_OF_CONTRACTS (=N)
 #define TICK_REQUESTING_PERIOD 500ULL
 #define MAX_NUMBER_EPOCH 1000ULL
-#define MAX_NUMBER_OF_MINERS 8192
 #if defined(TESTNET) && defined(TESTNET_LITE_RAM)
 #define NUMBER_OF_MINER_SOLUTION_FLAGS 0x10000000 // 16 MB bitmap — LITE testnet
+#define NUMBER_OF_ANT_SOLUTION_FLAGS 0x10000000   // 16 MB bitmap — LITE testnet
 #else
 #define NUMBER_OF_MINER_SOLUTION_FLAGS 0x100000000
+#define NUMBER_OF_ANT_SOLUTION_FLAGS 0x100000000
 #endif
 #define MAX_MESSAGE_PAYLOAD_SIZE MAX_TRANSACTION_SIZE
 #define MAX_UNIVERSE_SIZE 1073741824
 #define MESSAGE_DISSEMINATION_THRESHOLD 1000000000
+// Overridable so a second node can run on a box where the default port is already taken.
+#ifndef PORT
 #ifdef TESTNET
 #define PORT 31841
 #else
 #define PORT 21841
+#endif
 #endif
 #define SYSTEM_DATA_SAVING_PERIOD 300000ULL
 #define TICK_TRANSACTIONS_PUBLICATION_OFFSET 2 // Must be only 2
@@ -293,6 +300,14 @@ static int misalignedState = 0;
 
 static bool forceVerifySolutions = false;
 static bool forceBroadcastInvalidSolution = false;
+static bool forceBroadcastAntSolution = false;
+static unsigned int forceAntSolutionBudget = 3;
+// Honest solutions published before the mode under test, so it has a tree to aim at.
+static unsigned int forceAntInjectWarmup = 0;
+// Ticks left between publishes. A gap wider than the checkpoint window lets each window retire, which is
+// what leaves an optimistically committed record in place to parent a later one.
+static unsigned int forceAntInjectGapTicks = 0;
+static TestInvalidSolution::AntInjectMode forceAntInjectMode = TestInvalidSolution::AntInjectMode::Valid;
 static unsigned int gFbisCount = 1;          // test: number of solution txs to inject per tick
 static bool gFbisSameComputor = false;       // test: all from one computor (drains it -> out-of-qus)
 static int gTestSolutionThreshold = -1;      // test: override runtime Bpp9000 threshold (-1 = off)
@@ -384,8 +399,20 @@ static ScoreFunction<
     NUMBER_OF_SOLUTION_PROCESSORS
 > * score = nullptr;
 static unsigned char* gBpp9000TaskBuffer = nullptr;
+
+// The payload is the { publicKey, miningSeed, nonce }
+static_assert(3 * sizeof(m256i) <= ScoreFunction<NUMBER_OF_SOLUTION_PROCESSORS>::TASK_PAYLOAD_MAX,
+    "A legacy solution must fit the task queue payload");
+
+static void scoreLegacySolutionTask(unsigned long long processorNumber, void* payload)
+{
+    const m256i* data = (const m256i*)payload;
+    (*score)(processorNumber, data[0], data[1], data[2]);
+}
+
 static volatile char solutionsLock = 0;
 static unsigned long long* minerSolutionFlags = NULL;
+static unsigned long long* gAntSolutionFlags = NULL;
 static volatile m256i minerPublicKeys[MAX_NUMBER_OF_MINERS + 1];
 static volatile unsigned int minerScores[MAX_NUMBER_OF_MINERS + 1];
 static volatile unsigned int minerBestScoreTicks[MAX_NUMBER_OF_MINERS + 1];
@@ -408,6 +435,9 @@ static constexpr unsigned int gScoreMultiplier[score_engine::AlgoType::MaxAlgoCo
     NEURAXON_SOLUTION_MULTIPLER,   // Neuraxon (reserved)
     BPP9000_SOLUTION_MULTIPLER     // Bpp9000
 };
+// Bpp9000's score is a raw error count consumed directly by the minimum-is-best ranking; scaling it
+// serves no purpose and a large multiplier would overflow the ranking score. Pin it to 1.
+static_assert(BPP9000_SOLUTION_MULTIPLER == 1, "Bpp9000 error score is ranked by minimum; its multiplier must be 1");
 
 // Active solution threshold for an algorithm
 static int getSolutionThreshold(score_engine::AlgoType selectedAlgo)
@@ -421,6 +451,538 @@ static int getSolutionThreshold(score_engine::AlgoType selectedAlgo)
         : score_engine::DEFAUL_SOLUTION_THRESHOLD[selectedAlgo];
 }
 static bool applyBpp9000Task();
+
+static AntColonyBpp9000T gAntColony;
+static AntPendingSolutions gAntPendingSolutions;
+static AntColonyBpp9000T::Ann gAntParentAnnScratch[MAX_NUMBER_OF_PROCESSORS];
+static AntColonyBpp9000T::Ann gAntChildAnnScratch[MAX_NUMBER_OF_PROCESSORS];
+// Separate from the two above: a rebuild runs underneath a caller already holding those.
+static AntColonyBpp9000T::Ann gAntRebuildParentScratch[MAX_NUMBER_OF_PROCESSORS];
+static AntColonyBpp9000T::Ann gAntRebuildChildScratch[MAX_NUMBER_OF_PROCESSORS];
+
+// Compiled into every build and switched on with --ant-debug, so a release node can be traced without
+// rebuilding it. Debug builds keep it on by default.
+#ifndef NDEBUG
+static bool gAntDebugEnabled = true;
+#else
+static bool gAntDebugEnabled = false;
+#endif
+static constexpr unsigned int ANT_DEBUG_PRINTS_PER_EPOCH = 512;
+static unsigned int gAntDebugPrintBudget = ANT_DEBUG_PRINTS_PER_EPOCH;
+static bool antDebugCanPrint()
+{
+    if (!gAntDebugEnabled || gAntDebugPrintBudget == 0)
+    {
+        return false;
+    }
+    gAntDebugPrintBudget--;
+    if (gAntDebugPrintBudget == 0)
+    {
+        logToConsole(L"[ant-colony] debug print budget exhausted, silent until next epoch");
+    }
+    return true;
+}
+
+static void antDebugLine(const CHAR16* text)
+{
+    if (antDebugCanPrint())
+    {
+        logToConsole(text);
+    }
+}
+
+static void antDebugPoolDrop(const CHAR16* reason, const AntSolutionBroadcastPayload& payload)
+{
+    if (!antDebugCanPrint())
+    {
+        return;
+    }
+    CHAR16 msg[256];
+    setText(msg, L"[ant-colony] pool drop ");
+    appendText(msg, reason);
+    appendText(msg, L": parent=");
+    appendNumber(msg, payload.parentTick, FALSE);
+    appendText(msg, L"/");
+    appendNumber(msg, payload.parentSolutionIndexInTick, FALSE);
+    appendText(msg, L" anchor=");
+    appendNumber(msg, payload.anchorTick, FALSE);
+    appendText(msg, L" nonce0=");
+    appendNumber(msg, payload.nonce.m256i_u64[0], FALSE);
+    logToConsole(msg);
+}
+
+static void antDebugPending(const CHAR16* outcome, const AntPendingSolution& entry, unsigned int targetTick)
+{
+    if (!antDebugCanPrint())
+    {
+        return;
+    }
+    CHAR16 msg[256];
+    setText(msg, L"[ant-colony] ");
+    appendText(msg, outcome);
+    appendText(msg, L": parent=");
+    appendNumber(msg, entry.parentRef.tick, FALSE);
+    appendText(msg, L"/");
+    appendNumber(msg, entry.parentRef.solutionIndexInTick, FALSE);
+    appendText(msg, L" anchor=");
+    appendNumber(msg, entry.anchorTick, FALSE);
+    appendText(msg, L" score=");
+    appendNumber(msg, entry.score, FALSE);
+    appendText(msg, L" target=");
+    appendNumber(msg, targetTick, FALSE);
+    logToConsole(msg);
+}
+
+static void antDebugAccepted(const AntColonyMiningSolutionTransaction* transaction, unsigned int score,
+    unsigned int depth, unsigned int transactionIndex, ValidityResult result, bool trustedScore)
+{
+    if (result != ValidityResult::Valid && result != ValidityResult::ValidNotStored)
+    {
+        return;
+    }
+    if (!antDebugCanPrint())
+    {
+        return;
+    }
+    CHAR16 msg[256];
+    setText(msg, L"[ant-colony] accepted: tick=");
+    appendNumber(msg, system.tick, FALSE);
+    appendText(msg, L" idx=");
+    appendNumber(msg, transactionIndex, FALSE);
+    appendText(msg, L" score=");
+    appendNumber(msg, score, FALSE);
+    appendText(msg, L" depth=");
+    appendNumber(msg, depth, FALSE);
+    appendText(msg, L" stored=");
+    appendNumber(msg, (result == ValidityResult::Valid) ? 1 : 0, FALSE);
+    appendText(msg, L" trusted=");
+    appendNumber(msg, trustedScore ? 1 : 0, FALSE);
+    logToConsole(msg);
+}
+
+// Pre-scored ant solutions for the current tick, indexed by TRANSACTION index. Each transaction is
+// enqueued at most once, so no two workers ever write the same slot and no lock is needed
+static bool gAntScoredReady[NUMBER_OF_TRANSACTIONS_PER_TICK];
+static unsigned int gAntScoredValue[NUMBER_OF_TRANSACTIONS_PER_TICK];
+static AntColonyBpp9000T::Ann gAntScoredAnn[NUMBER_OF_TRANSACTIONS_PER_TICK];
+
+// Enqueued per ant solution transaction. 80 bytes, inside ScoreFunction::TASK_PAYLOAD_MAX.
+struct AntScoreTaskPayload
+{
+    m256i pubkey;
+    m256i nonce;
+    SolutionRef parentRef;
+    unsigned int anchorTick;
+    unsigned int txIdx;
+};
+static_assert(sizeof(AntScoreTaskPayload) <= 128, "ant score payload must fit TASK_PAYLOAD_MAX");
+
+// The parent is named by its on-chain address, not a hash of its network: within an epoch a ref selects
+// the same parent on every node, and unlike the hash it can be formed without holding that network.
+// The cache file is epoch-scoped, so a ref never means something else in a later epoch.
+static AntColonyBpp9000T::ReplayKey makeAntReplayKey(const m256i& pubkey, const m256i& nonce,
+    const SolutionRef& parentRef, const m256i& anchorDigest)
+{
+    AntColonyBpp9000T::ReplayKey key;
+    key.pubkey = pubkey;
+    key.nonce = nonce;
+    key.parentKey = AntColonyBpp9000T::replayParentKey(parentRef);
+    key.anchorDigest = anchorDigest;
+    return key;
+}
+
+// Defined below, next to the anchor-digest fallback it needs.
+static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int recordIdx,
+    AntColonyBpp9000T::Ann& out);
+
+// Score one ant solution ahead of the transaction loop, on whichever processor drains the queue.
+static void scoreAntSolutionTask(unsigned long long processorNumber, void* payload)
+{
+    const AntScoreTaskPayload* task = (const AntScoreTaskPayload*)payload;
+
+    const AntSolutionRecord* parentRec = nullptr;
+    if (gAntColony.tryGetParent(task->parentRef, &parentRec) != ValidityResult::Valid)
+    {
+        return;
+    }
+
+    m256i anchorDigest;
+    if (!gAntColony.getAnchorDigest(task->anchorTick, anchorDigest))
+    {
+        return;
+    }
+
+    const AntColonyBpp9000T::Ann* parentAnn = nullptr;
+    if (parentRec != nullptr)
+    {
+        const long long parentIdx = gAntColony.findIndexBySolutionRef(task->parentRef);
+        if (parentIdx == ANT_INVALID_INDEX
+            || !ensureAntRecordAnn(processorNumber, (unsigned int)parentIdx,
+                gAntParentAnnScratch[processorNumber]))
+        {
+            return;
+        }
+        parentAnn = &gAntParentAnnScratch[processorNumber];
+    }
+
+    const AntColonyBpp9000T::ReplayKey replayKey =
+        makeAntReplayKey(task->pubkey, task->nonce, task->parentRef, anchorDigest);
+
+    // Check in the cache first if this sol was computed
+    if (!gAntColony.tryGetReplayScore(replayKey, gAntScoredValue[task->txIdx], gAntScoredAnn[task->txIdx]))
+    {
+        // Straight into this transaction's own result slot, so nothing is copied afterwards.
+        gAntScoredValue[task->txIdx] = score->computeAntChildScore(
+            processorNumber, parentAnn, task->pubkey, task->nonce,
+            anchorDigest, gAntScoredAnn[task->txIdx]);
+        gAntColony.putReplayScore(replayKey, gAntScoredValue[task->txIdx], gAntScoredAnn[task->txIdx]);
+    }
+
+    // Last, so the transaction loop never sees a slot whose score or network is half written.
+    gAntScoredReady[task->txIdx] = true;
+}
+
+// The two independent bits an ant solution occupies in gAntSolutionFlags. Hashed over the same
+// triple AntDedupKey uses, so "seen" and "already in the tree" agree on what counts as one solution.
+// Bytes are laid out explicitly rather than hashing a struct, so no padding can make the digest
+// differ between compilers.
+static void computeAntSolutionFlagIndices(const m256i& pubkey, const m256i& nonce,
+    const SolutionRef& parentRef, unsigned int* outFlagIndices)
+{
+    unsigned char preimage[sizeof(m256i) + sizeof(m256i) + sizeof(SolutionRef)];
+    copyMem(preimage, &pubkey, sizeof(pubkey));
+    copyMem(preimage + sizeof(pubkey), &nonce, sizeof(nonce));
+    copyMem(preimage + sizeof(pubkey) + sizeof(nonce), &parentRef, sizeof(parentRef));
+    KangarooTwelve(preimage, sizeof(preimage), outFlagIndices, 2 * sizeof(unsigned int));
+    // mask hash into allocated gAntSolutionFlags bit-range (no-op at full size; LITE-safe)
+    outFlagIndices[0] &= (unsigned int)(NUMBER_OF_ANT_SOLUTION_FLAGS - 1);
+    outFlagIndices[1] &= (unsigned int)(NUMBER_OF_ANT_SOLUTION_FLAGS - 1);
+}
+
+// Seen means BOTH bits are set, matching the legacy filter: one bit alone is a collision with some
+// other solution, and requiring two drops the false-positive rate from ~N/2^32 to ~N^2/2^64.
+static bool isAntSolutionSeen(const unsigned int* flagIndices)
+{
+    return (gAntSolutionFlags[flagIndices[0] >> 6] & (1ULL << (flagIndices[0] & 63)))
+        && (gAntSolutionFlags[flagIndices[1] >> 6] & (1ULL << (flagIndices[1] & 63)));
+}
+
+static void markAntSolutionSeen(const unsigned int* flagIndices)
+{
+    gAntSolutionFlags[flagIndices[0] >> 6] |= (1ULL << (flagIndices[0] & 63));
+    gAntSolutionFlags[flagIndices[1] >> 6] |= (1ULL << (flagIndices[1] & 63));
+}
+
+// The anchor digest a solution's mutation walk seeds from, K12(tick || transactionDigest)
+static void computeAntAnchorDigest(unsigned int tick, const m256i& transactionDigest, m256i& out)
+{
+    unsigned char preimage[sizeof(unsigned int) + sizeof(m256i)];
+    copyMem(preimage, &tick, sizeof(tick));
+    copyMem(preimage + sizeof(tick), &transactionDigest, sizeof(transactionDigest));
+    KangarooTwelve(preimage, sizeof(preimage), &out, sizeof(out));
+}
+
+// A record outlives the anchor ring, so a rebuild needs its anchor after the ring has wrapped past it.
+// Tick storage keeps the whole epoch; only non-empty ticks recorded an anchor, which this reproduces.
+static bool recomputeAntAnchorDigest(unsigned int tick, m256i& out)
+{
+    m256i anchorTxDigest;
+    ts.tickData.acquireLock();
+    const TickData* storedTickData = ts.tickData.getByTickIfNotEmpty(tick);
+    const bool usable = (storedTickData != nullptr) && (storedTickData->epoch == system.epoch);
+    if (usable)
+    {
+        KangarooTwelve(storedTickData, sizeof(TickData), &anchorTxDigest, sizeof(anchorTxDigest));
+    }
+    ts.tickData.releaseLock();
+    if (!usable)
+    {
+        return false;
+    }
+    computeAntAnchorDigest(tick, anchorTxDigest, out);
+    return true;
+}
+
+// Ring first, tick storage once it has wrapped past the tick. Rebuild paths only: the live paths must
+// keep rejecting an anchor outside the freshness window, which the bare ring lookup already does.
+static bool getAntAnchorDigestForRebuild(unsigned int tick, m256i& out)
+{
+    if (gAntColony.getAnchorDigest(tick, out))
+    {
+        return true;
+    }
+    return recomputeAntAnchorDigest(tick, out);
+}
+
+// Rebuilds one record's network. Its parent must already have one, or be the root.
+static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned int idx)
+{
+    const AntColonyBpp9000T::AnnClaim claim = gAntColony.tryClaimAnn(idx);
+    if (claim == AntColonyBpp9000T::AnnClaimReady)
+    {
+        return true;
+    }
+    if (claim == AntColonyBpp9000T::AnnClaimInvalid)
+    {
+        return false;
+    }
+    if (claim == AntColonyBpp9000T::AnnClaimBusy)
+    {
+        // Waiting costs what the walk costs; walking it here as well would pay that twice.
+        while (gAntColony.isAnnClaimHeld(idx))
+        {
+            sleepMilliseconds(20);
+        }
+        return gAntColony.isAnnMaterialised(idx);
+    }
+
+    // Owned from here on, so every exit below either publishes or releases the claim.
+    const unsigned long long rebuildStart = __rdtsc();
+    const AntSolutionRecord* rec = gAntColony.recordAt(idx);
+    if (rec == nullptr)
+    {
+        gAntColony.releaseAnnClaim(idx);
+        return false;
+    }
+
+    const AntColonyBpp9000T::Ann* parentAnn = nullptr;
+    if (!rec->parentRef.isRoot())
+    {
+        const long long parentIdx = gAntColony.findIndexBySolutionRef(rec->parentRef);
+        const AntSolutionRecord* parentRec =
+            (parentIdx == ANT_INVALID_INDEX) ? nullptr : gAntColony.recordAt(parentIdx);
+        if (parentRec == nullptr
+            || !gAntColony.annOfNonRoot(*parentRec, gAntRebuildParentScratch[processorNumber]))
+        {
+            gAntColony.releaseAnnClaim(idx);
+            return false;
+        }
+        parentAnn = &gAntRebuildParentScratch[processorNumber];
+    }
+
+    m256i anchorDigest;
+    if (!getAntAnchorDigestForRebuild(rec->anchorTick, anchorDigest))
+    {
+        gAntColony.releaseAnnClaim(idx);
+        return false;
+    }
+
+    AntColonyBpp9000T::Ann& childAnn = gAntRebuildChildScratch[processorNumber];
+    const unsigned int rebuiltScore = score->computeAntChildScore(processorNumber, parentAnn,
+        rec->pubkey, rec->nonce, anchorDigest, childAnn);
+
+    // This walk is the computation the record was admitted without. A disagreement means the acceptance
+    // was wrong, so publish nothing: a network built for a score no other node holds is worse than none.
+    if (rebuiltScore != rec->score)
+    {
+        gAntColony.releaseAnnClaim(idx);
+        CHAR16 msg[256];
+        setText(msg, L"[ant-colony] rebuilt score disagrees with the accepted record, index ");
+        appendNumber(msg, idx, FALSE);
+        appendText(msg, L" accepted ");
+        appendNumber(msg, rec->score, FALSE);
+        appendText(msg, L" rebuilt ");
+        appendNumber(msg, rebuiltScore, FALSE);
+        logToConsole(msg);
+        return false;
+    }
+
+    unsigned int annHash;
+    KangarooTwelve(&childAnn, sizeof(childAnn), &annHash, sizeof(annHash));
+    gAntColony.publishAnn(idx, childAnn, annHash);
+
+    // A rebuild costs a full walk, so a tick that takes tens of seconds is attributable here.
+    CHAR16 okLine[224];
+    setText(okLine, L"[ant-colony] rebuilt the network of record ");
+    appendNumber(okLine, idx, FALSE);
+    appendText(okLine, L" score ");
+    appendNumber(okLine, rebuiltScore, FALSE);
+    appendText(okLine, L" in ");
+    appendNumber(okLine, (__rdtsc() - rebuildStart) / (frequency / 1000), FALSE);
+    appendText(okLine, L" ms");
+    logToConsole(okLine);
+    return true;
+}
+
+// Supplies the network of a record committed without one, walking its lineage down from the nearest
+// ancestor that still has one and publishing each level for later readers. Unbounded in depth on
+// purpose: a record this node cannot rebuild would be rejected here and accepted elsewhere.
+static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int recordIdx,
+    AntColonyBpp9000T::Ann& out)
+{
+    if (!gAntColony.isAnnMaterialised(recordIdx))
+    {
+        antDebugLine(L"[ant-colony] rebuilding a missing parent network, this costs a full walk");
+    }
+
+    while (!gAntColony.isAnnMaterialised(recordIdx))
+    {
+        // The shallowest record still missing a network: its parent is the root or already rebuilt.
+        unsigned int target = recordIdx;
+        for (;;)
+        {
+            const AntSolutionRecord* rec = gAntColony.recordAt(target);
+            if (rec == nullptr)
+            {
+                return false;
+            }
+            if (rec->parentRef.isRoot())
+            {
+                break;
+            }
+            const long long parentIdx = gAntColony.findIndexBySolutionRef(rec->parentRef);
+            if (parentIdx == ANT_INVALID_INDEX)
+            {
+                return false;
+            }
+            if (gAntColony.isAnnMaterialised((unsigned int)parentIdx))
+            {
+                break;
+            }
+            target = (unsigned int)parentIdx;
+        }
+
+        if (!materialiseOneAntRecord(processorNumber, target))
+        {
+            // The caller turns this into RejectParentNotRegistered, which no other node reaches, so say
+            // so rather than failing quietly.
+            CHAR16 failLine[224];
+            setText(failLine, L"[ant-colony] could not rebuild the network of record ");
+            appendNumber(failLine, target, FALSE);
+            appendText(failLine, L" needed by record ");
+            appendNumber(failLine, recordIdx, FALSE);
+            logToConsole(failLine);
+            return false;
+        }
+    }
+
+    const AntSolutionRecord* rec = gAntColony.recordAt(recordIdx);
+    return (rec != nullptr) && gAntColony.annOfNonRoot(*rec, out);
+}
+
+// A pool miner's solution, arriving over BroadcastMessage
+static void queueAntSolution(unsigned long long processorNumber, const m256i& computorPublicKey,
+    const AntSolutionBroadcastPayload& payload)
+{
+    gAntPendingSolutions.noteReceived();
+
+    // A non-canonical nonce is rejected by the scorer without producing a score, so the transaction
+    // would forfeit the deposit with nothing to show. The computor pays that, not the miner.
+    if (!score_engine::ScoreEngineT::isCanonicalAntNonce(payload.nonce.m256i_u8))
+    {
+        antDebugPoolDrop(L"nonCanonical", payload);
+        gAntPendingSolutions.noteDroppedNonCanonical();
+        return;
+    }
+
+    // The same bits the commit path checks before RejectReplay, so a hit here is a solution this
+    // node has already processed on-chain - publishing it again would forfeit the deposit. The
+    // filter is restored from the snapshot, so unlike this buffer the check survives a restart.
+    const SolutionRef parentRef = { payload.parentTick, payload.parentSolutionIndexInTick };
+    unsigned int seenFlagIndices[2];
+    computeAntSolutionFlagIndices(computorPublicKey, payload.nonce, parentRef, seenFlagIndices);
+    if (isAntSolutionSeen(seenFlagIndices))
+    {
+        gAntPendingSolutions.noteDroppedDuplicate();
+        return;
+    }
+
+    // An anchor in the future is malformed, and one the ring no longer holds cannot be scored.
+    m256i anchorDigest;
+    if (payload.anchorTick > system.tick
+        || system.tick - payload.anchorTick > ANT_PUBLISH_WINDOW_TICKS
+        || !gAntColony.getAnchorDigest(payload.anchorTick, anchorDigest))
+    {
+        antDebugPoolDrop(L"badAnchor", payload);
+        gAntPendingSolutions.noteDroppedBadAnchor();
+        return;
+    }
+
+    const AntSolutionRecord* parentRec = nullptr;
+    if (gAntColony.tryGetParent(parentRef, &parentRec) != ValidityResult::Valid)
+    {
+        antDebugPoolDrop(L"parentUnknown", payload);
+        gAntPendingSolutions.noteDroppedParentUnknown();
+        return;
+    }
+
+    const score_engine::ScoreBpp9000T::ANN* parentAnn = nullptr;
+    if (parentRec != nullptr)
+    {
+        if (!gAntColony.annOfNonRoot(*parentRec, gAntParentAnnScratch[processorNumber]))
+        {
+            antDebugPoolDrop(L"parentUnknown", payload);
+        gAntPendingSolutions.noteDroppedParentUnknown();
+            return;
+        }
+        parentAnn = &gAntParentAnnScratch[processorNumber];
+    }
+
+    // Building the key is far cheaper than a miss, so the cache is consulted first.
+    const AntColonyBpp9000T::ReplayKey replayKey =
+        makeAntReplayKey(computorPublicKey, payload.nonce, parentRef, anchorDigest);
+    unsigned int childScore = 0;
+    if (!gAntColony.tryGetReplayScore(replayKey, childScore, gAntChildAnnScratch[processorNumber]))
+    {
+        childScore = score->computeAntChildScore(processorNumber, parentAnn, computorPublicKey,
+            payload.nonce, anchorDigest, gAntChildAnnScratch[processorNumber]);
+        // Cached whatever the outcome: a timed-out network scores invalid, and the walk is
+        // deterministic, so the cached rejection stays right - without the entry the same doomed
+        // solution costs a full walk again on every path that sees it.
+        gAntColony.putReplayScore(replayKey, childScore, gAntChildAnnScratch[processorNumber]);
+    }
+    if (!score->isValidScore(childScore, score_engine::AlgoType::Bpp9000))
+    {
+        antDebugPoolDrop(L"unscorable", payload);
+        gAntPendingSolutions.noteDroppedUnscorable();
+        return;
+    }
+
+    // The sender's own number, checked where it can still prevent work rather than merely be counted.
+    if (payload.claimedScore != childScore)
+    {
+        antDebugPoolDrop(L"claimMismatch", payload);
+        gAntPendingSolutions.noteClaimMismatch();
+        return;
+    }
+
+    // The child count only grows, so passing now is not a promise it will pass at publication - the
+    // publisher re-checks. Failing now is final enough to refuse the slot.
+    const unsigned int childCount = gAntColony.childCountForQuery(parentRef, computorPublicKey);
+    const ChildCandidate candidate{ computorPublicKey, childScore, payload.anchorTick, system.tick };
+    if (AntColonyBpp9000T::validateChild(candidate, parentRec, childCount,
+        gAntColony.errorThreshold()) != ValidityResult::Valid)
+    {
+        antDebugPoolDrop(L"unacceptable", payload);
+        gAntPendingSolutions.noteDroppedUnacceptable();
+        return;
+    }
+
+    gAntPendingSolutions.add(computorPublicKey, parentRef, payload.anchorTick, childScore,
+        payload.nonce);
+}
+
+// Reseed the colony for a new epoch. The root seed is score->currentRandomSeed, the epoch-start
+// spectrum digest
+static void antColonyBeginEpoch()
+{
+#ifndef NDEBUG
+    gAntDebugPrintBudget = ANT_DEBUG_PRINTS_PER_EPOCH;
+#endif
+    gAntPendingSolutions.reset();
+    gAntColony.beginEpoch(score->currentRandomSeed, system.initialTick);
+    gAntColony.setErrorThreshold((unsigned int)getSolutionThreshold(score_engine::AlgoType::Bpp9000));
+
+    // Every identity's root derives from this one value, so a node that seeded differently builds a
+    // different forest and diverges. Logged as an identity so operators can compare it across nodes
+    // by eye at epoch start, which is cheaper than finding out from a digest split later.
+    CHAR16 digestChars[60 + 1];
+    getIdentity(gAntColony.rootSeed().m256i_u8, digestChars, true);
+    CHAR16 msg[128];
+    setText(msg, L"[ant-colony] Root seed = ");
+    appendText(msg, digestChars);
+    logToConsole(msg);
+}
 
 // DOGE merged-mining shares
 static volatile char gDogeMiningSharesCountLock = 0;
@@ -639,6 +1201,15 @@ static bool isLastTickInEpoch() {
     return (dayIndex == 738570 + system.epoch * 7 && etalonTick.hour >= 12)
             || dayIndex > 738570 + system.epoch * 7;
 #endif
+}
+
+// AUX outside the strict paths takes a solution's claimed score instead of computing it, and the fork
+// checkpoint undoes the tick if that disagrees with quorum. Every path that fails to establish one sets
+// gReRunStrict, so this is never true without a checkpoint behind it, nor on a build with no rollback.
+static bool isTrustingClaimedSolutionScore()
+{
+    return tickFork::gRollbackAvailable
+        && !isMainMode() && !gReRunStrict && !forceVerifySolutions && !isLastTickInEpoch();
 }
 
 // NOTE: this function doesn't work well on a few CPUs, some bits will be flipped after calling this. It's probably microcode bug.
@@ -889,6 +1460,12 @@ static void processBroadcastMessage(const unsigned long long processorNumber, Re
 
                                         const m256i& solution_miningSeed = *(m256i*)((unsigned char*)request + sizeof(BroadcastMessage));
                                         const m256i& solution_nonce = *(m256i*)((unsigned char*)request + sizeof(BroadcastMessage) + 32);
+                                        // standalone mining disabled for bpp9000
+                                        if (score_engine::getAlgoType(solution_nonce.m256i_u8) == score_engine::AlgoType::Bpp9000)
+                                        {
+                                            break;
+                                        }
+
                                         const unsigned int solution_claimedScore = *(unsigned int*)((unsigned char*)request + sizeof(BroadcastMessage) + 64);
                                         unsigned int k;
                                         for (k = 0; k < system.numberOfSolutions; k++)
@@ -935,6 +1512,19 @@ static void processBroadcastMessage(const unsigned long long processorNumber, Re
                                     }
                                 }
                                 break;
+
+                                case MESSAGE_TYPE_ANT_SOLUTION:
+                                {
+                                    // Exact size, not a minimum: the payload is fixed, so a longer
+                                    // one is a different message rather than a forward-compatible
+                                    // variant of this one.
+                                    if (messagePayloadSize == sizeof(AntSolutionBroadcastPayload))
+                                    {
+                                        queueAntSolution(processorNumber, request->destinationPublicKey,
+                                            *(AntSolutionBroadcastPayload*)((unsigned char*)request + sizeof(BroadcastMessage)));
+                                    }
+                                }
+                                break;
                                 }
                             }
                         }
@@ -977,8 +1567,11 @@ static void processBroadcastComputors(Peer* peer, RequestResponseHeader* header)
                 enqueueResponse(NULL, header);
             }
 
-            // Copy computor list
-            copyMem(&broadcastedComputors.computors, &request->computors, sizeof(Computors));
+            // Copy computor list. epoch is the flag the tick processor gates on without a lock, so
+            // copy publicKeys + signature first and publish epoch last
+            copyMem(broadcastedComputors.computors.publicKeys, request->computors.publicKeys,
+                sizeof(broadcastedComputors.computors.publicKeys) + sizeof(broadcastedComputors.computors.signature));
+            broadcastedComputors.computors.epoch = request->computors.epoch;
 
             // Update ownComputorIndices and minerPublicKeys
             if (request->computors.epoch == system.epoch)
@@ -1338,6 +1931,53 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
                 }
             }
 
+            // Same latency hiding for ant solution transactions, we do simple check first then the last
+            // is the score engine that where the heavy load stay
+            if (preprocessSolutionFlags[processorNumber]
+                && !isTrustingClaimedSolutionScore()
+                && AntColonyMiningSolutionTransaction::isSolutionTransaction(request))
+            {
+                const AntColonyMiningSolutionTransaction* antTx = (const AntColonyMiningSolutionTransaction*)request;
+                const SolutionRef preParentRef = { antTx->parentTick, antTx->parentSolutionIndexInTick };
+                unsigned int preFlagIndices[2];
+                computeAntSolutionFlagIndices(antTx->sourcePublicKey, antTx->nonce, preParentRef, preFlagIndices);
+                const int spectrumIdx = spectrumIndex(antTx->sourcePublicKey);
+                if (spectrumIdx >= 0
+                    && energy(spectrumIdx) >= AntColonyMiningSolutionTransaction::minAmount()
+                    && !isAntSolutionSeen(preFlagIndices)
+                    && score_engine::ScoreEngineT::isCanonicalAntNonce(antTx->nonce.m256i_u8))
+                {
+                    const AntSolutionRecord* preParentRec = nullptr;
+                    m256i preAnchorDigest;
+                    if (gAntColony.tryGetParent(preParentRef, &preParentRec) == ValidityResult::Valid
+                        && gAntColony.getAnchorDigest(antTx->anchorTick, preAnchorDigest))
+                    {
+                        const AntColonyBpp9000T::Ann* preParentAnn = nullptr;
+                        bool preParentOk = true;
+                        if (preParentRec != nullptr)
+                        {
+                            preParentOk = gAntColony.annOfNonRoot(*preParentRec, gAntParentAnnScratch[processorNumber]);
+                            preParentAnn = &gAntParentAnnScratch[processorNumber];
+                        }
+                        if (preParentOk)
+                        {
+                            const AntColonyBpp9000T::ReplayKey preKey = makeAntReplayKey(
+                                antTx->sourcePublicKey, antTx->nonce, preParentRef, preAnchorDigest);
+                            unsigned int preScore = 0;
+                            if (!gAntColony.tryGetReplayScore(preKey, preScore, gAntChildAnnScratch[processorNumber]))
+                            {
+                                preScore = score->computeAntChildScore(processorNumber, preParentAnn,
+                                    antTx->sourcePublicKey, antTx->nonce, preAnchorDigest,
+                                    gAntChildAnnScratch[processorNumber]);
+                                // cache this score so later can skip the heavy score computation,
+                                // invalid ones included
+                                gAntColony.putReplayScore(preKey, preScore, gAntChildAnnScratch[processorNumber]);
+                            }
+                        }
+                    }
+                }
+            }
+
             // shortcut: oracle reply reveal transactions are analyzed immediately after receiving them (before execution of the tx),
             // in order to minimize the number of reveal transaction (one per oracle query is enough, so no reveal tx is generated
             // after one has been seen)
@@ -1691,6 +2331,171 @@ static void processRequestContractFunction(Peer* peer, const unsigned long long 
             enqueueResponse(peer, 0, type, header->dejavu(), NULL);
         }
     }
+}
+
+// One response buffer per processor
+static AntIdentityTreeResponse gAntIdentityTreeResponseBuffer[MAX_NUMBER_OF_PROCESSORS];
+
+struct AntParentAnnResponse
+{
+    RespondAntParentAnnHeader header;
+    AntColonyBpp9000T::Ann ann;
+};
+static_assert(sizeof(AntParentAnnResponse)
+    == sizeof(RespondAntParentAnnHeader) + sizeof(AntColonyBpp9000T::Ann),
+    "AntParentAnnResponse must have no padding between the header and the network");
+static AntParentAnnResponse gAntParentAnnResponseBuffer[MAX_NUMBER_OF_PROCESSORS];
+
+// Request ant colony in epoch contex
+static void processRequestAntEpochContext(Peer* peer, RequestResponseHeader* header)
+{
+    RespondAntEpochContext respond;
+    setMem(&respond, sizeof(respond), 0);
+
+    respond.spectrumDigest = gAntColony.rootSeed();
+    respond.threshold = gAntColony.errorThreshold();
+    respond.freshnessWindow = ANT_PUBLISH_WINDOW_TICKS;
+    respond.solutionCount = gAntColony.solutionCount();
+    respond.freeAnnSlotsCount = gAntColony.freeAnnSlotsCount();
+    respond.maxChildrenPerParent = ANT_MAX_CHILDREN_PER_PARENT;
+    respond.epoch = system.epoch;
+    respond.topologyHash = *(const m256i*)BPP9000_TOPOLOGY_HASH;
+    respond.dataHash = *(const m256i*)BPP9000_DATA_HASH;
+
+    enqueueResponse(peer, sizeof(respond), RespondAntEpochContext::type(), header->dejavu(), &respond);
+}
+
+// The parents ONE identity can branch from, each with the bar a child of it must beat. Scoped by
+// pubkey: a child must name a parent in its own tree, so an unscoped answer would be mostly nodes the
+// caller can never use.
+//
+// Paged, because the store holds millions and a response is one datagram - the cursor is a record
+// index, and ANT_IDENTITY_TREE_SCAN_BUDGET caps how far one request may scan, so a caller cannot
+// walk the whole store in a single call. Sweeping a full store therefore costs many requests; the
+// alternative, walking the identity's tree through the head maps, needs a resumable cursor that does
+// not fit a record index, and the scan is cache-friendly where a chain walk is not.
+//
+// Operator-signed
+static void processRequestAntIdentityTree(unsigned long long processorNumber, Peer* peer, RequestResponseHeader* header)
+{
+    if (processorNumber >= MAX_NUMBER_OF_PROCESSORS)
+    {
+        return;
+    }
+    if (header->size() != sizeof(RequestResponseHeader) + sizeof(RequestAntIdentityTree) + SIGNATURE_SIZE)
+    {
+        return;
+    }
+    const RequestAntIdentityTree* request = header->getPayload<RequestAntIdentityTree>();
+
+    // Signature check
+    unsigned char digest[32];
+    KangarooTwelve(request, header->size() - sizeof(RequestResponseHeader) - SIGNATURE_SIZE, digest, sizeof(digest));
+    if (!verify(operatorPublicKey.m256i_u8, digest, ((const unsigned char*)header + (header->size() - SIGNATURE_SIZE))))
+    {
+        antDebugLine(L"[ant-colony] query signature rejected");
+        return;
+    }
+
+    AntIdentityTreeResponse& response = gAntIdentityTreeResponseBuffer[processorNumber];
+    setMem(&response, sizeof(response), 0);
+    response.header.itemSize = (unsigned int)sizeof(AntIdentityTreeNode);
+
+    const unsigned int total = gAntColony.solutionCount();
+
+    unsigned int idx = request->fromIndex;
+    unsigned int scanned = 0;
+    while (idx < total
+        && response.header.count < ANT_IDENTITY_TREE_NODES_PER_RESPONSE
+        && scanned < ANT_IDENTITY_TREE_SCAN_BUDGET)
+    {
+        const AntSolutionRecord* rec = gAntColony.recordAt(idx);
+        if (rec == nullptr)
+        {
+            break;
+        }
+        scanned++;
+        if (!(rec->pubkey == request->pubkey))
+        {
+            idx++;
+            continue;
+        }
+
+        AntIdentityTreeNode& item = response.items[response.header.count];
+        item.selfTick = rec->selfRef.tick;
+        item.selfSolutionIndexInTick = rec->selfRef.solutionIndexInTick;
+        item.parentTick = rec->parentRef.tick;
+        item.parentSolutionIndexInTick = rec->parentRef.solutionIndexInTick;
+        item.score = rec->score;
+        item.childCount = gAntColony.childCountForQuery(rec->selfRef, rec->pubkey);
+        item.anchorTick = rec->anchorTick;
+        item.depth = rec->depth;
+        response.header.count++;
+        idx++;
+    }
+
+    // Zero means the caller reached the end of what this node holds, per the protocol.
+    response.header.nextIndex = (idx < total) ? idx : 0;
+
+    enqueueResponse(peer,
+        (unsigned int)sizeof(response.header) + response.header.count * (unsigned int)sizeof(AntIdentityTreeNode),
+        RespondAntIdentityTreeHeader::type(), header->dejavu(), &response);
+}
+
+// One stored node's network, for the pool that is about to mine a child of it
+static void processRequestAntParentAnn(unsigned long long processorNumber, Peer* peer, RequestResponseHeader* header)
+{
+    if (processorNumber >= MAX_NUMBER_OF_PROCESSORS)
+    {
+        return;
+    }
+    if (header->size() != sizeof(RequestResponseHeader) + sizeof(RequestAntParentAnn) + SIGNATURE_SIZE)
+    {
+        return;
+    }
+    const RequestAntParentAnn* request = header->getPayload<RequestAntParentAnn>();
+
+    // Signature check
+    unsigned char digest[32];
+    KangarooTwelve(request, header->size() - sizeof(RequestResponseHeader) - SIGNATURE_SIZE, digest, sizeof(digest));
+    if (!verify(operatorPublicKey.m256i_u8, digest, ((const unsigned char*)header + (header->size() - SIGNATURE_SIZE))))
+    {
+        antDebugLine(L"[ant-colony] query signature rejected");
+        return;
+    }
+
+    AntParentAnnResponse& response = gAntParentAnnResponseBuffer[processorNumber];
+    setMem(&response, sizeof(response), 0);
+    response.header.parentRefTick = request->parentRefTick;
+    response.header.parentRefSolutionIndexInTick = request->parentRefSolutionIndexInTick;
+
+    const SolutionRef ref = { request->parentRefTick, request->parentRefSolutionIndexInTick };
+    if (ref.isRoot())
+    {
+        // Roots are never stored; the miner derives its own from the epoch context's seed.
+        response.header.status = ANT_PARENT_ANN_STATUS_IS_ROOT;
+        enqueueResponse(peer, sizeof(response.header), RespondAntParentAnnHeader::type(), header->dejavu(), &response);
+        return;
+    }
+
+    const AntSolutionRecord* rec = nullptr;
+    const ValidityResult parentResult = gAntColony.tryGetParent(ref, &rec);
+    bool annLoaded = false;
+    if (parentResult == ValidityResult::Valid && rec != nullptr)
+    {
+        annLoaded = gAntColony.annOfNonRoot(*rec, response.ann);
+    }
+    if (!annLoaded)
+    {
+        response.header.status = ANT_PARENT_ANN_STATUS_NOT_FOUND;
+        enqueueResponse(peer, sizeof(response.header), RespondAntParentAnnHeader::type(), header->dejavu(), &response);
+        return;
+    }
+
+    response.header.status = ANT_PARENT_ANN_STATUS_OK;
+    response.header.annSizeBytes = (unsigned int)sizeof(response.ann);
+    enqueueResponse(peer, (unsigned int)(sizeof(response.header) + sizeof(response.ann)),
+        RespondAntParentAnnHeader::type(), header->dejavu(), &response);
 }
 
 static void processRequestSystemInfo(Peer* peer, RequestResponseHeader* header)
@@ -2141,6 +2946,7 @@ static void checkAndSwitchMiningPhase(short tickEpoch, TimeDate tickDate, bool r
     if (resetPhase)
     {
         setNewMiningSeed();
+        antColonyBeginEpoch();
     }
 
     // Roll DOGE per-phase stats at broadcast-cycle boundaries (display only).
@@ -2236,7 +3042,7 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
         if (solutionProcessorFlags[processorNumber] && processorNumber != (numberOfProcessors - 1))
         {
             PROFILE_NAMED_SCOPE("requestProcessor(): solution processing");
-            score->tryProcessSolution(processorNumber);
+            score->tryProcessOneTask(processorNumber);
         }
         
         if (requestQueueElementTail == requestQueueElementHead)
@@ -2468,6 +3274,24 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
                 case RequestOracleData::type():
                 {
                     oracleEngine.processRequestOracleData(peer, header);
+                }
+                break;
+
+                case RequestAntEpochContext::type():
+                {
+                    processRequestAntEpochContext(peer, header);
+                }
+                break;
+
+                case RequestAntIdentityTree::type():
+                {
+                    processRequestAntIdentityTree(processorNumber, peer, header);
+                }
+                break;
+
+                case RequestAntParentAnn::type():
+                {
+                    processRequestAntParentAnn(processorNumber, peer, header);
                 }
                 break;
 
@@ -2824,6 +3648,145 @@ static bool ranksBelow(unsigned int scoreA, unsigned int tickA, unsigned int sco
     return tickA > tickB;
 }
 
+// Tick-processor only
+static void updateMinerRankingAndFutureComputors(
+    const m256i& sourcePublicKey,
+    unsigned int newScore,
+    unsigned int newTick)
+{
+    ACQUIRE(minerScoreArrayLock);
+    bool minerEntryChanged = false;
+    unsigned int minerIndex;
+    for (minerIndex = 0; minerIndex < numberOfMiners; minerIndex++)
+    {
+        if (sourcePublicKey == minerPublicKeys[minerIndex])
+        {
+            if (newScore < minerScores[minerIndex])
+            {
+                minerScores[minerIndex] = newScore;
+                minerBestScoreTicks[minerIndex] = newTick;
+                minerEntryChanged = true;
+            }
+
+            break;
+        }
+    }
+    if (minerIndex == numberOfMiners)
+    {
+        if (numberOfMiners < MAX_NUMBER_OF_MINERS)
+        {
+            minerPublicKeys[numberOfMiners] = sourcePublicKey;
+            minerBestScoreTicks[numberOfMiners] = newTick;
+            minerScores[numberOfMiners++] = newScore;
+            minerEntryChanged = true;
+        }
+        else
+        {
+            // The table is full. Entries beyond the computor block are kept sorted, so the
+            // worst-ranked one sits at the end and is replaced only if the newcomer outranks it.
+            const unsigned int worstIndex = numberOfMiners - 1;
+            if (ranksBelow(minerScores[worstIndex], minerBestScoreTicks[worstIndex], newScore, newTick))
+            {
+                minerPublicKeys[worstIndex] = sourcePublicKey;
+                minerScores[worstIndex] = newScore;
+                minerBestScoreTicks[worstIndex] = newTick;
+                minerIndex = worstIndex;
+                minerEntryChanged = true;
+            }
+        }
+    }
+
+    if (minerEntryChanged)
+    {
+        const m256i tmpPublicKey = minerPublicKeys[minerIndex];
+        const unsigned int tmpScore = minerScores[minerIndex];
+        const unsigned int tmpTick = minerBestScoreTicks[minerIndex];
+        while (minerIndex > (unsigned int)(minerIndex < NUMBER_OF_COMPUTORS ? 0 : NUMBER_OF_COMPUTORS)
+            && ranksBelow(minerScores[minerIndex - 1], minerBestScoreTicks[minerIndex - 1], minerScores[minerIndex], minerBestScoreTicks[minerIndex]))
+        {
+            minerPublicKeys[minerIndex] = minerPublicKeys[minerIndex - 1];
+            minerScores[minerIndex] = minerScores[minerIndex - 1];
+            minerBestScoreTicks[minerIndex] = minerBestScoreTicks[minerIndex - 1];
+            minerPublicKeys[--minerIndex] = tmpPublicKey;
+            minerScores[minerIndex] = tmpScore;
+            minerBestScoreTicks[minerIndex] = tmpTick;
+        }
+    }
+
+    // combine 225 worst current computors with 225 best candidates
+    for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS - QUORUM; i++)
+    {
+        competitorPublicKeys[i] = minerPublicKeys[QUORUM + i];
+        competitorScores[i] = minerScores[QUORUM + i];
+        competitorTicks[i] = minerBestScoreTicks[QUORUM + i];
+        competitorComputorStatuses[i] = true;
+
+        if (NUMBER_OF_COMPUTORS + i < numberOfMiners)
+        {
+            competitorPublicKeys[i + (NUMBER_OF_COMPUTORS - QUORUM)] = minerPublicKeys[NUMBER_OF_COMPUTORS + i];
+            competitorScores[i + (NUMBER_OF_COMPUTORS - QUORUM)] = minerScores[NUMBER_OF_COMPUTORS + i];
+            competitorTicks[i + (NUMBER_OF_COMPUTORS - QUORUM)] = minerBestScoreTicks[NUMBER_OF_COMPUTORS + i];
+        }
+        else
+        {
+            competitorScores[i + (NUMBER_OF_COMPUTORS - QUORUM)] = NO_MINER_SCORE;
+            competitorTicks[i + (NUMBER_OF_COMPUTORS - QUORUM)] = 0;
+        }
+        competitorComputorStatuses[i + (NUMBER_OF_COMPUTORS - QUORUM)] = false;
+    }
+    RELEASE(minerScoreArrayLock);
+
+    // bubble sorting -> top 225 from competitorPublicKeys have computors and candidates which are the best from that subset
+    for (unsigned int i = NUMBER_OF_COMPUTORS - QUORUM; i < (NUMBER_OF_COMPUTORS - QUORUM) * 2; i++)
+    {
+        int j = i;
+        const m256i tmpPublicKey = competitorPublicKeys[j];
+        const unsigned int tmpScore = competitorScores[j];
+        const unsigned int tmpTick = competitorTicks[j];
+        const bool tmpComputorStatus = false;
+        while (j
+            && ranksBelow(competitorScores[j - 1], competitorTicks[j - 1], competitorScores[j], competitorTicks[j]))
+        {
+            competitorPublicKeys[j] = competitorPublicKeys[j - 1];
+            competitorScores[j] = competitorScores[j - 1];
+            competitorTicks[j] = competitorTicks[j - 1];
+            competitorComputorStatuses[j] = competitorComputorStatuses[j - 1];
+            competitorPublicKeys[--j] = tmpPublicKey;
+            competitorScores[j] = tmpScore;
+            competitorTicks[j] = tmpTick;
+            competitorComputorStatuses[j] = tmpComputorStatus;
+        }
+    }
+
+    minimumComputorScore = competitorScores[NUMBER_OF_COMPUTORS - QUORUM - 1];
+
+    unsigned char candidateCounter = 0;
+    for (unsigned int i = 0; i < (NUMBER_OF_COMPUTORS - QUORUM) * 2; i++)
+    {
+        if (!competitorComputorStatuses[i])
+        {
+            minimumCandidateScore = competitorScores[i];
+            candidateCounter++;
+        }
+    }
+    if (candidateCounter < NUMBER_OF_COMPUTORS - QUORUM)
+    {
+        minimumCandidateScore = minimumComputorScore;
+    }
+
+    ACQUIRE(minerScoreArrayLock);
+    for (unsigned int i = 0; i < QUORUM; i++)
+    {
+        system.futureComputors[i] = minerPublicKeys[i];
+    }
+    RELEASE(minerScoreArrayLock);
+
+    for (unsigned int i = QUORUM; i < NUMBER_OF_COMPUTORS; i++)
+    {
+        system.futureComputors[i] = competitorPublicKeys[i - QUORUM];
+    }
+}
+
 static void processTickTransactionSolution(const MiningSolutionTransaction* transaction, unsigned int transactionIndex, const unsigned long long processorNumber)
 {
     PROFILE_SCOPE();
@@ -2836,6 +3799,11 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
     ASSERT(transaction->amount >=MiningSolutionTransaction::minAmount()
             && transaction->inputSize == MiningSolutionTransaction::minInputSize()
             && transaction->inputType == MiningSolutionTransaction::transactionType());
+    // Standalone mining is disabled; bpp9000 is mined through the ant colony only.
+    if (score_engine::getAlgoType(transaction->nonce.m256i_u8) == score_engine::AlgoType::Bpp9000)
+    {
+        return;
+    }
 
     m256i data[3] = { transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce };
     static_assert(sizeof(data) == 3 * 32, "Unexpected array size");
@@ -2853,7 +3821,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
         score_engine::AlgoType selectedAlgo = score_engine::getAlgoType(transaction->nonce.m256i_u8);
         const int threshold = getSolutionThreshold(selectedAlgo);
         unsigned int solutionScore;
-        if (isMainMode() || gReRunStrict || isLastTickInEpoch() || forceVerifySolutions)
+        if (!isTrustingClaimedSolutionScore())
         {
             solutionScore = (*::score)(processorNumber, transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce);
         }
@@ -2916,138 +3884,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
                 // accepted solutions
                 const unsigned int newScore = solutionScore * gScoreMultiplier[selectedAlgo];
                 const unsigned int newTick = system.tick;
-
-                ACQUIRE(minerScoreArrayLock);
-                bool minerEntryChanged = false;
-                unsigned int minerIndex;
-                for (minerIndex = 0; minerIndex < numberOfMiners; minerIndex++)
-                {
-                    if (transaction->sourcePublicKey == minerPublicKeys[minerIndex])
-                    {
-                        if (newScore < minerScores[minerIndex])
-                        {
-                            minerScores[minerIndex] = newScore;
-                            minerBestScoreTicks[minerIndex] = newTick;
-                            minerEntryChanged = true;
-                        }
-
-                        break;
-                    }
-                }
-                if (minerIndex == numberOfMiners)
-                {
-                    if (numberOfMiners < MAX_NUMBER_OF_MINERS)
-                    {
-                        minerPublicKeys[numberOfMiners] = transaction->sourcePublicKey;
-                        minerBestScoreTicks[numberOfMiners] = newTick;
-                        minerScores[numberOfMiners++] = newScore;
-                        minerEntryChanged = true;
-                    }
-                    else
-                    {
-                        // The table is full. Entries beyond the computor block are kept sorted, so the
-                        // worst-ranked one sits at the end and is replaced only if the newcomer outranks it.
-                        const unsigned int worstIndex = numberOfMiners - 1;
-                        if (ranksBelow(minerScores[worstIndex], minerBestScoreTicks[worstIndex], newScore, newTick))
-                        {
-                            minerPublicKeys[worstIndex] = transaction->sourcePublicKey;
-                            minerScores[worstIndex] = newScore;
-                            minerBestScoreTicks[worstIndex] = newTick;
-                            minerIndex = worstIndex;
-                            minerEntryChanged = true;
-                        }
-                    }
-                }
-
-                if (minerEntryChanged)
-                {
-                    const m256i tmpPublicKey = minerPublicKeys[minerIndex];
-                    const unsigned int tmpScore = minerScores[minerIndex];
-                    const unsigned int tmpTick = minerBestScoreTicks[minerIndex];
-                    while (minerIndex > (unsigned int)(minerIndex < NUMBER_OF_COMPUTORS ? 0 : NUMBER_OF_COMPUTORS)
-                        && ranksBelow(minerScores[minerIndex - 1], minerBestScoreTicks[minerIndex - 1], minerScores[minerIndex], minerBestScoreTicks[minerIndex]))
-                    {
-                        minerPublicKeys[minerIndex] = minerPublicKeys[minerIndex - 1];
-                        minerScores[minerIndex] = minerScores[minerIndex - 1];
-                        minerBestScoreTicks[minerIndex] = minerBestScoreTicks[minerIndex - 1];
-                        minerPublicKeys[--minerIndex] = tmpPublicKey;
-                        minerScores[minerIndex] = tmpScore;
-                        minerBestScoreTicks[minerIndex] = tmpTick;
-                    }
-                }
-
-                // combine 225 worst current computors with 225 best candidates
-                for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS - QUORUM; i++)
-                {
-                    competitorPublicKeys[i] = minerPublicKeys[QUORUM + i];
-                    competitorScores[i] = minerScores[QUORUM + i];
-                    competitorTicks[i] = minerBestScoreTicks[QUORUM + i];
-                    competitorComputorStatuses[i] = true;
-
-                    if (NUMBER_OF_COMPUTORS + i < numberOfMiners)
-                    {
-                        competitorPublicKeys[i + (NUMBER_OF_COMPUTORS - QUORUM)] = minerPublicKeys[NUMBER_OF_COMPUTORS + i];
-                        competitorScores[i + (NUMBER_OF_COMPUTORS - QUORUM)] = minerScores[NUMBER_OF_COMPUTORS + i];
-                        competitorTicks[i + (NUMBER_OF_COMPUTORS - QUORUM)] = minerBestScoreTicks[NUMBER_OF_COMPUTORS + i];
-                    }
-                    else
-                    {
-                        competitorScores[i + (NUMBER_OF_COMPUTORS - QUORUM)] = NO_MINER_SCORE;
-                        competitorTicks[i + (NUMBER_OF_COMPUTORS - QUORUM)] = 0;
-                    }
-                    competitorComputorStatuses[i + (NUMBER_OF_COMPUTORS - QUORUM)] = false;
-                }
-                RELEASE(minerScoreArrayLock);
-
-                // bubble sorting -> top 225 from competitorPublicKeys have computors and candidates which are the best from that subset
-                for (unsigned int i = NUMBER_OF_COMPUTORS - QUORUM; i < (NUMBER_OF_COMPUTORS - QUORUM) * 2; i++)
-                {
-                    int j = i;
-                    const m256i tmpPublicKey = competitorPublicKeys[j];
-                    const unsigned int tmpScore = competitorScores[j];
-                    const unsigned int tmpTick = competitorTicks[j];
-                    const bool tmpComputorStatus = false;
-                    while (j
-                        && ranksBelow(competitorScores[j - 1], competitorTicks[j - 1], competitorScores[j], competitorTicks[j]))
-                    {
-                        competitorPublicKeys[j] = competitorPublicKeys[j - 1];
-                        competitorScores[j] = competitorScores[j - 1];
-                        competitorTicks[j] = competitorTicks[j - 1];
-                        competitorComputorStatuses[j] = competitorComputorStatuses[j - 1];
-                        competitorPublicKeys[--j] = tmpPublicKey;
-                        competitorScores[j] = tmpScore;
-                        competitorTicks[j] = tmpTick;
-                        competitorComputorStatuses[j] = tmpComputorStatus;
-                    }
-                }
-
-                minimumComputorScore = competitorScores[NUMBER_OF_COMPUTORS - QUORUM - 1];
-
-                unsigned char candidateCounter = 0;
-                for (unsigned int i = 0; i < (NUMBER_OF_COMPUTORS - QUORUM) * 2; i++)
-                {
-                    if (!competitorComputorStatuses[i])
-                    {
-                        minimumCandidateScore = competitorScores[i];
-                        candidateCounter++;
-                    }
-                }
-                if (candidateCounter < NUMBER_OF_COMPUTORS - QUORUM)
-                {
-                    minimumCandidateScore = minimumComputorScore;
-                }
-
-                ACQUIRE(minerScoreArrayLock);
-                for (unsigned int i = 0; i < QUORUM; i++)
-                {
-                    system.futureComputors[i] = minerPublicKeys[i];
-                }
-                RELEASE(minerScoreArrayLock);
-
-                for (unsigned int i = QUORUM; i < NUMBER_OF_COMPUTORS; i++)
-                {
-                    system.futureComputors[i] = competitorPublicKeys[i - QUORUM];
-                }
+                updateMinerRankingAndFutureComputors(transaction->sourcePublicKey, newScore, newTick);
             }
             else
             {
@@ -3092,6 +3929,214 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
                 break;
             }
         }
+    }
+}
+
+// One ant solution: resolve its parent, score the child against it, and commit. Every rejection
+// forfeits the deposit by simply not refunding it
+// One line per ant solution transaction, whatever became of it. The body follows the logger's own
+// convention: compiled out with LOG_CUSTOM_MESSAGES, so a build without qlogging pays nothing here.
+static void logAntSolutionOutcome(const AntColonyMiningSolutionTransaction* transaction,
+    unsigned int score, ValidityResult result)
+{
+#if LOG_CUSTOM_MESSAGES
+    AntSolutionLogMessage logMsg;
+    logMsg._type = CUSTOM_MESSAGE_ANT_SOLUTION;
+    logMsg.sourcePublicKey = transaction->sourcePublicKey;
+    logMsg.nonce = transaction->nonce;
+    logMsg.parentTick = transaction->parentTick;
+    logMsg.parentSolutionIndexInTick = transaction->parentSolutionIndexInTick;
+    logMsg.anchorTick = transaction->anchorTick;
+    logMsg.score = score;
+    logMsg.result = (unsigned int)result;
+    logger.logCustomMessage(logMsg);
+#endif
+}
+
+static void processTickTransactionAntColonySolution(
+    const AntColonyMiningSolutionTransaction* transaction,
+    unsigned int transactionIndex,
+    const unsigned long long processorNumber)
+{
+    AntColonyBpp9000T::Ann& parentAnnScratch = gAntParentAnnScratch[processorNumber];
+    AntColonyBpp9000T::Ann& childAnnScratch = gAntChildAnnScratch[processorNumber];
+
+    const SolutionRef parentRef = { transaction->parentTick, transaction->parentSolutionIndexInTick };
+
+    // Already looked at, accepted or not. Marked BEFORE the walk below, so one solution costs at
+    // most one walk for the whole epoch - _dedup alone would only cover the accepted ones.
+    unsigned int antFlagIndices[2];
+    computeAntSolutionFlagIndices(transaction->sourcePublicKey, transaction->nonce, parentRef, antFlagIndices);
+    if (isAntSolutionSeen(antFlagIndices))
+    {
+        gAntColony.recordReject(ValidityResult::RejectReplay);
+        logAntSolutionOutcome(transaction, 0, ValidityResult::RejectReplay);
+        return;
+    }
+    markAntSolutionSeen(antFlagIndices);
+
+    // Reject a parent ref into the current or a later tick: a real parent is always on-chain from an
+    // earlier tick. Root is exempt, it is derived rather than stored.
+    if (!parentRef.isRoot() && parentRef.tick >= system.tick)
+    {
+        gAntColony.recordReject(ValidityResult::RejectParentNotRegistered);
+        logAntSolutionOutcome(transaction, 0, ValidityResult::RejectParentNotRegistered);
+        return;
+    }
+
+    const AntSolutionRecord* parentRec = nullptr;
+    ValidityResult result = gAntColony.tryGetParent(parentRef, &parentRec);
+    if (result != ValidityResult::Valid)
+    {
+        gAntColony.recordReject(result);
+        logAntSolutionOutcome(transaction, 0, result);
+        return;
+    }
+
+    // The anchor digest seeds the child's mutation walk, so an anchor the ring no longer holds cannot
+    // be scored
+    m256i anchorDigest;
+    if (!gAntColony.getAnchorDigest(transaction->anchorTick, anchorDigest))
+    {
+        gAntColony.recordReject(ValidityResult::RejectStale);
+        logAntSolutionOutcome(transaction, 0, ValidityResult::RejectStale);
+        return;
+    }
+
+    // No walk and no network for this solution. A lie shows up as a refund this node makes and the
+    // quorum does not, so the disagreement lands in the same tick.
+    const bool trustClaimedScore = isTrustingClaimedSolutionScore();
+
+    unsigned int childScore;
+    const AntColonyBpp9000T::Ann* childAnn = nullptr;
+    if (trustClaimedScore)
+    {
+        childScore = transaction->claimedScore;
+    }
+    else if (gAntScoredReady[transactionIndex])
+    {
+        childScore = gAntScoredValue[transactionIndex];
+        childAnn = &gAntScoredAnn[transactionIndex];
+    }
+    else
+    {
+        // A null parent record means root, the scorer derives the submitter's own root, since roots
+        // are never stored and so cannot be handed in.
+        const AntColonyBpp9000T::Ann* parentAnn = nullptr;
+        if (parentRec != nullptr)
+        {
+            const long long parentIdx = gAntColony.findIndexBySolutionRef(parentRef);
+            if (parentIdx == ANT_INVALID_INDEX
+                || !ensureAntRecordAnn(processorNumber, (unsigned int)parentIdx, parentAnnScratch))
+            {
+                gAntColony.recordReject(ValidityResult::RejectParentNotRegistered);
+                logAntSolutionOutcome(transaction, 0, ValidityResult::RejectParentNotRegistered);
+                return;
+            }
+            parentAnn = &parentAnnScratch;
+        }
+
+        // Same cache the async path uses. Reached when the pre-scan did not enqueue this one or the
+        // queue did not drain in time, which is exactly the catch-up case the cache exists for.
+        const AntColonyBpp9000T::ReplayKey replayKey =
+            makeAntReplayKey(transaction->sourcePublicKey, transaction->nonce, parentRef, anchorDigest);
+        if (!gAntColony.tryGetReplayScore(replayKey, childScore, childAnnScratch))
+        {
+            childScore = score->computeAntChildScore(
+                processorNumber, parentAnn, transaction->sourcePublicKey, transaction->nonce,
+                anchorDigest, childAnnScratch);
+            gAntColony.putReplayScore(replayKey, childScore, childAnnScratch);
+        }
+        childAnn = &childAnnScratch;
+    }
+
+    // This and the two score rules inside commit() are the only checks decided by the score itself, and none
+    // may fire on a trusted one: rejecting leaves no refund for the quorum to disagree with, so the tree
+    // diverges in silence. Accepting turns the lie into a spectrum disagreement instead.
+    if (!trustClaimedScore && !score->isValidScore(childScore, score_engine::AlgoType::Bpp9000))
+    {
+        gAntColony.recordReject(ValidityResult::RejectNonCanonicalNonce);
+        logAntSolutionOutcome(transaction, 0, ValidityResult::RejectNonCanonicalNonce);
+        return;
+    }
+
+    // Keep previous behavior, we fold both good and bad score into resource testing digest
+    unsigned int childAnnHash = 0;
+    if (childAnn != nullptr)
+    {
+        KangarooTwelve(childAnn, sizeof(*childAnn), &childAnnHash, sizeof(childAnnHash));
+    }
+    resourceTestingDigest ^= childScore;
+    resourceTestingDigest ^= childAnnHash;
+    KangarooTwelve(&resourceTestingDigest, sizeof(resourceTestingDigest), &resourceTestingDigest, sizeof(resourceTestingDigest));
+
+    const AntCommitInput in = {
+        transaction->sourcePublicKey,
+        transaction->nonce,
+        parentRef,
+        { system.tick, transactionIndex },                        // selfRef, ABSOLUTE tick
+        transaction->anchorTick,                                  // ABSOLUTE
+        system.tick };                                            // publishTick, ABSOLUTE (== selfRef.tick)
+    // Seeing this transaction execute, that mean those solution is recognized on-chain, mark them as recorded
+    for (unsigned int ownIdx = 0; ownIdx < computorSeedsCount; ownIdx++)
+    {
+        if (transaction->sourcePublicKey == computorPublicKeys[ownIdx])
+        {
+            gAntPendingSolutions.markRecorded(transaction->sourcePublicKey, parentRef, transaction->nonce);
+            break;
+        }
+    }
+
+    result = gAntColony.commit(in, parentRec, childScore, childAnn, childAnnHash, trustClaimedScore);
+    logAntSolutionOutcome(transaction, childScore, result);
+    antDebugAccepted(transaction, childScore, (parentRec != nullptr) ? (parentRec->depth + 1) : 1,
+        transactionIndex, result, trustClaimedScore);
+
+    // An accept that only stood because the score was trusted is the one that will disagree with quorum.
+    if (trustClaimedScore
+        && (result == ValidityResult::Valid || result == ValidityResult::ValidNotStored))
+    {
+        const unsigned int parentScore = (parentRec != nullptr) ? parentRec->score : WORST_SCORE;
+        const bool wouldHaveRejected = (childScore > gAntColony.errorThreshold())
+            || (childScore >= parentScore)
+            || !score->isValidScore(childScore, score_engine::AlgoType::Bpp9000);
+        if (wouldHaveRejected && antDebugCanPrint())
+        {
+            CHAR16 msg[256];
+            setText(msg, L"[ant-colony] over-accepted on a trusted score, tick ");
+            appendNumber(msg, system.tick, FALSE);
+            appendText(msg, L" idx ");
+            appendNumber(msg, transactionIndex, FALSE);
+            appendText(msg, L" score ");
+            appendNumber(msg, childScore, FALSE);
+            appendText(msg, L" threshold ");
+            appendNumber(msg, gAntColony.errorThreshold(), FALSE);
+            appendText(msg, L" parentScore ");
+            appendNumber(msg, parentScore, FALSE);
+            appendText(msg, L" - expect a spectrum disagreement this tick");
+            logToConsole(msg);
+        }
+    }
+    // ValidNotStored is the store being full: the solution passed every rule and only missed a slot,
+    // so it earns its refund and its ranking exactly like a stored one
+    if (result != ValidityResult::Valid && result != ValidityResult::ValidNotStored)
+    {
+        return;   // commit() counted this one itself
+    }
+
+    // Refund AND ranking. A valid solution is refunded whether or not it improved this miner's best,
+    // and whether or not the store had room for it, ranking is best-score-only
+    if (transaction->claimedScore == childScore)
+    {
+        // Refund if this score == its claimed score and the ann tree check
+        increaseEnergy(transaction->sourcePublicKey, transaction->amount);
+
+        const QuTransfer quTransfer = { m256i::zero(), transaction->sourcePublicKey, transaction->amount };
+        logger.logQuTransfer(quTransfer);
+
+        // A miner is ranked by its single best score of the epoch
+        const unsigned int newScore = childScore * gScoreMultiplier[score_engine::AlgoType::Bpp9000];
+        updateMinerRankingAndFutureComputors(transaction->sourcePublicKey, newScore, system.tick);
     }
 }
 
@@ -3219,6 +4264,19 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                         && transaction->inputSize >= MiningSolutionTransaction::minInputSize())
                     {
                         processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber);
+                    }
+                }
+                break;
+
+                case AntColonyMiningSolutionTransaction::transactionType():
+                {
+                    // Exact inputSize, not >=: the payload is fixed and a longer one is not a
+                    // forward-compatible variant, it is a different transaction.
+                    if (transaction->amount >= AntColonyMiningSolutionTransaction::minAmount()
+                        && transaction->inputSize == AntColonyMiningSolutionTransaction::minInputSize())
+                    {
+                        processTickTransactionAntColonySolution(
+                            (AntColonyMiningSolutionTransaction*)transaction, transactionIndex, processorNumber);
                     }
                 }
                 break;
@@ -3504,6 +4562,90 @@ static bool makeAndBroadcastExecutionFeeTransaction(int i, BroadcastFutureTickDa
     return true;
 }
 
+OPTIMIZE_OFF()
+
+// Publish at most one queued ant solution for computor i, retrying anything whose transaction never
+// landed. Mirrors the legacy solution publisher: the tick the transaction is targeted at is also the
+// deadline to see it on-chain, so missing it is what triggers the retry.
+static void publishAntSolutionFor(unsigned long long processorNumber, unsigned int computorIndex)
+{
+    AntPendingSolution entry;
+    const unsigned int idx = gAntPendingSolutions.selectForPublish(
+        computorPublicKeys[computorIndex], system.tick, entry);
+    if (idx == AntPendingSolutions::NO_ENTRY)
+    {
+        return;
+    }
+
+    const AntSolutionRecord* parentRec = nullptr;
+    if (gAntColony.tryGetParent(entry.parentRef, &parentRec) != ValidityResult::Valid)
+    {
+        gAntPendingSolutions.markObsoleteParentGone(idx);
+        antDebugPending(L"retire parentGone", entry, 0);
+        return;
+    }
+
+    m256i anchorDigest;
+    if (!gAntColony.getAnchorDigest(entry.anchorTick, anchorDigest))
+    {
+        // The ring no longer holds it, so this node could not score the transaction it is about to
+        // publish - and neither could anyone else.
+        gAntPendingSolutions.markObsoleteExpired(idx);
+        antDebugPending(L"retire expired", entry, 0);
+        return;
+    }
+
+    // Last point before the node signs with its own computor key and funds the deposit from its own
+    // balance. The commit path forfeits the deposit on a non-canonical nonce, and a check this cheap
+    // belongs on both sides of the queue.
+    if (!score_engine::ScoreEngineT::isCanonicalAntNonce(entry.nonce.m256i_u8))
+    {
+        gAntPendingSolutions.markObsoleteGateRejected(idx);
+        antDebugPending(L"retire gateRejected", entry, 0);
+        return;
+    }
+
+    // The score was computed at receipt, on a request processor, and the entry has
+    // carried it since.
+    // Judged at the tick the transaction will EXECUTE in, not the current one, so this gate sees
+    // what commit will see - a solution at the window boundary now would commit stale.
+    const unsigned int publishTick = system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET;
+    const unsigned int childCount = gAntColony.childCountForQuery(entry.parentRef,
+        entry.computorPublicKey);
+    const ChildCandidate candidate{ entry.computorPublicKey, entry.score, entry.anchorTick, publishTick };
+    if (AntColonyBpp9000T::validateChild(candidate, parentRec, childCount,
+        gAntColony.errorThreshold()) != ValidityResult::Valid)
+    {
+        gAntPendingSolutions.markObsoleteGateRejected(idx);
+        antDebugPending(L"retire gateRejected", entry, 0);
+        return;
+    }
+
+    AntColonyMiningSolutionTransaction payload;
+    setMem(&payload, sizeof(payload), 0);
+    payload.sourcePublicKey = computorPublicKeys[computorIndex];
+    payload.destinationPublicKey = m256i::zero();
+    payload.amount = AntColonyMiningSolutionTransaction::minAmount();
+    payload.tick = publishTick;
+    payload.inputType = AntColonyMiningSolutionTransaction::transactionType();
+    payload.inputSize = AntColonyMiningSolutionTransaction::minInputSize();
+    payload.parentTick = entry.parentRef.tick;
+    payload.parentSolutionIndexInTick = entry.parentRef.solutionIndexInTick;
+    payload.anchorTick = entry.anchorTick;
+    payload.claimedScore = entry.score;
+    payload.nonce = entry.nonce;
+
+    unsigned char digest[32];
+    KangarooTwelve(&payload, sizeof(Transaction) + AntColonyMiningSolutionTransaction::minInputSize(),
+        digest, sizeof(digest));
+    sign(computorSubseeds[computorIndex].m256i_u8, computorPublicKeys[computorIndex].m256i_u8,
+        digest, payload.signature);
+
+    enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
+    gAntPendingSolutions.markScheduled(idx, (int)payload.tick);
+    antDebugPending(L"published", entry, payload.tick);
+}
+
 static void processTick(unsigned long long processorNumber)
 {
     PROFILE_SCOPE();
@@ -3626,6 +4768,7 @@ static void processTick(unsigned long long processorNumber)
     ts.tickData.acquireLock();
     copyMem(&nextTickData, &ts.tickData[tickIndex], sizeof(TickData));
     ts.tickData.releaseLock();
+
     unsigned long long solutionProcessStartTick = __rdtsc(); // for tracking the time processing solutions
     if (nextTickData.epoch == system.epoch)
     {
@@ -3633,13 +4776,17 @@ static void processTick(unsigned long long processorNumber)
 #if ADDON_TX_STATUS_REQUEST
         txStatusData.tickTxIndexStart[system.tick - system.initialTick] = numberOfTransactions; // qli: part of tx_status_request add-on
 #endif
-        // Only apply skipping compute solution when in Mainnet with Aux node (except for last tick)
-        if (isMainMode() || isTestnet() || isLastTickInEpoch() || forceVerifySolutions)
+        // Only apply skipping compute solution when in Mainnet with Aux node (except for last tick).
+        // A strict replay computes too, and this is what clears the per-transaction pre-score gates so it
+        // cannot read the previous tick's answers.
+        if (isMainMode() || isTestnet() || isLastTickInEpoch() || forceVerifySolutions || gReRunStrict)
         {
             PROFILE_NAMED_SCOPE_BEGIN("processTick(): pre-scan solutions");
             unsigned long long _bPrescanStart = __rdtsc();
             // reset solution task queue
             score->resetTaskQueue();
+            // Only the gate needs clearing; the score and the network are written before it is set.
+            setMem(gAntScoredReady, sizeof(gAntScoredReady), 0);
             // pre-scan any solution tx and add them to solution task queue
             for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
             {
@@ -3672,8 +4819,32 @@ static void processTick(unsigned long long processorNumber)
                                     if (!(minerSolutionFlags[flagIndices[0] >> 6] & (1ULL << (flagIndices[0] & 63)))
                                         || !(minerSolutionFlags[flagIndices[1] >> 6] & (1ULL << (flagIndices[1] & 63))))
                                     {
-                                        score->addTask(transaction->sourcePublicKey, solution_miningSeed, solution_nonce);
+                                        score->addTask(scoreLegacySolutionTask, data, sizeof(data));
                                     }
+                                }
+                            }
+                            // Ant solutions ride the same async queue
+                            else if (isZero(transaction->destinationPublicKey)
+                                && transaction->amount >= AntColonyMiningSolutionTransaction::minAmount()
+                                && transaction->inputType == AntColonyMiningSolutionTransaction::transactionType()
+                                && transaction->inputSize == AntColonyMiningSolutionTransaction::minInputSize())
+                            {
+                                const AntColonyMiningSolutionTransaction* antTx =
+                                    (const AntColonyMiningSolutionTransaction*)transaction;
+                                AntScoreTaskPayload task;
+                                task.pubkey = antTx->sourcePublicKey;
+                                task.nonce = antTx->nonce;
+                                task.parentRef.tick = antTx->parentTick;
+                                task.parentRef.solutionIndexInTick = antTx->parentSolutionIndexInTick;
+                                task.anchorTick = antTx->anchorTick;
+                                task.txIdx = transactionIndex;
+                                // Skip anything this node has already looked at, accepted or not,
+                                // and anything this tick will take on its claimed score anyway
+                                unsigned int antFlagIndices[2];
+                                computeAntSolutionFlagIndices(task.pubkey, task.nonce, task.parentRef, antFlagIndices);
+                                if (!isAntSolutionSeen(antFlagIndices) && !isTrustingClaimedSolutionScore())
+                                {
+                                    score->addTask(scoreAntSolutionTask, &task, sizeof(task));
                                 }
                             }
                         }
@@ -3684,15 +4855,11 @@ static void processTick(unsigned long long processorNumber)
             TickBench::add(TickBench::PRESCAN_SOLUTIONS, _bPrescanStart, __rdtsc());
             PROFILE_SCOPE_END();
             {
-                // Process solutions in this tick and store in cache. In parallel, score->tryProcessSolution() is called by
-                // request processors to speed up solution processing.
+                // Process solutions in this tick and store in cache. In parallel, request processors call
+                // score->tryProcessOneTask() from their idle path to speed this up.
                 PROFILE_NAMED_SCOPE("processTick(): process solutions");
                 TickBench::Scope _bProcSol(TickBench::PROCESS_SOLUTIONS);
-                score->startProcessTaskQueue();
-                while (!score->isTaskQueueProcessed()) {
-                    score->tryProcessSolution(processorNumber);
-                }
-                score->stopProcessTaskQueue();
+                score->runUntilDone(processorNumber);
             }
         }
 
@@ -3797,6 +4964,25 @@ static void processTick(unsigned long long processorNumber)
         }
         TickBench::add(TickBench::PROCESS_TXS, _bProcTxsStart, __rdtsc());
         PROFILE_SCOPE_END();
+
+        // Ant colony anchor for this non-empty tick, K12(tick || transactionDigest)
+        {
+            m256i anchorTxDigest;
+            KangarooTwelve(&nextTickData, sizeof(TickData), &anchorTxDigest, 32);
+            m256i anchorDigest;
+            computeAntAnchorDigest(system.tick, anchorTxDigest, anchorDigest);
+            gAntColony.recordAnchorDigest(system.tick, anchorDigest);
+
+#if !defined(NDEBUG)
+            // Rebuilds recompute this from tick storage; check the two agree while both are available.
+            m256i recomputedAnchorDigest;
+            if (!recomputeAntAnchorDigest(system.tick, recomputedAnchorDigest)
+                || recomputedAnchorDigest != anchorDigest)
+            {
+                addDebugMessage(L"ant anchor recomputed from tick storage disagrees with the ring");
+            }
+#endif
+        }
     }
     else
     {
@@ -4490,6 +5676,9 @@ static void processTick(unsigned long long processorNumber)
 
                 enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
             }
+
+            // Re-publish the solutions that are not on chain
+            publishAntSolutionFor(processorNumber, i);
         }
 
     }
@@ -4506,6 +5695,52 @@ static void processTick(unsigned long long processorNumber)
         else
         {
             TestInvalidSolution::broadcastRandom(score->currentRandomSeed, txTick, claimedScore);
+        }
+    }
+
+    // TEST: mine ant solutions against our own colony to drive the inputType-12 path. A walk
+    // takes seconds, so it runs on its own thread like an external miner would, never on the
+    // tick processor.
+    if (forceBroadcastAntSolution && computorSeedsCount > 0)
+    {
+        static bool antMinerStarted = false;
+        if (!antMinerStarted)
+        {
+            antMinerStarted = true;
+            std::thread([]()
+            {
+                unsigned int lastMinedTick = 0;
+                unsigned int published = 0;
+                unsigned int lastPublishTick = 0;
+                while (!shutDownNode && published < forceAntSolutionBudget)
+                {
+                    const unsigned int tick = system.tick;
+                    const bool gapElapsed = (lastPublishTick == 0)
+                        || (tick - lastPublishTick >= forceAntInjectGapTicks);
+                    if (tick != lastMinedTick && tick > system.initialTick && gapElapsed)
+                    {
+                        lastMinedTick = tick;
+                        const TestInvalidSolution::AntInjectMode mode =
+                            (published < forceAntInjectWarmup)
+                                ? TestInvalidSolution::AntInjectMode::Valid
+                                : forceAntInjectMode;
+                        // Engine slot is processorNumber % solutionBufferCount; the tick processor is
+                        // processor 1, so use 0 to keep the miner's walk off the verifier's lock.
+                        if (TestInvalidSolution::broadcastAntSolution(gAntColony, *score, 0,
+                                                                      tick - 1, mode, 1))
+                        {
+                            published++;
+                            lastPublishTick = tick;
+                        }
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                CHAR16 doneLine[128];
+                setText(doneLine, L"ANT-INJECT budget spent, miner thread exiting after ");
+                appendNumber(doneLine, published, FALSE);
+                appendText(doneLine, L" solution(s)");
+                logToConsole(doneLine);
+            }).detach();
         }
     }
 
@@ -4640,6 +5875,7 @@ static void beginEpoch()
     score->initMemory();
     score->resetTaskQueue();
     setMem(minerSolutionFlags, NUMBER_OF_MINER_SOLUTION_FLAGS / 8, 0);
+    setMem(gAntSolutionFlags, NUMBER_OF_ANT_SOLUTION_FLAGS / 8, 0);
     setMem((void*)minerPublicKeys, sizeof(minerPublicKeys), 0);
     setMem((void*)minerScores, sizeof(minerScores), 0xFF);
     setMem((void*)minerBestScoreTicks, sizeof(minerBestScoreTicks), 0);
@@ -4973,9 +6209,18 @@ static bool saveAllNodeStates()
     forceLogToConsoleAsAddDebugMessage = true;
 #endif
 
+    CHAR16 snapshotDirectory[16];
+    setText(snapshotDirectory, L"ep");
+    appendNumber(snapshotDirectory, system.epoch, false);
+
+    // Stage the save in a side directory so an interrupted save leaves the previous snapshot loadable.
     CHAR16 directory[16];
-    setText(directory, L"ep");
-    appendNumber(directory, system.epoch, false);
+    setText(directory, snapshotDirectory);
+    appendText(directory, L".tmp");
+
+    CHAR16 previousDirectory[16];
+    setText(previousDirectory, snapshotDirectory);
+    appendText(previousDirectory, L".old");
 
     logToConsole(L"Start saving node states from main thread");
 
@@ -5060,6 +6305,7 @@ static bool saveAllNodeStates()
     }
     
     score->saveScoreCache(system.epoch, directory);
+    gAntColony.saveReplayCache(system.epoch, directory);
     
     copyMem(&nodeStateBuffer.etalonTick, &etalonTick, sizeof(etalonTick));
     copyMem(nodeStateBuffer.minerPublicKeys, (void*)minerPublicKeys, sizeof(minerPublicKeys));
@@ -5145,6 +6391,14 @@ static bool saveAllNodeStates()
         return false;
     }
 
+    logToConsole(L"Saving ant solution flags");
+    savedSize = save(ANT_SOL_FLAG_FILE_NAME, NUMBER_OF_ANT_SOLUTION_FLAGS / 8, (unsigned char*)gAntSolutionFlags, directory);
+    if (savedSize != NUMBER_OF_ANT_SOLUTION_FLAGS / 8)
+    {
+        logToConsole(L"Failed to save ant solution flag");
+        return false;
+    }
+
     setText(message, L"Saving tick storage ");
     logToConsole(message);
     if (ts.trySaveToFile(system.epoch, system.tick, directory) != 0)
@@ -5156,6 +6410,11 @@ static bool saveAllNodeStates()
 #if !defined(NDEBUG)
     oracleEngine.checkStateConsistencyWithAssert();
 #endif
+    if (!gAntColony.saveSnapshot(system.epoch, directory, system.initialTick))
+    {
+        return false;
+    }
+
     if (!oracleEngine.saveSnapshot(system.epoch, directory))
     {
         return false;
@@ -5183,6 +6442,18 @@ static bool saveAllNodeStates()
 #if !defined(NDEBUG)
     forceLogToConsoleAsAddDebugMessage = false;
 #endif
+
+    // Promote the staged directory only now that every component is on disk. Two renames instead of
+    // a remove: deleting the previous snapshot takes seconds, and a kill in that window leaves nothing.
+    removeDir(previousDirectory);
+    renameDir(snapshotDirectory, previousDirectory);   // absent on the first save
+    if (!renameDir(directory, snapshotDirectory))
+    {
+        renameDir(previousDirectory, snapshotDirectory);
+        logToConsole(L"Failed to promote snapshot");
+        return false;
+    }
+    removeDir(previousDirectory);
 
     return true;
 }
@@ -5407,6 +6678,32 @@ static bool loadAllNodeStates()
         logToConsole(L"Failed to load miner solution flag");
         return false;
     }
+
+    logToConsole(L"Loading ant solution flags");
+    loadedSize = load(ANT_SOL_FLAG_FILE_NAME, NUMBER_OF_ANT_SOLUTION_FLAGS / 8, (unsigned char*)gAntSolutionFlags, directory);
+    if (loadedSize != NUMBER_OF_ANT_SOLUTION_FLAGS / 8)
+    {
+        logToConsole(L"Failed to load ant solution flag");
+        return false;
+    }
+
+    // initialRandomSeedFromPersistingState, not score->currentRandomSeed, the scorer is not reseeded
+    // until initialize() finishes, so this is the only restored copy available here.
+    if (!gAntColony.loadSnapshot(system.epoch, directory,
+        initialRandomSeedFromPersistingState,
+        (unsigned int)getSolutionThreshold(score_engine::AlgoType::Bpp9000),
+        system.initialTick))
+    {
+        return false;
+    }
+#ifndef NDEBUG
+    {
+        CHAR16 dbg[128];
+        setText(dbg, L"[ant-colony] snapshot loaded, solutions=");
+        appendNumber(dbg, gAntColony.solutionCount(), FALSE);
+        logToConsole(dbg);
+    }
+#endif
 
     if (!oracleEngine.loadSnapshot(system.epoch, directory))
     {
@@ -6597,6 +7894,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     gReRunStrict = false;
                 latestProcessedTick = system.tick;
 
+
                 // safety check for contract locks
                 // after processing a tick, all contract locks should be released
                 checkAllContractLocksReleased();
@@ -7103,6 +8401,16 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                     asyncSave(REVENUE_DATA_END_OF_EPOCH_FILE_NAME, sizeof(gEpochRevenueData), (unsigned char*)&gEpochRevenueData);
                                     // Multi-dim revenue (shadow) - for offline comparison against the additive
                                     asyncSave(MULTIDIM_REVENUE_END_OF_EPOCH_FILE_NAME, sizeof(gMultiDimRevenue), (unsigned char*)&gMultiDimRevenue);
+                                    // The epoch's best networks, for offline extraction
+#ifndef NDEBUG
+                                    {
+                                        CHAR16 dbg[768];
+                                        setText(dbg, L"[ant-colony] epoch end: ");
+                                        gAntColony.stats().appendLog(dbg);
+                                        logToConsole(dbg);
+                                    }
+#endif
+                                    gAntColony.exportBestSolutions(system.epoch, NULL);
 
                                     // Reorder futureComputors so requalifying computors keep their index
                                     // This is needed for correct execution fee reporting across epoch boundaries
@@ -7680,8 +8988,21 @@ static bool initialize()
         setMem(score_qpi, sizeof(*score_qpi), 0);
 #endif
 
+        if (!gAntPendingSolutions.init())
+        {
+            return false;
+        }
+        if (!gAntColony.init())
+        {
+            return false;
+        }
+
         setMem(&solutionThreshold[0][0], sizeof(int) * MAX_NUMBER_EPOCH * score_engine::AlgoType::MaxAlgoCount, 0);
         if (!allocPoolWithErrorLog(L"minserSolutionFlag", NUMBER_OF_MINER_SOLUTION_FLAGS / 8, (void**)&minerSolutionFlags, __LINE__))
+        {
+            return false;
+        }
+        if (!allocPoolWithErrorLog(L"antSolutionFlag", NUMBER_OF_ANT_SOLUTION_FLAGS / 8, (void**)&gAntSolutionFlags, __LINE__))
         {
             return false;
         }
@@ -7950,15 +9271,33 @@ static bool initialize()
     {
         score->initMiningData(initialRandomSeedFromPersistingState);
         loadMiningSeedFromFile = false;;
+        // Skipped entirely when a snapshot was restored
+        if (!loadAllNodeStateFromFile)
+        {
+            antColonyBeginEpoch();
+        }
     }
     else
     {
-        short tickEpoch = -1; 
+        short tickEpoch = -1;
         TimeDate tickDate;
         setMem((void*)&tickDate, sizeof(TimeDate), 0);
         checkAndSwitchMiningPhase(tickEpoch, tickDate, true);
-    }    
+    }
     score->loadScoreCache(system.epoch);
+
+    // After the branch above, never before: both paths can call antColonyBeginEpoch(), which clears
+    // the cache. A memo, not state - absence or any load failure just means the solutions get
+    // computed honestly.
+    gAntColony.loadReplayCache(system.epoch, NULL);
+#ifndef NDEBUG
+    {
+        CHAR16 dbg[128];
+        setText(dbg, L"[ant-colony] replay cache loaded, occupancy=");
+        appendNumber(dbg, gAntColony.replayCacheOccupancy(), FALSE);
+        logToConsole(dbg);
+    }
+#endif
 
     // Load + hash-verify the bpp9000 task once at init
     if (!loadBpp9000Task())
@@ -8150,6 +9489,8 @@ static void deinitialize()
     pendingTxsPool.deinit();
 
     fastTxWindow.deinit();
+    gAntPendingSolutions.deinit();
+    gAntColony.deinit();
 
     if (score)
     {
@@ -8158,6 +9499,10 @@ static void deinitialize()
     if (minerSolutionFlags)
     {
         freePoolOrVirtual(minerSolutionFlags);
+    }
+    if (gAntSolutionFlags)
+    {
+        freePool(gAntSolutionFlags);
     }
 
     if (dejavu0)
@@ -8921,6 +10266,47 @@ static void processKeyPresses()
             setText(message, L"DogeMining: ");
             gDogeMiningStats.appendLog(message);
             logToConsole(message);
+
+            setText(message, L"AntColony: ");
+            gAntColony.stats().appendLog(message);
+            appendText(message, L" | replay cache ");
+            appendNumber(message, gAntColony.replayCacheOccupancy(), TRUE);
+            logToConsole(message);
+
+            AntPendingSolutions::Stats pending;
+            unsigned int pendingCount = 0;
+            gAntPendingSolutions.getStats(pending, pendingCount);
+            setText(message, L"AntPool: queued ");
+            appendNumber(message, pendingCount, TRUE);
+            appendText(message, L" | received ");
+            appendNumber(message, pending.received, TRUE);
+            appendText(message, L" | published ");
+            appendNumber(message, pending.published, TRUE);
+            appendText(message, L" | recorded ");
+            appendNumber(message, pending.recorded, TRUE);
+            appendText(message, L" | dropped: nonCanonical ");
+            appendNumber(message, pending.droppedNonCanonical, TRUE);
+            appendText(message, L", badAnchor ");
+            appendNumber(message, pending.droppedBadAnchor, TRUE);
+            appendText(message, L", parentUnknown ");
+            appendNumber(message, pending.droppedParentUnknown, TRUE);
+            appendText(message, L", unscorable ");
+            appendNumber(message, pending.droppedUnscorable, TRUE);
+            appendText(message, L", unacceptable ");
+            appendNumber(message, pending.droppedUnacceptable, TRUE);
+            appendText(message, L", duplicate ");
+            appendNumber(message, pending.droppedDuplicate, TRUE);
+            appendText(message, L", full ");
+            appendNumber(message, pending.droppedFull, TRUE);
+            appendText(message, L" | obsolete: parentGone ");
+            appendNumber(message, pending.obsoleteParentGone, TRUE);
+            appendText(message, L", expired ");
+            appendNumber(message, pending.obsoleteExpired, TRUE);
+            appendText(message, L", gateRejected ");
+            appendNumber(message, pending.obsoleteGateRejected, TRUE);
+            appendText(message, L" | claim mismatch ");
+            appendNumber(message, pending.claimMismatch, TRUE);
+            logToConsole(message);
         }
         break;
 
@@ -9243,6 +10629,17 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     // ── strict-replay window ──
     gReRunStrict = true;
     gReRunStrictUntilTick = strictUntilTick;
+    {
+        // The range explains the catch-up that follows: every solution in it is recomputed, and a parent
+        // accepted on trust is rebuilt too.
+        CHAR16 strictLine[192];
+        setText(strictLine, L"[FORK] CHILD: replaying ticks ");
+        appendNumber(strictLine, (unsigned long long)system.tick, FALSE);
+        appendText(strictLine, L"..");
+        appendNumber(strictLine, (unsigned long long)strictUntilTick, FALSE);
+        appendText(strictLine, L" strict");
+        logToConsole(strictLine);
+    }
 
     // ── networking — drop parent connection state, keep COW-shared buffers ──
     Overload::resetForChildPromote();
@@ -9781,7 +11178,8 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                 }
 
 #if !TICK_STORAGE_AUTOSAVE_MODE
-                // Only save system + score cache to file regularly here if on AUX and snapshot auto-save is disabled
+                // Only save system + score cache + ant replay cache to file regularly here if on AUX
+                // and snapshot auto-save is disabled
                 if ((!isMainMode())
                     && curTimeTick - systemDataSavingTick >= SYSTEM_DATA_SAVING_PERIOD * frequency / 1000)
                 {
@@ -9789,6 +11187,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 
                     saveSystem();
                     score->saveScoreCache(system.epoch);
+                    gAntColony.saveReplayCache(system.epoch, NULL);
                 }
 #endif
                 tryResendTickVotes();
@@ -10152,6 +11551,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 
             saveSystem();
             score->saveScoreCache(system.epoch);
+            gAntColony.saveReplayCache(system.epoch, NULL);
 #ifdef ENABLE_PROFILING
             gProfilingDataCollector.writeToFile();
 #endif
@@ -10253,6 +11653,20 @@ unsigned long long getTotalRam()
 
     // minerSolutionFlags (qubic.cpp:7068)
     add("minerSolutionFlags", NUMBER_OF_MINER_SOLUTION_FLAGS / 8);
+    add("gAntSolutionFlags", NUMBER_OF_ANT_SOLUTION_FLAGS / 8);
+
+    // ant colony pools (allocPoolWithErrorLog in AntColony::init)
+    add("antColony",
+        AntColonyBpp9000T::ANT_RECORDS_BYTES
+        + AntColonyBpp9000T::ANT_ANN_POOL_BYTES
+        + AntColonyBpp9000T::ANT_REPLAY_CACHE_BYTES
+        + (unsigned long long)MAX_NUMBER_OF_TICKS_PER_EPOCH * sizeof(AntTickSlot)
+        + sizeof(AnchorRing)
+        + sizeof(QPI::HashMap<SolutionRef, unsigned int, ANT_CHILD_HEAD_BY_PARENT_SIZE>)
+        + sizeof(QPI::HashMap<m256i, unsigned int, ANT_CHILD_HEAD_BY_MINER_SIZE>)
+        + sizeof(QPI::HashSet<AntDedupKey, ANT_DEDUP_SIZE>)
+        + sizeof(AntColonyBpp9000T::ExportSet)
+        + ANT_SNAPSHOT_SCRATCH_BYTES);
 
     // contractLocalsStack array (contract_exec.h:45)
     add("contractLocalsStack", NUMBER_OF_CONTRACT_EXECUTION_BUFFERS * (unsigned long long)ContractLocalsStack::capacity());
@@ -10343,6 +11757,10 @@ void processArgs(int argc, const char* argv[]) {
         ("fbis-count", "TEST: number of solution txs per tick with --fbis", cxxopts::value<int>()->default_value("1"))
         ("fbis-same", "TEST: inject all --fbis solutions from one computor", cxxopts::value<bool>())
         ("test-solution-threshold", "TEST: override runtime Bpp9000 solution threshold", cxxopts::value<int>()->default_value("-1"))
+        ("fbas,force-broadcast-ant-solution", "TEST: mine ant-colony solutions against our own colony and publish them, as <mode> or <mode>:<count> (default 3; a walk costs seconds of CPU and each publish burns a deposit). Mode selects which accept rule it aims at: valid, badclaim, noncanon, wrongtree, stale, futureparent, leparent", cxxopts::value<std::string>())
+        ("fbas-warmup", "TEST: publish this many valid ant solutions before switching to the --fbas mode", cxxopts::value<int>()->default_value("0"))
+        ("fbas-gap", "TEST: minimum ticks between ant publishes; a gap wider than the fork window makes each window retire", cxxopts::value<int>()->default_value("0"))
+        ("ant-debug", "Trace ant-colony accepts, over-accepts and network rebuilds (budgeted per epoch)", cxxopts::value<bool>())
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
@@ -10557,6 +11975,13 @@ void processArgs(int argc, const char* argv[]) {
         logColorToScreen("INFO", "Using testnet go behind trick");
     }
 
+    if (result.count("ant-debug"))
+    {
+        gAntDebugEnabled = true;
+        logColorToScreen("INFO", "Ant colony tracing enabled, "
+            + std::to_string(ANT_DEBUG_PRINTS_PER_EPOCH) + " lines per epoch");
+    }
+
     if (result.count("rebuild-tx-hashmap"))
     {
         rebuildTxHashmap = true;
@@ -10709,6 +12134,51 @@ void processArgs(int argc, const char* argv[]) {
     {
         forceBroadcastInvalidSolution = true;
         logColorToScreen("INFO", "Force broadcast invalid solution enabled (TEST ONLY)");
+    }
+
+    if (result.count("force-broadcast-ant-solution"))
+    {
+        std::string mode = result["force-broadcast-ant-solution"].as<std::string>();
+        // "mode" or "mode:count" - a walk costs ~25s of CPU and each publish burns a deposit, so the
+        // injector stops after a small budget rather than mining every tick forever.
+        const size_t colonPos = mode.find(':');
+        if (colonPos != std::string::npos)
+        {
+            forceAntSolutionBudget = (unsigned int)std::stoul(mode.substr(colonPos + 1));
+            mode = mode.substr(0, colonPos);
+        }
+        forceBroadcastAntSolution = true;
+        if (mode == "valid")             forceAntInjectMode = TestInvalidSolution::AntInjectMode::Valid;
+        else if (mode == "badclaim")     forceAntInjectMode = TestInvalidSolution::AntInjectMode::BadClaim;
+        else if (mode == "noncanon")     forceAntInjectMode = TestInvalidSolution::AntInjectMode::NonCanonical;
+        else if (mode == "wrongtree")    forceAntInjectMode = TestInvalidSolution::AntInjectMode::WrongTree;
+        else if (mode == "stale")        forceAntInjectMode = TestInvalidSolution::AntInjectMode::Stale;
+        else if (mode == "futureparent") forceAntInjectMode = TestInvalidSolution::AntInjectMode::FutureParent;
+        else if (mode == "leparent")     forceAntInjectMode = TestInvalidSolution::AntInjectMode::LeParent;
+        else
+        {
+            forceBroadcastAntSolution = false;
+            logColorToScreen("ERROR", "Unknown --force-broadcast-ant-solution mode: " + mode);
+        }
+        // Clamped by comparison, not std::max: the legacy Qubic.sln build has no NOMINMAX, so
+        // <windows.h>'s max macro would eat the call.
+        if (result.count("fbas-warmup"))
+        {
+            const int warmup = result["fbas-warmup"].as<int>();
+            forceAntInjectWarmup = (warmup > 0) ? (unsigned int)warmup : 0u;
+        }
+        if (result.count("fbas-gap"))
+        {
+            const int gapTicks = result["fbas-gap"].as<int>();
+            forceAntInjectGapTicks = (gapTicks > 0) ? (unsigned int)gapTicks : 0u;
+        }
+        if (forceBroadcastAntSolution)
+        {
+            logColorToScreen("INFO", "Force broadcast ant solution enabled, mode " + mode
+                + ", budget " + std::to_string(forceAntSolutionBudget) + " solution(s)"
+                + ", warmup " + std::to_string(forceAntInjectWarmup)
+                + ", gap " + std::to_string(forceAntInjectGapTicks) + " tick(s) (TEST ONLY)");
+        }
     }
 }
 

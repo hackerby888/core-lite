@@ -39,6 +39,9 @@
 #endif
 #define SCORE_CACHE_COLLISION_RETRIES 20 // number of retries to find entry in cache in case of hash collision
 
+// Persist the ant-colony replay cache (mirror of USE_SCORE_CACHE for the standalone score cache).
+#define ANT_USE_SCORE_CACHE 1
+
 // Number of ticks from prior epoch that are kept after seamless epoch transition. These can be requested after transition.
 #define TICKS_TO_KEEP_FROM_PRIOR_EPOCH 100
 
@@ -135,6 +138,13 @@ static wchar_t REVENUE_DATA_END_OF_EPOCH_FILE_NAME[] = L"revenue_data.eoe";
 static wchar_t REVENUE_DATA_SNAPSHOT_FILE_NAME[] = L"revenue_data.???";
 static wchar_t MULTIDIM_REVENUE_SNAPSHOT_FILE_NAME[] = L"revenue_data_multi.???";
 static wchar_t MULTIDIM_REVENUE_END_OF_EPOCH_FILE_NAME[] = L"revenue_data_multi.eoe";
+// Ant colony files. The header file carries the meta, the anchor ring and the export set together
+static wchar_t ANT_SNAPSHOT_HEADER_FILENAME[] = L"snapshotAntColonyHeader.???";
+static wchar_t ANT_SNAPSHOT_RECORDS_FILENAME[] = L"snapshotAntColonyRecords.???";
+static wchar_t ANT_SNAPSHOT_POOL_FILENAME[] = L"snapshotAntColonyPool.???";
+static wchar_t ANT_COLONY_REPLAY_CACHE_FILENAME[] = L"antColonyReplayCache.???";
+static wchar_t ANT_COLONY_SOLUTIONS_EOE_FILENAME[] = L"antColonySolutions.eoe";
+static wchar_t ANT_SOL_FLAG_FILE_NAME[] = L"snapshotAntSolutionFlag";
 
 // Neuraxon (even-nonce slot) - reserved for a future algorithm, not yet implemented.
 static constexpr unsigned long long NEURAXON_NUMBER_OF_INPUT_NEURONS = 1;
@@ -166,7 +176,39 @@ static constexpr unsigned long long BPP9000_NUMBER_OF_MUTATIONS = 100;
 // Number of graded windows. The score is an error count in [0, BPP9000_NUMBER_OF_WINDOWS], smaller is
 // better, and a solution passes when score <= threshold.
 static constexpr unsigned long long BPP9000_NUMBER_OF_WINDOWS = BPP9000_SEQUENCE_LENGTH - BPP9000_WINDOW_WIDTH;
-static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 3838;
+#ifdef TESTNET
+// A fresh root scores around 5500 and one walk reaches about 4500, so the mainnet bound is
+// unreachable at depth 1 and the local tree never starts. Raise it on testnet so every walk qualifies
+// and the tree deepens; deeper nodes must still strictly beat their parent.
+static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 6500;
+#else
+static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 4000;
+#endif
+
+// Ant colony: a solution must be published within this many ticks of the anchor its walk seeded from.
+static constexpr unsigned int ANT_PUBLISH_WINDOW_TICKS = 15000;
+
+// Per-parent child cap: a parent accepts at most this many children - a miner's parallel branches
+// off one node. 0 means unbound (no cap). A child's score must still strictly beat its parent's.
+// A child over the cap is rejected without a refund, so miners should stop submitting to a full parent.
+static constexpr unsigned int ANT_MAX_CHILDREN_PER_PARENT = 0;
+
+// Ant colony: tree nodes recorded per epoch; one per accepted solution.
+#if defined(TESTNET) && defined(TESTNET_LITE_RAM)
+static constexpr unsigned int ANT_MAX_NODES_PER_EPOCH = 1u << 16;
+#else
+static constexpr unsigned int ANT_MAX_NODES_PER_EPOCH = 1u << 23;
+#endif
+
+// Ant colony: replay-cache entries, scores this node already computed so a restart does not
+// recompute them. Node-local, not consensus; a miss only costs time.
+#if defined(TESTNET) && defined(TESTNET_LITE_RAM)
+static constexpr unsigned int ANT_REPLAY_CACHE_SIZE = 1u << 14;
+#else
+static constexpr unsigned int ANT_REPLAY_CACHE_SIZE = 1u << 20;
+#endif
+static_assert((ANT_REPLAY_CACHE_SIZE & (ANT_REPLAY_CACHE_SIZE - 1)) == 0,
+    "ANT_REPLAY_CACHE_SIZE must be a power of two, the slot index masks with it");
 
 // Multipler of score
 static constexpr unsigned int NEURAXON_SOLUTION_MULTIPLER = 1;

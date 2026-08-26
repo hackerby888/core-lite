@@ -58,6 +58,9 @@ inline long gForkRssBeforeKb = 0;        // parent RSS just before fork
 
 namespace tickFork
 {
+    // Trusting a claimed score is only safe where a tick can be undone.
+    inline constexpr bool gRollbackAvailable = true;
+
     inline std::atomic<bool> gForkRequest{ false };  // tickProcessor -> BSP: fork now
     inline std::atomic<pid_t> gChildPid{ -2 };       // BSP -> tickProcessor: child pid (>=0) / -1 fail / -2 idle
     inline int gPipe[2] = { -1, -1 };                // verdict channel: parent writes [1], child reads [0]
@@ -81,7 +84,7 @@ namespace tickFork
         gWinState.store((int)state, std::memory_order_release);
     }
 
-    // Only ticks carrying a mining-solution tx can mismatch quorum.
+    // Only ticks carrying a mining-solution tx can mismatch quorum. Ant counts too: AUX commits it on the claimed score.
     inline bool tickHasSolution(unsigned int tick)
     {
         TickData tickDataCopy;
@@ -101,7 +104,7 @@ namespace tickFork
             Transaction* transaction = ts.tickTransactions(offsets[i]);
             if (!transaction->checkValidity())
                 continue;
-            if (MiningSolutionTransaction::isSolutionTransaction(transaction))
+            if (MiningSolutionTransaction::isSolutionTransaction(transaction) || AntColonyMiningSolutionTransaction::isSolutionTransaction(transaction))
                 return true;
         }
         return false;
@@ -521,6 +524,9 @@ namespace tickFork
 #include <atomic>
 namespace tickFork
 {
+    // No checkpoint on this build, so every optimistic shortcut stays off.
+    inline constexpr bool gRollbackAvailable = false;
+
     inline std::atomic<bool> gIsForkChild{ false };
     inline std::atomic<bool> gForkRequest{ false };
     inline void maybeForkBeforeTick(unsigned long long) {}

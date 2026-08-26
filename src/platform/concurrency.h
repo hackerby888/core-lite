@@ -309,8 +309,12 @@ struct LockGuard
 #ifdef _MSC_VER
 static_assert(sizeof(long) == 4, "Size of long for _InterlockedExchange is 4 bytes");
 #define ATOMIC_STORE32(target, val) _InterlockedExchange((volatile long*)&target, val)
+#define ATOMIC_LOAD32(target) _InterlockedCompareExchange((volatile long*)&target, 0, 0)
 #else
 #define ATOMIC_STORE32(target, val) _InterlockedExchange((volatile int*)&target, val)
+// A real load, not a CAS: routing this through the _InterlockedCompareExchange shim would issue
+// an 8-byte operation on a 4-byte field, since long is 8 bytes here.
+#define ATOMIC_LOAD32(target) __atomic_load_n((volatile unsigned int*)&(target), __ATOMIC_SEQ_CST)
 #endif
 #define ATOMIC_INC64(target) _InterlockedIncrement64(&target)
 #define ATOMIC_AND64(target, val) _InterlockedAnd64(&target, val)

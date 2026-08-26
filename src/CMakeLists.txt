@@ -207,6 +207,11 @@ if(NO_RPC)
     target_compile_definitions(Qubic PRIVATE NO_RPC)
 endif()
 
+# Peer port override, so a second node can run where the default is taken.
+if(DEFINED PORT)
+    target_compile_definitions(Qubic PRIVATE PORT=${PORT})
+endif()
+
 if(NO_ENABLE_QUBIC_LOGGING_EVENT)
     target_compile_definitions(Qubic PRIVATE NO_ENABLE_QUBIC_LOGGING_EVENT)
 endif()
