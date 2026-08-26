@@ -73,7 +73,6 @@ private:
     static constexpr unsigned long long tickTransactionOffsetsSizeCurrentEpoch = tickTransactionOffsetsLengthCurrentEpoch * sizeof(unsigned long long);
     static constexpr unsigned long long tickTransactionOffsetsSizePreviousEpoch = tickTransactionOffsetsLengthPreviousEpoch * sizeof(unsigned long long);
     static constexpr unsigned long long tickTransactionOffsetsSize = tickTransactionOffsetsLength * sizeof(unsigned long long);
-    static constexpr unsigned long long oldTickTransactionsPadding = 4096 * 2;
 
 
     // Tick number range of current epoch storage
@@ -828,7 +827,7 @@ public:
         // if we don't use swap, these memory will be commited on the fly while core is running (below is just reserve space, not physical memory allocation)
         if (!allocPoolWithErrorLog(L"tickDataPtr ", tickDataSize, (void**)&tickDataPtr, __LINE__, true, false)
             || !allocPoolWithErrorLog(L"tickPtr", ticksSize, (void**)&ticksPtr, __LINE__, true, false)
-            || !allocPoolWithErrorLog(L"tickTransactionPtr", tickTransactionsSize + oldTickTransactionsPadding, (void**)&tickTransactionsPtr, __LINE__, true, false))
+            || !allocPoolWithErrorLog(L"tickTransactionPtr", tickTransactionsSize, (void**)&tickTransactionsPtr, __LINE__, true, false))
         {
             return false;
         }
@@ -848,7 +847,7 @@ public:
 
         oldTickDataPtr = tickDataPtr + MAX_NUMBER_OF_TICKS_PER_EPOCH;
         oldTicksPtr = ticksPtr + ticksLengthCurrentEpoch;
-        oldTickTransactionsPtr = tickTransactionsPtr + tickTransactionsSizeCurrentEpoch + oldTickTransactionsPadding;
+        oldTickTransactionsPtr = tickTransactionsPtr + tickTransactionsSizeCurrentEpoch;
         oldTickTransactionOffsetsPtr = tickTransactionOffsetsPtr + tickTransactionOffsetsLengthCurrentEpoch;
 
         tickBegin = 0;
@@ -940,7 +939,7 @@ public:
             qVirtualCommit(oldTickTransactionsPtr, tickTransactionsSizePreviousEpoch);
 
             unsigned long long currentOldTickTransactionsOffet = 0;
-            const unsigned long long offsetDelta = (tickTransactionsSizeCurrentEpoch + keepTransactionSizesSum) - nextTickTransactionOffset + oldTickTransactionsPadding;
+            const unsigned long long offsetDelta = (tickTransactionsSizeCurrentEpoch + keepTransactionSizesSum) - nextTickTransactionOffset;
 
                 for (unsigned int tickId = oldTickBegin; tickId < oldTickEnd; ++tickId)
                 {
@@ -1000,7 +999,7 @@ public:
                 copyMem(oldTickTransactionsPtr, tickTransactionsPtr + firstToKeepOffset, keepTransactionSizesSum);
 
                 // adjust offsets (based on end of transactions)
-                const unsigned long long offsetDelta = (tickTransactionsSizeCurrentEpoch + keepTransactionSizesSum) - nextTickTransactionOffset + oldTickTransactionsPadding;
+                const unsigned long long offsetDelta = (tickTransactionsSizeCurrentEpoch + keepTransactionSizesSum) - nextTickTransactionOffset;
                 for (unsigned int tickId = oldTickBegin; tickId < oldTickEnd; ++tickId)
                 {
                     PinScope _pinScope; // bound swap-page pins during epoch-transition copy
@@ -1128,13 +1127,11 @@ public:
         ASSERT(tickTransactionOffsetsPtr != nullptr);
         ASSERT(oldTickDataPtr == tickDataPtr + MAX_NUMBER_OF_TICKS_PER_EPOCH);
         ASSERT(oldTicksPtr == ticksPtr + ticksLengthCurrentEpoch);
-        ASSERT(oldTickTransactionsPtr == tickTransactionsPtr + tickTransactionsSizeCurrentEpoch + oldTickTransactionsPadding);
+        ASSERT(oldTickTransactionsPtr == tickTransactionsPtr + tickTransactionsSizeCurrentEpoch);
         ASSERT(oldTickTransactionOffsetsPtr == tickTransactionOffsetsPtr + tickTransactionOffsetsLengthCurrentEpoch);
 
         ASSERT(nextTickTransactionOffset >= FIRST_TICK_TRANSACTION_OFFSET);
         ASSERT(nextTickTransactionOffset <= tickTransactionsSizeCurrentEpoch);
-        const unsigned long long* tickOffsets = TickTransactionOffsetsAccess::getByTickInPreviousEpoch(oldTickBegin+2);
-        unsigned long long offset = tickOffsets[0];
         // Check previous epoch data
         for (unsigned int tickId = oldTickBegin; tickId < oldTickEnd; ++tickId)
         {
