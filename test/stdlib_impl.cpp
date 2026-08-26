@@ -89,13 +89,40 @@ void* qVirtualCommit(void* address, const unsigned long long size) {
 	return VirtualAlloc(address, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE);
 }
 
+unsigned long long qGetPageSize() {
+    SYSTEM_INFO systemInfo;
+    GetSystemInfo(&systemInfo);
+    return (unsigned long long)systemInfo.dwPageSize;
+}
+
 bool qVirtualFreeAndRecommit(void* address, const unsigned long long size) {
-    VirtualFree(address, (SIZE_T)size, MEM_DECOMMIT);
-    bool commitMem = commitMemMap[(unsigned long long)address];
-	if (!commitMem) {
-		return true;
-	}
-    return VirtualAlloc(address, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE) != address;
+    static const unsigned long long pageSize = qGetPageSize();
+    const bool commitMem = commitMemMap[(unsigned long long)address];
+
+    // MEM_DECOMMIT rounds the length up to a page, so decommitting a non-page-multiple size would
+    // also drop whatever region shares the last page; zero that tail in place instead.
+    const unsigned long long decommitSize = size & ~(pageSize - 1);
+    if (decommitSize)
+    {
+        VirtualFree(address, (SIZE_T)decommitSize, MEM_DECOMMIT);
+        if (commitMem && VirtualAlloc(address, (SIZE_T)decommitSize, MEM_COMMIT, PAGE_READWRITE) != address)
+        {
+            return false;
+        }
+    }
+
+    const unsigned long long tailSize = size - decommitSize;
+    if (tailSize)
+    {
+        char* tail = (char*)address + decommitSize;
+        if (!VirtualAlloc(tail, (SIZE_T)tailSize, MEM_COMMIT, PAGE_READWRITE))
+        {
+            return false;
+        }
+        memset(tail, 0, (size_t)tailSize);
+    }
+
+    return true;
 }
 #else
 void* qVirtualAlloc(const unsigned long long size, bool commitMem = false) {
@@ -127,9 +154,30 @@ void* qVirtualCommit(void* address, const unsigned long long size) {
 }
 
 bool qVirtualFreeAndRecommit(void* address, const unsigned long long size) {
-    bool commitMem = commitMemMap[(unsigned long long)address];
-    int prot = commitMem ? (PROT_READ | PROT_WRITE) : PROT_NONE;
-    return mmap(address, size, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == address;
+    static const unsigned long long pageSize = (unsigned long long)sysconf(_SC_PAGESIZE);
+    const bool commitMem = commitMemMap[(unsigned long long)address];
+    const int prot = commitMem ? (PROT_READ | PROT_WRITE) : PROT_NONE;
+
+    // MAP_FIXED rounds the length up to a page, so remapping a non-page-multiple size would also
+    // wipe whatever region shares the last page; zero that tail in place instead of remapping it.
+    const unsigned long long remapSize = size & ~(pageSize - 1);
+    if (remapSize && mmap(address, remapSize, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != address)
+    {
+        return false;
+    }
+
+    const unsigned long long tailSize = size - remapSize;
+    if (tailSize)
+    {
+        char* tail = (char*)address + remapSize;
+        if (mprotect(tail, tailSize, PROT_READ | PROT_WRITE) != 0)
+        {
+            return false;
+        }
+        memset(tail, 0, tailSize);
+    }
+
+    return true;
 }
 
 #endif
