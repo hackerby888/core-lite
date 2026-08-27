@@ -50,9 +50,8 @@ static pid_t shimForkSidecar()
 #endif
 }
 
-// Re-exec self as the ant walker, a sibling of the node: the ant score walk runs there so the node
-// never holds a score-engine lock across a checkpoint fork point. Spawned here rather than by the
-// node so it outlives a rollback promotion.
+// Re-exec self as the ant walker, a sibling of the node. Spawned here, not by the node, so it
+// outlives a rollback promotion.
 static pid_t shimForkAntWalker()
 {
     if (std::atoi(gAntWalkerThreads) <= 0)
@@ -163,8 +162,7 @@ static inline void runUnderSupervisor(int argc, const char** argv)
         if (antWalker > 0 && reapedPid == antWalker)
         {
             sleep(1);                                      // a squatted socket would hot-loop the respawn
-            // A missing or unrunnable walker binary would otherwise respawn once a second forever;
-            // the node works without one, it just pays the walks on demand.
+            // An unrunnable walker would otherwise respawn once a second forever.
             if (++antWalkerRestarts > 5)
             {
                 fprintf(stderr, "[shim] ant walker died %d times, leaving it down\n", antWalkerRestarts);

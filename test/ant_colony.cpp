@@ -1175,8 +1175,7 @@ static long long commitChildWithoutAnn(AntColonyBpp9000T* colony, const m256i& o
     return landsAt;
 }
 
-// fork() clones one thread, so a claim held at fork time has no owner in the child and the on-demand
-// waiter would spin on it forever.
+// A claim held at fork time has no owner in the child, and the on-demand waiter would spin on it.
 TEST(TestAntColonyMaintenance, PromoteReleasesAnInheritedClaim)
 {
     AntColonyBpp9000T* colony = freshColony();
@@ -1192,7 +1191,7 @@ TEST(TestAntColonyMaintenance, PromoteReleasesAnInheritedClaim)
 
     EXPECT_EQ(AntColonyMaintenance::releaseInheritedClaims(*colony), 1u);
     EXPECT_FALSE(colony->isAnnClaimHeld(slot));
-    // Retryable, not merely unclaimed: a Busy here would be the hang the sweep exists to prevent.
+    // Retryable, not merely unclaimed: a Busy here is the hang the sweep exists to prevent.
     EXPECT_EQ(colony->tryClaimAnn(slot), AntColonyBpp9000T::AnnClaimOwned);
     colony->releaseAnnClaim(slot);
 

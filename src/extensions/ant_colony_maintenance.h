@@ -1,14 +1,11 @@
 #pragma once
 
-// Colony upkeep the node does outside consensus: dropping claims a fork child inherited, and
-// deciding which records a background rebuild may take next. Both are pure functions of a colony so
-// they can be exercised without a running node.
+// Colony upkeep outside consensus. Pure functions of a colony, so they are testable without a node.
 
 namespace AntColonyMaintenance
 {
-// An ant record claimed for a network rebuild sits at ANT_ANN_MATERIALISING until the claiming thread
-// publishes or releases it. fork() clones only the calling thread, so a promoted child can inherit a
-// claim whose owner never existed there, and ensureAntRecordAnn's waiter would spin on it forever.
+// fork() clones only the calling thread, so a promoted child can inherit a claim with no owner and
+// ensureAntRecordAnn's waiter would spin on it forever.
 inline unsigned int releaseInheritedClaims(AntColonyBpp9000T& colony)
 {
     unsigned int released = 0;
@@ -24,8 +21,7 @@ inline unsigned int releaseInheritedClaims(AntColonyBpp9000T& colony)
     return released;
 }
 
-// A record can be rebuilt only once its parent holds a network, so a scan in commit order - which is
-// topological - walks each lineage from the bottom up and never repeats a level.
+// A rebuild starts from the parent's network, so a record whose parent has none cannot be taken.
 inline bool isRebuildableNow(AntColonyBpp9000T& colony, unsigned int index)
 {
     if (colony.isAnnMaterialised(index) || colony.isAnnClaimHeld(index))

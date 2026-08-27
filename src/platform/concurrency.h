@@ -40,8 +40,7 @@ namespace ForkCensus
     {
         std::atomic<int> depth{ 0 };
         std::atomic<const char*> what{ nullptr };
-        // Every LockGuard-based lock reports the same `what` (the macro expands inside LockGuard's
-        // constructor), so the address is the only thing that says which lock blocked a fork.
+        // Every LockGuard lock reports the same `what`, so only the address names the offender.
         std::atomic<const volatile void*> where{ nullptr };
         std::atomic<int> live{ 0 };   // 0 = free/reusable, 1 = owned by a live thread
     };

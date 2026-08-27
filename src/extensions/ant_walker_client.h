@@ -1,14 +1,7 @@
 #pragma once
 
-// Node side of the ant walker sidecar: picks records whose network was never built, hands the walk
-// to a separate process, and publishes the result after re-verifying it against the record.
-//
-// An AUX node trusting claimed scores commits every ant record unmaterialised, so the backlog grows
-// all epoch and is paid back at ~one full walk per lineage level the first time a strict path needs
-// a network (epoch end, a rollback replay, a MAIN switch). The walk cannot run on a node thread: it
-// holds a score-engine lock for tens of seconds while a checkpoint window is only ~21 s, so the fork
-// census would skip nearly every fork and force those ticks strict. Out of process the node holds no
-// lock while the walk runs.
+// Node side of the ant walker: picks records committed without a network, sends the walk to a
+// separate process, publishes the result after re-verifying it against the record.
 
 #if defined(ANT_WALKER) && !defined(_WIN32)
 
@@ -40,20 +33,18 @@ enum class LinkState
     Ready,
 };
 
-// A walker that scores differently than this node fails every job. Marking each one would poison
-// good records permanently, so a run of them is read as a broken walker instead: the marks are
-// rolled back and the link is dropped.
+// A wrong walker fails every job, and marking each would poison good records permanently, so a
+// streak is read as a broken walker instead.
 static constexpr unsigned int DISAGREEMENT_STREAK_LIMIT = 3;
 static constexpr unsigned int DEADLINE_STREAK_LIMIT = 3;
-// A walk runs for minutes, and the walker answers PING throughout, so this is the "gone, not slow"
-// threshold rather than an expected duration.
+// "Gone", not "slow": a walk runs for minutes and the walker answers PING throughout.
 static constexpr long long MIN_JOB_DEADLINE_MS = 600'000;
 static constexpr long long PING_INTERVAL_MS = 10'000;
 static constexpr long long BACKOFF_MIN_MS = 100;
 static constexpr long long BACKOFF_MAX_MS = 30'000;
 static constexpr int POLL_SLICE_MS = 100;
 static constexpr long long HEARTBEAT_INTERVAL_MS = 60'000;
-// Generous enough for a legitimate 512 MB pool derive, short enough that a wedged walker is visible.
+// Covers a legitimate 512 MB pool derive without hiding a wedged walker.
 static constexpr long long HANDSHAKE_DEADLINE_MS = 120'000;
 
 struct InFlight
@@ -61,8 +52,7 @@ struct InFlight
     unsigned long long jobId;
     unsigned int recordIndex;
     long long sentAtMs;
-    // Kept so the replay-cache key can be rebuilt when the result lands; re-resolving the anchor then
-    // could pick a different digest once the ring has moved on.
+    // Kept for the replay key: re-resolving the anchor later could pick a different digest.
     m256i anchorDigest;
 };
 
@@ -144,9 +134,7 @@ inline bool isEnabled()
 }
 
 // ── failed-record bitmap ────────────────────────────────────────────────────────────────────────
-// Node-local scheduling state only: it decides what the background dispatcher tries next. The
-// on-demand rebuild path ignores it and still walks, because that runs when consensus needs the
-// network rather than when spare capacity allows it.
+// Scheduling only: the on-demand rebuild path ignores this and still walks.
 
 inline void ensureFailedBits()
 {
@@ -243,8 +231,7 @@ inline bool sendFrame(int fd, unsigned int type, const void* payload, unsigned i
 
 // ── link ────────────────────────────────────────────────────────────────────────────────────────
 
-// Every exit from Ready goes through here, so no claim is ever left held behind a connection that no
-// longer exists - the on-demand rebuild path would otherwise wait on it forever.
+// Releases every in-flight claim: the on-demand path would otherwise wait on a dead connection.
 inline void dropLink(const char* reason)
 {
     const int fd = gState.fd.exchange(-1);
@@ -314,8 +301,7 @@ inline bool tryConnect()
 
 // ── selection ───────────────────────────────────────────────────────────────────────────────────
 
-// Commit order is topological, so a forward scan that only takes records whose parent already has a
-// network walks each lineage from the bottom up and never repeats a level.
+// Commit order is topological, so this walks each lineage bottom-up without repeating a level.
 inline bool selectNextRecord(unsigned int& outIndex)
 {
     const unsigned int recordCount = gAntColony.solutionCount();
@@ -338,8 +324,7 @@ inline bool selectNextRecord(unsigned int& outIndex)
     return false;
 }
 
-// Counting the whole backlog is a full pass over the records, so it runs on the heartbeat rather
-// than on every dispatch: at mainnet's 2^23 records that scan is not something to repeat per job.
+// A full record scan (2^23 on mainnet), so it runs on the heartbeat rather than per dispatch.
 inline void refreshBacklog()
 {
     const unsigned int recordCount = gAntColony.solutionCount();
@@ -437,8 +422,6 @@ inline bool takeInFlight(unsigned long long jobId, InFlight& out)
     return false;
 }
 
-// A walker that scores this node's records wrongly fails all of them, so a streak is treated as a
-// broken walker rather than broken records: the marks it caused are undone and the link is dropped.
 inline void noteDisagreement(unsigned int index)
 {
     markFailed(index);
@@ -511,8 +494,7 @@ inline void applyResult(const AntWalkProto::ResultPayload& result)
     KangarooTwelve(&childAnn, sizeof(childAnn), &annHash, sizeof(annHash));
 
     gAntColony.publishAnn(job.recordIndex, childAnn, annHash);
-    // The same cache every scoring path consults, so a later strict replay of this solution is a
-    // lookup rather than another walk.
+    // The cache every scoring path consults, so a strict replay of this solution is a lookup.
     const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(record->pubkey, record->nonce, record->parentRef, job.anchorDigest);
     gAntColony.putReplayScore(replayKey, result.score, childAnn);
     gState.materialised.fetch_add(1, std::memory_order_relaxed);
@@ -557,8 +539,7 @@ inline void checkDeadlines()
 
 // ── dispatcher ──────────────────────────────────────────────────────────────────────────────────
 
-// The colony is about to be reseeded, so every index in flight is about to mean something else.
-// Claims are dropped and the scan state cleared before the reset is allowed to proceed.
+// Reseeding invalidates every index in flight, so claims and scan state go before it proceeds.
 inline void serveQuiesce()
 {
     for (const InFlight& job : gState.inFlight)
@@ -626,8 +607,7 @@ inline bool readOneFrame(int fd, unsigned char* payload)
             dropLink("handshake refused");
             return false;
         }
-        // A ready frame also answers the hello resent when the mining seed rotates, which is a
-        // re-seed of a link that never dropped rather than a new connection.
+        // Also answers the hello resent on a seed rotation, which is a re-seed, not a new link.
         const bool wasReady = (LinkState)gState.link.load(std::memory_order_acquire) == LinkState::Ready;
         gState.threadCount = ready.threadCount;
         gState.walkerPid.store((int)ready.walkerPid, std::memory_order_release);
@@ -687,8 +667,7 @@ inline void dispatcherLoop()
             continue;
         }
 
-        // Before the first mining seed exists there is nothing to derive a pool from, and a walker
-        // seeded with zeros would disagree on every record.
+        // A walker seeded before the first mining seed exists would disagree on every record.
         if (score == nullptr || isZero(score->currentRandomSeed))
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(POLL_SLICE_MS));
@@ -743,8 +722,7 @@ inline void dispatcherLoop()
 
         checkDeadlines();
 
-        // The queue is kept exactly as deep as the walker has threads: any more only lets a wedged
-        // walker hold claims the on-demand path may need.
+        // Deeper only lets a wedged walker hold claims the on-demand path may need.
         if ((LinkState)gState.link.load(std::memory_order_acquire) == LinkState::Ready)
         {
             while (gState.inFlight.size() < gState.threadCount && dispatchOne())
@@ -810,8 +788,7 @@ inline void stop()
     gState.dispatcher = nullptr;
 }
 
-// The seed the walker derives its pool from changed, so any result still in flight was computed
-// against the old one and must not be applied.
+// The pool seed changed, so results still in flight were computed against the old one.
 inline void onEpochBegin()
 {
     gState.seedGeneration.fetch_add(1, std::memory_order_acq_rel);
@@ -844,8 +821,7 @@ inline void quiesceEnd()
     gState.quiesceRequested.store(false, std::memory_order_release);
 }
 
-// Runs in the fork child, where the dispatcher thread does not exist but its descriptor was
-// inherited: two readers on one socket would interleave results.
+// The fork child inherits the descriptor; two readers on one socket interleave results.
 inline void closeInheritedSocket()
 {
     const int fd = gState.fd.exchange(-1);
@@ -856,13 +832,11 @@ inline void closeInheritedSocket()
     gState.link.store((int)LinkState::Disconnected, std::memory_order_release);
 }
 
-// The promoted child owns the node now; its claims were swept by the promote path, so only the
-// client's own view has to be rebuilt before a fresh dispatcher starts.
+// The promote path swept the claims, so only the client's own view is rebuilt here.
 inline void restartAfterPromote()
 {
     closeInheritedSocket();
-    // The parent's dispatcher thread did not come through fork(); only its handle did, so the handle
-    // is abandoned rather than joined or destroyed.
+    // Only the handle came through fork(), so it is abandoned rather than joined or destroyed.
     gState.dispatcher = nullptr;
     gState.inFlight.clear();
     gState.inFlightCount.store(0, std::memory_order_release);

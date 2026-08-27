@@ -767,8 +767,7 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
         return false;
     }
 
-    // Same cache every other scoring path consults, so a rebuild never re-walks a score this node
-    // already holds - including one restored from the on-disk replay cache.
+    // The cache every other scoring path consults, so a rebuild never re-walks a score we hold.
     AntColonyBpp9000T::Ann& childAnn = gAntRebuildChildScratch[processorNumber];
     const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(rec->pubkey, rec->nonce, rec->parentRef, anchorDigest);
     unsigned int rebuiltScore;
@@ -12423,8 +12422,7 @@ int main(int argc, const char* argv[])
         return tickStorageScan::scan();
     }
 #endif
-    // Before any node setup: this process is the walker sidecar, not a node. It leaves via _exit so
-    // the node's static destructors never run against globals this process never initialised.
+    // The walker, not a node. _exit so static destructors never run against uninitialised globals.
     if (AntWalkerWorker::requested(argc, argv))
     {
         _exit(AntWalkerWorker::run(argc, argv));

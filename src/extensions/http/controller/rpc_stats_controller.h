@@ -140,8 +140,7 @@ RPC_ROUTE("GET", "/v1/fork-stats")
     return r;
 }
 
-// Ant walker sidecar health: link state, backlog and the counters that tell a walker chewing through
-// work from one that is up but delivering nothing.
+// Ant walker health: separates a walker chewing through work from one up but delivering nothing.
 RPC_ROUTE("GET", "/v1/ant-walker")
 {
     (void)req;

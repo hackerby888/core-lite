@@ -1,11 +1,7 @@
 #pragma once
 
-// Wire format shared by the node's walker client and the qubic-ant-walker sidecar. Fixed-size
-// payloads only, so a frame is one read of a known length.
-//
-// The sidecar is a pure function of the job payload: it holds no node state and the node re-verifies
-// every score against the record before publishing, so a wrong or stale sidecar can only waste its
-// own CPU, never corrupt consensus.
+// Wire format shared by the walker client and the walker process. Fixed-size payloads only, so a
+// frame is one read of a known length.
 
 #include "score.h"
 #include "public_settings.h"
@@ -15,12 +11,10 @@ namespace AntWalkProto
 static constexpr unsigned int MAGIC = 0x57544E41u;   // "ANTW"
 static constexpr unsigned int VERSION = 1;
 
-// Bumped past the 512 MB pool build, so a walker that predates a wire change is refused at HELLO.
 static constexpr unsigned int ANN_BYTES = (unsigned int)sizeof(score_engine::ScoreBpp9000T::ANN);
 
-// Both binaries compile the same scorer headers, so the only way they can score a nonce differently
-// is a build that disagrees on the parameters feeding it. Comparing this at the handshake catches
-// that before a job runs, rather than as a walker whose every result the node rejects.
+// Both sides compile the same scorer, so only a build disagreeing on these params scores
+// differently. Compared at the handshake, before a job runs.
 constexpr unsigned int mixConfig(unsigned int accumulated, unsigned long long value)
 {
     for (unsigned int byteIndex = 0; byteIndex < 8; byteIndex++)

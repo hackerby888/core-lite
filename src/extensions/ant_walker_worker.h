@@ -1,13 +1,7 @@
 #pragma once
 
-// The ant score walk, run in a separate process re-exec'd from this same binary (the shim passes
-// --ant-walk-worker). A walk holds a score-engine lock for tens of seconds while a checkpoint window
-// is only ~21 s, so on a node thread the fork census would skip nearly every fork and force those
-// ticks strict. Here the node only sends a job and applies a verified result.
-//
-// Stateless: the pool is re-derived from the seed the node sends and the task is the blob compiled
-// into this binary. Nothing about a node's colony lives here, and the node re-verifies every score
-// against the record before publishing it.
+// The ant score walk, in a process re-exec'd from this binary (--ant-walk-worker): on a node thread
+// it would hold the score-engine lock across nearly every fork point. Stateless, holds no node state.
 
 #if defined(ANT_WALKER) && !defined(_WIN32)
 
@@ -84,8 +78,7 @@ bool writeFully(int fd, const void* buffer, size_t size)
     return true;
 }
 
-// Waits for readable with a bounded total timeout, so a peer that vanished without an EOF cannot
-// leave this process parked forever on a connection that will never speak again.
+// Bounded, so a peer that vanished without an EOF cannot park this process forever.
 bool waitReadable(int fd, int timeoutMs, const std::atomic<bool>& stop)
 {
     int waitedMs = 0;
@@ -247,8 +240,7 @@ void runWorker(unsigned int workerIndex)
             }
         }
 
-        // A walk cannot be aborted mid-flight, so one that outlived its connection is finished and
-        // then dropped rather than written to whatever now owns that descriptor.
+        // A walk cannot be aborted, so one that outlived its connection finishes and is dropped.
         if (!gPoolOfWorkers.connected.load(std::memory_order_acquire))
         {
             continue;
@@ -337,8 +329,7 @@ void serveConnection(int fd, unsigned int threadCount)
     {
         if (!waitReadable(fd, NO_TRAFFIC_TIMEOUT_MS, gPoolOfWorkers.stopping))
         {
-            // A single walk runs far longer than this timeout, so silence only means a dead peer
-            // when there is nothing outstanding to answer with.
+            // A walk outlasts this timeout, so silence only means a dead peer when nothing is queued.
             if (hasWorkOutstanding())
             {
                 continue;
@@ -425,8 +416,7 @@ void serveConnection(int fd, unsigned int threadCount)
         gPoolOfWorkers.queue.clear();
     }
     {
-        // Held until every worker that might still write is out of writeFully, so the descriptor is
-        // never closed under one of them.
+        // Held until no worker can still be inside writeFully on this descriptor.
         std::lock_guard<std::mutex> writeGuard(gPoolOfWorkers.writeMutex);
         gPoolOfWorkers.connectionFd.store(-1, std::memory_order_release);
     }
@@ -435,9 +425,7 @@ void serveConnection(int fd, unsigned int threadCount)
 
 // ── listener ────────────────────────────────────────────────────────────────────────────────────
 
-// A live server on this path means this process would silently compete with it for the node's jobs,
-// which is how an orphaned sidecar ends up answering for a running one. Only a socket nothing answers
-// on is stale enough to replace.
+// Competing with a live server is how an orphaned sidecar ends up answering for a running one.
 bool socketPathIsServed(const char* path)
 {
     const int probeFd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -500,8 +488,7 @@ bool parseOptions(int argc, const char* argv[], Options& options)
     return !options.socketPath.empty() && options.threadCount > 0;
 }
 
-// The shim re-execs this binary with the worker flag rather than shipping a second one; the node
-// half of main() must not run here, so this is checked before any node setup.
+// Checked before any node setup: the node half of main() must not run in the walker.
 inline bool requested(int argc, const char* argv[])
 {
     for (int i = 1; i < argc; i++)
