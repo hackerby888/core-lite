@@ -140,6 +140,16 @@ RPC_ROUTE("GET", "/v1/fork-stats")
     return r;
 }
 
+// Ant walker sidecar health: link state, backlog and the counters that tell a walker chewing through
+// work from one that is up but delivering nothing.
+RPC_ROUTE("GET", "/v1/ant-walker")
+{
+    (void)req;
+    RpcResp r;
+    r.body = AntWalker::statsJson();
+    return r;
+}
+
 // The full durable record of every unforkable tick (not a recent ring) — one line per skipped fork.
 RPC_ROUTE("GET", "/v1/unforkable-ticks")
 {

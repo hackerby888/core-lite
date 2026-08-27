@@ -767,9 +767,18 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
         return false;
     }
 
+    // Same cache every other scoring path consults, so a rebuild never re-walks a score this node
+    // already holds - including one restored from the on-disk replay cache.
     AntColonyBpp9000T::Ann& childAnn = gAntRebuildChildScratch[processorNumber];
-    const unsigned int rebuiltScore = score->computeAntChildScore(processorNumber, parentAnn,
-        rec->pubkey, rec->nonce, anchorDigest, childAnn);
+    const AntColonyBpp9000T::ReplayKey replayKey =
+        makeAntReplayKey(rec->pubkey, rec->nonce, rec->parentRef, anchorDigest);
+    unsigned int rebuiltScore;
+    if (!gAntColony.tryGetReplayScore(replayKey, rebuiltScore, childAnn))
+    {
+        rebuiltScore = score->computeAntChildScore(processorNumber, parentAnn,
+            rec->pubkey, rec->nonce, anchorDigest, childAnn);
+        gAntColony.putReplayScore(replayKey, rebuiltScore, childAnn);
+    }
 
     // This walk is the computation the record was admitted without. A disagreement means the acceptance
     // was wrong, so publish nothing: a network built for a score no other node holds is worse than none.
@@ -859,6 +868,10 @@ static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int 
     const AntSolutionRecord* rec = gAntColony.recordAt(recordIdx);
     return (rec != nullptr) && gAntColony.annOfNonRoot(*rec, out);
 }
+
+#include "extensions/ant_colony_maintenance.h"
+#include "extensions/ant_walker_worker.h"
+#include "extensions/ant_walker_client.h"
 
 // A pool miner's solution, arriving over BroadcastMessage
 static void queueAntSolution(unsigned long long processorNumber, const m256i& computorPublicKey,
@@ -969,8 +982,11 @@ static void antColonyBeginEpoch()
 #ifndef NDEBUG
     gAntDebugPrintBudget = ANT_DEBUG_PRINTS_PER_EPOCH;
 #endif
+    AntWalker::quiesceBegin();
     gAntPendingSolutions.reset();
     gAntColony.beginEpoch(score->currentRandomSeed, system.initialTick);
+    AntWalker::onEpochBegin();
+    AntWalker::quiesceEnd();
     gAntColony.setErrorThreshold((unsigned int)getSolutionThreshold(score_engine::AlgoType::Bpp9000));
 
     // Every identity's root derives from this one value, so a node that seeded differently builds a
@@ -9490,6 +9506,7 @@ static void deinitialize()
 
     fastTxWindow.deinit();
     gAntPendingSolutions.deinit();
+    AntWalker::stop();
     gAntColony.deinit();
 
     if (score)
@@ -10620,6 +10637,13 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     const bool shadowClean = gShadow.purgeOrphans();
     ts.resetSwapPinsForChildPromote();
     forkCensusResetForChildPromote();
+    const unsigned int releasedAntClaims = AntColonyMaintenance::releaseInheritedClaims(gAntColony);
+    AntWalker::restartAfterPromote();
+    if (releasedAntClaims)
+    {
+        fprintf(stderr, "[FORK] CHILD: released %u inherited ant network claims\n", releasedAntClaims);
+        fflush(stderr);
+    }
     if (!shadowClean)
     {
         forceVerifySolutions = true;
@@ -10811,8 +10835,8 @@ static void bspForkPoint()
         {
             const char* offendingLock = forkCensusOffender();
             ForkStats::onForkSkipped(ForkStats::CENSUS, (unsigned)system.tick, offendingLock ? offendingLock : "?");
-            fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n", offendingLock ? offendingLock : "?",
-                (unsigned)system.tick);
+            fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' (%p) -> skip fork, run tick %u strict\n",
+                offendingLock ? offendingLock : "?", (const void*)forkCensusOffenderAddress(), (unsigned)system.tick);
             fflush(stderr);
             quiescence.release();
             tickFork::gChildPid = -1;
@@ -10841,6 +10865,7 @@ static void bspForkPoint()
     {
         // CHILD BSP: block until parent's verdict, then become the node.
         quiescence.abandonInChild();
+        AntWalker::closeInheritedSocket();
         close(tickFork::gPipe[1]);
         const auto childCommand = tickForkControl::readChildCommand(tickFork::gPipe[0], (unsigned)system.tick + tickFork::gForkWindowK);
         if (childCommand.action == tickForkControl::ChildAction::Retire)
@@ -11761,6 +11786,8 @@ void processArgs(int argc, const char* argv[]) {
         ("fbas-warmup", "TEST: publish this many valid ant solutions before switching to the --fbas mode", cxxopts::value<int>()->default_value("0"))
         ("fbas-gap", "TEST: minimum ticks between ant publishes; a gap wider than the fork window makes each window retire", cxxopts::value<int>()->default_value("0"))
         ("ant-debug", "Trace ant-colony accepts, over-accepts and network rebuilds (budgeted per epoch)", cxxopts::value<bool>())
+        ("ant-walker-threads", "Ant network walks handed to the walker sidecar (0=off)", cxxopts::value<unsigned int>()->default_value("4"))
+        ("ant-walker-debug", "Trace every ant walker job and result", cxxopts::value<bool>())
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
@@ -11980,6 +12007,18 @@ void processArgs(int argc, const char* argv[]) {
         gAntDebugEnabled = true;
         logColorToScreen("INFO", "Ant colony tracing enabled, "
             + std::to_string(ANT_DEBUG_PRINTS_PER_EPOCH) + " lines per epoch");
+    }
+
+    {
+        const unsigned int antWalkerThreads = result["ant-walker-threads"].as<unsigned int>();
+        char antWalkerSocket[128];
+        snprintf(antWalkerSocket, sizeof(antWalkerSocket), "/tmp/qubic-antwalk-%d.sock", httpPort);
+        AntWalker::configure(antWalkerSocket, antWalkerThreads, result.count("ant-walker-debug") > 0);
+        if (antWalkerThreads > 0)
+        {
+            logColorToScreen("INFO", "Ant walker sidecar enabled, " + std::to_string(antWalkerThreads)
+                + " threads, socket " + antWalkerSocket);
+        }
     }
 
     if (result.count("rebuild-tx-hashmap"))
@@ -12386,6 +12425,12 @@ int main(int argc, const char* argv[])
         return tickStorageScan::scan();
     }
 #endif
+    // Before any node setup: this process is the walker sidecar, not a node. It leaves via _exit so
+    // the node's static destructors never run against globals this process never initialised.
+    if (AntWalkerWorker::requested(argc, argv))
+    {
+        _exit(AntWalkerWorker::run(argc, argv));
+    }
 #if defined(__linux__) && !defined(NO_RPC) && !defined(LITE_WASM_SC)
     int rpcProxyExitCode = 0;
     if (runRpcProxyIfRequested(argc, argv, rpcProxyExitCode))
@@ -12402,6 +12447,7 @@ int main(int argc, const char* argv[])
 #if defined(__linux__) && !defined(NO_RPC) && !defined(LITE_WASM_SC)
     startRpcServices();
 #endif
+    AntWalker::start();
 #if defined(LITE_WASM_SC) && !defined(NO_RPC)
     // Wasm testnet serves HTTP in-process; the unix-socket/sidecar stack is compiled out.
     QubicHttpServer::start(httpPort);
