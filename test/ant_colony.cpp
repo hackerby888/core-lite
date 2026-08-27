@@ -1149,9 +1149,8 @@ TEST(TestAntColonyExport, BeginEpochClearsIt)
 }
 
 // A child of an existing node committed on trust: no network, the way an AUX node stores one.
-static long long commitChildWithoutAnn(AntColonyBpp9000T* colony, const m256i& owner,
-    const SolutionRef& parentRef, unsigned int score, unsigned int txIdx, unsigned long long nonceSeed,
-    unsigned int tick = 100000)
+static long long commitChildWithoutAnn(AntColonyBpp9000T* colony, const m256i& owner, const SolutionRef& parentRef, unsigned int score,
+    unsigned int txIdx, unsigned long long nonceSeed, unsigned int tick = 100000)
 {
     const AntSolutionRecord* parentRec = nullptr;
     if (colony->tryGetParent(parentRef, &parentRec) != ValidityResult::Valid)

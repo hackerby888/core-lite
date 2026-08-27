@@ -148,8 +148,7 @@ bool loadEmbeddedTask(score_engine::ScoreBpp9000T& engine)
     const unsigned int population = (unsigned int)BPP9000_POPULATION_THRESHOLD;
     const unsigned int neighbors = (unsigned int)BPP9000_NUMBER_OF_NEIGHBORS;
 
-    const unsigned long long topologyBytes =
-        score_task_file::topologyBytes(inputTrits, outputTrits, population, neighbors);
+    const unsigned long long topologyBytes = score_task_file::topologyBytes(inputTrits, outputTrits, population, neighbors);
     const unsigned char* topologyBlock = BPP9000_TASK_BYTES + sizeof(score_task_file::TaskFileHeader);
     const unsigned char* dataBlock = topologyBlock + topologyBytes;
 
@@ -179,8 +178,7 @@ WorkerPool gPoolOfWorkers;
 
 void runWorker(unsigned int workerIndex)
 {
-    score_engine::ScoreBpp9000T* engine = (score_engine::ScoreBpp9000T*)aligned_alloc(64,
-        (sizeof(score_engine::ScoreBpp9000T) + 63) / 64 * 64);
+    score_engine::ScoreBpp9000T* engine = (score_engine::ScoreBpp9000T*)aligned_alloc(64, (sizeof(score_engine::ScoreBpp9000T) + 63) / 64 * 64);
     if (engine == nullptr || !loadEmbeddedTask(*engine))
     {
         fprintf(stderr, "[ant-walker] worker %u could not load the embedded task\n", workerIndex);
@@ -195,8 +193,7 @@ void runWorker(unsigned int workerIndex)
         AntWalkProto::JobPayload job;
         {
             std::unique_lock<std::mutex> lock(gPoolOfWorkers.queueMutex);
-            gPoolOfWorkers.queueSignal.wait(lock, []
-            {
+            gPoolOfWorkers.queueSignal.wait(lock, [] {
                 return gPoolOfWorkers.stopping.load(std::memory_order_acquire)
                     || !gPoolOfWorkers.queue.empty();
             });
@@ -236,8 +233,7 @@ void runWorker(unsigned int workerIndex)
                 parentAnn = (const Ann*)job.parentAnn;
             }
 
-            const unsigned int score = engine->computeScoreFromParent(
-                *parentAnn, job.pubkey, job.nonce, job.anchorDigest, gPool);
+            const unsigned int score = engine->computeScoreFromParent(*parentAnn, job.pubkey, job.nonce, job.anchorDigest, gPool);
             if (score == score_engine::INVALID_SCORE_VALUE)
             {
                 result.status = AntWalkProto::ResultUnscorable;
@@ -306,15 +302,13 @@ unsigned int validateHello(const AntWalkProto::HelloPayload& hello)
     {
         return AntWalkProto::ReadyVersionMismatch;
     }
-    if (memcmp(hello.topologyHash, BPP9000_TOPOLOGY_HASH, 32) != 0
-        || memcmp(hello.dataHash, BPP9000_DATA_HASH, 32) != 0)
+    if (memcmp(hello.topologyHash, BPP9000_TOPOLOGY_HASH, 32) != 0 || memcmp(hello.dataHash, BPP9000_DATA_HASH, 32) != 0)
     {
         return AntWalkProto::ReadyTaskMismatch;
     }
     if (hello.configHash != AntWalkProto::CONFIG_HASH)
     {
-        fprintf(stderr, "[ant-walker] scorer config %08x does not match the node's %08x\n",
-            AntWalkProto::CONFIG_HASH, hello.configHash);
+        fprintf(stderr, "[ant-walker] scorer config %08x does not match the node's %08x\n", AntWalkProto::CONFIG_HASH, hello.configHash);
         fflush(stderr);
         return AntWalkProto::ReadyConfigMismatch;
     }
@@ -349,8 +343,7 @@ void serveConnection(int fd, unsigned int threadCount)
             {
                 continue;
             }
-            fprintf(stderr, "[ant-walker] no traffic for %d ms and nothing in flight, dropping the connection\n",
-                NO_TRAFFIC_TIMEOUT_MS);
+            fprintf(stderr, "[ant-walker] no traffic for %d ms and nothing in flight, dropping the connection\n", NO_TRAFFIC_TIMEOUT_MS);
             fflush(stderr);
             break;
         }
@@ -362,8 +355,7 @@ void serveConnection(int fd, unsigned int threadCount)
         }
         if (header.magic != AntWalkProto::MAGIC || header.payloadSize > sizeof(payload))
         {
-            fprintf(stderr, "[ant-walker] bad frame (magic %08x size %u), dropping the connection\n",
-                header.magic, header.payloadSize);
+            fprintf(stderr, "[ant-walker] bad frame (magic %08x size %u), dropping the connection\n", header.magic, header.payloadSize);
             fflush(stderr);
             break;
         }
@@ -551,8 +543,7 @@ inline int run(int argc, const char* argv[])
     {
         gPoolOfWorkers.threads.emplace_back(runWorker, i);
     }
-    fprintf(stderr, "[ant-walker] listening on %s, %u threads, pid %d\n",
-        options.socketPath.c_str(), options.threadCount, (int)getpid());
+    fprintf(stderr, "[ant-walker] listening on %s, %u threads, pid %d\n", options.socketPath.c_str(), options.threadCount, (int)getpid());
     fflush(stderr);
 
     while (!gPoolOfWorkers.stopping.load(std::memory_order_acquire))

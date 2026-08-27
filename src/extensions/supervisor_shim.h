@@ -74,8 +74,7 @@ static pid_t shimForkAntWalker()
 
     char socketPath[128];
     snprintf(socketPath, sizeof(socketPath), "/tmp/qubic-antwalk-%s.sock", gSidecarPort);
-    execl(self, "qubic-ant-walker", "--ant-walk-worker", "--socket", socketPath,
-        "--threads", gAntWalkerThreads, (char*)nullptr);
+    execl(self, "qubic-ant-walker", "--ant-walk-worker", "--socket", socketPath, "--threads", gAntWalkerThreads, (char*)nullptr);
     // Not fatal for the node: without a walker the backlog is simply paid on demand as before.
     fprintf(stderr, "[shim] could not exec the ant walker (%s), running without it\n", strerror(errno));
     fflush(stderr);

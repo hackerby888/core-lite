@@ -770,13 +770,11 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
     // Same cache every other scoring path consults, so a rebuild never re-walks a score this node
     // already holds - including one restored from the on-disk replay cache.
     AntColonyBpp9000T::Ann& childAnn = gAntRebuildChildScratch[processorNumber];
-    const AntColonyBpp9000T::ReplayKey replayKey =
-        makeAntReplayKey(rec->pubkey, rec->nonce, rec->parentRef, anchorDigest);
+    const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(rec->pubkey, rec->nonce, rec->parentRef, anchorDigest);
     unsigned int rebuiltScore;
     if (!gAntColony.tryGetReplayScore(replayKey, rebuiltScore, childAnn))
     {
-        rebuiltScore = score->computeAntChildScore(processorNumber, parentAnn,
-            rec->pubkey, rec->nonce, anchorDigest, childAnn);
+        rebuiltScore = score->computeAntChildScore(processorNumber, parentAnn, rec->pubkey, rec->nonce, anchorDigest, childAnn);
         gAntColony.putReplayScore(replayKey, rebuiltScore, childAnn);
     }
 
@@ -10835,8 +10833,8 @@ static void bspForkPoint()
         {
             const char* offendingLock = forkCensusOffender();
             ForkStats::onForkSkipped(ForkStats::CENSUS, (unsigned)system.tick, offendingLock ? offendingLock : "?");
-            fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' (%p) -> skip fork, run tick %u strict\n",
-                offendingLock ? offendingLock : "?", (const void*)forkCensusOffenderAddress(), (unsigned)system.tick);
+            fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' (%p) -> skip fork, run tick %u strict\n", offendingLock ? offendingLock : "?",
+                (const void*)forkCensusOffenderAddress(), (unsigned)system.tick);
             fflush(stderr);
             quiescence.release();
             tickFork::gChildPid = -1;

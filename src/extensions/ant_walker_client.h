@@ -124,8 +124,7 @@ inline const char* linkName(LinkState state)
 
 inline long long nowMs()
 {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 inline void logLine(const char* format, ...)
@@ -393,8 +392,7 @@ inline bool dispatchOne()
     if (!job.isRoot)
     {
         const long long parentIndex = gAntColony.findIndexBySolutionRef(record->parentRef);
-        const AntSolutionRecord* parentRecord =
-            (parentIndex == ANT_INVALID_INDEX) ? nullptr : gAntColony.recordAt(parentIndex);
+        const AntSolutionRecord* parentRecord = (parentIndex == ANT_INVALID_INDEX) ? nullptr : gAntColony.recordAt(parentIndex);
         AntColonyBpp9000T::Ann parentAnn;
         if (parentRecord == nullptr || !gAntColony.annOfNonRoot(*parentRecord, parentAnn))
         {
@@ -417,8 +415,7 @@ inline bool dispatchOne()
     gState.jobsSent.fetch_add(1, std::memory_order_relaxed);
     if (gState.debug)
     {
-        logLine("job %llu record %u depth %u sent", (unsigned long long)job.jobId, index,
-            (unsigned)record->depth);
+        logLine("job %llu record %u depth %u sent", (unsigned long long)job.jobId, index, (unsigned)record->depth);
     }
     return true;
 }
@@ -460,8 +457,7 @@ inline void noteDisagreement(unsigned int index)
         gState.disagreementStreak, (unsigned int)gState.rolledBackCandidates.size());
     gState.rolledBackCandidates.clear();
     gState.disagreementStreak = 0;
-    gState.suspectWalkerPid.store(gState.walkerPid.load(std::memory_order_acquire),
-        std::memory_order_release);
+    gState.suspectWalkerPid.store(gState.walkerPid.load(std::memory_order_acquire), std::memory_order_release);
     dropLink("walker disagrees on every job");
 }
 
@@ -482,12 +478,10 @@ inline void applyResult(const AntWalkProto::ResultPayload& result)
 
     const long long walkMs = nowMs() - job.sentAtMs;
     const unsigned long long previousEma = gState.walkMsEma.load(std::memory_order_acquire);
-    gState.walkMsEma.store(previousEma ? (previousEma * 3 + (unsigned long long)walkMs) / 4
-                                       : (unsigned long long)walkMs, std::memory_order_release);
+    gState.walkMsEma.store(previousEma ? (previousEma * 3 + (unsigned long long)walkMs) / 4 : (unsigned long long)walkMs, std::memory_order_release);
     gState.lastResultAtMs.store((unsigned long long)nowMs(), std::memory_order_release);
 
-    if (result.epochId != gState.seedGeneration.load(std::memory_order_acquire)
-        || result.status == AntWalkProto::ResultStaleEpoch)
+    if (result.epochId != gState.seedGeneration.load(std::memory_order_acquire) || result.status == AntWalkProto::ResultStaleEpoch)
     {
         gAntColony.releaseAnnClaim(job.recordIndex);
         gState.staleDropped.fetch_add(1, std::memory_order_relaxed);
@@ -506,8 +500,7 @@ inline void applyResult(const AntWalkProto::ResultPayload& result)
     if (result.status != AntWalkProto::ResultOk || result.score != record->score)
     {
         gAntColony.releaseAnnClaim(job.recordIndex);
-        logLine("record %u walked %u != accepted %u, marked failed", job.recordIndex,
-            result.score, record->score);
+        logLine("record %u walked %u != accepted %u, marked failed", job.recordIndex, result.score, record->score);
         noteDisagreement(job.recordIndex);
         return;
     }
@@ -520,15 +513,13 @@ inline void applyResult(const AntWalkProto::ResultPayload& result)
     gAntColony.publishAnn(job.recordIndex, childAnn, annHash);
     // The same cache every scoring path consults, so a later strict replay of this solution is a
     // lookup rather than another walk.
-    const AntColonyBpp9000T::ReplayKey replayKey =
-        makeAntReplayKey(record->pubkey, record->nonce, record->parentRef, job.anchorDigest);
+    const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(record->pubkey, record->nonce, record->parentRef, job.anchorDigest);
     gAntColony.putReplayScore(replayKey, result.score, childAnn);
     gState.materialised.fetch_add(1, std::memory_order_relaxed);
     noteSuccess();
     if (gState.debug)
     {
-        logLine("job %llu record %u score %u in %lld ms", (unsigned long long)result.jobId,
-            job.recordIndex, result.score, walkMs);
+        logLine("job %llu record %u score %u in %lld ms", (unsigned long long)result.jobId, job.recordIndex, result.score, walkMs);
     }
 }
 
@@ -552,8 +543,7 @@ inline void checkDeadlines()
         gAntColony.releaseAnnClaim(index);
         gState.deadlineExpiries.fetch_add(1, std::memory_order_relaxed);
         // A missing result says nothing about the record, so the bitmap is left alone.
-        logLine("job %llu record %u no result in %lld ms, claim released, not marked",
-            jobId, index, deadlineMs);
+        logLine("job %llu record %u no result in %lld ms, claim released, not marked", jobId, index, deadlineMs);
         gState.deadlineStreak++;
     }
     gState.inFlightCount.store((unsigned int)gState.inFlight.size(), std::memory_order_release);
@@ -585,8 +575,7 @@ inline void serveQuiesce()
     gState.failedCount.store(0, std::memory_order_release);
     gState.quiesceAcknowledged.store(true, std::memory_order_release);
 
-    while (gState.quiesceRequested.load(std::memory_order_acquire)
-        && !gState.stopping.load(std::memory_order_acquire))
+    while (gState.quiesceRequested.load(std::memory_order_acquire) && !gState.stopping.load(std::memory_order_acquire))
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -633,15 +622,13 @@ inline bool readOneFrame(int fd, unsigned char* payload)
         }
         if (ready.status != AntWalkProto::ReadyOk)
         {
-            logLine("handshake refused by the walker (status %u) - not retrying until it changes",
-                ready.status);
+            logLine("handshake refused by the walker (status %u) - not retrying until it changes", ready.status);
             dropLink("handshake refused");
             return false;
         }
         // A ready frame also answers the hello resent when the mining seed rotates, which is a
         // re-seed of a link that never dropped rather than a new connection.
-        const bool wasReady =
-            (LinkState)gState.link.load(std::memory_order_acquire) == LinkState::Ready;
+        const bool wasReady = (LinkState)gState.link.load(std::memory_order_acquire) == LinkState::Ready;
         gState.threadCount = ready.threadCount;
         gState.walkerPid.store((int)ready.walkerPid, std::memory_order_release);
         gState.link.store((int)LinkState::Ready, std::memory_order_release);
@@ -652,8 +639,7 @@ inline bool readOneFrame(int fd, unsigned char* payload)
         else
         {
             gState.reconnects.fetch_add(1, std::memory_order_relaxed);
-            logLine("sidecar connected, pid %u, %u threads, epoch %u", ready.walkerPid,
-                ready.threadCount, ready.epochId);
+            logLine("sidecar connected, pid %u, %u threads, epoch %u", ready.walkerPid, ready.threadCount, ready.epochId);
         }
     }
     else if (header.type == AntWalkProto::MsgResult)
@@ -673,12 +659,9 @@ inline bool readOneFrame(int fd, unsigned char* payload)
 inline void heartbeat()
 {
     logLine("backlog %llu, done %llu, failed %llu, inflight %u/%u, walk avg %llu ms, link %s",
-        (unsigned long long)gState.backlog.load(std::memory_order_acquire),
-        (unsigned long long)gState.materialised.load(std::memory_order_acquire),
-        (unsigned long long)gState.failedCount.load(std::memory_order_acquire),
-        gState.inFlightCount.load(std::memory_order_acquire), gState.threadCount,
-        (unsigned long long)gState.walkMsEma.load(std::memory_order_acquire),
-        linkName((LinkState)gState.link.load(std::memory_order_acquire)));
+        (unsigned long long)gState.backlog.load(std::memory_order_acquire), (unsigned long long)gState.materialised.load(std::memory_order_acquire),
+        (unsigned long long)gState.failedCount.load(std::memory_order_acquire), gState.inFlightCount.load(std::memory_order_acquire), gState.threadCount,
+        (unsigned long long)gState.walkMsEma.load(std::memory_order_acquire), linkName((LinkState)gState.link.load(std::memory_order_acquire)));
 }
 
 inline void dispatcherLoop()
@@ -731,8 +714,7 @@ inline void dispatcherLoop()
             continue;
         }
 
-        if (link == LinkState::Handshaking
-            && nowMs() - gState.handshakeStartedAtMs > HANDSHAKE_DEADLINE_MS)
+        if (link == LinkState::Handshaking && nowMs() - gState.handshakeStartedAtMs > HANDSHAKE_DEADLINE_MS)
         {
             dropLink("no ready frame within the handshake deadline");
             continue;
@@ -771,8 +753,7 @@ inline void dispatcherLoop()
         }
 
         const unsigned int generation = gState.seedGeneration.load(std::memory_order_acquire);
-        if (generation != gState.helloGeneration
-            && (LinkState)gState.link.load(std::memory_order_acquire) == LinkState::Ready)
+        if (generation != gState.helloGeneration && (LinkState)gState.link.load(std::memory_order_acquire) == LinkState::Ready)
         {
             const int helloFd = gState.fd.load(std::memory_order_acquire);
             if (helloFd < 0 || !sendHello(helloFd))
@@ -906,19 +887,12 @@ inline std::string statsJson()
         "\"inflight\":%u,\"backlog\":%llu,\"materialised\":%llu,\"failed\":%llu,"
         "\"jobsSent\":%llu,\"disagreements\":%llu,\"deadlineExpiries\":%llu,"
         "\"staleDropped\":%llu,\"reconnects\":%llu,\"walkAvgMs\":%llu,\"epochId\":%u}",
-        isEnabled() ? "true" : "false",
-        linkName((LinkState)gState.link.load(std::memory_order_acquire)),
-        gState.socketPath.c_str(), gState.threadCount,
-        gState.inFlightCount.load(std::memory_order_acquire),
-        (unsigned long long)gState.backlog.load(std::memory_order_acquire),
-        (unsigned long long)gState.materialised.load(std::memory_order_acquire),
-        (unsigned long long)gState.failedCount.load(std::memory_order_acquire),
-        (unsigned long long)gState.jobsSent.load(std::memory_order_acquire),
-        (unsigned long long)gState.disagreements.load(std::memory_order_acquire),
-        (unsigned long long)gState.deadlineExpiries.load(std::memory_order_acquire),
-        (unsigned long long)gState.staleDropped.load(std::memory_order_acquire),
-        (unsigned long long)gState.reconnects.load(std::memory_order_acquire),
-        (unsigned long long)gState.walkMsEma.load(std::memory_order_acquire),
+        isEnabled() ? "true" : "false", linkName((LinkState)gState.link.load(std::memory_order_acquire)), gState.socketPath.c_str(), gState.threadCount,
+        gState.inFlightCount.load(std::memory_order_acquire), (unsigned long long)gState.backlog.load(std::memory_order_acquire),
+        (unsigned long long)gState.materialised.load(std::memory_order_acquire), (unsigned long long)gState.failedCount.load(std::memory_order_acquire),
+        (unsigned long long)gState.jobsSent.load(std::memory_order_acquire), (unsigned long long)gState.disagreements.load(std::memory_order_acquire),
+        (unsigned long long)gState.deadlineExpiries.load(std::memory_order_acquire), (unsigned long long)gState.staleDropped.load(std::memory_order_acquire),
+        (unsigned long long)gState.reconnects.load(std::memory_order_acquire), (unsigned long long)gState.walkMsEma.load(std::memory_order_acquire),
         gState.seedGeneration.load(std::memory_order_acquire));
     return std::string(buffer);
 }
