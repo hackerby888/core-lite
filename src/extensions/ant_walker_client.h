@@ -46,6 +46,11 @@ static constexpr int POLL_SLICE_MS = 100;
 static constexpr long long HEARTBEAT_INTERVAL_MS = 60'000;
 // Covers a legitimate 512 MB pool derive without hiding a wedged walker.
 static constexpr long long HANDSHAKE_DEADLINE_MS = 120'000;
+// A record the tick is blocked on is handed back, but only once the job is old enough to be stuck:
+// yanking a healthy walk throws its progress away and the node pays the whole walk again.
+static constexpr long long PREEMPT_MIN_AGE_MS = 180'000;
+static constexpr long long PREEMPT_ACK_WAIT_MS = 500;
+static constexpr unsigned int PREEMPT_NONE = 0xFFFFFFFFu;
 
 struct InFlight
 {
@@ -70,10 +75,13 @@ struct State
     std::atomic<unsigned int> seedGeneration{ 0 };
     std::atomic<int> walkerPid{ -1 };
     std::atomic<int> suspectWalkerPid{ -1 };
+    std::atomic<unsigned int> preemptRequest{ PREEMPT_NONE };
+    std::atomic<unsigned int> handedBack{ PREEMPT_NONE };
 
     std::atomic<unsigned long long> jobsSent{ 0 };
     std::atomic<unsigned long long> materialised{ 0 };
     std::atomic<unsigned long long> memoHits{ 0 };
+    std::atomic<unsigned long long> preempted{ 0 };
     std::atomic<unsigned long long> disagreements{ 0 };
     std::atomic<unsigned long long> deadlineExpiries{ 0 };
     std::atomic<unsigned long long> staleDropped{ 0 };
@@ -313,6 +321,15 @@ inline bool selectNextRecord(unsigned int& outIndex)
     for (unsigned int scanned = 0; scanned < recordCount; scanned++)
     {
         const unsigned int index = (gState.cursor + scanned) % recordCount;
+        if (index == gState.handedBack.load(std::memory_order_acquire))
+        {
+            // Held until the tick has actually taken it, so the walker cannot re-take what it gave up.
+            if (gAntColony.isAnnClaimHeld(index) || gAntColony.isAnnMaterialised(index))
+            {
+                gState.handedBack.store(PREEMPT_NONE, std::memory_order_release);
+            }
+            continue;
+        }
         if (isFailed(index) || !AntColonyMaintenance::isRebuildableNow(gAntColony, index))
         {
             continue;
@@ -373,6 +390,32 @@ inline bool dispatchOne()
         return false;
     }
     copyMem(job.anchorDigest, anchorDigest.m256i_u8, 32);
+
+    // Every other scoring path memoises its walk, so a score already held here costs no job at all.
+    const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(record->pubkey, record->nonce, record->parentRef, anchorDigest);
+    AntColonyBpp9000T::Ann memoAnn;
+    unsigned int memoScore;
+    if (gAntColony.tryGetReplayScore(replayKey, memoScore, memoAnn))
+    {
+        if (memoScore != record->score)
+        {
+            // The node's own cache disagreeing is the record's fault, not the walker's, so no streak.
+            gAntColony.releaseAnnClaim(index);
+            markFailed(index);
+            logLine("record %u memo %u != accepted %u, marked failed", index, memoScore, record->score);
+            return false;
+        }
+        unsigned int memoHash;
+        KangarooTwelve(&memoAnn, sizeof(memoAnn), &memoHash, sizeof(memoHash));
+        gAntColony.publishAnn(index, memoAnn, memoHash);
+        gState.memoHits.fetch_add(1, std::memory_order_relaxed);
+        gState.materialised.fetch_add(1, std::memory_order_relaxed);
+        if (gState.debug)
+        {
+            logLine("record %u from the replay cache, no job", index);
+        }
+        return true;
+    }
 
     if (!job.isRoot)
     {
@@ -539,6 +582,37 @@ inline void checkDeadlines()
 
 // ── dispatcher ──────────────────────────────────────────────────────────────────────────────────
 
+// Answers the on-demand path waiting on a record this link claimed. Only a job past the stale age is
+// handed back: a healthy walk is worth waiting out, since taking it back discards all of its progress.
+inline void servePreempt()
+{
+    const unsigned int index = gState.preemptRequest.load(std::memory_order_acquire);
+    if (index == PREEMPT_NONE)
+    {
+        return;
+    }
+
+    const unsigned long long ema = gState.walkMsEma.load(std::memory_order_acquire);
+    const long long staleMs = (long long)(ema * 2) > PREEMPT_MIN_AGE_MS ? (long long)(ema * 2) : PREEMPT_MIN_AGE_MS;
+    for (size_t i = 0; i < gState.inFlight.size(); i++)
+    {
+        if (gState.inFlight[i].recordIndex != index || nowMs() - gState.inFlight[i].sentAtMs < staleMs)
+        {
+            continue;
+        }
+        const unsigned long long jobId = gState.inFlight[i].jobId;
+        const long long ageMs = nowMs() - gState.inFlight[i].sentAtMs;
+        gState.inFlight.erase(gState.inFlight.begin() + (long)i);
+        gState.inFlightCount.store((unsigned int)gState.inFlight.size(), std::memory_order_release);
+        gState.handedBack.store(index, std::memory_order_release);
+        gAntColony.releaseAnnClaim(index);
+        gState.preempted.fetch_add(1, std::memory_order_relaxed);
+        logLine("job %llu record %u handed back to the tick after %lld ms, its result will be dropped", jobId, index, ageMs);
+        break;
+    }
+    gState.preemptRequest.store(PREEMPT_NONE, std::memory_order_release);
+}
+
 // Reseeding invalidates every index in flight, so claims and scan state go before it proceeds.
 inline void serveQuiesce()
 {
@@ -548,6 +622,8 @@ inline void serveQuiesce()
     }
     gState.inFlight.clear();
     gState.inFlightCount.store(0, std::memory_order_release);
+    gState.preemptRequest.store(PREEMPT_NONE, std::memory_order_release);
+    gState.handedBack.store(PREEMPT_NONE, std::memory_order_release);
     gState.cursor = 0;
     gState.disagreementStreak = 0;
     gState.deadlineStreak = 0;
@@ -638,10 +714,11 @@ inline bool readOneFrame(int fd, unsigned char* payload)
 
 inline void heartbeat()
 {
-    logLine("backlog %llu, done %llu, failed %llu, inflight %u/%u, walk avg %llu ms, link %s",
+    logLine("backlog %llu, done %llu (memo %llu), failed %llu, inflight %u/%u, walk avg %llu ms, link %s",
         (unsigned long long)gState.backlog.load(std::memory_order_acquire), (unsigned long long)gState.materialised.load(std::memory_order_acquire),
-        (unsigned long long)gState.failedCount.load(std::memory_order_acquire), gState.inFlightCount.load(std::memory_order_acquire), gState.threadCount,
-        (unsigned long long)gState.walkMsEma.load(std::memory_order_acquire), linkName((LinkState)gState.link.load(std::memory_order_acquire)));
+        (unsigned long long)gState.memoHits.load(std::memory_order_acquire), (unsigned long long)gState.failedCount.load(std::memory_order_acquire),
+        gState.inFlightCount.load(std::memory_order_acquire), gState.threadCount, (unsigned long long)gState.walkMsEma.load(std::memory_order_acquire),
+        linkName((LinkState)gState.link.load(std::memory_order_acquire)));
 }
 
 inline void dispatcherLoop()
@@ -654,6 +731,8 @@ inline void dispatcherLoop()
 
     while (!gState.stopping.load(std::memory_order_acquire))
     {
+        servePreempt();
+
         if (nowMs() >= nextHeartbeatAtMs)
         {
             nextHeartbeatAtMs = nowMs() + HEARTBEAT_INTERVAL_MS;
@@ -821,6 +900,30 @@ inline void quiesceEnd()
     gState.quiesceRequested.store(false, std::memory_order_release);
 }
 
+// Asks the dispatcher to hand back a record the on-demand path is stuck behind. The caller re-checks
+// the claim afterwards: a claim held by another node processor is not the walker's to release.
+inline void preemptClaim(unsigned int index)
+{
+    if (!isEnabled() || gState.inFlightCount.load(std::memory_order_acquire) == 0)
+    {
+        return;
+    }
+    unsigned int slot = PREEMPT_NONE;
+    if (!gState.preemptRequest.compare_exchange_strong(slot, index, std::memory_order_acq_rel))
+    {
+        return;
+    }
+
+    const long long deadlineMs = nowMs() + PREEMPT_ACK_WAIT_MS;
+    while (gState.preemptRequest.load(std::memory_order_acquire) == index && nowMs() < deadlineMs)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    // A dispatcher that never answered must not leave the slot taken for every later request.
+    slot = index;
+    gState.preemptRequest.compare_exchange_strong(slot, PREEMPT_NONE, std::memory_order_acq_rel);
+}
+
 // The fork child inherits the descriptor; two readers on one socket interleave results.
 inline void closeInheritedSocket()
 {
@@ -840,6 +943,8 @@ inline void restartAfterPromote()
     gState.dispatcher = nullptr;
     gState.inFlight.clear();
     gState.inFlightCount.store(0, std::memory_order_release);
+    gState.preemptRequest.store(PREEMPT_NONE, std::memory_order_release);
+    gState.handedBack.store(PREEMPT_NONE, std::memory_order_release);
     gState.quiesceRequested.store(false, std::memory_order_release);
     gState.quiesceAcknowledged.store(true, std::memory_order_release);
     gState.cursor = 0;
@@ -855,18 +960,20 @@ inline void restartAfterPromote()
 
 inline std::string statsJson()
 {
-    char buffer[768];
+    char buffer[896];
     snprintf(buffer, sizeof(buffer),
         "{\"enabled\":%s,\"state\":\"%s\",\"socket\":\"%s\",\"threads\":%u,"
         "\"inflight\":%u,\"backlog\":%llu,\"materialised\":%llu,\"failed\":%llu,"
         "\"jobsSent\":%llu,\"disagreements\":%llu,\"deadlineExpiries\":%llu,"
-        "\"staleDropped\":%llu,\"reconnects\":%llu,\"walkAvgMs\":%llu,\"epochId\":%u}",
+        "\"staleDropped\":%llu,\"reconnects\":%llu,\"walkAvgMs\":%llu,"
+        "\"memoHits\":%llu,\"preempted\":%llu,\"epochId\":%u}",
         isEnabled() ? "true" : "false", linkName((LinkState)gState.link.load(std::memory_order_acquire)), gState.socketPath.c_str(), gState.threadCount,
         gState.inFlightCount.load(std::memory_order_acquire), (unsigned long long)gState.backlog.load(std::memory_order_acquire),
         (unsigned long long)gState.materialised.load(std::memory_order_acquire), (unsigned long long)gState.failedCount.load(std::memory_order_acquire),
         (unsigned long long)gState.jobsSent.load(std::memory_order_acquire), (unsigned long long)gState.disagreements.load(std::memory_order_acquire),
         (unsigned long long)gState.deadlineExpiries.load(std::memory_order_acquire), (unsigned long long)gState.staleDropped.load(std::memory_order_acquire),
         (unsigned long long)gState.reconnects.load(std::memory_order_acquire), (unsigned long long)gState.walkMsEma.load(std::memory_order_acquire),
+        (unsigned long long)gState.memoHits.load(std::memory_order_acquire), (unsigned long long)gState.preempted.load(std::memory_order_acquire),
         gState.seedGeneration.load(std::memory_order_acquire));
     return std::string(buffer);
 }
@@ -884,6 +991,7 @@ inline void stop() {}
 inline void onEpochBegin() {}
 inline void quiesceBegin() {}
 inline void quiesceEnd() {}
+inline void preemptClaim(unsigned int) {}
 inline void closeInheritedSocket() {}
 inline void restartAfterPromote() {}
 inline std::string statsJson() { return std::string("{\"enabled\":false}"); }

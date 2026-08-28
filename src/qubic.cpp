@@ -714,26 +714,44 @@ static bool getAntAnchorDigestForRebuild(unsigned int tick, m256i& out)
     return recomputeAntAnchorDigest(tick, out);
 }
 
+namespace AntWalker
+{
+inline void preemptClaim(unsigned int index);
+}
+
+// A background walker job holds its claim for a whole walk, so a rebuild the tick needs would queue
+// behind it. Asking repeatedly is free: the walker only hands back a job old enough to be stuck.
+static constexpr unsigned int ANT_ANN_CLAIM_PREEMPT_POLLS = 250;
+
+// Waiting costs what the walk costs; walking it here as well would pay that twice.
+static AntColonyBpp9000T::AnnClaim waitForAnnClaim(unsigned int idx)
+{
+    for (unsigned int polls = 1; gAntColony.isAnnClaimHeld(idx); polls++)
+    {
+        sleepMilliseconds(20);
+        if (polls % ANT_ANN_CLAIM_PREEMPT_POLLS == 0)
+        {
+            AntWalker::preemptClaim(idx);
+        }
+    }
+    return gAntColony.tryClaimAnn(idx);
+}
+
 // Rebuilds one record's network. Its parent must already have one, or be the root.
 static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned int idx)
 {
-    const AntColonyBpp9000T::AnnClaim claim = gAntColony.tryClaimAnn(idx);
+    AntColonyBpp9000T::AnnClaim claim = gAntColony.tryClaimAnn(idx);
+    while (claim == AntColonyBpp9000T::AnnClaimBusy)
+    {
+        claim = waitForAnnClaim(idx);
+    }
     if (claim == AntColonyBpp9000T::AnnClaimReady)
     {
         return true;
     }
-    if (claim == AntColonyBpp9000T::AnnClaimInvalid)
+    if (claim != AntColonyBpp9000T::AnnClaimOwned)
     {
         return false;
-    }
-    if (claim == AntColonyBpp9000T::AnnClaimBusy)
-    {
-        // Waiting costs what the walk costs; walking it here as well would pay that twice.
-        while (gAntColony.isAnnClaimHeld(idx))
-        {
-            sleepMilliseconds(20);
-        }
-        return gAntColony.isAnnMaterialised(idx);
     }
 
     // Owned from here on, so every exit below either publishes or releases the claim.
