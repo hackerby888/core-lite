@@ -6209,9 +6209,18 @@ static bool saveAllNodeStates()
     forceLogToConsoleAsAddDebugMessage = true;
 #endif
 
+    CHAR16 snapshotDirectory[16];
+    setText(snapshotDirectory, L"ep");
+    appendNumber(snapshotDirectory, system.epoch, false);
+
+    // Stage the save in a side directory so an interrupted save leaves the previous snapshot loadable.
     CHAR16 directory[16];
-    setText(directory, L"ep");
-    appendNumber(directory, system.epoch, false);
+    setText(directory, snapshotDirectory);
+    appendText(directory, L".tmp");
+
+    CHAR16 previousDirectory[16];
+    setText(previousDirectory, snapshotDirectory);
+    appendText(previousDirectory, L".old");
 
     logToConsole(L"Start saving node states from main thread");
 
@@ -6433,6 +6442,18 @@ static bool saveAllNodeStates()
 #if !defined(NDEBUG)
     forceLogToConsoleAsAddDebugMessage = false;
 #endif
+
+    // Promote the staged directory only now that every component is on disk. Two renames instead of
+    // a remove: deleting the previous snapshot takes seconds, and a kill in that window leaves nothing.
+    removeDir(previousDirectory);
+    renameDir(snapshotDirectory, previousDirectory);   // absent on the first save
+    if (!renameDir(directory, snapshotDirectory))
+    {
+        renameDir(previousDirectory, snapshotDirectory);
+        logToConsole(L"Failed to promote snapshot");
+        return false;
+    }
+    removeDir(previousDirectory);
 
     return true;
 }
