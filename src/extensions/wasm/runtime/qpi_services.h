@@ -460,6 +460,13 @@ static void clearCheatWarp()
 // Sets a balance outright rather than transferring, which is the whole point of a deal.
 static long long dealCheatBalance(const m256i& publicKey, long long amount)
 {
+    // The amount arrives as an unsigned word, so a value past the signed range lands here negative.
+    // A negative balance is meaningless, and letting it through would decrease against index -1.
+    if (amount < 0)
+    {
+        return CHEAT_ERR_UNKNOWN_OP;
+    }
+
     const int index = spectrumIndex(publicKey);
     const long long current = index < 0 ? 0 : energy(index);
 
