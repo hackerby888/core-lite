@@ -88,7 +88,6 @@
 
 // #define INCLUDE_CONTRACT_TEST_EXAMPLES
 
-// #define OLD_QRAFFLE
 
 // contract_def.h needs to be included first to make sure that contracts have minimal access
 #include "contract_core/contract_def.h"
@@ -976,12 +975,14 @@ static void antColonyBeginEpoch()
     // Every identity's root derives from this one value, so a node that seeded differently builds a
     // different forest and diverges. Logged as an identity so operators can compare it across nodes
     // by eye at epoch start, which is cheaper than finding out from a digest split later.
+#ifndef NDEBUG
     CHAR16 digestChars[60 + 1];
     getIdentity(gAntColony.rootSeed().m256i_u8, digestChars, true);
     CHAR16 msg[128];
     setText(msg, L"[ant-colony] Root seed = ");
     appendText(msg, digestChars);
-    logToConsole(msg);
+    addDebugMessage(msg);
+#endif
 }
 
 // DOGE merged-mining shares
@@ -1661,9 +1662,9 @@ static void processBroadcastTick(Peer* peer, RequestResponseHeader* header)
             }
             else
             {
-                // hot fix: only accept "empty" votes for stuck tick 73924308
+                // hot fix: only accept "empty" votes for stuck tick 77259626
                 bool isOk = true;
-                if (request->tick.tick == 73924308)
+                if (request->tick.tick == 77259626)
                 {
                     // only accept zero transactionDigest
                     if (!isZero(request->tick.transactionDigest))
@@ -8076,24 +8077,16 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 tickDataSuits = true;
             }
 
-            // hot fix: force tick 73924308 to be empty
-            if (system.tick == 73924307)
+            // hot fix: force tick 77259626 to be empty
+            if (system.tick == 77259625)
             {
-                // ignore next tick (73924308)
+                // ignore next tick (77259626)
                 targetNextTickDataDigest = m256i::zero();
                 targetNextTickDataDigestIsKnown = true;
             }
 
-            // recovery: tick 73924308 must be EMPTY, but this passive follower is frozen there.
-            // 261 computors have a stale NON-empty vote for 308 captured in the swap-backed tick
-            // storage, and the node never overwrites a stored vote (see processBroadcastTick, ~L997):
-            // when those computors re-issue corrected (empty) votes, the node drops them and only flags
-            // the computor faulty. Those votes are persisted to the state file and survive restarts, so
-            // the empty tally is pinned at 244 and can never climb to QUORUM.
-            // While stuck here, drop any stored NON-empty vote for 308 so only empty-aligned votes are
-            // retained/re-collected. This does NOT reduce quorum: the node still advances only once
-            // >= QUORUM computors actually vote empty (updateVotesCount at ~L7042 / gate at ~L7071).
-            if (system.tick == 73924308)
+            // should clear the stale votes in swap vm state too
+            if (system.tick == 77259626)
             {
                 for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
                 {
