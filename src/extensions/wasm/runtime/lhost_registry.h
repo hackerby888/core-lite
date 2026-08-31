@@ -248,6 +248,8 @@ static void w_logBytes(wasm_exec_env_t execEnv, uint32_t contractIndex, uint32_t
 
     if (callContext && callContext->trace)
     {
+        // hostServices.logBytes stamps this word for the log store and zeroes it after; the trace must capture the stamped bytes.
+        *((unsigned int*)message) = contractIndex;
         recordLog((TraceEntry*)callContext->trace, (unsigned char)type, message, size);
     }
 
