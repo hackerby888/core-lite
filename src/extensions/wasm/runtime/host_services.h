@@ -76,6 +76,7 @@ static HostServices hostServices =
     .liteInvokeProcedure = &invokeContractProcedure,
     .setShareholderProposal = &setShareholderProposal,
     .setShareholderVotes = &setShareholderVotes,
+    .cheat = &cheat,
 };
 
 } // namespace Wasm::Runtime

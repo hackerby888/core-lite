@@ -92,6 +92,7 @@ LH_IMPORT(liteCallFunction) int lh_liteCallFunction(unsigned int calleeIdx, unsi
 LH_IMPORT(liteInvokeProcedure) int lh_liteInvokeProcedure(unsigned int calleeIdx, unsigned int inputType, const void* in, unsigned int inSize, void* out, unsigned int outSize, long long invocationReward);
 LH_IMPORT(liteSetShareholderProposal) unsigned int lh_liteSetShareholderProposal(unsigned int calleeIdx, const void* proposal1024, long long invocationReward);
 LH_IMPORT(liteSetShareholderVotes) unsigned int lh_liteSetShareholderVotes(unsigned int calleeIdx, const void* voteData, unsigned int voteSize, long long invocationReward);
+LH_IMPORT(cheat) long long lh_cheat(unsigned int op, unsigned long long a, unsigned long long b, void* ptr, unsigned int len);
 } // extern "C"
 
 namespace Wasm::Sdk
