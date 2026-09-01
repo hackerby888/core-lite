@@ -263,7 +263,9 @@ static void w_logBytes(wasm_exec_env_t execEnv, uint32_t contractIndex, uint32_t
 static int64_t w_cheat(wasm_exec_env_t execEnv, uint32_t op, uint64_t a, uint64_t b, uint32_t ptrOffset, uint32_t len)
 {
     CallContext* callContext = activeCallContext(execEnv);
-    void* payload = ptrOffset ? nativeAddress(execEnv, ptrOffset) : nullptr;
+    // The length says whether there is a payload, not the offset: offset 0 is an ordinary address, and
+    // contract state lives there, so testing the offset drops exactly the reads worth printing.
+    void* payload = len ? nativeAddress(execEnv, ptrOffset) : nullptr;
 
     if (op == CHEAT_OP_PRINT)
     {

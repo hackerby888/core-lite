@@ -239,8 +239,11 @@ static inline void recordCheat(TraceEntry* entry, unsigned int id, unsigned char
         return;
     }
 
+    // A guest offset outside linear memory resolves to null; record the size but never read from it.
+    const bool readable = bytes && size;
+
     entry->cheats.push_back(CheatEntry{
-        id, part, size, value, size ? hex(bytes, size) : std::string(),
+        id, part, size, value, readable ? hex(bytes, size) : std::string(),
     });
 }
 
