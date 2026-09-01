@@ -44,6 +44,7 @@ LH_IMPORT(abort)          void  lh_abort(unsigned int errorCode);
 LH_IMPORT(burn)           long long lh_burn(long long amount, unsigned int contractIndexBurnedFor);
 LH_IMPORT(epoch)          unsigned int lh_epoch();
 LH_IMPORT(tick)           unsigned int lh_tick();
+LH_IMPORT(initialTick)    unsigned int lh_initialTick();
 LH_IMPORT(numberOfTickTransactions) int lh_numberOfTickTransactions();
 LH_IMPORT(getEntity)      unsigned int lh_getEntity(const void* id32, void* entityOut);
 LH_IMPORT(queryFeeReserve) long long lh_queryFeeReserve(unsigned int contractIndex);

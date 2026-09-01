@@ -35,6 +35,7 @@
     HQ("burn",                                burn,           w_burn,               "(Ii)I")     \
     GQ("epoch",                               epoch,                                "()i")       \
     GQ("tick",                                tick,                                 "()i")       \
+    GQ("initialTick",                         initialTick,                          "()i")       \
     GQ("numberOfTickTransactions",            numberOfTickTransactions,             "()i")       \
     HQ("getEntity",                           getEntity,      w_getEntity,          "(ii)i")     \
     GQ("queryFeeReserve",                     queryFeeReserve,                      "(i)I")      \

@@ -4021,7 +4021,7 @@ static void processTickTransactionAntColonySolution(
     }
     else
     {
-        // A null parent record means root, the scorer derives the submitter's own root, since roots
+        // A null parent record means root, the scorer derives the shared epoch root, since roots
         // are never stored and so cannot be handed in.
         const AntColonyBpp9000T::Ann* parentAnn = nullptr;
         if (parentRec != nullptr)
@@ -8799,7 +8799,9 @@ static bool loadBpp9000Task()
     const unsigned long long headerBytes = sizeof(score_task_file::TaskFileHeader);
     const unsigned long long totalBytes = headerBytes + topoBytes + dataBytes;
 
-    if (totalBytes != BPP9000_TASK_SIZE
+    // The canonical task may carry more samples than the configured sequence length consumes, so the
+    // embedded blob only has to cover totalBytes; anything past that is never read.
+    if (totalBytes > BPP9000_TASK_SIZE
         || save(SCORE_BPP9000_TASK_FILE_NAME, BPP9000_TASK_SIZE, BPP9000_TASK_BYTES, NULL)
             != (long long)BPP9000_TASK_SIZE)
     {

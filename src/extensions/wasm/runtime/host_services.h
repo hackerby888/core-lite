@@ -28,6 +28,7 @@ static HostServices hostServices =
     .burn = &burn,
     .epoch = &epoch,
     .tick = &tick,
+    .initialTick = &initialTick,
     .numberOfTickTransactions = &numberOfTickTransactions,
     .getEntity = &getEntity,
     .queryFeeReserve = &queryFeeReserve,

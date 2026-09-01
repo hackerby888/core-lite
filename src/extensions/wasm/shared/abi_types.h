@@ -64,6 +64,7 @@ struct HostServices
     long long (*burn)(const void* ctx, long long amount, unsigned int contractIndexBurnedFor);
     unsigned short (*epoch)(const void* ctx);
     unsigned int   (*tick)(const void* ctx);
+    unsigned int   (*initialTick)(const void* ctx);
     int            (*numberOfTickTransactions)(const void* ctx);
     unsigned char (*getEntity)(const void* ctx, const void* id32, void* entityOut);
     long long (*queryFeeReserve)(const void* ctx, unsigned int contractIndex);

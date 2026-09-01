@@ -213,6 +213,11 @@ static unsigned int tick(const void* context)
     return functionContext(context)->tick();
 }
 
+static unsigned int initialTick(const void* context)
+{
+    return functionContext(context)->initialTick();
+}
+
 static int numberOfTickTransactions(const void* context)
 {
     return functionContext(context)->numberOfTickTransactions();
