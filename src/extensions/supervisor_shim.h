@@ -16,7 +16,7 @@
 #include <string>
 
 inline char gSidecarPort[16] = "41841";   // node http port -> sidecar listen + unix-socket key
-inline char gAntWalkerThreads[16] = "4";  // matches the node default; 0 keeps the walker unspawned
+inline char gAntWalkerThreads[16] = "0";  // matches the node default; 0 keeps the walker unspawned
 
 // Forward a stop signal to the children so the container/service stops promptly.
 static void shimForwardSignal(int sig)

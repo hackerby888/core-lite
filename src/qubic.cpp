@@ -11801,7 +11801,7 @@ void processArgs(int argc, const char* argv[]) {
         ("fbas-warmup", "TEST: publish this many valid ant solutions before switching to the --fbas mode", cxxopts::value<int>()->default_value("0"))
         ("fbas-gap", "TEST: minimum ticks between ant publishes; a gap wider than the fork window makes each window retire", cxxopts::value<int>()->default_value("0"))
         ("ant-debug", "Trace ant-colony accepts, over-accepts and network rebuilds (budgeted per epoch)", cxxopts::value<bool>())
-        ("ant-walker-threads", "Ant network walks handed to the walker sidecar (0=off)", cxxopts::value<unsigned int>()->default_value("4"))
+        ("ant-walker-threads", "Ant network walks handed to the walker sidecar (0=off)", cxxopts::value<unsigned int>()->default_value("0"))
         ("ant-walker-debug", "Trace every ant walker job and result", cxxopts::value<bool>())
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
