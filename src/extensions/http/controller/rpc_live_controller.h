@@ -14,6 +14,16 @@
 #include "extensions/rpc/rpc_core.h"
 
 // ============================ live (/live/v1/...) ============================
+// Mainnet returns errors as HTTP 4xx/5xx, never 200: clients branch on res.ok.
+static RpcResp rpcErr(int code, const std::string& message, int status = 400)
+{
+    Json::Value e;
+    e["code"] = code;
+    e["message"] = message;
+    e["details"] = Json::Value(Json::arrayValue);
+    return jsonResp(e, status);
+}
+
 RPC_ROUTE("GET", "/live/v1/assets/issuances")
 {
     std::string issuerIdentity = req.getParameter("issuerIdentity");
@@ -37,14 +47,15 @@ RPC_ROUTE("GET", "/live/v1/assets/issuances")
             Json::Value root;
             Json::Value assetJson = HttpUtils::issuanceToJson((HttpUtils::AssetIssuanceType *)&asset);
             root["data"] = assetJson;
+            root["tick"] = system.tick;
+            root["universeIndex"] = Json::UInt64(i);
             assetsArray.append(root);
             targetUniverseIndex = i;
             break;
         }
     }
+    (void)targetUniverseIndex;
     result["assets"] = assetsArray;
-    result["tick"] = system.tick;
-    result["universeIndex"] = Json::UInt64(targetUniverseIndex);
     return jsonResp(result);
 }
 
@@ -54,15 +65,11 @@ RPC_ROUTE("GET", "/live/v1/assets/issuances/:index")
     unsigned long long index = std::stoull(req.getParameter("index"));
     if (index >= ASSETS_CAPACITY)
     {
-        result["code"] = 3;
-        result["message"] = "Index out of range";
-        return jsonResp(result);
+        return rpcErr(3, "Index out of range", 400);
     }
     if (assets[index].varStruct.issuance.type != ISSUANCE)
     {
-        result["code"] = 3;
-        result["message"] = "No asset issuance at the given index";
-        return jsonResp(result);
+        return rpcErr(3, "No asset issuance at the given index", 400);
     }
     auto &asset = assets[index].varStruct.issuance;
     Json::Value assetJson = HttpUtils::issuanceToJson((HttpUtils::AssetIssuanceType *)&asset);
@@ -118,15 +125,11 @@ RPC_ROUTE("GET", "/live/v1/assets/ownerships/:index")
     unsigned long long index = std::stoull(req.getParameter("index"));
     if (index >= ASSETS_CAPACITY)
     {
-        result["code"] = 3;
-        result["message"] = "Index out of range";
-        return jsonResp(result);
+        return rpcErr(3, "Index out of range", 400);
     }
     if (assets[index].varStruct.ownership.type != OWNERSHIP)
     {
-        result["code"] = 3;
-        result["message"] = "No asset ownership at the given index";
-        return jsonResp(result);
+        return rpcErr(3, "No asset ownership at the given index", 400);
     }
     auto &asset = assets[index].varStruct.ownership;
     Json::Value assetJson = HttpUtils::ownershipToJson((HttpUtils::AssetOwnershipType *)&asset);
@@ -189,15 +192,11 @@ RPC_ROUTE("GET", "/live/v1/assets/possessions/:index")
     unsigned long long index = std::stoull(req.getParameter("index"));
     if (index >= ASSETS_CAPACITY)
     {
-        result["code"] = 3;
-        result["message"] = "Index out of range";
-        return jsonResp(result);
+        return rpcErr(3, "Index out of range", 400);
     }
     if (assets[index].varStruct.possession.type != POSSESSION)
     {
-        result["code"] = 3;
-        result["message"] = "No asset possession at the given index";
-        return jsonResp(result);
+        return rpcErr(3, "No asset possession at the given index", 400);
     }
     auto &asset = assets[index].varStruct.possession;
     Json::Value assetJson = HttpUtils::possessionToJson((HttpUtils::AssetPossessionType *)&asset);
@@ -258,6 +257,8 @@ RPC_ROUTE("GET", "/live/v1/assets/:identity/owned")
 
             Json::Value root;
             Json::Value assetJson = HttpUtils::ownershipToJson((HttpUtils::AssetOwnershipType *)&asset);
+            // Only the per-identity routes carry padding; the universe-index ones do not.
+            assetJson["padding"] = (int)asset.padding[0];
             assetJson["issuedAsset"] = HttpUtils::issuanceToJson((HttpUtils::AssetIssuanceType *)issuanceAsset);
             root["data"] = assetJson;
             Json::Value info(Json::objectValue);
@@ -292,7 +293,12 @@ RPC_ROUTE("GET", "/live/v1/assets/:identity/possessed")
 
             Json::Value root;
             Json::Value assetJson = HttpUtils::possessionToJson((HttpUtils::AssetPossessionType *)&asset);
+            // Per-identity possessions report the owned asset's issuanceIndex, not ownershipIndex.
+            assetJson["padding"] = (int)asset.padding[0];
+            assetJson.removeMember("ownershipIndex");
+            assetJson["issuanceIndex"] = ownershipAsset->issuanceIndex;
             assetJson["ownedAsset"] = HttpUtils::ownershipToJson((HttpUtils::AssetOwnershipType *)ownershipAsset);
+            assetJson["ownedAsset"]["padding"] = (int)ownershipAsset->padding[0];
             assetJson["ownedAsset"]["issuedAsset"] = HttpUtils::issuanceToJson((HttpUtils::AssetIssuanceType *)issuanceAsset);
             root["data"] = assetJson;
             Json::Value info(Json::objectValue);
@@ -327,23 +333,24 @@ RPC_ROUTE("GET", "/live/v1/balances/:id")
     return jsonResp(result);
 }
 
-// block-height + tick-info share the same body in the drogon controller.
-static RpcResp rpcLiveTickInfo(const RpcReq& req)
+static RpcResp rpcLiveTickInfo(const RpcReq& req, const char* wrapperKey)
 {
     (void)req;
+    Json::Value tickInfo;
+    tickInfo["tick"] = system.tick;
+    tickInfo["duration"] = 0;
+    tickInfo["epoch"] = system.epoch;
+    tickInfo["initialTick"] = system.initialTick;
+
     Json::Value json;
-    json["epoch"] = system.epoch;
-    json["tick"] = system.tick;
-    json["initialTick"] = system.initialTick;
+    json[wrapperKey] = tickInfo;
     json["alignedVotes"] = gTickNumberOfComputors;
     json["misalignedVotes"] = gTickTotalNumberOfComputors - gTickNumberOfComputors;
     json["mainAuxStatus"] = mainAuxStatus;
-    json["duration"] = 0;
-    json["tickInfo"]["tick"] = system.tick;
     return jsonResp(json);
 }
-RPC_ROUTE("GET", "/live/v1/block-height") { return rpcLiveTickInfo(req); }
-RPC_ROUTE("GET", "/live/v1/tick-info")    { return rpcLiveTickInfo(req); }
+RPC_ROUTE("GET", "/live/v1/block-height") { return rpcLiveTickInfo(req, "blockHeight"); }
+RPC_ROUTE("GET", "/live/v1/tick-info")    { return rpcLiveTickInfo(req, "tickInfo"); }
 
 RPC_ROUTE("POST", "/live/v1/broadcast-transaction")
 {
@@ -353,9 +360,7 @@ RPC_ROUTE("POST", "/live/v1/broadcast-transaction")
         auto json = rpcJsonBody(req.body);
         if (!json)
         {
-            result["code"] = 3;
-            result["message"] = "Invalid JSON";
-            return jsonResp(result);
+            return rpcErr(3, "Invalid JSON", 400);
         }
 
         std::string txBase64 = (*json)["encodedTransaction"].asString();
@@ -364,9 +369,7 @@ RPC_ROUTE("POST", "/live/v1/broadcast-transaction")
         Transaction *tx = (Transaction*)txData.data();
         if (!tx->checkValidity())
         {
-            result["code"] = 3;
-            result["message"] = "Invalid validity";
-            return jsonResp(result);
+            return rpcErr(3, "Invalid validity", 400);
         }
         std::cout << "tx json" << HttpUtils::transactionToJson(tx, false) << std::endl;
         {
@@ -374,9 +377,7 @@ RPC_ROUTE("POST", "/live/v1/broadcast-transaction")
             KangarooTwelve(txData.data(), tx->totalSize() - SIGNATURE_SIZE, digest, sizeof(digest));
             if (!verify(tx->sourcePublicKey.m256i_u8, digest, tx->signaturePtr()))
             {
-                result["code"] = 3;
-                result["message"] = "Invalid signature";
-                return jsonResp(result);
+                return rpcErr(3, "Invalid signature", 400);
             }
         }
 
@@ -400,9 +401,7 @@ RPC_ROUTE("POST", "/live/v1/broadcast-transaction")
     }
     catch (const std::exception &e)
     {
-        result["code"] = -1;
-        result["message"] = "Exception: " + std::string(e.what());
-        return jsonResp(result);
+        return rpcErr(-1, "Exception: " + std::string(e.what()), 500);
     }
 }
 
@@ -433,17 +432,13 @@ RPC_ROUTE("POST", "/live/v1/querySmartContract")
         auto json = rpcJsonBody(req.body);
         if (!json)
         {
-            result["code"] = 3;
-            result["message"] = "Invalid JSON";
-            return jsonResp(result);
+            return rpcErr(3, "Invalid JSON", 400);
         }
 
         unsigned int contractIndex = (*json)["contractIndex"].asUInt();
         if (contractIndex < 1 || contractIndex >= contractCount)
         {
-            result["code"] = 3;
-            result["message"] = "contractIndex out of range";
-            return jsonResp(result, 400);
+            return rpcErr(3, "contractIndex out of range", 400);
         }
         unsigned short inputType = (*json)["inputType"].asUInt();
         unsigned short inputSize = (*json)["inputSize"].asUInt();
@@ -451,9 +446,7 @@ RPC_ROUTE("POST", "/live/v1/querySmartContract")
         std::vector<uint8_t> inputData = base64_decode(requestData);
         if (inputData.size() != inputSize)
         {
-            result["code"] = 3;
-            result["message"] = "Input size mismatch";
-            return jsonResp(result, 400);
+            return rpcErr(3, "Input size mismatch", 400);
         }
         QpiContextUserFunctionCall qpiContext(contractIndex);
         auto errorCode = qpiContext.call(inputType, inputData.data(), inputSize);
@@ -466,16 +459,12 @@ RPC_ROUTE("POST", "/live/v1/querySmartContract")
         }
         else
         {
-            result["code"] = -1;
-            result["message"] = "Error calling smart contract function: " + std::to_string(errorCode);
-            return jsonResp(result, 500);
+            return rpcErr(-1, "Error calling smart contract function: " + std::to_string(errorCode), 500);
         }
     }
     catch (const std::exception &e)
     {
-        result["code"] = -1;
-        result["message"] = "Exception: " + std::string(e.what());
-        return jsonResp(result, 500);
+        return rpcErr(-1, "Exception: " + std::string(e.what()), 500);
     }
 }
 

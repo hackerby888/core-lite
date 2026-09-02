@@ -228,7 +228,7 @@ RPC_ROUTE("GET", "/v1/latest-stats")
     }
     TickStorage::tickData.releaseLock();
 
-    data["circulatingSupply"] = Json::UInt64(spectrumInfo.totalAmount);
+    data["circulatingSupply"] = std::to_string(spectrumInfo.totalAmount);
     data["activeAddresses"] = spectrumInfo.numberOfEntities;
     data["price"] = 0;
     data["marketCap"] = "0";
@@ -246,7 +246,7 @@ RPC_ROUTE("GET", "/v1/latest-stats")
     }
     data["emptyTicksInCurrentEpoch"] = emptyTicks;
     data["epochTickQuality"] = system.tick - system.initialTick == 0 ? 0 : std::roundf((float)(system.tick - system.initialTick - emptyTicks) / (float)(system.tick - system.initialTick) * 100000.0f) / 100000.0f;
-    data["burnedQus"] = 0;
+    data["burnedQus"] = "0";
     result["data"] = data;
     return jsonResp(result);
 }

@@ -454,7 +454,7 @@ async function renderTick(n) {
       <td>${tx.hash ? `<button class="logs-btn" onclick="window.__showTxLogs('${fmt.esc(tx.hash)}', ${td.tickNumber ?? n})">◈ LOGS</button>` : ''}</td>
     </tr>`).join('');
 
-  const digests = (td.transactionDigests || []);
+  const digests = (td.transactionHashes || []);
 
   $view().innerHTML = `
     <h2 class="section">TICK ${fmt.n(td.tickNumber ?? n)}</h2>
@@ -482,7 +482,7 @@ async function renderTick(n) {
     <div class="grid-2" style="margin-top:1.5em">
       <div>
         <h2 class="section">TIMELOCK</h2>
-        <pre class="hex">${fmt.esc(td.timelock || '—')}</pre>
+        <pre class="hex">${fmt.esc(td.timeLock || '—')}</pre>
       </div>
       <div>
         <h2 class="section">SIGNATURE</h2>

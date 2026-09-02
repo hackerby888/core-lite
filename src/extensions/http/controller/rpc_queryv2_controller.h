@@ -138,7 +138,7 @@ RPC_ROUTE("POST", "/query/v1/getTickData")
     jsonObject["tickNumber"] = localTickData.tick;
     jsonObject["epoch"] = localTickData.epoch;
     jsonObject["computorIndex"] = localTickData.computorIndex;
-    jsonObject["timelock"] = base64_encode(localTickData.timelock.m256i_u8, 32);
+    jsonObject["timeLock"] = base64_encode(localTickData.timelock.m256i_u8, 32);
     jsonObject["timestamp"] = HttpUtils::formatTimestamp(localTickData.millisecond, localTickData.second, localTickData.minute,
         localTickData.hour, localTickData.day, localTickData.month, localTickData.year);
     jsonObject["varStruct"] = "";
@@ -152,10 +152,12 @@ RPC_ROUTE("POST", "/query/v1/getTickData")
             txDigestsJson.append(wchar_to_string(id));
         }
     }
-    jsonObject["transactionDigests"] = txDigestsJson;
+    jsonObject["transactionHashes"] = txDigestsJson;
     Json::Value contractFeesJson(Json::arrayValue);
+    // Zero fees are dropped, as go-archiver's contractFeesToProto() does.
     for (unsigned int i = 0; i < MAX_NUMBER_OF_CONTRACTS; i++)
-        contractFeesJson.append(Json::UInt64(localTickData.contractFees[i]));
+        if (localTickData.contractFees[i] != 0)
+            contractFeesJson.append(std::to_string(localTickData.contractFees[i]));
     jsonObject["contractFees"] = contractFeesJson;
     jsonObject["signature"] = base64_encode(localTickData.signature, SIGNATURE_SIZE);
     return jsonResp(jsonObject);

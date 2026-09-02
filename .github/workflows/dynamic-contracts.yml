@@ -137,8 +137,20 @@ jobs:
                 fi
                 sleep 2
               done
+              # Assert the mainnet nesting, not just that a tick advanced.
+              shape_ok=0
+              if [ "$ticked" -eq 1 ]; then
+                ti=$(wget -qO- http://127.0.0.1:41841/live/v1/tick-info 2>/dev/null) || true
+                bh=$(wget -qO- http://127.0.0.1:41841/live/v1/block-height 2>/dev/null) || true
+                nested=$(printf "%s" "$ti" | sed -n "s/.*\"tickInfo\":{\([^}]*\)}.*/\1/p")
+                shape_ok=1
+                for field in tick duration epoch initialTick; do
+                  printf "%s" "$nested" | grep -q "\"$field\":" || { echo "tick-info: tickInfo.$field missing"; shape_ok=0; }
+                done
+                printf "%s" "$bh" | grep -q "\"blockHeight\":{" || { echo "block-height: blockHeight wrapper missing"; shape_ok=0; }
+              fi
               kill "$node_pid" 2>/dev/null || true
-              if [ "$ticked" -ne 1 ]; then
+              if [ "$ticked" -ne 1 ] || [ "$shape_ok" -ne 1 ]; then
                 cat node-smoke.log
                 exit 1
               fi
