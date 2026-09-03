@@ -138,7 +138,8 @@ static thread_local CallContext* slotCallContexts[WASM_RESERVED_SLOT_COUNT] = {}
 
 struct IoSizes
 {
-    uint16_t input = 0;
+    // A migration's input is the whole old state, which outgrows 16 bits long before a user entry does.
+    uint32_t input = 0;
     uint16_t output = 0;
 };
 

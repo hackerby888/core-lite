@@ -327,56 +327,6 @@ static void handleMigrationResult(EngineSlot& slot, uint32_t contractIndex, bool
     wasm_runtime_clear_exception(slot.instance);
 }
 
-static void dispatchMigration(uint32_t contractIndex, int slotOffset, EngineSlot& slot, const void* context, const void* oldState)
-{
-    const uint32_t oldStateSize = slot.migrationOldStateSize;
-    if (oldStateSize > WASM_ARENA_SIZE)
-    {
-        logColorToScreen("ERROR", "LITEWASM migrate old-state exceeds arena idx=" + std::to_string(contractIndex));
-        return;
-    }
-
-    EnvironmentScope environment(slot);
-    if (!environment.ready)
-    {
-        return;
-    }
-
-    const MemoryLayout layout = resolveMemoryLayout(slot);
-    uint32_t arenaLimit = 0;
-    if (!resolveArenaLimit(layout, arenaLimit))
-    {
-        logColorToScreen("ERROR", "LITEWASM migrate arena exceeds Wasm32 memory idx=" + std::to_string(contractIndex));
-        return;
-    }
-
-    const uint32_t migrationArenaStart = layout.arenaOffset + ((oldStateSize + 15u) & ~15u);
-    CallContext callContext = createCallContext(context, migrationArenaStart, arenaLimit);
-    bindJournal(callContext, slot);
-    DispatchDepthScope dispatchDepth(slotCallDepth[slotOffset]);
-
-    bindEnvironment(environment.execEnv, callContext);
-
-    if (context && slot.contextOffset)
-    {
-        copyMem(wasm_runtime_addr_app_to_native(slot.instance, slot.contextOffset), context, sizeof(QPI::QpiContext));
-    }
-
-    if (oldStateSize)
-    {
-        copyMem(wasm_runtime_addr_app_to_native(slot.instance, layout.arenaOffset), oldState, oldStateSize);
-    }
-
-    setMem(wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset), slot.stateSize, 0);
-    setMem(wasm_runtime_addr_app_to_native(slot.instance, layout.localsOffset), WASM_LOCALS_CAPACITY, 0);
-
-    const bool succeeded = invokeDispatch(slot, environment.execEnv, DispatchKind::Migration, 0, layout.arenaOffset, 0, layout.localsOffset);
-    handleMigrationResult(slot, contractIndex, succeeded);
-
-    contractStates[contractIndex] = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset);
-    hostServices.markDirty(contractIndex);
-}
-
 /** Regions flattened per byte: the tracker splits a run at page boundaries, the journal at block ones. */
 static std::map<unsigned int, std::pair<std::string, std::string>> changedStateBytes(const std::vector<StateRegionTrace>& regions)
 {
@@ -440,6 +390,71 @@ static void recordStateDiff(EngineSlot& slot, uint32_t contractIndex, StateJourn
     traceEntry.stateDiff = std::move(journalDiff);
     // The journal covered the call whole, so a tracker-side truncation no longer describes this entry.
     traceEntry.stateTruncated = false;
+}
+
+static void dispatchMigration(uint32_t contractIndex, int slotOffset, EngineSlot& slot, const void* context, const void* oldState)
+{
+    const uint32_t oldStateSize = slot.migrationOldStateSize;
+    if (oldStateSize > WASM_ARENA_SIZE)
+    {
+        logColorToScreen("ERROR", "LITEWASM migrate old-state exceeds arena idx=" + std::to_string(contractIndex));
+        return;
+    }
+
+    EnvironmentScope environment(slot);
+    if (!environment.ready)
+    {
+        return;
+    }
+
+    const MemoryLayout layout = resolveMemoryLayout(slot);
+    uint32_t arenaLimit = 0;
+    if (!resolveArenaLimit(layout, arenaLimit))
+    {
+        logColorToScreen("ERROR", "LITEWASM migrate arena exceeds Wasm32 memory idx=" + std::to_string(contractIndex));
+        return;
+    }
+
+    const uint32_t migrationArenaStart = layout.arenaOffset + ((oldStateSize + 15u) & ~15u);
+    CallContext callContext = createCallContext(context, migrationArenaStart, arenaLimit);
+    bindJournal(callContext, slot);
+    DispatchDepthScope dispatchDepth(slotCallDepth[slotOffset]);
+
+    bindEnvironment(environment.execEnv, callContext);
+
+    if (context && slot.contextOffset)
+    {
+        copyMem(wasm_runtime_addr_app_to_native(slot.instance, slot.contextOffset), context, sizeof(QPI::QpiContext));
+    }
+
+    if (oldStateSize)
+    {
+        copyMem(wasm_runtime_addr_app_to_native(slot.instance, layout.arenaOffset), oldState, oldStateSize);
+    }
+
+    setMem(wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset), slot.stateSize, 0);
+    setMem(wasm_runtime_addr_app_to_native(slot.instance, layout.localsOffset), WASM_LOCALS_CAPACITY, 0);
+
+    // Traced after the zero-fill: the page tracker protects the state region, so a host write into it
+    // would fault, and the before-image the reader sees is the migration's real starting point.
+    DispatchTrace trace;
+    const IoSizes sizes{oldStateSize, 0};
+    beginDispatchTrace(slot, contractIndex, 0, DispatchKind::Migration, context, oldState, sizes, callContext, trace);
+
+    unsigned char* linearMemory = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.ioBaseOffset) - slot.ioBaseOffset;
+    // A migration always runs at the top of a tick, so there is no parent frame whose journal it could reset.
+    const bool journalUsable = slot.journalBaseOffset && !slot.journalOverflowed;
+    StateJournalScope journalScope(trace.tracksWrites && journalUsable, linearMemory, slot.journalBaseOffset, slot.stateOffset, slot.journalHeader);
+    StateWriteScope pageProtection(trace.tracksWrites && (!journalUsable || verifyingStateDiff()), trace.state, slot.stateSize);
+
+    const bool succeeded = invokeDispatch(slot, environment.execEnv, DispatchKind::Migration, 0, layout.arenaOffset, 0, layout.localsOffset);
+    handleMigrationResult(slot, contractIndex, succeeded);
+    pageProtection.finish(trace.entry);
+    recordStateDiff(slot, contractIndex, journalScope, trace.entry);
+    finishDispatchTrace(slot, layout, sizes, callContext, trace);
+
+    contractStates[contractIndex] = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset);
+    hostServices.markDirty(contractIndex);
 }
 
 static void dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKind kind, const void* context, void* statePointer, void* input, void* output,
