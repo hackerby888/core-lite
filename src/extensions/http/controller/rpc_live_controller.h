@@ -333,6 +333,30 @@ RPC_ROUTE("GET", "/live/v1/balances/:id")
     return jsonResp(result);
 }
 
+#ifdef LITE_WASM_SC
+// The halt record, or null while the node is healthy. Same keys on every runtime that serves one.
+static Json::Value faultJson()
+{
+    const Wasm::Runtime::FaultRecord fault = Wasm::Runtime::faultSnapshot();
+    if (!fault.set)
+    {
+        return Json::Value();
+    }
+
+    Json::Value json;
+    json["message"] = fault.message;
+    json["phase"] = fault.phase;
+    json["failedTick"] = fault.failedTick;
+    json["failedEpoch"] = fault.failedEpoch;
+    json["lastFinalizedTick"] = fault.failedTick ? fault.failedTick - 1 : 0;
+    json["lastFinalizedEpoch"] = fault.failedEpoch;
+    json["slot"] = fault.slot;
+    json["kind"] = fault.kind;
+    json["entry"] = fault.entry;
+    return json;
+}
+#endif
+
 static RpcResp rpcLiveTickInfo(const RpcReq& req, const char* wrapperKey)
 {
     (void)req;
@@ -347,6 +371,13 @@ static RpcResp rpcLiveTickInfo(const RpcReq& req, const char* wrapperKey)
     json["alignedVotes"] = gTickNumberOfComputors;
     json["misalignedVotes"] = gTickTotalNumberOfComputors - gTickNumberOfComputors;
     json["mainAuxStatus"] = mainAuxStatus;
+#ifdef LITE_WASM_SC
+    const Json::Value fault = faultJson();
+    if (!fault.isNull())
+    {
+        json["fault"] = fault;
+    }
+#endif
     return jsonResp(json);
 }
 RPC_ROUTE("GET", "/live/v1/block-height") { return rpcLiveTickInfo(req, "blockHeight"); }
@@ -487,6 +518,13 @@ static std::string rpcHex32(const unsigned char* bytes)
 }
 
 // ============================ wasm contracts (/live/v1/...) ============================
+
+// Why the node stopped ticking, if it did: a contract abort from a procedure. Null while healthy.
+RPC_ROUTE("GET", "/live/v1/dev/fault")
+{
+    (void)req;
+    return jsonResp(faultJson());
+}
 
 // Reserved slots and their registered entry points.
 RPC_ROUTE("GET", "/live/v1/dyn-registry")

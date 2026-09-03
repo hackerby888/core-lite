@@ -511,6 +511,9 @@ static void dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKin
     }
 
     DispatchFrameScope frame(slot, environment.execEnv, slotOffset, static_cast<const QPI::QpiContext*>(context), layout, arenaLimit, nested);
+    frame.callContext().contractIndex = contractIndex;
+    frame.callContext().inputType = inputType;
+    frame.callContext().kind = (unsigned char)kind;
     DispatchTrace trace;
     beginDispatchTrace(slot, contractIndex, inputType, kind, context, input, sizes, frame.callContext(), trace);
     prepareMemory(slot, layout, context, input, sizes);

@@ -27,6 +27,10 @@ struct CallContext
     const JournalHeader* journalHeader = nullptr;
     // Where the guest's copy of QpiContext lives, so a prank can rewrite the caller it observes.
     uint32_t guestContextOffset = 0;
+    // The entry this frame is running, for a record that has to be written before the call returns.
+    uint32_t contractIndex = 0;
+    uint16_t inputType = 0;
+    unsigned char kind = 0;
 };
 
 static inline CallContext* activeCallContext(wasm_exec_env_t execEnv)
@@ -330,6 +334,13 @@ static void w_abort(wasm_exec_env_t execEnv, uint32_t errorCode)
     CallContext* callContext = activeCallContext(execEnv);
 
     traceHostCall(callContext, "abort", std::to_string(errorCode));
+    // From a procedure entry point the abort below never returns and the tick loop stops with it, so the
+    // halt is recorded first. A function entry point unwinds instead and the node keeps ticking.
+    if (functionContext(callContext->ctx)->__qpiEntryPoint() != USER_FUNCTION_CALL)
+    {
+        recordFault(callContext->contractIndex, callContext->kind, callContext->inputType, errorCode, hostServices.tick(callContext->ctx),
+            hostServices.epoch(callContext->ctx));
+    }
     hostServices.abort(callContext->ctx, errorCode);
 }
 
