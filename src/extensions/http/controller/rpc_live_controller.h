@@ -690,6 +690,7 @@ RPC_ROUTE("GET", "/live/v1/debug-trace")
             Json::Value call;
             call["name"] = hostCall.name;
             call["detail"] = hostCall.detail;
+            call["ord"] = (Json::UInt64)hostCall.ordinal;
             hostCalls.append(call);
         }
         entry["hostCalls"] = hostCalls;
@@ -701,6 +702,7 @@ RPC_ROUTE("GET", "/live/v1/debug-trace")
             logEntry["type"] = (unsigned int)log.type;
             logEntry["size"] = log.size;
             logEntry["hex"] = log.hex;
+            logEntry["ord"] = (Json::UInt64)log.ordinal;
             logs.append(logEntry);
         }
         entry["logs"] = logs;
@@ -714,6 +716,7 @@ RPC_ROUTE("GET", "/live/v1/debug-trace")
             cheatEntry["size"] = cheat.size;
             cheatEntry["value"] = (Json::UInt64)cheat.value;
             cheatEntry["hex"] = cheat.hex;
+            cheatEntry["ord"] = (Json::UInt64)cheat.ordinal;
             cheats.append(cheatEntry);
         }
         entry["cheats"] = cheats;

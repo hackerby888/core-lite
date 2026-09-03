@@ -25,10 +25,13 @@
 namespace Wasm::Runtime
 {
 
+// `ordinal` places a record in the node-wide emission order, across every frame of a call: a callee's
+// prints read back in the order they ran among the caller's, which the per-frame vectors alone lose.
 struct HostCallTrace
 {
     const char* name;
     std::string detail;
+    unsigned long long ordinal = 0;
 };
 
 struct StateRegionTrace
@@ -43,6 +46,7 @@ struct LogTrace
     unsigned char type = 0;
     unsigned int size = 0;
     std::string hex;
+    unsigned long long ordinal = 0;
 };
 
 // One CC_PRINT argument. size == 0 means the value came through by register instead of by pointer.
@@ -53,6 +57,7 @@ struct CheatEntry
     unsigned int size = 0;
     unsigned long long value = 0;
     std::string hex;
+    unsigned long long ordinal = 0;
 };
 
 struct TraceEntry
@@ -93,6 +98,8 @@ static TraceEntry traceRing[WASM_TRACE_RING_CAPACITY];
 static volatile long g_liteWasmTraceLock = 0;
 static unsigned int traceWriteIndex = 0;
 static unsigned long long traceSequence = 0;
+// Records land in an entry before it is committed, outside the trace lock, so the counter is atomic.
+static std::atomic<unsigned long long> traceOrdinal{ 0 };
 
 #ifdef _MSC_VER
 static inline void acquireTraceLock()
@@ -141,7 +148,7 @@ static inline void recordHostCall(TraceEntry* entry, const char* name, const std
     if (entry)
     {
         entry->hostCalls.push_back({
-            name, detail,
+            name, detail, ++traceOrdinal,
         });
     }
 }
@@ -226,7 +233,7 @@ static inline void recordLog(TraceEntry* entry, unsigned char type, const void* 
     }
 
     entry->logs.push_back(LogTrace{
-        type, size, hex(bytes, size),
+        type, size, hex(bytes, size), ++traceOrdinal,
     });
 }
 
@@ -243,7 +250,7 @@ static inline void recordCheat(TraceEntry* entry, unsigned int id, unsigned char
     const bool readable = bytes && size;
 
     entry->cheats.push_back(CheatEntry{
-        id, part, size, value, readable ? hex(bytes, size) : std::string(),
+        id, part, size, value, readable ? hex(bytes, size) : std::string(), ++traceOrdinal,
     });
 }
 
