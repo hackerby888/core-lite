@@ -146,6 +146,10 @@ struct HostServices
 #define CHEAT_ERR_DISABLED      (-2LL)
 #define CHEAT_ERR_WRONG_CONTEXT (-3LL)
 
+// A Wasm trap (unreachable, divide overflow, out-of-bounds access) surfaces through the contract error
+// path under this code, outside the assert line namespace (0xCC000000 | line) and the cheat refusals.
+#define WASM_TRAP_ERROR_CODE 0xCC1D0000u
+
 #define WASM_MAX_USER_ENTRIES 1024
 
 struct ContractDescriptor

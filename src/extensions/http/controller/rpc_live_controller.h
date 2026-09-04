@@ -820,8 +820,6 @@ RPC_ROUTE("GET", "/live/v1/dev/state-read")
 
     if (offset > stateSize)
         offset = stateSize;
-    if (length > 262144ull)
-        length = 262144ull;
     if (offset + length > stateSize)
         length = stateSize - offset;
 

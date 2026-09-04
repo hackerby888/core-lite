@@ -38,6 +38,19 @@ static inline CallContext* activeCallContext(wasm_exec_env_t execEnv)
     return (CallContext*)wasm_runtime_get_user_data(execEnv);
 }
 
+// Set while an aborted guest unwinds, so the frames above it can tell an abort from any other trap.
+static thread_local uint32_t pendingAbortCode = 0;
+
+// A callee that aborted has already unwound its own frame; the caller unwinds next, so every frame
+// commits its trace before the root frame settles the abort.
+static inline void propagatePendingAbort(wasm_exec_env_t execEnv)
+{
+    if (pendingAbortCode)
+    {
+        wasm_runtime_set_exception(wasm_runtime_get_module_inst(execEnv), abortMessage(pendingAbortCode).c_str());
+    }
+}
+
 // Offset 0 is an ordinary linear-memory address, not a null pointer: a module can and does place data
 // there. WAMR returns the memory base for it and null only when the offset is out of bounds.
 static inline void* nativeAddress(wasm_exec_env_t execEnv, uint32_t offset)
@@ -334,14 +347,15 @@ static void w_abort(wasm_exec_env_t execEnv, uint32_t errorCode)
     CallContext* callContext = activeCallContext(execEnv);
 
     traceHostCall(callContext, "abort", std::to_string(errorCode));
-    // From a procedure entry point the abort below never returns and the tick loop stops with it, so the
-    // halt is recorded first. A function entry point unwinds instead and the node keeps ticking.
+    // The guest unwinds first so the frame can commit its trace; the root frame then halts the node for a
+    // procedure entry point or fails the query for a function one. The first frame to abort names itself.
     if (functionContext(callContext->ctx)->__qpiEntryPoint() != USER_FUNCTION_CALL)
     {
-        recordFault(callContext->contractIndex, callContext->kind, callContext->inputType, errorCode, hostServices.tick(callContext->ctx),
+        recordFault(callContext->contractIndex, callContext->kind, callContext->inputType, abortMessage(errorCode), hostServices.tick(callContext->ctx),
             hostServices.epoch(callContext->ctx));
     }
-    hostServices.abort(callContext->ctx, errorCode);
+    pendingAbortCode = errorCode;
+    wasm_runtime_set_exception(wasm_runtime_get_module_inst(execEnv), abortMessage(errorCode).c_str());
 }
 
 static int64_t w_burn(wasm_exec_env_t execEnv, int64_t amount, uint32_t contractIndex)
@@ -557,7 +571,9 @@ static int32_t w_liteCallFunction(
 
     traceHostCall(callContext, "callFunction", "-> " + std::to_string(contractIndex) + "/" + std::to_string(inputType));
     noteGuestWrite(execEnv, callContext, outputOffset, outputSize);
-    return hostServices.liteCallFunction(callContext->ctx, contractIndex, (unsigned short)inputType, nativeAddress(execEnv, inputOffset), inputSize, nativeAddress(execEnv, outputOffset), outputSize);
+    const int32_t result = hostServices.liteCallFunction(callContext->ctx, contractIndex, (unsigned short)inputType, nativeAddress(execEnv, inputOffset), inputSize, nativeAddress(execEnv, outputOffset), outputSize);
+    propagatePendingAbort(execEnv);
+    return result;
 }
 
 static int32_t w_liteInvokeProcedure(
@@ -574,7 +590,9 @@ static int32_t w_liteInvokeProcedure(
 
     traceHostCall(callContext, "invokeProcedure", "-> " + std::to_string(contractIndex) + "/" + std::to_string(inputType) + " reward " + std::to_string(invocationReward));
     noteGuestWrite(execEnv, callContext, outputOffset, outputSize);
-    return hostServices.liteInvokeProcedure(callContext->ctx, contractIndex, (unsigned short)inputType, nativeAddress(execEnv, inputOffset), inputSize, nativeAddress(execEnv, outputOffset), outputSize, invocationReward);
+    const int32_t result = hostServices.liteInvokeProcedure(callContext->ctx, contractIndex, (unsigned short)inputType, nativeAddress(execEnv, inputOffset), inputSize, nativeAddress(execEnv, outputOffset), outputSize, invocationReward);
+    propagatePendingAbort(execEnv);
+    return result;
 }
 
 static int32_t w_liteSetShareholderProposal(wasm_exec_env_t execEnv, uint32_t contractIndex, uint32_t proposalOffset, int64_t invocationReward)

@@ -134,6 +134,8 @@ static inline void ensureThreadEnvironment()
 
 static thread_local wasm_exec_env_t currentEnvironment = nullptr;
 static thread_local uint32_t slotCallDepth[WASM_RESERVED_SLOT_COUNT] = {};
+// Depth across every slot, so a root frame can be told from a callee living in another slot.
+static thread_local uint32_t dispatchDepth = 0;
 static thread_local CallContext* slotCallContexts[WASM_RESERVED_SLOT_COUNT] = {};
 
 struct IoSizes

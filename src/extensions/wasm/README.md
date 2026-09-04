@@ -26,3 +26,5 @@ included fragment and therefore has no include guard.
 `LITE_WASM_TU_BUILD` remains the contract-side compilation guard. `LITE_SC_PAGER`, `LITE_SC_CONTRACT_LEVEL`, and `LITE_SC_NO_PAGER` are internal state-backend controls, not user-facing Wasm feature switches.
 
 The `"lhost"` names and signatures, module exports, deployment transaction layout, state layout, libffi call shapes, migration order, and registration order are compatibility boundaries. Changes to them require an explicit ABI or wire-format migration.
+
+A contract failure falls into one of three classes. An abort or trap inside a user function fails that query with a contract error and the node keeps ticking. An abort or trap inside a procedure, system procedure, or migration commits its trace entry, records the node fault served at `/live/v1/dev/fault`, and halts the tick loop. A nested Wasm trap is recovered by the caller as `NoCallError` with zeroed output; a nested abort unwinds every frame and halts like a top-level one. `/live/v1/dev/state-read` serves any length up to the contract's state size; the client chooses its chunk size.

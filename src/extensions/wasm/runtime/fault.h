@@ -1,8 +1,7 @@
 #pragma once
 
-// A contract abort from a procedure entry point stops the tick loop for good. Nothing else records that:
-// the dispatch never returns, so its trace entry is never committed. This is the one record of the halt,
-// written before the abort and served over HTTP so a reader can tell "halted" from "not ticking yet".
+// A contract abort or trap from a procedure entry point stops the tick loop for good once the frame has
+// committed its trace. This record is served over HTTP so a reader can tell "halted" from "not ticking yet".
 #ifdef LITE_WASM_SC
 
 #include <string>
@@ -26,7 +25,7 @@ struct FaultRecord
 static FaultRecord nodeFault;
 
 // The first fault describes the halt; anything after it is a consequence.
-static inline void recordFault(unsigned int contractIndex, unsigned char kind, unsigned short inputType, unsigned int errorCode, unsigned int tick,
+static inline void recordFault(unsigned int contractIndex, unsigned char kind, unsigned short inputType, const std::string& message, unsigned int tick,
     unsigned short epoch)
 {
     TraceLockScope lock;
@@ -36,13 +35,18 @@ static inline void recordFault(unsigned int contractIndex, unsigned char kind, u
     }
 
     nodeFault.set = true;
-    nodeFault.message = "abort(" + std::to_string(errorCode) + ")";
+    nodeFault.message = message;
     nodeFault.phase = "transaction";
     nodeFault.failedTick = tick;
     nodeFault.failedEpoch = epoch;
     nodeFault.slot = contractIndex;
     nodeFault.kind = kind;
     nodeFault.entry = inputType;
+}
+
+static inline std::string abortMessage(unsigned int errorCode)
+{
+    return "abort(" + std::to_string(errorCode) + ")";
 }
 
 static inline FaultRecord faultSnapshot()

@@ -222,6 +222,15 @@ struct DispatchTrace
     std::chrono::steady_clock::time_point startedAt;
 };
 
+// What a frame leaves behind for the closure that called it, once every scope of the frame is gone.
+struct DispatchOutcome
+{
+    bool trapped = false;
+    bool rootFrame = false;
+    uint32_t abortCode = 0;
+    std::string trapText;
+};
+
 static void beginDispatchTrace(const EngineSlot& slot, uint32_t contractIndex, uint16_t inputType, DispatchKind kind, const void* context, const void* input,
     const IoSizes& sizes, CallContext& callContext, DispatchTrace& trace)
 {
@@ -297,7 +306,9 @@ static bool invokeDispatch(EngineSlot& slot, wasm_exec_env_t execEnv, DispatchKi
     return wasm_runtime_call_wasm(execEnv, slot.dispatchFunction, 5, arguments);
 }
 
-static void handleDispatchResult(EngineSlot& slot, uint32_t contractIndex, uint16_t inputType, DispatchKind kind, bool succeeded)
+// An abort reads the same in the trace and the registry as it does in the fault record; a real trap keeps
+// the entry that raised it, which the WAMR text alone does not carry.
+static void handleDispatchResult(EngineSlot& slot, uint32_t contractIndex, const std::string& frameLabel, bool succeeded, DispatchOutcome& outcome)
 {
     if (succeeded)
     {
@@ -306,25 +317,32 @@ static void handleDispatchResult(EngineSlot& slot, uint32_t contractIndex, uint1
     }
 
     const char* exception = wasm_runtime_get_exception(slot.instance);
-    slot.lastTrap = std::string("it=") + std::to_string(inputType) + " kind=" + std::to_string((unsigned int)kind) + (exception ? std::string(" — ") + exception : std::string(" — trap"));
+    outcome.trapped = true;
+    outcome.abortCode = pendingAbortCode;
+    outcome.trapText = exception ? exception : "trap";
+    slot.lastTrap = outcome.abortCode ? abortMessage(outcome.abortCode) : frameLabel + " — " + outcome.trapText;
 
-    // WAMR prints the original Wasm offsets before unwinding so Qinit can map them through DWARF.
+    // WAMR prints the original Wasm offsets before unwinding so a debugger can map them through DWARF.
     logColorToScreen("ERROR", "LITEWASM dispatch trap idx=" + std::to_string(contractIndex) + " " + slot.lastTrap);
     wasm_runtime_clear_exception(slot.instance);
 }
 
-static void handleMigrationResult(EngineSlot& slot, uint32_t contractIndex, bool succeeded)
+// Runs once every scope of the frame has unwound, because a halt parks this thread and a function abort
+// long-jumps back to the query; neither may skip a destructor. Nested frames settle nothing: a nested
+// trap is the caller's to recover, a nested abort is propagated frame by frame up to the root.
+static void settleRootFailure(const DispatchOutcome& outcome, DispatchKind kind, uint32_t contractIndex, uint16_t inputType, const void* context)
 {
-    if (succeeded)
+    if (!outcome.trapped || !outcome.rootFrame)
     {
-        slot.lastTrap.clear();
         return;
     }
 
-    const char* exception = wasm_runtime_get_exception(slot.instance);
-    slot.lastTrap = std::string("MIGRATE") + (exception ? std::string(" — ") + exception : std::string(" — trap"));
-    logColorToScreen("ERROR", "LITEWASM migrate trap idx=" + std::to_string(contractIndex) + " " + slot.lastTrap);
-    wasm_runtime_clear_exception(slot.instance);
+    pendingAbortCode = 0;
+    if (kind != DispatchKind::UserFunction && !outcome.abortCode)
+    {
+        recordFault(contractIndex, (unsigned char)kind, inputType, outcome.trapText, hostServices.tick(context), hostServices.epoch(context));
+    }
+    hostServices.abort(context, outcome.abortCode ? outcome.abortCode : WASM_TRAP_ERROR_CODE);
 }
 
 /** Regions flattened per byte: the tracker splits a run at page boundaries, the journal at block ones. */
@@ -392,19 +410,20 @@ static void recordStateDiff(EngineSlot& slot, uint32_t contractIndex, StateJourn
     traceEntry.stateTruncated = false;
 }
 
-static void dispatchMigration(uint32_t contractIndex, int slotOffset, EngineSlot& slot, const void* context, const void* oldState)
+static DispatchOutcome dispatchMigration(uint32_t contractIndex, int slotOffset, EngineSlot& slot, const void* context, const void* oldState)
 {
+    DispatchOutcome outcome;
     const uint32_t oldStateSize = slot.migrationOldStateSize;
     if (oldStateSize > WASM_ARENA_SIZE)
     {
         logColorToScreen("ERROR", "LITEWASM migrate old-state exceeds arena idx=" + std::to_string(contractIndex));
-        return;
+        return outcome;
     }
 
     EnvironmentScope environment(slot);
     if (!environment.ready)
     {
-        return;
+        return outcome;
     }
 
     const MemoryLayout layout = resolveMemoryLayout(slot);
@@ -412,13 +431,18 @@ static void dispatchMigration(uint32_t contractIndex, int slotOffset, EngineSlot
     if (!resolveArenaLimit(layout, arenaLimit))
     {
         logColorToScreen("ERROR", "LITEWASM migrate arena exceeds Wasm32 memory idx=" + std::to_string(contractIndex));
-        return;
+        return outcome;
     }
 
     const uint32_t migrationArenaStart = layout.arenaOffset + ((oldStateSize + 15u) & ~15u);
     CallContext callContext = createCallContext(context, migrationArenaStart, arenaLimit);
+    callContext.contractIndex = contractIndex;
+    callContext.inputType = 0;
+    callContext.kind = (unsigned char)DispatchKind::Migration;
     bindJournal(callContext, slot);
-    DispatchDepthScope dispatchDepth(slotCallDepth[slotOffset]);
+    DispatchDepthScope slotDepth(slotCallDepth[slotOffset]);
+    DispatchDepthScope frameDepth(dispatchDepth);
+    outcome.rootFrame = dispatchDepth == 1;
 
     bindEnvironment(environment.execEnv, callContext);
 
@@ -448,49 +472,50 @@ static void dispatchMigration(uint32_t contractIndex, int slotOffset, EngineSlot
     StateWriteScope pageProtection(trace.tracksWrites && (!journalUsable || verifyingStateDiff()), trace.state, slot.stateSize);
 
     const bool succeeded = invokeDispatch(slot, environment.execEnv, DispatchKind::Migration, 0, layout.arenaOffset, 0, layout.localsOffset);
-    handleMigrationResult(slot, contractIndex, succeeded);
+    handleDispatchResult(slot, contractIndex, "MIGRATE", succeeded, outcome);
     pageProtection.finish(trace.entry);
     recordStateDiff(slot, contractIndex, journalScope, trace.entry);
     finishDispatchTrace(slot, layout, sizes, callContext, trace);
 
     contractStates[contractIndex] = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset);
     hostServices.markDirty(contractIndex);
+    return outcome;
 }
 
-static void dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKind kind, const void* context, void* statePointer, void* input, void* output,
-    void* locals)
+static DispatchOutcome dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKind kind, const void* context, void* statePointer, void* input,
+    void* output, void* locals)
 {
     (void)statePointer;
     (void)locals;
 
+    DispatchOutcome outcome;
     const int slotOffset = engineSlotOffset(contractIndex);
     if (slotOffset < 0)
     {
-        return;
+        return outcome;
     }
 
     EngineSlot& slot = engineSlots[slotOffset];
     if (!slot.loaded)
     {
-        return;
+        return outcome;
     }
 
     if (kind == DispatchKind::Migration)
     {
-        dispatchMigration(contractIndex, slotOffset, slot, context, input);
-        return;
+        return dispatchMigration(contractIndex, slotOffset, slot, context, input);
     }
 
     IoSizes sizes;
     if (!resolveIoSizes(contractIndex, inputType, kind, slot, sizes))
     {
-        return;
+        return outcome;
     }
 
     EnvironmentScope environment(slot);
     if (!environment.ready)
     {
-        return;
+        return outcome;
     }
 
     const MemoryLayout fixedLayout = resolveMemoryLayout(slot);
@@ -498,7 +523,7 @@ static void dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKin
     if (!resolveArenaLimit(fixedLayout, arenaLimit))
     {
         logColorToScreen("ERROR", "LITEWASM dispatch arena exceeds Wasm32 memory idx=" + std::to_string(contractIndex));
-        return;
+        return outcome;
     }
 
     const bool nested = slotCallDepth[slotOffset] != 0;
@@ -507,10 +532,12 @@ static void dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKin
     if (nested && !nestedMemoryLayout(fixedLayout, arenaLimit, parentContext ? parentContext->arenaTop : 0, layout))
     {
         logColorToScreen("ERROR", "LITEWASM nested dispatch frame exceeds arena idx=" + std::to_string(contractIndex));
-        return;
+        return outcome;
     }
 
     DispatchFrameScope frame(slot, environment.execEnv, slotOffset, static_cast<const QPI::QpiContext*>(context), layout, arenaLimit, nested);
+    DispatchDepthScope frameDepth(dispatchDepth);
+    outcome.rootFrame = dispatchDepth == 1;
     frame.callContext().contractIndex = contractIndex;
     frame.callContext().inputType = inputType;
     frame.callContext().kind = (unsigned char)kind;
@@ -524,24 +551,30 @@ static void dispatchCall(uint32_t contractIndex, uint16_t inputType, DispatchKin
     StateJournalScope journalScope(trace.tracksWrites && journalUsable, linearMemory, slot.journalBaseOffset, slot.stateOffset, slot.journalHeader);
     StateWriteScope pageProtection(trace.tracksWrites && (!journalUsable || verifyingStateDiff()), trace.state, slot.stateSize);
     const bool succeeded = invokeDispatch(slot, environment.execEnv, kind, inputType, layout.inputOffset, layout.outputOffset, layout.localsOffset);
-    handleDispatchResult(slot, contractIndex, inputType, kind, succeeded);
+    const std::string frameLabel = "it=" + std::to_string(inputType) + " kind=" + std::to_string((unsigned int)kind);
+    handleDispatchResult(slot, contractIndex, frameLabel, succeeded, outcome);
     pageProtection.finish(trace.entry);
     recordStateDiff(slot, contractIndex, journalScope, trace.entry);
 
     finalizeMemory(slot, layout, contractIndex, kind, output, sizes);
     finishDispatchTrace(slot, layout, sizes, frame.callContext(), trace);
+    return outcome;
 }
 
 static void dispatchClosure(ffi_cif*, void*, void** arguments, void* userData)
 {
     EntryBinding* binding = (EntryBinding*)userData;
-    dispatchCall(binding->contractIndex, binding->inputType, binding->kind, *(const void**)arguments[0], *(void**)arguments[1], *(void**)arguments[2], *(void**)arguments[3], *(void**)arguments[4]);
+    const void* context = *(const void**)arguments[0];
+    const DispatchOutcome outcome = dispatchCall(binding->contractIndex, binding->inputType, binding->kind, context, *(void**)arguments[1], *(void**)arguments[2], *(void**)arguments[3], *(void**)arguments[4]);
+    settleRootFailure(outcome, binding->kind, binding->contractIndex, binding->inputType, context);
 }
 
 static void migrationClosure(ffi_cif*, void*, void** arguments, void* userData)
 {
     EntryBinding* binding = (EntryBinding*)userData;
-    dispatchCall(binding->contractIndex, 0, DispatchKind::Migration, *(const void**)arguments[0], *(void**)arguments[1], *(void**)arguments[2], nullptr, *(void**)arguments[3]);
+    const void* context = *(const void**)arguments[0];
+    const DispatchOutcome outcome = dispatchCall(binding->contractIndex, 0, DispatchKind::Migration, context, *(void**)arguments[1], *(void**)arguments[2], nullptr, *(void**)arguments[3]);
+    settleRootFailure(outcome, DispatchKind::Migration, binding->contractIndex, 0, context);
 }
 
 } // namespace Wasm::Runtime
