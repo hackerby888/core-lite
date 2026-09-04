@@ -52,6 +52,24 @@ static void unloadSlot(EngineSlot& slot)
 
     for (uint32_t entryIndex = 0; entryIndex < slot.entryCount; ++entryIndex)
     {
+        // Clear the shared-core registration row before freeing the closure, so a redeploy that drops
+        // this entry cannot leave a non-null pointer into freed trampoline code that dispatch would jump to.
+        const EntryBinding& binding = slot.entryBindings[entryIndex];
+        if (binding.kind == DispatchKind::UserFunction)
+        {
+            contractUserFunctions[binding.contractIndex][binding.inputType] = nullptr;
+            contractUserFunctionInputSizes[binding.contractIndex][binding.inputType] = 0;
+            contractUserFunctionOutputSizes[binding.contractIndex][binding.inputType] = 0;
+            contractUserFunctionLocalsSizes[binding.contractIndex][binding.inputType] = 0;
+        }
+        else if (binding.kind == DispatchKind::UserProcedure)
+        {
+            contractUserProcedures[binding.contractIndex][binding.inputType] = nullptr;
+            contractUserProcedureInputSizes[binding.contractIndex][binding.inputType] = 0;
+            contractUserProcedureOutputSizes[binding.contractIndex][binding.inputType] = 0;
+            contractUserProcedureLocalsSizes[binding.contractIndex][binding.inputType] = 0;
+        }
+
         if (slot.entryClosures[entryIndex])
         {
             ffi_closure_free(slot.entryClosures[entryIndex]);
@@ -63,6 +81,10 @@ static void unloadSlot(EngineSlot& slot)
     {
         if (slot.systemClosures[systemProcedure])
         {
+            // Same as above for a system procedure the redeploy may have dropped.
+            const EntryBinding& binding = slot.systemBindings[systemProcedure];
+            contractSystemProcedures[binding.contractIndex][systemProcedure] = nullptr;
+            contractSystemProcedureLocalsSizes[binding.contractIndex][systemProcedure] = 0;
             ffi_closure_free(slot.systemClosures[systemProcedure]);
             slot.systemClosures[systemProcedure] = nullptr;
         }

@@ -248,7 +248,9 @@ static bool hasPendingActivation()
         contractError[contractIndex] = NoContractError;
         if (getContractFeeReserve(contractIndex) <= 0)
         {
-            setContractFeeReserve(contractIndex, 1000000000000ll);
+            // Match the simulator's metered DEFAULT_FEE_RESERVE (1e9) so the fee-cliff / dormancy point is
+            // the same on both runtimes for a contract developer.
+            setContractFeeReserve(contractIndex, 1000000000ll);
         }
     }
 }

@@ -5986,7 +5986,9 @@ static void endEpoch()
     system.initialYear = etalonTick.year;
 
 
-    // Only issue qus if the max supply is not yet reached
+    // Only issue qus if the max supply is not yet reached.
+    // Dev node (TESTNET + LITE_WASM_SC) skips per-epoch emission to keep contract-dev balances stable; boot funding stays.
+#if !(defined(TESTNET) && defined(LITE_WASM_SC))
     if (spectrumInfo.totalAmount + ISSUANCE_RATE <= MAX_SUPPLY)
     {
         logToConsole(L"endEpoch: [3/5] computing revenue (V2/multi-dim) + distributing to computors...");
@@ -6077,6 +6079,7 @@ static void endEpoch()
         const QuTransfer quTransfer = { m256i::zero(), arbitratorPublicKey, arbitratorRevenue };
         logger.logQuTransfer(quTransfer);
     }
+#endif // !(TESTNET && LITE_WASM_SC): per-epoch emission disabled on the dev node
 
     // Reorganize spectrum hash map (also updates spectrumInfo)
     logToConsole(L"endEpoch: [4/5] reorganizing spectrum hash map...");
@@ -9278,10 +9281,15 @@ static bool initialize()
     // if the contract 0 is missing, we should give default executionFee for it
     if (isAllBytesZero(contractStates[0], contractDescriptions[0].stateSize))
     {
-        logToConsole(L"No contract 0 state provided, giving testnet execution fee reserve (10B by default for each contract) ...");
+        logToConsole(L"No contract 0 state provided, giving testnet execution fee reserve for each contract ...");
         for (unsigned int i = 1; i < contractCount; i++)
         {
-           setContractFeeReserve(i, 10'000'000'000);
+#if defined(LITE_WASM_SC)
+            // Dev node matches the simulator's 1e9 metered reserve, so the fee cliff lands at the same point.
+            setContractFeeReserve(i, 1'000'000'000);
+#else
+            setContractFeeReserve(i, 10'000'000'000);
+#endif
         }
     }
 #endif

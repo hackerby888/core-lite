@@ -479,6 +479,12 @@ RPC_ROUTE("POST", "/live/v1/querySmartContract")
         {
             return rpcErr(3, "Input size mismatch", 400);
         }
+        // A never-registered or redeploy-dropped entry has a null row; calling it would jump into freed
+        // memory. Reject it here the way the network path already does (qubic.cpp processRequestContractFunction).
+        if (!contractUserFunctions[contractIndex][inputType])
+        {
+            return rpcErr(3, "no such function on contract", 400);
+        }
         QpiContextUserFunctionCall qpiContext(contractIndex);
         auto errorCode = qpiContext.call(inputType, inputData.data(), inputSize);
         if (errorCode == NoContractError)
