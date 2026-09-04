@@ -101,6 +101,7 @@ struct State
     unsigned int deadlineStreak = 0;
     unsigned int helloGeneration = 0;
     long long handshakeStartedAtMs = 0;
+    long long lastSuspectLogMs = 0;
 
     std::thread* dispatcher = nullptr;
 };
@@ -123,6 +124,18 @@ inline const char* linkName(LinkState state)
 inline long long nowMs()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// The suspect-walker reconnect loop retries in ~100ms, so its two log lines would flood stderr.
+inline bool suspectLogDue()
+{
+    const long long now = nowMs();
+    if (now - gState.lastSuspectLogMs < 1000)
+    {
+        return false;
+    }
+    gState.lastSuspectLogMs = now;
+    return true;
 }
 
 inline void logLine(const char* format, ...)
@@ -257,7 +270,10 @@ inline void dropLink(const char* reason)
     gState.inFlightCount.store(0, std::memory_order_release);
     if (gState.link.load(std::memory_order_acquire) != (int)LinkState::Disconnected)
     {
-        logLine("sidecar lost (%s), %u claims released", reason, released);
+        if (strcmp(reason, "suspect walker") != 0 || suspectLogDue())
+        {
+            logLine("sidecar lost (%s), %u claims released", reason, released);
+        }
     }
     gState.link.store((int)LinkState::Disconnected, std::memory_order_release);
 }
@@ -673,7 +689,10 @@ inline bool readOneFrame(int fd, unsigned char* payload)
         memcpy(&ready, payload, sizeof(ready));
         if ((int)ready.walkerPid == gState.suspectWalkerPid.load(std::memory_order_acquire))
         {
-            logLine("walker pid %u already disagreed on every job, not using it", ready.walkerPid);
+            if (suspectLogDue())
+            {
+                logLine("walker pid %u already disagreed on every job, not using it", ready.walkerPid);
+            }
             dropLink("suspect walker");
             return false;
         }

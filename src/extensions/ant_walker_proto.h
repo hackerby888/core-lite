@@ -99,7 +99,7 @@ struct JobPayload
 {
     unsigned long long jobId;
     unsigned int epochId;
-    unsigned int isRoot;             // parentAnn is unused when set; the walker derives the miner's root
+    unsigned int isRoot;             // parentAnn is unused when set; the walker derives the epoch root
     unsigned char pubkey[32];
     unsigned char nonce[32];
     unsigned char anchorDigest[32];

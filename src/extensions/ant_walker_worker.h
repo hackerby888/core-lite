@@ -218,7 +218,7 @@ void runWorker(unsigned int workerIndex)
             const Ann* parentAnn;
             if (job.isRoot)
             {
-                engine->deriveRootANN(job.pubkey, gPool, rootAnn);
+                engine->deriveRootANN(gPoolSeed, gPool, rootAnn);
                 parentAnn = &rootAnn;
             }
             else
