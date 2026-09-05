@@ -604,6 +604,9 @@ RPC_ROUTE("GET", "/live/v1/dyn-upload")
     json["receivedCount"] = upload.receivedCount;
     json["complete"] = upload.active && upload.receivedCount == upload.chunkCount;
     json["finalHash"] = rpcHex32(upload.finalHash);
+    json["lastProgressTick"] = upload.lastProgressTick;
+    json["idleTicks"] = upload.active && system.tick > upload.lastProgressTick ? system.tick - upload.lastProgressTick : 0u;
+    json["staleAfterTicks"] = Wasm::Runtime::WASM_UPLOAD_STALE_TICKS;
 
     // Cap the missing-sequence response for large uploads.
     Json::Value missing(Json::arrayValue);

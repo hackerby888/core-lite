@@ -10,10 +10,11 @@
 namespace Wasm::Runtime
 {
 
-[[maybe_unused]] static void beginModuleUpload(unsigned long long sessionId, unsigned int totalSize, unsigned int chunkCount, const unsigned char* finalHash)
+[[maybe_unused]] static void beginModuleUpload(unsigned long long sessionId, unsigned int totalSize, unsigned int chunkCount, const unsigned char* finalHash,
+    unsigned int tick)
 {
-    const bool retry = moduleUpload.active;
-    if (!tryBeginModuleUpload(sessionId, totalSize, chunkCount, finalHash))
+    const bool retry = moduleUpload.active && !moduleUploadStale(tick);
+    if (!tryBeginModuleUpload(sessionId, totalSize, chunkCount, finalHash, tick))
     {
         if (moduleUpload.active)
         {
@@ -29,9 +30,22 @@ namespace Wasm::Runtime
     logToConsole(retry ? L"LITEDYN: UploadBegin retry accepted" : L"LITEDYN: UploadBegin received");
 }
 
-[[maybe_unused]] static void receiveModuleChunk(unsigned long long sessionId, unsigned int sequence, const unsigned char* data, unsigned int dataLength)
+[[maybe_unused]] static void receiveModuleChunk(unsigned long long sessionId, unsigned int sequence, const unsigned char* data, unsigned int dataLength,
+    unsigned int tick)
 {
-    tryReceiveModuleChunk(sessionId, sequence, data, dataLength);
+    tryReceiveModuleChunk(sessionId, sequence, data, dataLength, tick);
+}
+
+// Runs once per tick so an upload whose client died frees the node without a restart.
+[[maybe_unused]] static void expireStaleModuleUpload(unsigned int tick)
+{
+    if (!moduleUploadStale(tick))
+    {
+        return;
+    }
+
+    logColorToScreen("WARN", "LITEDYN: upload session " + std::to_string(moduleUpload.sessionId) + " dropped after " + std::to_string(tick - moduleUpload.lastProgressTick) + " idle ticks");
+    moduleUpload = ModuleUpload{};
 }
 
 static bool moduleUploadComplete()
@@ -134,7 +148,7 @@ static void runPendingMigration(unsigned int contractIndex);
 }
 
 
-[[maybe_unused]] static void dispatchDeploymentTransaction(unsigned short inputType, const unsigned char* input, unsigned int size)
+[[maybe_unused]] static void dispatchDeploymentTransaction(unsigned short inputType, const unsigned char* input, unsigned int size, unsigned int tick)
 {
     if (inputType == WASM_DEPLOYMENT_UPLOAD_BEGIN_INPUT_TYPE)
     {
@@ -145,7 +159,7 @@ static void runPendingMigration(unsigned int contractIndex);
         }
 
         copyMem(&message, input, sizeof(message));
-        beginModuleUpload(message.sessionId, message.totalSize, message.chunkCount, message.finalHash);
+        beginModuleUpload(message.sessionId, message.totalSize, message.chunkCount, message.finalHash, tick);
     }
     else if (inputType == WASM_DEPLOYMENT_UPLOAD_CHUNK_INPUT_TYPE)
     {
@@ -161,7 +175,7 @@ static void runPendingMigration(unsigned int contractIndex);
             return;
         }
 
-        receiveModuleChunk(message.sessionId, message.sequence, input + sizeof(message), message.dataLength);
+        receiveModuleChunk(message.sessionId, message.sequence, input + sizeof(message), message.dataLength, tick);
     }
     else if (inputType == WASM_DEPLOYMENT_DEPLOY_INPUT_TYPE)
     {

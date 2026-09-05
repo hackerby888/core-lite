@@ -4245,7 +4245,7 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
 #ifdef LITE_WASM_SC
             if (transaction->destinationPublicKey == Wasm::Runtime::DeploymentProtocol::DeploymentAddress)
             {
-                Wasm::Runtime::dispatchDeploymentTransaction(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize);
+                Wasm::Runtime::dispatchDeploymentTransaction(transaction->inputType, (const unsigned char*)transaction->inputPtr(), transaction->inputSize, system.tick);
             }
             else
 #endif
@@ -4779,6 +4779,8 @@ static void processTick(unsigned long long processorNumber)
     }
 
 #ifdef LITE_WASM_SC
+    Wasm::Runtime::expireStaleModuleUpload(system.tick);
+
     // Activate armed contracts under SC_INITIALIZE_TX framing.
     if (Wasm::Runtime::hasPendingActivation())
     {

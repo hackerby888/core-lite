@@ -183,6 +183,38 @@ TEST(WasmContracts, UploadBeginPreservesTheActiveSession)
     EXPECT_EQ(moduleUploadBuffer[WASM_UPLOAD_CHUNK_SIZE], 0xcd);
 }
 
+TEST(WasmContracts, StaleUploadSessionGivesWayToANewOne)
+{
+    using namespace Wasm::Runtime;
+
+    moduleUpload = ModuleUpload{};
+    std::memset(receivedChunkBits, 0, sizeof(receivedChunkBits));
+    unsigned char firstHash[32];
+    unsigned char otherHash[32];
+    std::memset(firstHash, 0x11, sizeof(firstHash));
+    std::memset(otherHash, 0x22, sizeof(otherHash));
+    unsigned char chunk[WASM_UPLOAD_CHUNK_SIZE] = {};
+
+    ASSERT_TRUE(tryBeginModuleUpload(11, WASM_UPLOAD_CHUNK_SIZE * 2u, 2, firstHash, 100));
+    ASSERT_TRUE(tryReceiveModuleChunk(11, 0, chunk, WASM_UPLOAD_CHUNK_SIZE, 105));
+    EXPECT_EQ(moduleUpload.lastProgressTick, 105u);
+
+    // Still within the idle window: another session is refused and nothing moves.
+    EXPECT_FALSE(moduleUploadStale(105 + WASM_UPLOAD_STALE_TICKS));
+    EXPECT_FALSE(tryBeginModuleUpload(22, WASM_UPLOAD_CHUNK_SIZE, 1, otherHash, 105 + WASM_UPLOAD_STALE_TICKS));
+    EXPECT_EQ(moduleUpload.sessionId, 11u);
+    EXPECT_EQ(moduleUpload.receivedCount, 1u);
+
+    // One tick past the window the old session is abandoned and the new one takes the slot.
+    EXPECT_TRUE(moduleUploadStale(106 + WASM_UPLOAD_STALE_TICKS));
+    EXPECT_TRUE(tryBeginModuleUpload(22, WASM_UPLOAD_CHUNK_SIZE, 1, otherHash, 106 + WASM_UPLOAD_STALE_TICKS));
+    EXPECT_EQ(moduleUpload.sessionId, 22u);
+    EXPECT_EQ(moduleUpload.receivedCount, 0u);
+    EXPECT_EQ(moduleUpload.lastProgressTick, 106u + WASM_UPLOAD_STALE_TICKS);
+    EXPECT_EQ(std::memcmp(moduleUpload.finalHash, otherHash, sizeof(otherHash)), 0);
+    EXPECT_EQ(receivedChunkBits[0], 0u);
+}
+
 TEST(WasmContracts, UploadBeginRejectsInvalidShapesWithoutMutation)
 {
     using namespace Wasm::Runtime;
