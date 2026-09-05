@@ -1052,7 +1052,7 @@ static bool saveSystem(CHAR16* directory = NULL);
 static bool loadContractStateFiles(CHAR16* directory = NULL, bool forceLoadFromFile = false);
 static bool loadContractExecFeeFiles(CHAR16* directory = NULL, bool loadAccumulatedTime = false);
 
-#if ENABLED_LOGGING && !defined(LONG_RUN_LOCAL_TESTNET)
+#if ENABLED_LOGGING && !defined(LONG_RUN_LOCAL_TESTNET) && !defined(TESTNET_LITE_RAM)
 #define PAUSE_BEFORE_CLEAR_MEMORY 1 // Requiring operators to press F10 to clear memory (before switching epoch)
 #else
 #define PAUSE_BEFORE_CLEAR_MEMORY 0 // long-run: see doc/long_run_local_testnet.md
