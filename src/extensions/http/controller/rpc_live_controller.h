@@ -578,6 +578,7 @@ RPC_ROUTE("GET", "/live/v1/dyn-registry")
         contractJson["procedures"] = proceduresJson;
         contractJson["source"] = slot.sourceH;
         contractJson["lastError"] = Wasm::Runtime::lastTrap(slotIndex);
+        contractJson["feeReserve"] = std::to_string(getContractFeeReserve(slotIndex));
         contractsJson.append(contractJson);
     }
     json["slotBase"] = (unsigned int)WASM_RESERVED_SLOT_BASE;

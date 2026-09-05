@@ -9285,8 +9285,7 @@ static bool initialize()
         for (unsigned int i = 1; i < contractCount; i++)
         {
 #if defined(LITE_WASM_SC)
-            // Dev node matches the simulator's 1e9 metered reserve, so the fee cliff lands at the same point.
-            setContractFeeReserve(i, 1'000'000'000);
+            setContractFeeReserve(i, LITE_DEV_FEE_RESERVE);
 #else
             setContractFeeReserve(i, 10'000'000'000);
 #endif

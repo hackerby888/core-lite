@@ -151,6 +151,7 @@ template <typename T>
 static void __logContractDebugMessage(unsigned int contractIndex, T& message)
 {
     static_assert(__builtin_offsetof(T, _terminator) >= 8, "Invalid contract debug message structure");
+    static_assert(sizeof(T) - __builtin_offsetof(T, _terminator) <= alignof(T), "Fields after _terminator are never logged");
 
     lh_logBytes(contractIndex, 7, &message, (unsigned int)__builtin_offsetof(T, _terminator));
 }
@@ -159,6 +160,7 @@ template <typename T>
 static void __logContractErrorMessage(unsigned int contractIndex, T& message)
 {
     static_assert(__builtin_offsetof(T, _terminator) >= 8, "Invalid contract error message structure");
+    static_assert(sizeof(T) - __builtin_offsetof(T, _terminator) <= alignof(T), "Fields after _terminator are never logged");
 
     lh_logBytes(contractIndex, 4, &message, (unsigned int)__builtin_offsetof(T, _terminator));
 }
@@ -167,6 +169,7 @@ template <typename T>
 static void __logContractInfoMessage(unsigned int contractIndex, T& message)
 {
     static_assert(__builtin_offsetof(T, _terminator) >= 8, "Invalid contract info message structure");
+    static_assert(sizeof(T) - __builtin_offsetof(T, _terminator) <= alignof(T), "Fields after _terminator are never logged");
 
     lh_logBytes(contractIndex, 6, &message, (unsigned int)__builtin_offsetof(T, _terminator));
 }
@@ -175,6 +178,7 @@ template <typename T>
 static void __logContractWarningMessage(unsigned int contractIndex, T& message)
 {
     static_assert(__builtin_offsetof(T, _terminator) >= 8, "Invalid contract warning message structure");
+    static_assert(sizeof(T) - __builtin_offsetof(T, _terminator) <= alignof(T), "Fields after _terminator are never logged");
 
     lh_logBytes(contractIndex, 5, &message, (unsigned int)__builtin_offsetof(T, _terminator));
 }

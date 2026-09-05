@@ -237,6 +237,10 @@ static bool hasPendingActivation()
     }
 }
 
+// The dev reserve every runtime seeds a slot with, so the dormancy point is the same wherever a contract
+// developer runs it: about a hundred state-changing procedures on a state near the 1 GiB limit.
+#define LITE_DEV_FEE_RESERVE 100000000000
+
 [[maybe_unused]] static void initializeDeployment()
 {
     logToConsole(L"LITEWASM: runtime deployment enabled for testnet lite RAM");
@@ -248,9 +252,7 @@ static bool hasPendingActivation()
         contractError[contractIndex] = NoContractError;
         if (getContractFeeReserve(contractIndex) <= 0)
         {
-            // Match the simulator's metered DEFAULT_FEE_RESERVE (1e9) so the fee-cliff / dormancy point is
-            // the same on both runtimes for a contract developer.
-            setContractFeeReserve(contractIndex, 1000000000ll);
+            setContractFeeReserve(contractIndex, LITE_DEV_FEE_RESERVE);
         }
     }
 }
