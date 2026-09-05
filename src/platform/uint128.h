@@ -33,6 +33,11 @@ public:
 	uint64_t low;
 	uint64_t high;
 
+	uint128_t(){
+		low = 0;
+		high = 0;
+	};
+
 	uint128_t(uint64_t n){
 		low = n;
 		high = 0;
