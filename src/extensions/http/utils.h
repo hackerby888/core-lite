@@ -104,6 +104,7 @@ public:
         TickData *tickData = new TickData();
         if (forceToBeProcessed)
         {
+            PinScope _pinScope; // callers loop over many ticks; hold the tickData page pin only while copying it out
             TickStorage::tickData.acquireLock();
             TickData *tmptickData = TickStorage::tickData.getByTickIfNotEmpty(tx->tick);
             if (!tmptickData)

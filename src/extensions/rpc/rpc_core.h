@@ -14,6 +14,7 @@
 #include <thread>
 #include <atomic>
 #include <shared_mutex>
+#include <semaphore>
 #include <chrono>
 #include <cerrno>
 #include <cstdio>
@@ -107,6 +108,12 @@ inline RpcResp fileResp(const std::string& absPath, const std::string& downloadN
 // ---------------- router ----------------
 using RpcHandler = std::function<RpcResp(const RpcReq&)>;
 
+// Bounds the swap-cache pages RPC handlers can pin at once (at most 2 per VM each); the rest of the
+// slot budget stays with the tick and request processors: (slots - frontier - tick processor) / 2.
+// Floor of 4: LITE dev nodes have 5 slots but their tooling (qinit) keeps several requests in flight.
+constexpr int RPC_MAX_CONCURRENT_HANDLERS = (CACHE_PAGE - 3) / 2 > 4 ? (CACHE_PAGE - 3) / 2 : 4;
+inline std::counting_semaphore<64> gRpcHandlerSlots{ RPC_MAX_CONCURRENT_HANDLERS };
+
 class RpcRouter
 {
     struct Route
@@ -161,6 +168,13 @@ public:
             }
             if (!ok) continue;
             req.params = std::move(params);
+            if (!gRpcHandlerSlots.try_acquire())
+            {
+                RpcResp busy{ 503, "application/json", "{\"error\":\"busy\"}", "", "" };
+                busy.headers.push_back({ "Retry-After", "1" });
+                return busy;
+            }
+            struct SlotRelease { ~SlotRelease() { gRpcHandlerSlots.release(); } } slotRelease;
             try
             {
                 return route.handler(req);

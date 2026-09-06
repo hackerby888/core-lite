@@ -374,6 +374,7 @@ inline void refreshBacklog()
 
 inline bool dispatchOne()
 {
+    PinScope _pinScope; // this thread has no other work-unit boundary; the anchor rebuild pins a tickData page per call
     unsigned int index;
     if (!selectNextRecord(index))
     {
