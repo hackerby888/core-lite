@@ -78,6 +78,7 @@ add_executable(
    		score_cache.cpp
    		spectrum.cpp
    		stdlib_impl.cpp
+   		demand_zero_pool.cpp
    		tick_storage.cpp
    		time.cpp
    		tx_status_request.cpp
