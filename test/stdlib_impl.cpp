@@ -52,31 +52,41 @@ struct VirtualMapping
     bool hugePageHint;
     bool noHugePages;
 };
-inline std::map<unsigned long long, VirtualMapping> commitMemMap;
-static std::mutex commitMemMapLock;
+// Never destroyed: pools are still freed by static destructors after a plain global lock/table would be
+// gone (macOS rejects a destroyed mutex with EINVAL).
+static std::map<unsigned long long, VirtualMapping>& commitMemMap()
+{
+    static auto* table = new std::map<unsigned long long, VirtualMapping>();
+    return *table;
+}
+static std::mutex& commitMemMapLock()
+{
+    static auto* lock = new std::mutex();
+    return *lock;
+}
 
 // Mapping that contains [address, address + size), or end() if none does. Caller holds the lock.
 static std::map<unsigned long long, VirtualMapping>::iterator findVirtualMappingLocked(const void* address, const unsigned long long size)
 {
     const unsigned long long begin = (unsigned long long)address;
-    auto it = commitMemMap.upper_bound(begin);
-    if (it == commitMemMap.begin())
+    auto it = commitMemMap().upper_bound(begin);
+    if (it == commitMemMap().begin())
     {
-        return commitMemMap.end();
+        return commitMemMap().end();
     }
     --it;
     if (begin + size > it->first + it->second.size)
     {
-        return commitMemMap.end();
+        return commitMemMap().end();
     }
     return it;
 }
 
 static bool lookupVirtualMapping(const void* address, const unsigned long long size, VirtualMapping& out)
 {
-    std::lock_guard<std::mutex> lk(commitMemMapLock);
+    std::lock_guard<std::mutex> lk(commitMemMapLock());
     auto it = findVirtualMappingLocked(address, size);
-    if (it == commitMemMap.end())
+    if (it == commitMemMap().end())
     {
         return false;
     }
@@ -86,8 +96,8 @@ static bool lookupVirtualMapping(const void* address, const unsigned long long s
 
 static void registerVirtualMapping(void* address, const unsigned long long size, bool commitMem, bool hugePageHint)
 {
-    std::lock_guard<std::mutex> lk(commitMemMapLock);
-    commitMemMap[(unsigned long long)address] = { commitMem, size, hugePageHint, false };
+    std::lock_guard<std::mutex> lk(commitMemMapLock());
+    commitMemMap()[(unsigned long long)address] = { commitMem, size, hugePageHint, false };
 }
 
 bool qVirtualContains(const void* address, const unsigned long long size)
@@ -105,12 +115,12 @@ void freePool(void* buffer)
     }
     unsigned long long mappingSize = 0;
     {
-        std::lock_guard<std::mutex> lk(commitMemMapLock);
-        auto mapping = commitMemMap.find((unsigned long long)buffer);
-        if (mapping != commitMemMap.end())
+        std::lock_guard<std::mutex> lk(commitMemMapLock());
+        auto mapping = commitMemMap().find((unsigned long long)buffer);
+        if (mapping != commitMemMap().end())
         {
             mappingSize = mapping->second.size;
-            commitMemMap.erase(mapping);
+            commitMemMap().erase(mapping);
         }
     }
     if (mappingSize)
@@ -161,9 +171,9 @@ void* qVirtualAlloc(const unsigned long long size, bool commitMem = false, bool 
 
 void qVirtualAdviseNoHugePages(void* address, const unsigned long long size)
 {
-    std::lock_guard<std::mutex> lk(commitMemMapLock);
+    std::lock_guard<std::mutex> lk(commitMemMapLock());
     auto mapping = findVirtualMappingLocked(address, size);
-    if (mapping != commitMemMap.end())
+    if (mapping != commitMemMap().end())
     {
         mapping->second.noHugePages = true;
     }
@@ -253,9 +263,9 @@ void* qVirtualAlloc(const unsigned long long size, bool commitMem = false, bool 
 
 void qVirtualAdviseNoHugePages(void* address, const unsigned long long size)
 {
-    std::lock_guard<std::mutex> lk(commitMemMapLock);
+    std::lock_guard<std::mutex> lk(commitMemMapLock());
     auto mapping = findVirtualMappingLocked(address, size);
-    if (mapping != commitMemMap.end())
+    if (mapping != commitMemMap().end())
     {
         mapping->second.noHugePages = true;
         qVirtualAdviseHugePages(address, size, false, true);
@@ -323,4 +333,4 @@ bool qVirtualFreeAndRecommit(void* address, const unsigned long long size) {
 
 #endif
 
-unsigned long long mainThreadProcessorID = 1;
+unsigned long long mainThreadProcessorID = 1;
