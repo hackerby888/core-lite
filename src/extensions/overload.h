@@ -248,18 +248,80 @@ std::vector<unsigned char> readInput() {
 }
 #endif
 
-inline std::map<unsigned long long, bool> commitMemMap;
+struct VirtualMapping
+{
+    bool commitMem;
+    unsigned long long size;
+    // Explicit callers ask for huge pages (cheaper fork); demand-zero pools keep the system default.
+    bool hugePageHint;
+    // Scatter-access pools opt out of huge pages so a single written byte does not pin 2 MiB.
+    bool noHugePages;
+};
+inline std::map<unsigned long long, VirtualMapping> commitMemMap;
+// Autosave allocates on the main thread while the tick thread zeroes pools, so the table is locked.
+inline SmartMutex commitMemMapLock{ "commitMemMapLock" };
+
+// Mapping that contains [address, address + size), or end() if none does. Caller holds the lock.
+inline std::map<unsigned long long, VirtualMapping>::iterator findVirtualMappingLocked(const void* address, const unsigned long long size)
+{
+    const unsigned long long begin = (unsigned long long)address;
+    auto it = commitMemMap.upper_bound(begin);
+    if (it == commitMemMap.begin())
+    {
+        return commitMemMap.end();
+    }
+    --it;
+    if (begin + size > it->first + it->second.size)
+    {
+        return commitMemMap.end();
+    }
+    return it;
+}
+
+inline bool lookupVirtualMapping(const void* address, const unsigned long long size, VirtualMapping& out)
+{
+    std::lock_guard<SmartMutex> lk(commitMemMapLock);
+    auto it = findVirtualMappingLocked(address, size);
+    if (it == commitMemMap.end())
+    {
+        return false;
+    }
+    out = it->second;
+    return true;
+}
+
+inline void registerVirtualMapping(void* address, const unsigned long long size, bool commitMem, bool hugePageHint)
+{
+    std::lock_guard<SmartMutex> lk(commitMemMapLock);
+    commitMemMap[(unsigned long long)address] = { commitMem, size, hugePageHint, false };
+}
+
+inline bool qVirtualContains(const void* address, const unsigned long long size)
+{
+    VirtualMapping mapping;
+    return lookupVirtualMapping(address, size, mapping);
+}
 
 #ifdef _MSC_VER
-inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false) {
+inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false, bool hugePageHint) {
     void *addr = VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE | (commitMem ? MEM_COMMIT : 0), PAGE_READWRITE);
     if (addr != nullptr)
     {
-        commitMemMap[(unsigned long long)addr] = commitMem;
+        registerVirtualMapping(addr, size, commitMem, hugePageHint);
         return addr;
     }
     logToConsole(L"CRITIAL: VirtualAlloc failed in qVirtualAlloc");
     return nullptr;
+}
+
+inline void qVirtualAdviseNoHugePages(void* address, const unsigned long long size)
+{
+    std::lock_guard<SmartMutex> lk(commitMemMapLock);
+    auto mapping = findVirtualMappingLocked(address, size);
+    if (mapping != commitMemMap.end())
+    {
+        mapping->second.noHugePages = true;
+    }
 }
 
 inline void* qVirtualCommit(void* address, const unsigned long long size) {
@@ -274,29 +336,41 @@ inline unsigned long long qGetPageSize() {
 
 inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size) {
     static const unsigned long long pageSize = qGetPageSize();
-    const bool commitMem = commitMemMap[(unsigned long long)address];
-
-    // MEM_DECOMMIT rounds the length up to a page, so decommitting a non-page-multiple size would
-    // also drop whatever region shares the last page; zero that tail in place instead.
-    const unsigned long long decommitSize = size & ~(pageSize - 1);
-    if (decommitSize)
+    VirtualMapping mapping;
+    if (!lookupVirtualMapping(address, size, mapping))
     {
-        VirtualFree(address, (SIZE_T)decommitSize, MEM_DECOMMIT);
-        if (commitMem && VirtualAlloc(address, (SIZE_T)decommitSize, MEM_COMMIT, PAGE_READWRITE) != address)
-        {
-            return false;
-        }
+        return false;
+    }
+    const bool commitMem = mapping.commitMem;
+
+    // MEM_DECOMMIT works on whole pages, so a range that starts or ends mid-page would also drop
+    // whatever shares those pages; zero the head and tail fragments in place instead.
+    char* const rangeEnd = (char*)address + size;
+    char* const head = (char*)address;
+    char* const decommitStart = (char*)(((uintptr_t)head + pageSize - 1) & ~(pageSize - 1));
+    char* const decommitEnd = (char*)((uintptr_t)rangeEnd & ~(pageSize - 1));
+    if (decommitEnd <= decommitStart)
+    {
+        memset(head, 0, (size_t)size);
+        return true;
+    }
+    memset(head, 0, (size_t)(decommitStart - head));
+
+    const unsigned long long decommitSize = decommitEnd - decommitStart;
+    VirtualFree(decommitStart, (SIZE_T)decommitSize, MEM_DECOMMIT);
+    if (commitMem && VirtualAlloc(decommitStart, (SIZE_T)decommitSize, MEM_COMMIT, PAGE_READWRITE) != decommitStart)
+    {
+        return false;
     }
 
-    const unsigned long long tailSize = size - decommitSize;
+    const unsigned long long tailSize = rangeEnd - decommitEnd;
     if (tailSize)
     {
-        char* tail = (char*)address + decommitSize;
-        if (!VirtualAlloc(tail, (SIZE_T)tailSize, MEM_COMMIT, PAGE_READWRITE))
+        if (!VirtualAlloc(decommitEnd, (SIZE_T)tailSize, MEM_COMMIT, PAGE_READWRITE))
         {
             return false;
         }
-        memset(tail, 0, (size_t)tailSize);
+        memset(decommitEnd, 0, (size_t)tailSize);
     }
 
     return true;
@@ -379,25 +453,50 @@ inline void* qVirtualAllocLazy(const unsigned long long size)
         VirtualAlloc(address, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE);
     }
 
-    commitMemMap[(unsigned long long)address] = true;
+    registerVirtualMapping(address, size, true, true);
     return address;
 }
 #else
-inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false) {
+inline void qVirtualAdviseHugePages(void* address, const unsigned long long size, bool hugePageHint, bool noHugePages)
+{
+    // THP hint: fewer PTEs -> cheaper fork() of the large-RSS node. Unprivileged; no-op if THP off.
+#if defined(__linux__)
+    if (noHugePages)
+    {
+        madvise(address, size, MADV_NOHUGEPAGE);   // Linux-only (absent on macOS/Darwin)
+    }
+    else if (hugePageHint)
+    {
+        madvise(address, size, MADV_HUGEPAGE);
+    }
+#else
+    (void)address; (void)size; (void)hugePageHint; (void)noHugePages;
+#endif
+}
+
+inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false, bool hugePageHint) {
     int prot = commitMem ? (PROT_READ | PROT_WRITE) : PROT_NONE;
     void* addr = mmap(nullptr, size, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (addr != MAP_FAILED)
     {
-        // THP hint: fewer PTEs -> cheaper fork() of the large-RSS node. Unprivileged; no-op if THP off.
-#if defined(__linux__)
-        madvise(addr, size, MADV_HUGEPAGE);   // MADV_HUGEPAGE is Linux-only (absent on macOS/Darwin)
-#endif
-        commitMemMap[(unsigned long long)addr] = commitMem;
+        qVirtualAdviseHugePages(addr, size, hugePageHint, false);
+        registerVirtualMapping(addr, size, commitMem, hugePageHint);
         return addr;
     }
 
     logToConsole(L"CRITIAL: mmap failed in qVirtualAlloc");
     return nullptr;
+}
+
+inline void qVirtualAdviseNoHugePages(void* address, const unsigned long long size)
+{
+    std::lock_guard<SmartMutex> lk(commitMemMapLock);
+    auto mapping = findVirtualMappingLocked(address, size);
+    if (mapping != commitMemMap.end())
+    {
+        mapping->second.noHugePages = true;
+        qVirtualAdviseHugePages(address, size, false, true);
+    }
 }
 
 inline void* qVirtualCommit(void* address, const unsigned long long size) {
@@ -417,26 +516,43 @@ inline void* qVirtualCommit(void* address, const unsigned long long size) {
 
 inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size) {
     static const unsigned long long pageSize = (unsigned long long)sysconf(_SC_PAGESIZE);
-    const bool commitMem = commitMemMap[(unsigned long long)address];
-    const int prot = commitMem ? (PROT_READ | PROT_WRITE) : PROT_NONE;
-
-    // MAP_FIXED rounds the length up to a page, so remapping a non-page-multiple size would also
-    // wipe whatever region shares the last page; zero that tail in place instead of remapping it.
-    const unsigned long long remapSize = size & ~(pageSize - 1);
-    if (remapSize && mmap(address, remapSize, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != address)
+    VirtualMapping mapping;
+    if (!lookupVirtualMapping(address, size, mapping))
     {
         return false;
     }
+    const bool commitMem = mapping.commitMem;
+    const int prot = commitMem ? (PROT_READ | PROT_WRITE) : PROT_NONE;
 
-    const unsigned long long tailSize = size - remapSize;
+    // MAP_FIXED works on whole pages, so a range that starts or ends mid-page would also wipe
+    // whatever shares those pages; zero the head and tail fragments in place instead.
+    char* const rangeEnd = (char*)address + size;
+    char* const head = (char*)address;
+    char* const remapStart = (char*)(((uintptr_t)head + pageSize - 1) & ~(pageSize - 1));
+    char* const remapEnd = (char*)((uintptr_t)rangeEnd & ~(pageSize - 1));
+    if (remapEnd <= remapStart)
+    {
+        memset(head, 0, size);
+        return true;
+    }
+    memset(head, 0, remapStart - head);
+
+    const unsigned long long remapSize = remapEnd - remapStart;
+    if (mmap(remapStart, remapSize, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != remapStart)
+    {
+        return false;
+    }
+    // The fresh mapping carries no advice; restoring it keeps adjacent VMAs mergeable.
+    qVirtualAdviseHugePages(remapStart, remapSize, mapping.hugePageHint, mapping.noHugePages);
+
+    const unsigned long long tailSize = rangeEnd - remapEnd;
     if (tailSize)
     {
-        char* tail = (char*)address + remapSize;
-        if (mprotect(tail, tailSize, PROT_READ | PROT_WRITE) != 0)
+        if (mprotect(remapEnd, tailSize, PROT_READ | PROT_WRITE) != 0)
         {
             return false;
         }
-        memset(tail, 0, tailSize);
+        memset(remapEnd, 0, tailSize);
     }
 
     return true;
@@ -444,20 +560,8 @@ inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size
 
 #endif
 
-// Route shutdown cleanup according to the original allocator.
 inline void freePoolOrVirtual(void* pointer)
 {
-    if (!pointer)
-    {
-        return;
-    }
-
-    auto allocation = commitMemMap.find((unsigned long long)pointer);
-    if (allocation != commitMemMap.end())
-    {
-        commitMemMap.erase(allocation);
-        return;
-    }
     freePool(pointer);
 }
 
@@ -506,11 +610,33 @@ bool allocatePool(unsigned long long size, void** buffer)
     return false;
 }
 
+// Pools come from either the heap or qVirtualAlloc; the mapping table tells which.
 void freePool(void* buffer)
 {
-    if (buffer) {
-        free(buffer);
+    if (!buffer)
+    {
+        return;
     }
+    unsigned long long mappingSize = 0;
+    {
+        std::lock_guard<SmartMutex> lk(commitMemMapLock);
+        auto mapping = commitMemMap.find((unsigned long long)buffer);
+        if (mapping != commitMemMap.end())
+        {
+            mappingSize = mapping->second.size;
+            commitMemMap.erase(mapping);
+        }
+    }
+    if (mappingSize)
+    {
+#ifdef _MSC_VER
+        VirtualFree(buffer, 0, MEM_RELEASE);
+#else
+        munmap(buffer, mappingSize);
+#endif
+        return;
+    }
+    free(buffer);
 }
 
 inline void closeEvent(EFI_EVENT Event)

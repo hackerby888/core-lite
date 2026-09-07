@@ -5920,8 +5920,8 @@ static void beginEpoch()
 
     score->initMemory();
     score->resetTaskQueue();
-    setMem(minerSolutionFlags, NUMBER_OF_MINER_SOLUTION_FLAGS / 8, 0);
-    setMem(gAntSolutionFlags, NUMBER_OF_ANT_SOLUTION_FLAGS / 8, 0);
+    zeroPool(minerSolutionFlags, NUMBER_OF_MINER_SOLUTION_FLAGS / 8);
+    zeroPool(gAntSolutionFlags, NUMBER_OF_ANT_SOLUTION_FLAGS / 8);
     setMem((void*)minerPublicKeys, sizeof(minerPublicKeys), 0);
     setMem((void*)minerScores, sizeof(minerScores), 0xFF);
     setMem((void*)minerBestScoreTicks, sizeof(minerBestScoreTicks), 0);
@@ -9041,11 +9041,11 @@ static bool initialize()
         }
 
         setMem(&solutionThreshold[0][0], sizeof(int) * MAX_NUMBER_EPOCH * score_engine::AlgoType::MaxAlgoCount, 0);
-        if (!allocPoolWithErrorLog(L"minserSolutionFlag", NUMBER_OF_MINER_SOLUTION_FLAGS / 8, (void**)&minerSolutionFlags, __LINE__))
+        if (!allocSparsePoolWithErrorLog(L"minserSolutionFlag", NUMBER_OF_MINER_SOLUTION_FLAGS / 8, (void**)&minerSolutionFlags, __LINE__))
         {
             return false;
         }
-        if (!allocPoolWithErrorLog(L"antSolutionFlag", NUMBER_OF_ANT_SOLUTION_FLAGS / 8, (void**)&gAntSolutionFlags, __LINE__))
+        if (!allocSparsePoolWithErrorLog(L"antSolutionFlag", NUMBER_OF_ANT_SOLUTION_FLAGS / 8, (void**)&gAntSolutionFlags, __LINE__))
         {
             return false;
         }
