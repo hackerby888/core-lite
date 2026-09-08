@@ -203,3 +203,10 @@ static inline int _rdrand32_step(unsigned int* output)
 #define __AVX2__ 1
 #endif
 #endif
+
+// four_q.h uses this MSVC scalar intrinsic; same body as platform/concurrency.h so either order is fine.
+#if defined(__linux__) || defined(__APPLE__)
+#ifndef _byteswap_ulong
+#define _byteswap_ulong(x) __builtin_bswap32(x)
+#endif
+#endif

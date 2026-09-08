@@ -34,6 +34,9 @@ file(COPY data/example_task_bpp9000.bin data/samples_bpp9000.csv data/scores_bpp
 
 add_executable(
   qubic_core_tests
+		# Keep first: it overrides MAX_NUMBER_OF_TICKS_PER_EPOCH before including tick_storage.h, and the
+		# linker keeps the first COMDAT copy of TickStorage inlines for every TU (oracle tests include it too).
+		tick_storage.cpp
 		assets.cpp
    		common_def.cpp
    		contract_core.cpp
@@ -41,6 +44,7 @@ add_executable(
    		contract_gqmprop.cpp
    		contract_msvault.cpp
    		contract_nostromo.cpp
+   		contract_qpayhub.cpp
    		contract_qbay.cpp
 		contract_qbond.cpp
    		contract_qearn.cpp
@@ -79,7 +83,6 @@ add_executable(
    		spectrum.cpp
    		stdlib_impl.cpp
    		demand_zero_pool.cpp
-   		tick_storage.cpp
    		time.cpp
    		tx_status_request.cpp
    		uint128.cpp
