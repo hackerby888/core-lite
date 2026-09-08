@@ -49,6 +49,8 @@ static const unsigned char ocMachineIPs[][4] = {
 #define ENABLE_QUBIC_LOGGING_EVENT 0
 #endif
 
+#define USE_PARALLEL_SIGN_VOTES 1
+
 // Virtual memory settings for logging
 #if defined(TESTNET) && defined(TESTNET_LITE_RAM)
 #define LOG_BUFFER_PAGE_SIZE (16000000ULL)   // 16 MB page — LITE testnet
