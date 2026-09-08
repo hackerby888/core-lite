@@ -61,6 +61,7 @@ struct ThreadPinArena
     int slot[CAP];
     unsigned long long gen[CAP]; // VM generation when this pin was taken; stale across reset()
     int count = 0;
+    unsigned long long drainSerial = 0; // bumped by releaseThreadPins(); a PinScope that saw a drain releases to 0
 
     // Already pinned by this thread in the current generation? (repeated access to the same page
     // is a no-op). Entries from an older generation never match — reset() bumped the generation,
@@ -72,14 +73,29 @@ struct ThreadPinArena
                 return true;
         return false;
     }
+    // Pins this thread holds on one VM in its current generation (diagnostics).
+    int heldOn(const void* v, unsigned long long g) const
+    {
+        int n = 0;
+        for (int i = 0; i < count; i++)
+            if (vm[i] == v && gen[i] == g)
+                n++;
+        return n;
+    }
     void add(void* v, void (*u)(void*, int, unsigned long long), int s, unsigned long long g)
     {
         if (count < CAP)
         {
             vm[count] = v; unpin[count] = u; slot[count] = s; gen[count] = g; count++;
+            return;
         }
-        // If CAP is ever exceeded the access still proceeds; the page just isn't pinned. CAP is
-        // sized far above the total number of cache slots so this cannot happen in practice.
+        // Full: the slot stays pinned for good (fail-stop via the all-pinned wait) rather than unpinned under a live pointer.
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            logToConsole(L"WARNING: swap pin arena full, pin leaked (thread spans resets without a pin boundary)");
+        }
     }
     // Release pins added since `savepoint` (default: all of this thread's pins). The unpin thunk
     // checks the generation, so notes left stale by a reset() are dropped harmlessly.
@@ -95,16 +111,22 @@ struct ThreadPinArena
 inline thread_local ThreadPinArena tlPinArena;
 
 // Release every pin held by the current thread. Call at work-unit boundaries.
-inline void releaseThreadPins() { tlPinArena.releaseDownTo(0); }
+inline void releaseThreadPins()
+{
+    tlPinArena.releaseDownTo(0);
+    tlPinArena.drainSerial++;
+}
 
 // RAII savepoint: releases only the pins taken during its lifetime. Use reset() to release
 // per loop iteration without disturbing pins held by an enclosing scope.
 struct PinScope
 {
     int savepoint;
-    PinScope() : savepoint(tlPinArena.count) {}
-    void reset() { tlPinArena.releaseDownTo(savepoint); }
-    ~PinScope() { tlPinArena.releaseDownTo(savepoint); }
+    unsigned long long drainSerial;
+    PinScope() : savepoint(tlPinArena.count), drainSerial(tlPinArena.drainSerial) {}
+    // A full drain inside the scope already invalidated its pointers; release everything taken since.
+    void reset() { tlPinArena.releaseDownTo(tlPinArena.drainSerial == drainSerial ? savepoint : 0); }
+    ~PinScope() { reset(); }
 };
 
 // an util to use disk as RAM to reduce hardware requirement for qubic core node
@@ -1165,6 +1187,17 @@ private:
         return sz == pageSize;
     }
 
+    // Self-deadlock (this thread holds the pins) and cross-thread exhaustion need different fixes; name which.
+    void appendPinDiag(CHAR16* msg)
+    {
+        appendText(msg, L" | pinned ");
+        appendNumber(msg, (unsigned long long)pinnedNow, false);
+        appendText(msg, L"/");
+        appendNumber(msg, (unsigned long long)(numCachePage + 1), false);
+        appendText(msg, L", this thread ");
+        appendNumber(msg, (unsigned long long)getPinsHeldByThisThread(), false);
+    }
+
     // Load pageId into a cache slot (returns its index). Entered/returned holding memLock; the evict
     // writeback + load run with it RELEASED (victim reserved via LOADING_PAGE_ID, skipped by
     // find/eviction) so concurrent cache hits don't stall behind this miss's ~16MB disk IO.
@@ -1197,9 +1230,10 @@ private:
                 allPinnedWaits++;
                 // Surface pin-exhaustion immediately (not only at the 5s fatal) so an operator can
                 // tell "stuck on swap-VM pins" apart from normal slow processing.
-                CHAR16 pinMsg[160];
+                CHAR16 pinMsg[256];
                 setText(pinMsg, L"WARNING: swapVM all cache pages pinned, waiting for a free slot (pin leak or numCachePage too small) | prefix ");
                 appendText(pinMsg, pageDir);
+                appendPinDiag(pinMsg);
                 logToConsole(pinMsg);
             }
             int allPinnedWaitMs = 0;
@@ -1235,6 +1269,7 @@ private:
                 {
                     setText(message, L"Fatal: swapVM all cache pages pinned (numCachePage too small) | prefix ");
                     appendText(message, pageDir);
+                    appendPinDiag(message);
                     logToConsole(message);
                     exit(1);
                 }
@@ -1517,6 +1552,7 @@ public:
     // pinnedHighWater approaching getNumCachePage() means raise numCachePage.
     int getPinnedNow() const { return pinnedNow; }
     int getPinnedHighWater() const { return pinnedHighWater; }
+    int getPinsHeldByThisThread() const { return tlPinArena.heldOn(this, generation); }
     unsigned long long getAllPinnedWaits() const { return allPinnedWaits; }
     unsigned long long getCacheHits() const { return cacheHits; }
     unsigned long long getCacheMisses() const { return cacheMisses; }

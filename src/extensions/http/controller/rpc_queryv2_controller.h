@@ -203,6 +203,13 @@ RPC_ROUTE("POST", "/query/v1/getTransactionByHash")
     const bool hasTickHint = (*json).isMember("tickNumber");
     const unsigned int scanLo = hasTickHint ? (*json)["tickNumber"].asUInt() : system.initialTick;
     const unsigned int scanHi = hasTickHint ? scanLo : system.tick;
+    // Prior-epoch ticks index the current-epoch offsets out of range; far-future ones pin a frontier page for the epoch.
+    if (hasTickHint && (scanLo < system.initialTick || scanLo > system.tick + 3))
+    {
+        result["code"] = QV2_NF;
+        result["message"] = "Transaction not found";
+        return jsonResp(result, 404);
+    }
     for (unsigned int tick = scanLo; tick <= scanHi && !found; tick++)
     {
         PinScope _pinScope;
