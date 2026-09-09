@@ -4198,6 +4198,12 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
     const m256i& transactionDigest = nextTickData.transactionDigests[transactionIndex];
     const m256i& dataLock = nextTickData.timelock;
 
+#ifdef LITE_WASM_SC
+    // A contract abort halts the tick loop from inside a dispatch, where the digest is out of scope.
+    // Park it for the length of this transaction so the fault record can name what was running.
+    const Wasm::Runtime::CurrentTransactionScope currentTransaction(transactionDigest);
+#endif
+
     // Reject transactions whose source is a smart-contract address ({contractIndex, 0, 0, 0}).
     // No legitimate keypair maps to such an address, so it can never be a real signer. Some of
     // these addresses are even low-order FourQ points whose signatures are forgeable (e.g. the

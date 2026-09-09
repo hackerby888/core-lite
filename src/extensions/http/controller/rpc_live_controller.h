@@ -353,6 +353,13 @@ static Json::Value faultJson()
     json["slot"] = fault.slot;
     json["kind"] = fault.kind;
     json["entry"] = fault.entry;
+    if (fault.hasTx)
+    {
+        // Same spelling as every other tx hash core serves: 60-char lowercase identity of the digest.
+        CHAR16 txHashStr[61] = {0};
+        getIdentity(fault.txDigest.m256i_u8, txHashStr, true);
+        json["txId"] = wchar_to_string(txHashStr);
+    }
     return json;
 }
 #endif

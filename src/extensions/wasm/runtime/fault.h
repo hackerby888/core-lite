@@ -20,9 +20,37 @@ struct FaultRecord
     unsigned int slot = 0;
     unsigned char kind = 0;
     unsigned short entry = 0;
+    // The transaction that was executing when the node halted. Held as the raw digest; the HTTP
+    // layer encodes it the way core spells every other tx hash (60-char lowercase identity).
+    bool hasTx = false;
+    m256i txDigest = m256i::zero();
 };
 
 static FaultRecord nodeFault;
+
+// The transaction currently on the contract processor. The runtime records a fault from deep inside
+// a dispatch, where the digest is not in scope — it lives up in processTickTransaction — so the tick
+// loop parks it here for the length of the transaction.
+static bool currentTxSet = false;
+static m256i currentTxDigest = m256i::zero();
+
+// Scoped so every early return out of processTickTransaction clears it.
+struct CurrentTransactionScope
+{
+    explicit CurrentTransactionScope(const m256i& digest)
+    {
+        currentTxDigest = digest;
+        currentTxSet = true;
+    }
+
+    ~CurrentTransactionScope()
+    {
+        currentTxSet = false;
+    }
+
+    CurrentTransactionScope(const CurrentTransactionScope&) = delete;
+    CurrentTransactionScope& operator=(const CurrentTransactionScope&) = delete;
+};
 
 // The first fault describes the halt; anything after it is a consequence.
 static inline void recordFault(unsigned int contractIndex, unsigned char kind, unsigned short inputType, const std::string& message, unsigned int tick,
@@ -42,6 +70,8 @@ static inline void recordFault(unsigned int contractIndex, unsigned char kind, u
     nodeFault.slot = contractIndex;
     nodeFault.kind = kind;
     nodeFault.entry = inputType;
+    nodeFault.hasTx = currentTxSet;
+    nodeFault.txDigest = currentTxDigest;
 }
 
 static inline std::string abortMessage(unsigned int errorCode)

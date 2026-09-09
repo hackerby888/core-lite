@@ -49,7 +49,11 @@ public:
 	}
 
 	// transfrom
-	operator bool() const {
+	// Explicit: this is the class's only conversion operator, so without it a narrowing cast
+	// `(uint64)wide` binds here and silently yields 1 or 0 instead of the low word. Contextual
+	// conversions (`if (x)`, `while (x)`, `!x`, `x && y`, `x ? a : b`) still work; a value cast
+	// now fails to compile, and the caller reaches for `.low` / `.high` as GGWP.h:340 already does.
+	explicit operator bool() const {
 		return (bool) (high | low);
 	}
 
