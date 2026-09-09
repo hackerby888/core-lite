@@ -15,6 +15,8 @@ namespace Wasm::Runtime
 
 static constexpr unsigned int WASM_UPLOAD_CHUNK_SIZE = 1008u;
 static constexpr unsigned int WASM_MAX_UPLOAD_CHUNKS = (WASM_MAX_MODULE_SIZE - 1u) / WASM_UPLOAD_CHUNK_SIZE + 1u;
+// An upload that receives nothing for this many ticks is dropped so a killed client cannot block deployment.
+static constexpr unsigned int WASM_UPLOAD_STALE_TICKS = 32u;
 
 struct ContractSlot
 {
@@ -37,6 +39,7 @@ struct ModuleUpload
     unsigned int totalSize = 0;
     unsigned int chunkCount = 0;
     unsigned int receivedCount = 0;
+    unsigned int lastProgressTick = 0;
     unsigned char finalHash[32] = {};
 };
 
@@ -59,8 +62,19 @@ static inline bool validModuleUploadShape(unsigned int totalSize, unsigned int c
     return totalSize > 0 && totalSize <= WASM_MAX_MODULE_SIZE && chunkCount == expectedModuleUploadChunkCount(totalSize);
 }
 
-static inline bool tryBeginModuleUpload(unsigned long long sessionId, unsigned int totalSize, unsigned int chunkCount, const unsigned char* finalHash)
+static inline bool moduleUploadStale(unsigned int tick)
 {
+    return moduleUpload.active && tick > moduleUpload.lastProgressTick + WASM_UPLOAD_STALE_TICKS;
+}
+
+static inline bool tryBeginModuleUpload(unsigned long long sessionId, unsigned int totalSize, unsigned int chunkCount, const unsigned char* finalHash,
+    unsigned int tick = 0)
+{
+    if (moduleUploadStale(tick))
+    {
+        moduleUpload = ModuleUpload{};
+    }
+
     if (moduleUpload.active)
     {
         return moduleUpload.sessionId == sessionId;
@@ -76,12 +90,14 @@ static inline bool tryBeginModuleUpload(unsigned long long sessionId, unsigned i
     moduleUpload.totalSize = totalSize;
     moduleUpload.chunkCount = chunkCount;
     moduleUpload.receivedCount = 0;
+    moduleUpload.lastProgressTick = tick;
     std::memcpy(moduleUpload.finalHash, finalHash, sizeof(moduleUpload.finalHash));
     std::memset(receivedChunkBits, 0, sizeof(receivedChunkBits));
     return true;
 }
 
-static inline bool tryReceiveModuleChunk(unsigned long long sessionId, unsigned int sequence, const unsigned char* data, unsigned int dataLength)
+static inline bool tryReceiveModuleChunk(unsigned long long sessionId, unsigned int sequence, const unsigned char* data, unsigned int dataLength,
+    unsigned int tick = 0)
 {
     if (!moduleUpload.active || sessionId != moduleUpload.sessionId)
     {
@@ -112,6 +128,7 @@ static inline bool tryReceiveModuleChunk(unsigned long long sessionId, unsigned 
     std::memcpy(moduleUploadBuffer + destinationOffset, data, dataLength);
     receivedChunkBits[sequenceByte] |= sequenceBit;
     moduleUpload.receivedCount++;
+    moduleUpload.lastProgressTick = tick;
     return true;
 }
 

@@ -575,7 +575,6 @@ jobs:
           if [ -n "${QINIT_BIN:-}" ] && [ -f "$QINIT_BIN" ]; then
             "$QINIT_BIN" build "$GITHUB_WORKSPACE/qinit/fixtures/DigestProbe.h" \
               --contract-name DigestProbe \
-              --slot 28 \
               --core-dir "$GITHUB_WORKSPACE/core" \
               --out "$RUNNER_TEMP/qinit-build-diag" \
               --compiler clang \

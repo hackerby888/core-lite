@@ -814,3 +814,93 @@ TEST(TestSwapVirtualMemory, RestoredCachedPageSurvivesEviction)
     EXPECT_EQ(vm.getRef(pageCapacity).a, 0x12345678U);
 }
 #endif
+
+// A per-access PinScope keeps the pin count flat no matter how many pages the loop walks, so a
+// full-epoch scan can never exhaust the cache on its own.
+TEST(TestSwapVirtualMemory, PerAccessPinScopeNeverStarves) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    tlPinArena.count = 0; // drop notes left by scope-less tests on VMs that no longer exist
+    SwapVirtualMemory<E16, wcharToNumber(L"pnsc"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+    vm.init();
+    for (unsigned long long p = 0; p < 64; p++) {
+        PinScope _;
+        vm.getRef(p * 256).a = p;
+        EXPECT_EQ(vm.getPinnedNow(), 1);
+    }
+    EXPECT_EQ(vm.getPinnedNow(), 0);
+    EXPECT_EQ(vm.getAllPinnedWaits(), 0ULL);
+}
+
+// One thread pinning every slot is the self-deadlock condition: a peer's miss must wait (counted in
+// allPinnedWaits) and proceed only once the holder's scope ends.
+TEST(TestSwapVirtualMemory, AllPinnedWaitRecoversWhenPeerReleases) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    tlPinArena.count = 0;
+    SwapVirtualMemory<E16, wcharToNumber(L"pnwt"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+    vm.init();
+    std::atomic<bool> peerDone{ false };
+    std::thread peer;
+    {
+        PinScope holder;
+        for (unsigned long long p = 0; p < 5; p++)
+            vm.getRef(p * 256).a = p;
+        EXPECT_EQ(vm.getPinnedNow(), 5);
+        EXPECT_EQ(vm.getPinsHeldByThisThread(), 5);
+        peer = std::thread([&] {
+            PinScope _;
+            vm.getRef(5 * 256).a = 5;
+            peerDone.store(true);
+        });
+        for (int i = 0; i < 2000 && vm.getAllPinnedWaits() == 0; i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        EXPECT_EQ(vm.getAllPinnedWaits(), 1ULL);
+        EXPECT_FALSE(peerDone.load());
+    }
+    peer.join();
+    EXPECT_TRUE(peerDone.load());
+    EXPECT_EQ(vm.getAllPinnedWaits(), 1ULL);
+    EXPECT_EQ(vm.getPinnedNow(), 0);
+}
+
+// getPinsHeldByThisThread counts only this thread's live notes: reset() invalidates them and the scope
+// end releases them, so the fatal-path diagnostic can tell self-deadlock from cross-thread pressure.
+TEST(TestSwapVirtualMemory, PinsHeldByThisThreadTracksScopeAndReset) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    tlPinArena.count = 0;
+    SwapVirtualMemory<E16, wcharToNumber(L"pnhd"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+    vm.init();
+    {
+        PinScope _;
+        for (unsigned long long p = 0; p < 3; p++)
+            vm.getRef(p * 256).a = p;
+        EXPECT_EQ(vm.getPinsHeldByThisThread(), 3);
+        EXPECT_EQ(vm.getPinnedNow(), 3);
+        vm.reset();
+        EXPECT_EQ(vm.getPinsHeldByThisThread(), 0);
+        EXPECT_EQ(vm.getPinnedNow(), 0);
+    }
+    EXPECT_EQ(vm.getPinnedNow(), 0);
+    EXPECT_EQ(tlPinArena.count, 0);
+}
+
+// A releaseThreadPins() inside a scope (beginEpoch does this on the tick processor) must not leave the
+// pins the scope takes afterwards stranded below its savepoint.
+TEST(TestSwapVirtualMemory, ScopeReleasesPinsTakenAfterDrain) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    tlPinArena.count = 0;
+    SwapVirtualMemory<E16, wcharToNumber(L"pndr"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+    vm.init();
+    vm.getRef(0).a = 1; // pinned outside any scope, like initializeFirstTick before the tick loop
+    {
+        PinScope _;
+        releaseThreadPins();
+        vm.getRef(256).a = 2;
+        EXPECT_EQ(vm.getPinnedNow(), 1);
+    }
+    EXPECT_EQ(vm.getPinnedNow(), 0);
+    EXPECT_EQ(tlPinArena.count, 0);
+}

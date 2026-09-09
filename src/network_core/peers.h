@@ -468,13 +468,13 @@ static void pushCustom(RequestResponseHeader* requestResponseHeader, int numberO
         {
             if ((filterFullNode && peers[i].isFullNode()) || (!filterFullNode))
             {
-                // Throttle: skip peers whose send buffer is already backed up so the broadcast firehose
-                // doesn't overflow (and drop on) a slow consumer. Direct peer-addressed push() is unaffected.
-                if (peers[i].dataToTransmitSize > BUFFER_SIZE / 4)
-                {
-                    _InterlockedIncrement64(&numberOfSkippedBroadcasts);
-                    continue;
-                }
+                // // Throttle: skip peers whose send buffer is already backed up so the broadcast firehose
+                // // doesn't overflow (and drop on) a slow consumer. Direct peer-addressed push() is unaffected.
+                // if (peers[i].dataToTransmitSize > BUFFER_SIZE / 4)
+                // {
+                //     _InterlockedIncrement64(&numberOfSkippedBroadcasts);
+                //     continue;
+                // }
                 suitablePeerIndices[numberOfSuitablePeers++] = i;
             }
         }

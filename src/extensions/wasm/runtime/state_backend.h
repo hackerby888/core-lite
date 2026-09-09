@@ -16,6 +16,11 @@
 namespace Wasm::Runtime
 {
 
+// Without the pager each reserved slot commits its whole state up front, so keep that window small.
+#if !defined(LITE_SC_PAGER) && defined(LITE_WASM_SC)
+static_assert(WASM_RESERVED_SLOT_COUNT <= 8, "more than 8 reserved Wasm slots need the state pager");
+#endif
+
 inline bool g_wasmOwnedSlot[contractCount] = {};
 
 inline bool statePagerActive(unsigned int contractIndex)

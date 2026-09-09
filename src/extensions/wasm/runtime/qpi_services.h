@@ -230,7 +230,10 @@ static unsigned int initialTick(const void* context)
 
 static int numberOfTickTransactions(const void* context)
 {
-    return functionContext(context)->numberOfTickTransactions();
+    // Shared core returns -1 as a "tick data not yet populated" sentinel; clamp to 0 so a contract on the
+    // dev node sees the simulator's semantics (0 on an empty tick) instead of a negative value.
+    const int count = functionContext(context)->numberOfTickTransactions();
+    return count < 0 ? 0 : count;
 }
 
 static unsigned char getEntity(const void* context, const void* id, void* entity)

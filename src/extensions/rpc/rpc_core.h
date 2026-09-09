@@ -107,6 +107,9 @@ inline RpcResp fileResp(const std::string& absPath, const std::string& downloadN
 // ---------------- router ----------------
 using RpcHandler = std::function<RpcResp(const RpcReq&)>;
 
+constexpr int RPC_MAX_CONCURRENT_HANDLERS = (CACHE_PAGE - 3) / 2 > 4 ? (CACHE_PAGE - 3) / 2 : 4;
+inline std::atomic<int> gRpcHandlersInFlight{ 0 };
+
 class RpcRouter
 {
     struct Route
@@ -161,6 +164,14 @@ public:
             }
             if (!ok) continue;
             req.params = std::move(params);
+            if (gRpcHandlersInFlight.fetch_add(1, std::memory_order_acquire) >= RPC_MAX_CONCURRENT_HANDLERS)
+            {
+                gRpcHandlersInFlight.fetch_sub(1, std::memory_order_release);
+                RpcResp busy{ 503, "application/json", "{\"error\":\"busy\"}", "", "" };
+                busy.headers.push_back({ "Retry-After", "1" });
+                return busy;
+            }
+            struct SlotRelease { ~SlotRelease() { gRpcHandlersInFlight.fetch_sub(1, std::memory_order_release); } } slotRelease;
             try
             {
                 return route.handler(req);

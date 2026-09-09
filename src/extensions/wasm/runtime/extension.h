@@ -8,6 +8,7 @@
 #include "extensions/wasm/runtime/state_backend.h"
 #include "extensions/wasm/runtime/arena_scope.h"
 #include "extensions/wasm/runtime/trace.h"
+#include "extensions/wasm/runtime/fault.h"
 #include "extensions/wasm/runtime/state_write_tracker.h"
 #include "extensions/wasm/runtime/oracle_services.h"
 #include "extensions/wasm/runtime/qpi_services.h"

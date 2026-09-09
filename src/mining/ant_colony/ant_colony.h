@@ -692,7 +692,7 @@ inline bool AntColony<ScoreT>::init()
     {
         return false;
     }
-    if (!allocPoolWithErrorLog(L"AntColony::_childHeadByParent",
+    if (!allocSparsePoolWithErrorLog(L"AntColony::_childHeadByParent",
         sizeof(QPI::HashMap<SolutionRef, unsigned int, ANT_CHILD_HEAD_BY_PARENT_SIZE>),
         (void**)&_childHeadByParent, __LINE__))
     {
@@ -709,13 +709,13 @@ inline bool AntColony<ScoreT>::init()
     {
         return false;
     }
-    if (!allocPoolWithErrorLog(L"AntColony::_dedup",
+    if (!allocSparsePoolWithErrorLog(L"AntColony::_dedup",
         sizeof(QPI::HashSet<AntDedupKey, ANT_DEDUP_SIZE>),
         (void**)&_dedup, __LINE__))
     {
         return false;
     }
-    if (!allocPoolWithErrorLog(L"AntColony::_replayCache",
+    if (!allocSparsePoolWithErrorLog(L"AntColony::_replayCache",
         ANT_REPLAY_CACHE_BYTES, (void**)&_replayCache, __LINE__))
     {
         return false;
@@ -798,12 +798,13 @@ inline void AntColony<ScoreT>::reset()
     ASSERT(_dedup != nullptr);
     ASSERT(_exportSet != nullptr);
 
-    setMem(_records, ANT_RECORDS_BYTES, 0);
+    zeroPool(_records, ANT_RECORDS_BYTES);
     setMem(_tickIndex,
         (unsigned long long)MAX_NUMBER_OF_TICKS_PER_EPOCH * sizeof(AntTickSlot), 0);
-    _childHeadByParent->reset();
+    // HashMap/HashSet::reset() is a whole-object memset; zeroing the pool is the same state without the RSS.
+    zeroPool(_childHeadByParent, sizeof(*_childHeadByParent));
     _childHeadByMiner->reset();
-    _dedup->reset();
+    zeroPool(_dedup, sizeof(*_dedup));
     setMem(_exportSet, sizeof(ExportSet), 0);
 
     // ANT_ANCHOR_TICK_NONE is used rather than zero
@@ -830,10 +831,7 @@ inline void AntColony<ScoreT>::clearReplayCache()
         return;
     }
     LockGuard guard(_replayCacheLock);
-    for (unsigned int i = 0; i < ANT_REPLAY_CACHE_SIZE; i++)
-    {
-        _replayCache[i].occupied = 0;
-    }
+    zeroPool(_replayCache, ANT_REPLAY_CACHE_BYTES);
     _replayCacheOccupancy = 0;
 }
 
@@ -923,7 +921,7 @@ inline bool AntColony<ScoreT>::loadReplayCache(unsigned short epoch, CHAR16* dir
         // Absent at the start of an epoch, and a wrong size means another build wrote it. Either way
         // the table is zeroed and every solution gets computed honestly.
         logToConsole(L"[ant-colony] no usable replay cache, solutions will be recomputed");
-        setMem(_replayCache, ANT_REPLAY_CACHE_BYTES, 0);
+        zeroPool(_replayCache, ANT_REPLAY_CACHE_BYTES);
         _replayCacheOccupancy = 0;
         return false;
     }

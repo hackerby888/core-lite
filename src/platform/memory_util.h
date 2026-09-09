@@ -14,13 +14,23 @@
 #include <cstdbool>
 #include <cstdio>
 
-inline void* qVirtualAlloc(const unsigned long long size, bool commitMem);
+inline void* qVirtualAlloc(const unsigned long long size, bool commitMem, bool hugePageHint = true);
 inline void* qVirtualCommit(void* address, const unsigned long long size);
 inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size);
+// True if [address, address + size) lies inside one qVirtualAlloc mapping.
+inline bool qVirtualContains(const void* address, const unsigned long long size);
+// Opt a mapping out of transparent huge pages (Linux); no-op elsewhere.
+inline void qVirtualAdviseNoHugePages(void* address, const unsigned long long size);
 #ifdef _MSC_VER
 // Reserve memory and commit pages on first touch.
 inline void* qVirtualAllocLazy(const unsigned long long size);
 #endif
+
+// Pools this large are mostly untouched in practice. An anonymous mapping is zero-filled on demand,
+// so unlike a memset heap block it costs RSS only where something writes.
+static constexpr unsigned long long DEMAND_ZERO_POOL_THRESHOLD = 64ULL << 20;
+// Heap tolerates a short over-read past the end; a mapping faults, so leave room.
+static constexpr unsigned long long DEMAND_ZERO_POOL_SLACK = 64ULL << 10;
 
 // useVirtualMem indicates whether to use VirtualAlloc or malloc
 // commitMem indicates whether to commit memory when using VirtualAlloc
@@ -32,12 +42,25 @@ static bool allocPoolWithErrorLog(const wchar_t* name, const unsigned long long 
     static unsigned long long totalMemoryUsed = 0;
     static unsigned long long totalVirtualMemoryUsed = 0;
     size_t padded_size = (size + 64 - 1) & ~(64 - 1);
+    unsigned long long mappingSize = size;
+    // A demand-zero pool keeps the system's huge-page default, as its heap block did.
+    bool hugePageHint = true;
+#if defined(__linux__)
+    if (!useVirtualMem && padded_size >= DEMAND_ZERO_POOL_THRESHOLD)
+    {
+        useVirtualMem = true;
+        commitMem = true;
+        hugePageHint = false;
+        padded_size += DEMAND_ZERO_POOL_SLACK;
+        mappingSize = padded_size;
+    }
+#endif
     if (useVirtualMem) {
 #ifdef _MSC_VER
-		*buffer = lazyCommit ? qVirtualAllocLazy(size) : qVirtualAlloc(size, commitMem);
+		*buffer = lazyCommit ? qVirtualAllocLazy(mappingSize) : qVirtualAlloc(mappingSize, commitMem, hugePageHint);
 #else
 		(void)lazyCommit;
-		*buffer = qVirtualAlloc(size, commitMem);
+		*buffer = qVirtualAlloc(mappingSize, commitMem, hugePageHint);
 #endif
     }
     else {
@@ -73,6 +96,29 @@ static bool allocPoolWithErrorLog(const wchar_t* name, const unsigned long long 
     // appendText(message, L" MiB.");
     // logToConsole(message);
     return true;
+}
+
+// For pools written at scattered offsets: with huge pages, each written byte would pin 2 MiB of a
+// demand-zero mapping, so these opt out.
+static bool allocSparsePoolWithErrorLog(const wchar_t* name, const unsigned long long size, void** buffer, const int LINE)
+{
+    if (!allocPoolWithErrorLog(name, size, buffer, LINE))
+    {
+        return false;
+    }
+    qVirtualAdviseNoHugePages(*buffer, size);
+    return true;
+}
+
+// Zero a range of a pool. Inside a demand-zero mapping the pages go back to the kernel instead of
+// being written, so the range stops costing RSS; anything else is memset.
+static void zeroPool(void* buffer, const unsigned long long size)
+{
+    if (qVirtualFreeAndRecommit(buffer, size))
+    {
+        return;
+    }
+    setMem(buffer, size, 0);
 }
 
 #else
@@ -113,6 +159,16 @@ static bool allocPoolWithErrorLog(const CHAR16* name, const unsigned long long s
         setMem(*buffer, size, 0);
     }
     return true;
+}
+
+static bool allocSparsePoolWithErrorLog(const CHAR16* name, const unsigned long long size, void** buffer, const int LINE)
+{
+    return allocPoolWithErrorLog(name, size, buffer, LINE);
+}
+
+static void zeroPool(void* buffer, const unsigned long long size)
+{
+    setMem(buffer, size, 0);
 }
 
 #endif

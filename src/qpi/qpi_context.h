@@ -98,6 +98,12 @@ namespace QPI
 			return _currentContractIndex;
 		}
 
+		// Expose the entry point to the Wasm host bridge: an abort behaves differently under each.
+		unsigned char __qpiEntryPoint() const
+		{
+			return _entryPoint;
+		}
+
 		// Returns the ID of the entity who has made this IPO bid or NULL_ID if the ipoContractIndex or ipoBidIndex are invalid.
 		inline id ipoBidId(
 			uint32 ipoContractIndex,

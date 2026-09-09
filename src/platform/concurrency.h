@@ -335,11 +335,20 @@ struct LockGuard
 static_assert(sizeof(long) == 4, "Size of long for _InterlockedExchange is 4 bytes");
 #define ATOMIC_STORE32(target, val) _InterlockedExchange((volatile long*)&target, val)
 #define ATOMIC_LOAD32(target) _InterlockedCompareExchange((volatile long*)&target, 0, 0)
+#define ATOMIC_CAS32(target, exchange, comparand) _InterlockedCompareExchange((volatile long*)&(target), exchange, comparand)
+#define ATOMIC_ADD32(target, val) _InterlockedExchangeAdd((volatile long*)&(target), val)
 #else
 #define ATOMIC_STORE32(target, val) _InterlockedExchange((volatile int*)&target, val)
 // A real load, not a CAS: routing this through the _InterlockedCompareExchange shim would issue
 // an 8-byte operation on a 4-byte field, since long is 8 bytes here.
 #define ATOMIC_LOAD32(target) __atomic_load_n((volatile unsigned int*)&(target), __ATOMIC_SEQ_CST)
+static int atomicCas32(volatile int* target, int exchange, int comparand)
+{
+    __atomic_compare_exchange_n(target, &comparand, exchange, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return comparand;
+}
+#define ATOMIC_CAS32(target, exchange, comparand) atomicCas32((volatile int*)&(target), exchange, comparand)
+#define ATOMIC_ADD32(target, val) __atomic_fetch_add((volatile int*)&(target), val, __ATOMIC_SEQ_CST)
 #endif
 #define ATOMIC_INC64(target) _InterlockedIncrement64(&target)
 #define ATOMIC_AND64(target, val) _InterlockedAnd64(&target, val)

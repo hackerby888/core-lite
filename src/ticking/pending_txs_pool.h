@@ -145,20 +145,20 @@ public:
     // Init at node startup.
     static bool init()
     {
-        if (!allocPoolWithErrorLog(L"PendingTxsPool::tickTransactionsPtr ", tickTransactionsSize, (void**)&tickTransactionsBuffer, __LINE__)
-            || !allocPoolWithErrorLog(L"PendingTxsPool::txsDigestsPtr ", txsDigestsSize, (void**)&txsDigestsBuffer, __LINE__)
-            || !allocPoolWithErrorLog(L"PendingTxsPool::txsPriorities", sizeof(Collection<unsigned int, txsPrioritiesCapacity>), (void**)&txsPriorities, __LINE__))
+        if (!allocSparsePoolWithErrorLog(L"PendingTxsPool::tickTransactionsPtr ", tickTransactionsSize, (void**)&tickTransactionsBuffer, __LINE__)
+            || !allocSparsePoolWithErrorLog(L"PendingTxsPool::txsDigestsPtr ", txsDigestsSize, (void**)&txsDigestsBuffer, __LINE__)
+            || !allocSparsePoolWithErrorLog(L"PendingTxsPool::txsPriorities", sizeof(Collection<unsigned int, txsPrioritiesCapacity>), (void**)&txsPriorities, __LINE__))
         {
             return false;
         }
 
         ASSERT(lock == 0);
 
-        setMem(tickTransactionsBuffer, tickTransactionsSize, 0);
-        setMem(txsDigestsBuffer, txsDigestsSize, 0);
+        zeroPool(tickTransactionsBuffer, tickTransactionsSize);
+        zeroPool(txsDigestsBuffer, txsDigestsSize);
         setMem(numSavedTxsPerTick, sizeof(numSavedTxsPerTick), 0);
 
-        txsPriorities->reset();
+        zeroPool(txsPriorities, sizeof(*txsPriorities));
 
         firstStoredTick = 0;
         buffersBeginIndex = 0;
@@ -459,8 +459,8 @@ public:
 
         // set memory at buffersBeginIndex to 0 
         unsigned long long numTxsBeforeBegin = buffersBeginIndex * maxNumTxsPerTick;
-        setMem(tickTransactionsBuffer + numTxsBeforeBegin * MAX_TRANSACTION_SIZE, maxNumTxsPerTick * MAX_TRANSACTION_SIZE, 0);
-        setMem(txsDigestsBuffer + numTxsBeforeBegin, maxNumTxsPerTick * sizeof(m256i), 0);
+        zeroPool(tickTransactionsBuffer + numTxsBeforeBegin * MAX_TRANSACTION_SIZE, maxNumTxsPerTick * MAX_TRANSACTION_SIZE);
+        zeroPool(txsDigestsBuffer + numTxsBeforeBegin, maxNumTxsPerTick * sizeof(m256i));
         numSavedTxsPerTick[buffersBeginIndex] = 0;
 
         // remove txs priorities stored for firstStoredTick
@@ -487,8 +487,8 @@ public:
             if (newInitialIndex < buffersBeginIndex)
             {
                 unsigned long long numTxsBeforeNew = newInitialIndex * maxNumTxsPerTick;
-                setMem(tickTransactionsBuffer, numTxsBeforeNew * MAX_TRANSACTION_SIZE, 0);
-                setMem(txsDigestsBuffer, numTxsBeforeNew * sizeof(m256i), 0);
+                zeroPool(tickTransactionsBuffer, numTxsBeforeNew * MAX_TRANSACTION_SIZE);
+                zeroPool(txsDigestsBuffer, numTxsBeforeNew * sizeof(m256i));
                 setMem(numSavedTxsPerTick, newInitialIndex * sizeof(unsigned int), 0);
 
                 for (unsigned int tickIndex = 0; tickIndex < newInitialIndex; ++tickIndex)
@@ -496,8 +496,8 @@ public:
 
                 unsigned long long numTxsBeforeBegin = buffersBeginIndex * maxNumTxsPerTick;
                 unsigned long long numTxsStartingAtBegin = (PENDING_TXS_POOL_NUM_TICKS - buffersBeginIndex) * maxNumTxsPerTick;
-                setMem(tickTransactionsBuffer + numTxsBeforeBegin * MAX_TRANSACTION_SIZE, numTxsStartingAtBegin * MAX_TRANSACTION_SIZE, 0);
-                setMem(txsDigestsBuffer + numTxsBeforeBegin, numTxsStartingAtBegin * sizeof(m256i), 0);
+                zeroPool(tickTransactionsBuffer + numTxsBeforeBegin * MAX_TRANSACTION_SIZE, numTxsStartingAtBegin * MAX_TRANSACTION_SIZE);
+                zeroPool(txsDigestsBuffer + numTxsBeforeBegin, numTxsStartingAtBegin * sizeof(m256i));
                 setMem(numSavedTxsPerTick + buffersBeginIndex, (PENDING_TXS_POOL_NUM_TICKS - buffersBeginIndex) * sizeof(unsigned int), 0);
 
                 for (unsigned int tickIndex = buffersBeginIndex; tickIndex < PENDING_TXS_POOL_NUM_TICKS; ++tickIndex)
@@ -507,8 +507,8 @@ public:
             {
                 unsigned long long numTxsBeforeBegin = buffersBeginIndex * maxNumTxsPerTick;
                 unsigned long long numTxsStartingAtBegin = (newInitialIndex - buffersBeginIndex) * maxNumTxsPerTick;
-                setMem(tickTransactionsBuffer + numTxsBeforeBegin * MAX_TRANSACTION_SIZE, numTxsStartingAtBegin * MAX_TRANSACTION_SIZE, 0);
-                setMem(txsDigestsBuffer + numTxsBeforeBegin, numTxsStartingAtBegin * sizeof(m256i), 0);
+                zeroPool(tickTransactionsBuffer + numTxsBeforeBegin * MAX_TRANSACTION_SIZE, numTxsStartingAtBegin * MAX_TRANSACTION_SIZE);
+                zeroPool(txsDigestsBuffer + numTxsBeforeBegin, numTxsStartingAtBegin * sizeof(m256i));
                 setMem(numSavedTxsPerTick + buffersBeginIndex, (newInitialIndex - buffersBeginIndex) * sizeof(unsigned int), 0);
 
                 for (unsigned int tickIndex = buffersBeginIndex; tickIndex < newInitialIndex; ++tickIndex)
@@ -519,11 +519,11 @@ public:
         }
         else
         {
-            setMem(tickTransactionsBuffer, tickTransactionsSize, 0);
-            setMem(txsDigestsBuffer, txsDigestsSize, 0);
+            zeroPool(tickTransactionsBuffer, tickTransactionsSize);
+            zeroPool(txsDigestsBuffer, txsDigestsSize);
             setMem(numSavedTxsPerTick, sizeof(numSavedTxsPerTick), 0);
 
-            txsPriorities->reset();
+            zeroPool(txsPriorities, sizeof(*txsPriorities));
 
             buffersBeginIndex = 0;
         }

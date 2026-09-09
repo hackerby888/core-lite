@@ -333,6 +333,30 @@ RPC_ROUTE("GET", "/live/v1/balances/:id")
     return jsonResp(result);
 }
 
+#ifdef LITE_WASM_SC
+// The halt record, or null while the node is healthy. Same keys on every runtime that serves one.
+static Json::Value faultJson()
+{
+    const Wasm::Runtime::FaultRecord fault = Wasm::Runtime::faultSnapshot();
+    if (!fault.set)
+    {
+        return Json::Value();
+    }
+
+    Json::Value json;
+    json["message"] = fault.message;
+    json["phase"] = fault.phase;
+    json["failedTick"] = fault.failedTick;
+    json["failedEpoch"] = fault.failedEpoch;
+    json["lastFinalizedTick"] = fault.failedTick ? fault.failedTick - 1 : 0;
+    json["lastFinalizedEpoch"] = fault.failedEpoch;
+    json["slot"] = fault.slot;
+    json["kind"] = fault.kind;
+    json["entry"] = fault.entry;
+    return json;
+}
+#endif
+
 static RpcResp rpcLiveTickInfo(const RpcReq& req, const char* wrapperKey)
 {
     (void)req;
@@ -347,6 +371,13 @@ static RpcResp rpcLiveTickInfo(const RpcReq& req, const char* wrapperKey)
     json["alignedVotes"] = gTickNumberOfComputors;
     json["misalignedVotes"] = gTickTotalNumberOfComputors - gTickNumberOfComputors;
     json["mainAuxStatus"] = mainAuxStatus;
+#ifdef LITE_WASM_SC
+    const Json::Value fault = faultJson();
+    if (!fault.isNull())
+    {
+        json["fault"] = fault;
+    }
+#endif
     return jsonResp(json);
 }
 RPC_ROUTE("GET", "/live/v1/block-height") { return rpcLiveTickInfo(req, "blockHeight"); }
@@ -448,6 +479,12 @@ RPC_ROUTE("POST", "/live/v1/querySmartContract")
         {
             return rpcErr(3, "Input size mismatch", 400);
         }
+        // A never-registered or redeploy-dropped entry has a null row; calling it would jump into freed
+        // memory. Reject it here the way the network path already does (qubic.cpp processRequestContractFunction).
+        if (!contractUserFunctions[contractIndex][inputType])
+        {
+            return rpcErr(3, "no such function on contract", 400);
+        }
         QpiContextUserFunctionCall qpiContext(contractIndex);
         auto errorCode = qpiContext.call(inputType, inputData.data(), inputSize);
         if (errorCode == NoContractError)
@@ -487,6 +524,13 @@ static std::string rpcHex32(const unsigned char* bytes)
 }
 
 // ============================ wasm contracts (/live/v1/...) ============================
+
+// Why the node stopped ticking, if it did: a contract abort from a procedure. Null while healthy.
+RPC_ROUTE("GET", "/live/v1/dev/fault")
+{
+    (void)req;
+    return jsonResp(faultJson());
+}
 
 // Reserved slots and their registered entry points.
 RPC_ROUTE("GET", "/live/v1/dyn-registry")
@@ -534,6 +578,7 @@ RPC_ROUTE("GET", "/live/v1/dyn-registry")
         contractJson["procedures"] = proceduresJson;
         contractJson["source"] = slot.sourceH;
         contractJson["lastError"] = Wasm::Runtime::lastTrap(slotIndex);
+        contractJson["feeReserve"] = std::to_string(getContractFeeReserve(slotIndex));
         contractsJson.append(contractJson);
     }
     json["slotBase"] = (unsigned int)WASM_RESERVED_SLOT_BASE;
@@ -559,6 +604,9 @@ RPC_ROUTE("GET", "/live/v1/dyn-upload")
     json["receivedCount"] = upload.receivedCount;
     json["complete"] = upload.active && upload.receivedCount == upload.chunkCount;
     json["finalHash"] = rpcHex32(upload.finalHash);
+    json["lastProgressTick"] = upload.lastProgressTick;
+    json["idleTicks"] = upload.active && system.tick > upload.lastProgressTick ? system.tick - upload.lastProgressTick : 0u;
+    json["staleAfterTicks"] = Wasm::Runtime::WASM_UPLOAD_STALE_TICKS;
 
     // Cap the missing-sequence response for large uploads.
     Json::Value missing(Json::arrayValue);
@@ -690,6 +738,7 @@ RPC_ROUTE("GET", "/live/v1/debug-trace")
             Json::Value call;
             call["name"] = hostCall.name;
             call["detail"] = hostCall.detail;
+            call["ord"] = (Json::UInt64)hostCall.ordinal;
             hostCalls.append(call);
         }
         entry["hostCalls"] = hostCalls;
@@ -701,6 +750,7 @@ RPC_ROUTE("GET", "/live/v1/debug-trace")
             logEntry["type"] = (unsigned int)log.type;
             logEntry["size"] = log.size;
             logEntry["hex"] = log.hex;
+            logEntry["ord"] = (Json::UInt64)log.ordinal;
             logs.append(logEntry);
         }
         entry["logs"] = logs;
@@ -714,6 +764,7 @@ RPC_ROUTE("GET", "/live/v1/debug-trace")
             cheatEntry["size"] = cheat.size;
             cheatEntry["value"] = (Json::UInt64)cheat.value;
             cheatEntry["hex"] = cheat.hex;
+            cheatEntry["ord"] = (Json::UInt64)cheat.ordinal;
             cheats.append(cheatEntry);
         }
         entry["cheats"] = cheats;
@@ -779,8 +830,6 @@ RPC_ROUTE("GET", "/live/v1/dev/state-read")
 
     if (offset > stateSize)
         offset = stateSize;
-    if (length > 262144ull)
-        length = 262144ull;
     if (offset + length > stateSize)
         length = stateSize - offset;
 
