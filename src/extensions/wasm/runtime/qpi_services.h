@@ -4,6 +4,7 @@
 #ifdef LITE_WASM_SC
 
 #include "extensions/wasm/shared/abi_types.h"
+#include "extensions/wasm/runtime/asset_iterator.h"
 
 #ifdef _MSC_VER
 #undef __transfer
@@ -20,53 +21,6 @@ static void logBytes(unsigned int contractIndex, unsigned char type, const void*
     qLogger::logMessage(size, type, message);
 
     *((unsigned int*)(void*)message) = 0;
-}
-
-static unsigned int enumerateAssets(const void*, unsigned int kind, const void* issuance, const void* ownership, const void* possession, void* outputBuffer,
-    unsigned int capacity)
-{
-    AssetEntry* output = (AssetEntry*)outputBuffer;
-    unsigned int count = 0;
-
-    if (kind == 1)
-    {
-        QPI::AssetPossessionIterator iterator(*(const QPI::Asset*)issuance, *(const QPI::AssetOwnershipSelect*)ownership, *(const QPI::AssetPossessionSelect*)possession);
-
-        while (!iterator.reachedEnd() && count < capacity)
-        {
-            QPI::id owner = iterator.owner();
-            QPI::id possessor = iterator.possessor();
-
-            copyMem(output[count].owner, &owner, 32);
-            copyMem(output[count].possessor, &possessor, 32);
-            output[count].shares = iterator.numberOfPossessedShares();
-            output[count].ownershipManagingContract = iterator.ownershipManagingContract();
-            output[count].possessionManagingContract = 0;
-
-            iterator.next();
-            count++;
-        }
-    }
-    else
-    {
-        QPI::AssetOwnershipIterator iterator(*(const QPI::Asset*)issuance, *(const QPI::AssetOwnershipSelect*)ownership);
-
-        while (!iterator.reachedEnd() && count < capacity)
-        {
-            QPI::id owner = iterator.owner();
-
-            copyMem(output[count].owner, &owner, 32);
-            copyMem(output[count].possessor, &owner, 32);
-            output[count].shares = iterator.numberOfOwnedShares();
-            output[count].ownershipManagingContract = iterator.ownershipManagingContract();
-            output[count].possessionManagingContract = 0;
-
-            iterator.next();
-            count++;
-        }
-    }
-
-    return count;
 }
 
 static int callContractFunction(const void* callerContext, unsigned int contractIndex, unsigned short inputType, const void* input, unsigned int, void* output,

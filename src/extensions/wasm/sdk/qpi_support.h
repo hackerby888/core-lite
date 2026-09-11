@@ -241,7 +241,8 @@ void QPI::QpiContextFunctionCall::__qpiFreeLocals() const
     }
 }
 
-// Asset iterator host bridge
+// Asset iterator host bridge: the object holds the native iterator's universe indices and the host advances them,
+// so a walk has no record cap and two live iterators never share a buffer.
 
 static_assert(sizeof(Wasm::AssetEntry) == 80, "AssetEntry ABI size");
 static_assert(offsetof(Wasm::AssetEntry, owner) == 0, "AssetEntry owner offset");
@@ -249,32 +250,39 @@ static_assert(offsetof(Wasm::AssetEntry, possessor) == 32, "AssetEntry possessor
 static_assert(offsetof(Wasm::AssetEntry, shares) == 64, "AssetEntry shares offset");
 static_assert(offsetof(Wasm::AssetEntry, ownershipManagingContract) == 72, "AssetEntry ownership-management offset");
 static_assert(offsetof(Wasm::AssetEntry, possessionManagingContract) == 74, "AssetEntry possession-management offset");
-__attribute__((import_module("lhost"), import_name("assetEnumerate")))
-extern "C" unsigned int lh_assetEnumerate(unsigned int kind, const void* issuance, const void* ownership, const void* possession, void* output,
-    unsigned int capacity);
+__attribute__((import_module("lhost"), import_name("assetIterBegin")))
+extern "C" void lh_assetIterBegin(unsigned int kind, const void* issuance, const void* ownership, const void* possession, unsigned int* issuanceIdx,
+    unsigned int* ownershipIdx, unsigned int* possessionIdx);
+__attribute__((import_module("lhost"), import_name("assetIterNext")))
+extern "C" unsigned int lh_assetIterNext(unsigned int kind, const void* issuance, const void* ownership, const void* possession, unsigned int* issuanceIdx,
+    unsigned int* ownershipIdx, unsigned int* possessionIdx);
+__attribute__((import_module("lhost"), import_name("assetIterRecord")))
+extern "C" void lh_assetIterRecord(unsigned int kind, unsigned int ownershipIdx, unsigned int possessionIdx, void* entry);
 
-namespace
+// The current record, fetched per accessor so nested walks never share a buffer.
+static Wasm::AssetEntry assetIterRecord(unsigned int kind, unsigned int ownershipIdx, unsigned int possessionIdx)
 {
-Wasm::AssetEntry assetEntries[WASM_ASSET_ENTRY_CAPACITY];
-} // namespace
+    Wasm::AssetEntry entry;
+
+    lh_assetIterRecord(kind, ownershipIdx, possessionIdx, &entry);
+    return entry;
+}
 
 void QPI::AssetOwnershipIterator::begin(const QPI::Asset& issuance, const QPI::AssetOwnershipSelect& ownership)
 {
     _issuance = issuance;
     _ownership = ownership;
-    _issuanceIdx = lh_assetEnumerate(0, &_issuance, &_ownership, &_ownership, assetEntries, WASM_ASSET_ENTRY_CAPACITY);
-    _ownershipIdx = 0;
+    lh_assetIterBegin(0, &_issuance, &_ownership, &_ownership, &_issuanceIdx, &_ownershipIdx, nullptr);
 }
 
 bool QPI::AssetOwnershipIterator::reachedEnd() const
 {
-    return _ownershipIdx >= _issuanceIdx;
+    return _ownershipIdx == WASM_NO_ASSET_INDEX;
 }
 
 bool QPI::AssetOwnershipIterator::next()
 {
-    ++_ownershipIdx;
-    return _ownershipIdx < _issuanceIdx;
+    return lh_assetIterNext(0, &_issuance, &_ownership, &_ownership, &_issuanceIdx, &_ownershipIdx, nullptr) != 0;
 }
 
 QPI::id QPI::AssetOwnershipIterator::issuer() const
@@ -289,20 +297,21 @@ QPI::uint64 QPI::AssetOwnershipIterator::assetName() const
 
 QPI::id QPI::AssetOwnershipIterator::owner() const
 {
+    const Wasm::AssetEntry entry = assetIterRecord(0, _ownershipIdx, WASM_NO_ASSET_INDEX);
     QPI::id ownerId;
 
-    copyMem(&ownerId, assetEntries[_ownershipIdx].owner, 32);
+    copyMem(&ownerId, entry.owner, 32);
     return ownerId;
 }
 
 QPI::sint64 QPI::AssetOwnershipIterator::numberOfOwnedShares() const
 {
-    return assetEntries[_ownershipIdx].shares;
+    return assetIterRecord(0, _ownershipIdx, WASM_NO_ASSET_INDEX).shares;
 }
 
 QPI::uint16 QPI::AssetOwnershipIterator::ownershipManagingContract() const
 {
-    return assetEntries[_ownershipIdx].ownershipManagingContract;
+    return assetIterRecord(0, _ownershipIdx, WASM_NO_ASSET_INDEX).ownershipManagingContract;
 }
 
 void QPI::AssetPossessionIterator::begin(const QPI::Asset& issuance, const QPI::AssetOwnershipSelect& ownership, const QPI::AssetPossessionSelect& possession)
@@ -310,32 +319,36 @@ void QPI::AssetPossessionIterator::begin(const QPI::Asset& issuance, const QPI::
     _issuance = issuance;
     _ownership = ownership;
     _possession = possession;
-    _issuanceIdx = lh_assetEnumerate(1, &_issuance, &_ownership, &_possession, assetEntries, WASM_ASSET_ENTRY_CAPACITY);
-    _ownershipIdx = 0;
+    lh_assetIterBegin(1, &_issuance, &_ownership, &_possession, &_issuanceIdx, &_ownershipIdx, &_possessionIdx);
 }
 
 bool QPI::AssetPossessionIterator::reachedEnd() const
 {
-    return _ownershipIdx >= _issuanceIdx;
+    return _possessionIdx == WASM_NO_ASSET_INDEX;
 }
 
 bool QPI::AssetPossessionIterator::next()
 {
-    ++_ownershipIdx;
-    return _ownershipIdx < _issuanceIdx;
+    return lh_assetIterNext(1, &_issuance, &_ownership, &_possession, &_issuanceIdx, &_ownershipIdx, &_possessionIdx) != 0;
 }
 
 QPI::id QPI::AssetPossessionIterator::possessor() const
 {
+    const Wasm::AssetEntry entry = assetIterRecord(1, _ownershipIdx, _possessionIdx);
     QPI::id possessorId;
 
-    copyMem(&possessorId, assetEntries[_ownershipIdx].possessor, 32);
+    copyMem(&possessorId, entry.possessor, 32);
     return possessorId;
 }
 
 QPI::sint64 QPI::AssetPossessionIterator::numberOfPossessedShares() const
 {
-    return assetEntries[_ownershipIdx].shares;
+    return assetIterRecord(1, _ownershipIdx, _possessionIdx).shares;
+}
+
+QPI::uint16 QPI::AssetPossessionIterator::possessionManagingContract() const
+{
+    return assetIterRecord(1, _ownershipIdx, _possessionIdx).possessionManagingContract;
 }
 
 #endif

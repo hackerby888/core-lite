@@ -38,6 +38,7 @@ add_executable(
 		# linker keeps the first COMDAT copy of TickStorage inlines for every TU (oracle tests include it too).
 		tick_storage.cpp
 		assets.cpp
+		wasm_asset_iterator.cpp
    		common_def.cpp
    		contract_core.cpp
 		contract_invocation_alignment.cpp

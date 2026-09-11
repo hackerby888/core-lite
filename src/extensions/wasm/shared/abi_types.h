@@ -17,7 +17,8 @@ struct AssetEntry
     unsigned short possessionManagingContract;
     unsigned char padding[4];
 };
-#define WASM_ASSET_ENTRY_CAPACITY 1024u
+// The universe's NO_ASSET_INDEX, which ends an asset walk; the sdk cannot see assets/assets.h.
+#define WASM_NO_ASSET_INDEX 0xffffffffu
 
 // System-procedure slots must match SystemProcedureID in contract_def.h.
 #define WASM_SYSTEM_PROCEDURE_ENUM(symbol, id, method, emptyMember) WASM_SYSTEM_PROCEDURE_##symbol = id,
@@ -91,8 +92,11 @@ struct HostServices
     long long (*numberOfShares)(const void* ctx, const void* asset, const void* ownSel, const void* posSel);
     long long (*numberOfPossessedShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32,
         unsigned short ownMgmt, unsigned short posMgmt);
-    unsigned int (*assetEnumerate)(const void* ctx, unsigned int kind, const void* issuance, const void* ownSel, const void* posSel, void* outBuf,
-        unsigned int maxEntries);
+    void (*assetIterBegin)(const void* ctx, unsigned int kind, const void* issuance, const void* ownSel, const void* posSel, unsigned int* issuanceIdx,
+        unsigned int* ownershipIdx, unsigned int* possessionIdx);
+    unsigned int (*assetIterNext)(const void* ctx, unsigned int kind, const void* issuance, const void* ownSel, const void* posSel, unsigned int* issuanceIdx,
+        unsigned int* ownershipIdx, unsigned int* possessionIdx);
+    void (*assetIterRecord)(const void* ctx, unsigned int kind, unsigned int ownershipIdx, unsigned int possessionIdx, void* entry);
     long long (*transferShareOwnershipAndPossession)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32,
         const void* possessor32, long long shares, const void* newOwner32);
     long long (*acquireShares)(const void* ctx, unsigned long long assetName, const void* issuer32, const void* owner32, const void* possessor32,

@@ -417,19 +417,56 @@ static int64_t w_releaseShares(
     return hostServices.releaseShares(callContext->ctx, name, nativeAddress(execEnv, issuerOffset), nativeAddress(execEnv, ownerOffset), nativeAddress(execEnv, possessorOffset), shares, (unsigned short)destinationOwnershipManagement, (unsigned short)destinationPossessionManagement, fee);
 }
 
-static uint32_t w_assetEnumerate(
+// An index the host advances lives in the contract's own iterator, possibly inside state, so the write is journalled like any out-pointer.
+static inline unsigned int* assetIndexSlot(wasm_exec_env_t execEnv, CallContext* callContext, uint32_t offset)
+{
+    noteGuestWrite(execEnv, callContext, offset, (uint32_t)sizeof(unsigned int));
+    return (unsigned int*)nativeAddress(execEnv, offset);
+}
+
+static void w_assetIterBegin(
     wasm_exec_env_t execEnv,
     uint32_t kind,
     uint32_t issuanceOffset,
     uint32_t ownershipOffset,
     uint32_t possessionOffset,
-    uint32_t outputOffset,
-    uint32_t capacity)
+    uint32_t issuanceIdxOffset,
+    uint32_t ownershipIdxOffset,
+    uint32_t possessionIdxOffset)
 {
     CallContext* callContext = activeCallContext(execEnv);
 
-    traceHostCall(callContext, "assetEnumerate", "kind=" + std::to_string(kind));
-    return hostServices.assetEnumerate(callContext->ctx, kind, nativeAddress(execEnv, issuanceOffset), nativeAddress(execEnv, ownershipOffset), nativeAddress(execEnv, possessionOffset), nativeAddress(execEnv, outputOffset), capacity);
+    traceHostCall(callContext, "assetIterBegin", "kind=" + std::to_string(kind));
+    hostServices.assetIterBegin(callContext->ctx, kind, nativeAddress(execEnv, issuanceOffset), nativeAddress(execEnv, ownershipOffset), nativeAddress(execEnv, possessionOffset),
+        assetIndexSlot(execEnv, callContext, issuanceIdxOffset), assetIndexSlot(execEnv, callContext, ownershipIdxOffset),
+        kind == 1 ? assetIndexSlot(execEnv, callContext, possessionIdxOffset) : nullptr);
+}
+
+static uint32_t w_assetIterNext(
+    wasm_exec_env_t execEnv,
+    uint32_t kind,
+    uint32_t issuanceOffset,
+    uint32_t ownershipOffset,
+    uint32_t possessionOffset,
+    uint32_t issuanceIdxOffset,
+    uint32_t ownershipIdxOffset,
+    uint32_t possessionIdxOffset)
+{
+    CallContext* callContext = activeCallContext(execEnv);
+
+    traceHostCall(callContext, "assetIterNext", "kind=" + std::to_string(kind));
+    return hostServices.assetIterNext(callContext->ctx, kind, nativeAddress(execEnv, issuanceOffset), nativeAddress(execEnv, ownershipOffset), nativeAddress(execEnv, possessionOffset),
+        assetIndexSlot(execEnv, callContext, issuanceIdxOffset), assetIndexSlot(execEnv, callContext, ownershipIdxOffset),
+        kind == 1 ? assetIndexSlot(execEnv, callContext, possessionIdxOffset) : nullptr);
+}
+
+static void w_assetIterRecord(wasm_exec_env_t execEnv, uint32_t kind, uint32_t ownershipIdx, uint32_t possessionIdx, uint32_t entryOffset)
+{
+    CallContext* callContext = activeCallContext(execEnv);
+
+    traceHostCall(callContext, "assetIterRecord", "kind=" + std::to_string(kind) + " ownership=" + std::to_string(ownershipIdx));
+    noteGuestWrite(execEnv, callContext, entryOffset, (uint32_t)sizeof(AssetEntry));
+    hostServices.assetIterRecord(callContext->ctx, kind, ownershipIdx, possessionIdx, nativeAddress(execEnv, entryOffset));
 }
 
 static uint32_t w_dayOfWeek(wasm_exec_env_t execEnv, uint32_t year, uint32_t month, uint32_t day)

@@ -182,6 +182,11 @@ namespace QPI
 		AssetPossessionSelect _possession;
 		unsigned int _possessionIdx;
 
+		// Constructor for derived classes, which should call begin() themselves.
+		AssetPossessionIterator()
+		{
+		}
+
 	public:
 		AssetPossessionIterator(const Asset& issuance, const AssetOwnershipSelect& ownership = AssetOwnershipSelect::any(), const AssetPossessionSelect& possession = AssetPossessionSelect::any())
 		{
