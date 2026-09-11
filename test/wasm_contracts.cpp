@@ -624,6 +624,61 @@ void hs_releaseScratch(wasm_exec_env_t executionEnvironment, uint32_t offset)
     }
 }
 
+// ---- qinit parity shims ----
+// Registered so the parity sweep can execute contracts that call a host function instead of trapping
+// on an unresolved import. Every value below mirrors what a bare QubicSimulator reports — tick 0,
+// epoch 0, clock pinned to 2024-01-01T00:00:00Z — because the sweep compares this runtime against
+// that simulator. A shim returning anything else would manufacture a divergence rather than reveal
+// one, which is the opposite of what a third oracle is for.
+//
+// Deliberately NOT shimmed: transfers, the asset ledger, logging, inter-contract calls, IPO, mining
+// and the oracle. Those need real host state, and a stub that invents an answer turns "this contract
+// is unreachable" into "this contract silently agreed", which is strictly worse than a trap.
+// dayOfWeek is left out too: it needs dayIndex, and no corpus contract calls it.
+
+extern "C" void qinitShimK12(const void* input, unsigned int length, void* output32);
+
+void* appToNative(wasm_exec_env_t executionEnvironment, uint32_t offset)
+{
+    return wasm_runtime_addr_app_to_native(wasm_runtime_get_module_inst(executionEnvironment), offset);
+}
+
+// lh_k12 carries no output length over the ABI; it is always 32 bytes, matching qpi_services.h's
+// hashK12 and the qinit engine's k12Bytes. Both were checked to produce identical digests before
+// this shim was trusted.
+void hs_k12(wasm_exec_env_t executionEnvironment, uint32_t inputOffset, uint32_t length, uint32_t outputOffset)
+{
+    qinitShimK12(appToNative(executionEnvironment, inputOffset), length, appToNative(executionEnvironment, outputOffset));
+}
+
+uint32_t hs_zero(wasm_exec_env_t)
+{
+    return 0;
+}
+
+// month() and day() are both 1 on 2024-01-01.
+uint32_t hs_one(wasm_exec_env_t)
+{
+    return 1;
+}
+
+// The engine reports the year in Qubic's two-digit form: (getUTCFullYear() - 2000) & 0xff.
+uint32_t hs_year(wasm_exec_env_t)
+{
+    return 24;
+}
+
+void hs_void(wasm_exec_env_t)
+{
+}
+
+void hs_now(wasm_exec_env_t executionEnvironment, uint32_t outputOffset)
+{
+    // packDateAndTime(Date.UTC(2024, 0, 1)): year+2000 at bit 46, month at 42, day at 37, rest zero.
+    const uint64_t packed = ((uint64_t)2024 << 46) | ((uint64_t)1 << 42) | ((uint64_t)1 << 37);
+    memcpy(appToNative(executionEnvironment, outputOffset), &packed, sizeof packed);
+}
+
 int hexNibble(char character)
 {
     if (character >= '0' && character <= '9')
@@ -674,6 +729,21 @@ TEST(WasmContracts, CrossHostStateEquivalence)
         { "markDirty", (void*)hs_void_i, "(i)", nullptr },
         { "acquireScratch", (void*)hs_acquireScratch, "(Ii)i", nullptr },
         { "releaseScratch", (void*)hs_releaseScratch, "(i)", nullptr },
+        { "k12", (void*)hs_k12, "(iii)", nullptr },
+        { "tick", (void*)hs_zero, "()i", nullptr },
+        { "epoch", (void*)hs_zero, "()i", nullptr },
+        { "initialTick", (void*)hs_zero, "()i", nullptr },
+        { "numberOfTickTransactions", (void*)hs_zero, "()i", nullptr },
+        { "year", (void*)hs_year, "()i", nullptr },
+        { "month", (void*)hs_one, "()i", nullptr },
+        { "day", (void*)hs_one, "()i", nullptr },
+        { "hour", (void*)hs_zero, "()i", nullptr },
+        { "minute", (void*)hs_zero, "()i", nullptr },
+        { "second", (void*)hs_zero, "()i", nullptr },
+        { "millisecond", (void*)hs_zero, "()i", nullptr },
+        { "now", (void*)hs_now, "(i)", nullptr },
+        { "pauseLog", (void*)hs_void, "()", nullptr },
+        { "resumeLog", (void*)hs_void, "()", nullptr },
     };
     static NativeSymbol envNs[] = {
         { "_ZL21addDebugMessageAssertPKcS0_j", (void*)hs_assert, "(iii)", nullptr },
@@ -683,7 +753,7 @@ TEST(WasmContracts, CrossHostStateEquivalence)
         { "fd_close", (void*)hs_fd_close, "(i)i", nullptr },
         { "fd_seek", (void*)hs_fd_seek, "(iIii)i", nullptr },
     };
-    ASSERT_TRUE(wasm_runtime_register_natives("lhost", lhostNs, 5));
+    ASSERT_TRUE(wasm_runtime_register_natives("lhost", lhostNs, sizeof lhostNs / sizeof lhostNs[0]));
     ASSERT_TRUE(wasm_runtime_register_natives("env", envNs, 1));
     ASSERT_TRUE(wasm_runtime_register_natives("wasi_snapshot_preview1", wasiNs, 3));
 
@@ -731,6 +801,26 @@ TEST(WasmContracts, CrossHostStateEquivalence)
     uint32_t ss = call("state_size", a, 0);
     a[0] = 0;
     uint32_t carve = call("io_size", a, 0);
+    a[0] = 0;
+    uint32_t ctx = call("ctx_addr", a, 0);
+
+    // Populate the per-call context header the host normally fills. Without this it stays zeroed, and
+    // qpi.invocator() / originator() / invocationReward() — which are struct reads, not lhost calls,
+    // so they never trap — silently answer with zeros. That is a false agreement the shim-trap
+    // classifier cannot see. Layout mirrors packages/engine/src/contract/abi.ts QpiContext, and the
+    // values mirror writeCtx in packages/engine/src/contract/runtime.ts.
+    {
+        unsigned char* context = (unsigned char*)wasm_runtime_addr_app_to_native(inst, ctx);
+        memset(context, 0, 256);
+        const uint32_t slot = expectedSlot;          // @0   currentContractIndex
+        const int32_t stackIndex = -1;               // @4   host writes -1
+        const uint64_t contractId = expectedSlot;    // @8   id(slot, 0, 0, 0) low lane
+        memcpy(context + 0, &slot, sizeof slot);
+        memcpy(context + 4, &stackIndex, sizeof stackIndex);
+        memcpy(context + 8, &contractId, sizeof contractId);
+        // originator @40 and invocator @72 stay zero: the sweep drives the simulator with no context
+        // either, and the engine leaves them zeroed when none is supplied.
+    }
 
     // The journal sits past the io carve. An artifact built before it carries none, and then the run
     // reports state only — an absent CROSSHOST_DIFF line means no journal, not an empty diff.
