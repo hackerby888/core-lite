@@ -13,6 +13,8 @@
 #define LITE_SC_CONTRACT_LEVEL 1
 #endif
 
+#include <atomic>
+
 namespace Wasm::Runtime
 {
 
@@ -22,6 +24,38 @@ static_assert(WASM_RESERVED_SLOT_COUNT <= 8, "more than 8 reserved Wasm slots ne
 #endif
 
 inline bool g_wasmOwnedSlot[contractCount] = {};
+
+// Per-slot write sequence: odd while a dispatch may be writing the slot, even when its bytes are quiescent.
+// Node-local, outside the state bytes, so digests and consensus are unchanged by it.
+inline std::atomic<unsigned long long> g_stateSeq[contractCount] = {};
+
+// Raised around a dispatch that may write a slot's state; a scope so entry and exit always pair.
+// A read-only function cannot write, and a nested frame is covered by its outermost caller, so neither raises it.
+struct StateWriteSeqScope
+{
+    StateWriteSeqScope(bool enabled, unsigned int contractIndex) : index(contractIndex), engaged(enabled)
+    {
+        if (engaged)
+        {
+            g_stateSeq[index].fetch_add(1, std::memory_order_release); // odd: a write may be in flight
+        }
+    }
+
+    ~StateWriteSeqScope()
+    {
+        if (engaged)
+        {
+            g_stateSeq[index].fetch_add(1, std::memory_order_release); // even: the bytes are quiescent again
+        }
+    }
+
+    StateWriteSeqScope(const StateWriteSeqScope&) = delete;
+    StateWriteSeqScope& operator=(const StateWriteSeqScope&) = delete;
+
+private:
+    const unsigned int index;
+    const bool engaged;
+};
 
 inline bool statePagerActive(unsigned int contractIndex)
 {

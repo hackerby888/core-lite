@@ -720,6 +720,7 @@ RPC_ROUTE("GET", "/live/v1/debug-trace")
         entry["outSize"] = trace.outputSize;
         entry["stateSize"] = trace.stateSize;
         entry["stateTruncated"] = trace.stateTruncated;
+        entry["stateVersion"] = (Json::UInt64)trace.stateVersion;
         entry["invocator"] = Wasm::Runtime::hex(&trace.invocator, 32);
         entry["invocationReward"] = (Json::Int64)trace.invocationReward;
 
@@ -840,19 +841,38 @@ RPC_ROUTE("GET", "/live/v1/dev/state-read")
     if (offset + length > stateSize)
         length = stateSize - offset;
 
-    const unsigned char* state = contractStates[slotIndex];
+    // Runs on an HTTP worker while the contract processor may be writing, so report which state the bytes came from.
+    // A seqlock rather than contractStateLock: that is writer-priority, and would stall the processor for the whole encode.
     static const char* hexDigits = "0123456789abcdef";
     std::string hex;
-    hex.reserve((size_t)length * 2);
-    for (unsigned long long i = 0; i < length; i++)
+    bool quiescent = false;
+    unsigned long long writeSeq = 0;
+    // One retry: two overlapping dispatches in a row mean the slot is busy enough that reporting no version beats spinning.
+    constexpr int stateReadAttempts = 2;
+    for (int attempt = 0; attempt < stateReadAttempts && !quiescent; attempt++)
     {
-        hex += hexDigits[state[offset + i] >> 4];
-        hex += hexDigits[state[offset + i] & 15];
+        writeSeq = Wasm::Runtime::g_stateSeq[slotIndex].load(std::memory_order_acquire);
+        // Copy on every attempt so the response always carries its bytes; only the version is withheld when untrusted.
+        const bool startedQuiescent = (writeSeq & 1ull) == 0;
+        const unsigned char* state = contractStates[slotIndex];
+        hex.clear();
+        hex.reserve((size_t)length * 2);
+        for (unsigned long long i = 0; i < length; i++)
+        {
+            hex += hexDigits[state[offset + i] >> 4];
+            hex += hexDigits[state[offset + i] & 15];
+        }
+        quiescent = startedQuiescent && Wasm::Runtime::g_stateSeq[slotIndex].load(std::memory_order_acquire) == writeSeq;
     }
+
     json["off"] = (Json::UInt64)offset;
     json["len"] = (Json::UInt64)length;
     json["stateSize"] = (Json::UInt64)stateSize;
     json["hex"] = hex;
+    if (quiescent)
+    {
+        json["version"] = (Json::UInt64)writeSeq;
+    }
     return jsonResp(json);
 }
 
