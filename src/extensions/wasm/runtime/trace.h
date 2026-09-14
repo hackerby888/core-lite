@@ -75,8 +75,7 @@ struct TraceEntry
     unsigned int outputSize = 0;
     unsigned int stateSize = 0;
     bool stateTruncated = false;
-    // The slot's write sequence once this dispatch finished. A reader comparing it against a later state-read
-    // can tell whether the bytes it is looking at are still the ones this diff describes.
+    // Slot write sequence after this dispatch; compare against a later state-read.
     unsigned long long stateVersion = 0;
     std::vector<unsigned char> input;
     std::vector<unsigned char> output;

@@ -288,8 +288,7 @@ static void finishDispatchTrace(const EngineSlot& slot, const MemoryLayout& layo
         }
     }
 
-    // The version the slot will carry once this dispatch's write window closes: odd inside the window, so round up.
-    // A frame that raised nothing already reads an even value and rounds to itself.
+    // Post-dispatch version: odd inside the write window, so round up to the next even.
     const unsigned long long writeSeq = g_stateSeq[trace.entry.contractIndex].load(std::memory_order_acquire);
     trace.entry.stateVersion = writeSeq + (writeSeq & 1ull);
 
@@ -448,7 +447,7 @@ static DispatchOutcome dispatchMigration(uint32_t contractIndex, int slotOffset,
     DispatchDepthScope slotDepth(slotCallDepth[slotOffset]);
     DispatchDepthScope frameDepth(dispatchDepth);
     outcome.rootFrame = dispatchDepth == 1;
-    // A migration zeroes and rewrites the whole state, and always runs at the top of a tick, so it never nests.
+    // Migration rewrites the whole state and never nests.
     StateWriteSeqScope stateSeq(true, contractIndex);
 
     bindEnvironment(environment.execEnv, callContext);
@@ -543,8 +542,7 @@ static DispatchOutcome dispatchCall(uint32_t contractIndex, uint16_t inputType, 
     }
 
     DispatchFrameScope frame(slot, environment.execEnv, slotOffset, static_cast<const QPI::QpiContext*>(context), layout, arenaLimit, nested);
-    // Declared after `frame` so it is destroyed first, once finalizeMemory below has re-pointed contractStates:
-    // a reader that sees the even value sees the new pointer.
+    // After `frame` so it destroys first, once finalizeMemory has re-pointed contractStates.
     StateWriteSeqScope stateSeq(kind != DispatchKind::UserFunction && !nested, contractIndex);
     DispatchDepthScope frameDepth(dispatchDepth);
     outcome.rootFrame = dispatchDepth == 1;

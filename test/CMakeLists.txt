@@ -182,8 +182,8 @@ if(LITE_WASM_SC)
     endif()
 
     add_executable(qubic_wasm_tests wasm_contracts.cpp wasm_state_write.cpp wasm_state_journal.cpp wasm_k12_shim.cpp)
-    # kangaroo_twelve.h reinterprets its byte input as unsigned long long, which the strict test flags reject.
-    # Scoped to this one file. MSVC has no -Wcast-align and rejects the flag outright (D8021), so it relaxes /WX.
+    # kangaroo_twelve.h casts bytes to unsigned long long; -Wcast-align -Werror rejects it.
+    # MSVC has no such flag and errors on it (D8021), so relax /WX there instead.
     if(MSVC)
         set_source_files_properties(wasm_k12_shim.cpp PROPERTIES COMPILE_OPTIONS "/WX-")
     else()

@@ -841,18 +841,17 @@ RPC_ROUTE("GET", "/live/v1/dev/state-read")
     if (offset + length > stateSize)
         length = stateSize - offset;
 
-    // Runs on an HTTP worker while the contract processor may be writing, so report which state the bytes came from.
-    // A seqlock rather than contractStateLock: that is writer-priority, and would stall the processor for the whole encode.
+    // Seqlock, not contractStateLock: writer-priority would stall the processor across the encode.
     static const char* hexDigits = "0123456789abcdef";
     std::string hex;
     bool quiescent = false;
     unsigned long long writeSeq = 0;
-    // One retry: two overlapping dispatches in a row mean the slot is busy enough that reporting no version beats spinning.
+    // One retry, then report no version rather than spin.
     constexpr int stateReadAttempts = 2;
     for (int attempt = 0; attempt < stateReadAttempts && !quiescent; attempt++)
     {
         writeSeq = Wasm::Runtime::g_stateSeq[slotIndex].load(std::memory_order_acquire);
-        // Copy on every attempt so the response always carries its bytes; only the version is withheld when untrusted.
+        // Always copy; only the version is withheld.
         const bool startedQuiescent = (writeSeq & 1ull) == 0;
         const unsigned char* state = contractStates[slotIndex];
         hex.clear();
