@@ -11,6 +11,11 @@
 #include "../src/mining/task_file.h"
 #include "../src/score.h"
 
+#ifdef LITE_PARALLEL_SCORE
+#define LITE_PARALLEL_SCORE_POOL_ONLY
+#include "../src/extensions/parallel_score.h"
+#endif
+
 #include "score_bpp9000_reference.h"
 #include "score_params.h"
 
@@ -448,28 +453,27 @@ TEST(TestQubicScoreFunction, Bpp9000ProductionRegression)
     });
 }
 
-// Ant-colony score seam (deriveRootANN + computeScoreFromParent)
-TEST(TestQubicScoreFunction, Bpp9000AntColonyRegression)
+struct AntNode
 {
-    // Group by chain each chain is a lineage - level 0 extends the derived root, level i extends level i-1's bestANN.
+    m256i nonce;
+    m256i anchor;
+    unsigned int score;
+};
+struct AntChain
+{
+    m256i pubkey;
+    unsigned int poolIndex;
+    std::vector<AntNode> nodes;   // indexed by depth
+};
+
+// gt_ant_production.csv grouped by chain: each chain is a lineage - depth 0 extends the derived root,
+// depth i extends depth i-1's bestANN. poolIndex refers to uniqueSeeds.
+static void loadAntChains(std::vector<AntChain>& chains, std::vector<m256i>& uniqueSeeds)
+{
     auto rows = readCSV(PRODUCTION_ANT_FILE_NAME);
     ASSERT_GT(rows.size(), 1u) << "missing/empty " << PRODUCTION_ANT_FILE_NAME;
 
-    struct AntNode
-    {
-        m256i nonce;
-        m256i anchor;
-        unsigned int score;
-    };
-    struct AntChain
-    {
-        m256i pubkey;
-        unsigned int poolIndex;
-        std::vector<AntNode> nodes;   // indexed by depth
-    };
-    std::vector<AntChain> chains;
     std::vector<int> chainIds;        // chain id per slot, first-seen order
-    std::vector<m256i> uniqueSeeds;
 
     for (unsigned long long i = 1; i < rows.size(); ++i)
     {
@@ -523,6 +527,18 @@ TEST(TestQubicScoreFunction, Bpp9000AntColonyRegression)
         chain.nodes[(size_t)depth] = node;
     }
     ASSERT_FALSE(chains.empty());
+}
+
+// Ant-colony score seam (deriveRootANN + computeScoreFromParent)
+TEST(TestQubicScoreFunction, Bpp9000AntColonyRegression)
+{
+    std::vector<AntChain> chains;
+    std::vector<m256i> uniqueSeeds;
+    loadAntChains(chains, uniqueSeeds);
+    if (chains.empty())
+    {
+        return;
+    }
 
     std::vector<std::vector<unsigned char>> pools(uniqueSeeds.size());
     for (size_t k = 0; k < uniqueSeeds.size(); ++k)
@@ -1377,3 +1393,807 @@ TEST_F(TestQubicScoreTaskQueue, OneBatchCarriesDifferentWorkFunctions)
     EXPECT_EQ(gTaskQueueProbe.altRunCount.load(), pairCount);
 }
 
+
+#ifdef LITE_PARALLEL_SCORE
+
+// =============================================================================
+// Parallel window batches (extensions/parallel_score.h): one score() split across worker engines.
+
+#if defined(__linux__)
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+namespace
+{
+using AntPool = LiteParallelScore::Pool<AntEngine>;
+using AntScope = AntPool::Scope;
+
+static constexpr unsigned long long STEPS_PER_WALK = AntEngine::numberOfMutations + 1;
+
+// Production task + the gt_ant chains + one pool per seed. Every parallel test walks these.
+struct AntChainFixture
+{
+    std::vector<AntChain> chains;
+    std::vector<m256i> uniqueSeeds;
+    std::vector<std::vector<unsigned char>> pools;
+    std::vector<unsigned char> taskBytes;
+    TaskBlocks tb;
+};
+
+static bool makeAntChainFixture(AntChainFixture& f)
+{
+    loadAntChains(f.chains, f.uniqueSeeds);
+    if (f.chains.empty())
+    {
+        return false;
+    }
+    f.pools.resize(f.uniqueSeeds.size());
+    for (size_t k = 0; k < f.uniqueSeeds.size(); ++k)
+    {
+        generatePool(f.uniqueSeeds[k], f.pools[k]);
+    }
+    f.taskBytes = readBinaryFile(PRODUCTION_TASK_FILE_NAME);
+    if (f.taskBytes.size() <= sizeof(score_task_file::TaskFileHeader))
+    {
+        ADD_FAILURE() << "missing/short " << PRODUCTION_TASK_FILE_NAME;
+        return false;
+    }
+    f.tb = taskSubview<ProductionConfig>(f.taskBytes);
+    return true;
+}
+
+static void chainRoot(AntEngine& engine, const AntChainFixture& f, const AntChain& chain, AntEngine::ANN& out)
+{
+    engine.deriveRootANN(f.uniqueSeeds[chain.poolIndex].m256i_u8, f.pools[chain.poolIndex].data(), out);
+}
+
+static unsigned int walkNode(AntEngine& engine, const AntChainFixture& f, const AntChain& chain, const AntNode& node,
+                             const AntEngine::ANN& parent, AntEngine::ANN& best)
+{
+    const unsigned int score = engine.computeScoreFromParent(parent, chain.pubkey.m256i_u8, node.nonce.m256i_u8, node.anchor.m256i_u8,
+                                                             f.pools[chain.poolIndex].data());
+    engine.getBestANN(best);
+    return score;
+}
+
+static double elapsedMs(std::chrono::steady_clock::time_point since)
+{
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - since).count();
+}
+}
+
+// The kernel hunks alone: any partition of [0, numberOfWindows) sums to the full score, and a timeout
+// in any sub-range is INFINITE_ERROR (absorbing) rather than a count.
+TEST(TestQubicScoreParallel, ScoreSimdSubRangesCompose)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f))
+    {
+        return;
+    }
+    auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    ASSERT_TRUE(engine);
+    constexpr unsigned long long W = AntEngine::numberOfWindows;
+    constexpr unsigned long long BW = AntPool::BATCH_WINDOWS;
+
+    AntEngine::ANN root;
+    chainRoot(*engine, f, f.chains[0], root);
+    engine->expand(root, engine->currentANN);
+
+    const unsigned int full = engine->scoreSIMD(0, W);
+    ASSERT_NE(full, AntEngine::INFINITE_ERROR);
+    EXPECT_EQ(engine->scoreSIMD(), full);
+
+    auto sumOver = [&](const std::vector<unsigned long long>& cuts)
+    {
+        unsigned int sum = 0;
+        for (size_t i = 0; i + 1 < cuts.size(); i++)
+        {
+            const unsigned int piece = engine->scoreSIMD(cuts[i], cuts[i + 1]);
+            EXPECT_NE(piece, AntEngine::INFINITE_ERROR) << "[" << cuts[i] << "," << cuts[i + 1] << ")";
+            sum += piece;
+        }
+        return sum;
+    };
+
+    EXPECT_EQ(sumOver({ 0, W }), full);
+
+    std::vector<unsigned long long> batchAligned;
+    for (unsigned long long b = 0; b < W; b += BW)
+    {
+        batchAligned.push_back(b);
+    }
+    batchAligned.push_back(W);
+    EXPECT_EQ(sumOver(batchAligned), full);
+
+    EXPECT_EQ(sumOver({ 0, 37, 1000, 4097, W - 1, W }), full);
+    EXPECT_EQ(sumOver({ 0, 1, 2, 3, W }), full);
+    EXPECT_EQ(engine->scoreSIMD(5, 5), 0u);
+    EXPECT_EQ(engine->scoreSIMD(W, W), 0u);
+
+    // An all-zero LUT pins the signal neuron to a known trit after one tick, so no window ever
+    // feeds again and every batch times out.
+    setMem(&engine->currentANN, sizeof(engine->currentANN), 0);
+    EXPECT_EQ(engine->scoreSIMD(0, W), AntEngine::INFINITE_ERROR);
+    EXPECT_EQ(engine->scoreSIMD(0, BW), AntEngine::INFINITE_ERROR);
+    EXPECT_EQ(engine->scoreSIMD(W - 1, W), AntEngine::INFINITE_ERROR);
+}
+
+// The bit-exact gate: walks under the pool return the serial score and the serial bestANN, at any N,
+// and twice in a row (claim order is nondeterministic, the result is not). N=8 covers every chain;
+// smaller N and the bestANN compare use every 4th chain, whose serial reference is computed once.
+TEST(TestQubicScoreParallel, ParallelMatchesSerial)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f))
+    {
+        return;
+    }
+    const size_t chainCount = f.chains.size();
+    auto isRefChain = [](size_t ci) { return ci % 4 == 0; };
+
+    struct RefNode
+    {
+        unsigned int score;
+        AntEngine::ANN best;
+    };
+    std::vector<std::vector<RefNode>> ref(chainCount);
+    std::vector<size_t> refChains;
+    for (size_t ci = 0; ci < chainCount; ci++)
+    {
+        if (isRefChain(ci))
+        {
+            refChains.push_back(ci);
+        }
+    }
+    runWorkers(workerThreadCount(refChains.size()), [&](unsigned int threadIdx, unsigned int numThreads)
+    {
+        auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+        if (!engine)
+        {
+            return;
+        }
+        for (size_t k = threadIdx; k < refChains.size(); k += numThreads)
+        {
+            const size_t ci = refChains[k];
+            const AntChain& chain = f.chains[ci];
+            AntEngine::ANN parent;
+            chainRoot(*engine, f, chain, parent);
+            ref[ci].resize(chain.nodes.size());
+            for (size_t d = 0; d < chain.nodes.size(); ++d)
+            {
+                ref[ci][d].score = walkNode(*engine, f, chain, chain.nodes[d], parent, ref[ci][d].best);
+                EXPECT_EQ(ref[ci][d].score, chain.nodes[d].score) << "serial chain " << ci << " depth " << d;
+                parent = ref[ci][d].best;
+            }
+        }
+    });
+
+    auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    ASSERT_TRUE(engine);
+    AntPool pool;
+    const int participantsList[] = { 1, 2, 5, 8 };
+    for (const int participants : participantsList)
+    {
+        EXPECT_EQ(pool.start(participants, f.tb.topo, f.tb.data), participants >= 2) << "N=" << participants;
+        const unsigned long long stepsBefore = pool.stepsParallel.load();
+        unsigned long long walks = 0;
+
+        for (size_t ci = 0; ci < chainCount; ci++)
+        {
+            const bool refChain = isRefChain(ci);
+            if (!refChain && participants != 8)
+            {
+                continue;
+            }
+            const AntChain& chain = f.chains[ci];
+            AntEngine::ANN parent;
+            chainRoot(*engine, f, chain, parent);
+            const size_t depths = participants == 1 ? 1 : chain.nodes.size();
+            for (size_t d = 0; d < depths; ++d)
+            {
+                const AntNode& node = chain.nodes[d];
+                AntEngine::ANN best1;
+                AntEngine::ANN best2;
+                unsigned int score1 = 0;
+                unsigned int score2 = 0;
+                {
+                    AntScope scope(LiteParallelScore::TickPath);
+                    score1 = walkNode(*engine, f, chain, node, parent, best1);
+                    walks++;
+                    if (refChain)
+                    {
+                        score2 = walkNode(*engine, f, chain, node, parent, best2);
+                        walks++;
+                    }
+                }
+                EXPECT_EQ(score1, node.score) << "N=" << participants << " chain " << ci << " depth " << d;
+                if (refChain)
+                {
+                    EXPECT_EQ(score2, score1) << "N=" << participants << " chain " << ci << " depth " << d;
+                    EXPECT_EQ(score1, ref[ci][d].score) << "N=" << participants << " chain " << ci << " depth " << d;
+                    EXPECT_EQ(memcmp(&best1, &ref[ci][d].best, sizeof(best1)), 0) << "bestANN N=" << participants << " chain " << ci << " depth " << d;
+                    EXPECT_EQ(memcmp(&best2, &best1, sizeof(best1)), 0) << "bestANN rerun N=" << participants << " chain " << ci << " depth " << d;
+                    // Continue from the serial lineage so one miss cannot cascade into the next depth.
+                    parent = ref[ci][d].best;
+                }
+                else
+                {
+                    parent = best1;
+                }
+            }
+        }
+
+        const unsigned long long steps = pool.stepsParallel.load() - stepsBefore;
+        EXPECT_EQ(steps, participants >= 2 ? walks * STEPS_PER_WALK : 0ull) << "N=" << participants;
+        pool.stop();
+    }
+}
+
+TEST(TestQubicScoreParallel, PoolMechanics)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f))
+    {
+        return;
+    }
+    auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    ASSERT_TRUE(engine);
+    AntEngine::ANN root;
+    chainRoot(*engine, f, f.chains[0], root);
+
+    engine->expand(root, engine->currentANN);
+    const unsigned int serial = engine->score();
+    ASSERT_NE(serial, AntEngine::INFINITE_ERROR);
+
+    AntPool pool;
+    EXPECT_FALSE(pool.start(0, f.tb.topo, f.tb.data));
+    EXPECT_FALSE(pool.start(1, f.tb.topo, f.tb.data));
+    EXPECT_EQ(pool.participants(), 0);
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        EXPECT_EQ(engine->score(), serial);
+    }
+    EXPECT_EQ(pool.stepsParallel.load(), 0u);
+
+    ASSERT_TRUE(pool.start(4, f.tb.topo, f.tb.data));
+    EXPECT_TRUE(pool.start(4, f.tb.topo, f.tb.data));
+    EXPECT_EQ(pool.participants(), 4);
+
+    EXPECT_EQ(engine->score(), serial);
+    EXPECT_EQ(pool.stepsParallel.load(), 0u);
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        EXPECT_EQ(engine->score(), serial);
+    }
+    EXPECT_EQ(pool.stepsParallel.load(), 1u);
+    EXPECT_EQ(pool.walksTickPath.load(), 1u);
+    EXPECT_EQ((int)pool.armedCount, 0);
+    EXPECT_EQ((int)pool.priorityActive, 0);
+
+    {
+        AntScope outer(LiteParallelScore::Precompute);
+        AntScope inner(LiteParallelScore::TickPath);
+        EXPECT_EQ(engine->score(), serial);
+    }
+    EXPECT_EQ(pool.stepsParallel.load(), 2u);
+    EXPECT_EQ(pool.walksPrecompute.load(), 1u);
+    EXPECT_EQ(pool.walksSerial.load(), 1u);
+
+    pool.startPid++;
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        EXPECT_EQ(engine->score(), serial);
+    }
+    pool.startPid--;
+    EXPECT_EQ(pool.stepsParallel.load(), 2u);
+    EXPECT_EQ(pool.walksSerial.load(), 2u);
+
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        for (int i = 0; i < 200; i++)
+        {
+            EXPECT_EQ(engine->score(), serial);
+        }
+    }
+    EXPECT_EQ(pool.stepsParallel.load(), 202u);
+
+    setMem(&engine->currentANN, sizeof(engine->currentANN), 0);
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        EXPECT_EQ(engine->score(), AntEngine::INFINITE_ERROR);
+    }
+    EXPECT_NE((int)pool.abort, 0);
+    EXPECT_LT((int)pool.nextBatch, AntPool::BATCH_COUNT);
+
+    pool.stop();
+    pool.stop();
+    EXPECT_EQ(pool.participants(), 0);
+    engine->expand(root, engine->currentANN);
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        EXPECT_EQ(engine->score(), serial);
+    }
+    EXPECT_EQ(pool.stepsParallel.load(), 203u);
+
+    ASSERT_TRUE(pool.start(3, f.tb.topo, f.tb.data));
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        EXPECT_EQ(engine->score(), serial);
+    }
+    EXPECT_EQ(pool.stepsParallel.load(), 204u);
+    pool.stop();
+}
+
+#if defined(__linux__)
+// A fork child inherits the pool with handles to threads that do not exist: walks stay serial until
+// restartAfterPromote(), which abandons the handles and spawns a fresh pool.
+TEST(TestQubicScoreParallel, ForkChildRestartsPool)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f))
+    {
+        return;
+    }
+    auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    ASSERT_TRUE(engine);
+    AntEngine::ANN root;
+    chainRoot(*engine, f, f.chains[0], root);
+    engine->expand(root, engine->currentANN);
+    const unsigned int serial = engine->score();
+    ASSERT_NE(serial, AntEngine::INFINITE_ERROR);
+
+    AntPool pool;
+    ASSERT_TRUE(pool.start(4, f.tb.topo, f.tb.data));
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        ASSERT_EQ(engine->score(), serial);
+    }
+    ASSERT_EQ(pool.stepsParallel.load(), 1u);
+
+    const pid_t child = fork();
+    ASSERT_GE(child, 0);
+    if (child == 0)
+    {
+        int status = 0;
+        {
+            AntScope scope(LiteParallelScore::TickPath);
+            if (engine->score() != serial)
+            {
+                status |= 1;
+            }
+        }
+        if (pool.stepsParallel.load() != 1)
+        {
+            status |= 2;
+        }
+        pool.restartAfterPromote(4, f.tb.topo, f.tb.data);
+        if (pool.participants() != 4)
+        {
+            status |= 4;
+        }
+        {
+            AntScope scope(LiteParallelScore::TickPath);
+            if (engine->score() != serial)
+            {
+                status |= 8;
+            }
+        }
+        if (pool.stepsParallel.load() != 2)
+        {
+            status |= 16;
+        }
+        pool.stop();
+        _exit(status);
+    }
+
+    int waitStatus = 0;
+    ASSERT_EQ(waitpid(child, &waitStatus, 0), child);
+    EXPECT_TRUE(WIFEXITED(waitStatus));
+    EXPECT_EQ(WEXITSTATUS(waitStatus), 0);
+
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        EXPECT_EQ(engine->score(), serial);
+    }
+    EXPECT_EQ(pool.stepsParallel.load(), 2u);
+    pool.stop();
+}
+#endif
+
+// A tick-path walk started while a precompute walk is mid-flight gets the whole pool: the precompute
+// steps park on priorityActive, so the tick-path walk finishes in about its solo time. Both still
+// return the serial result, as do two precompute walks interleaving their steps.
+TEST(TestQubicScoreParallel, TickPathPreemptsPrecompute)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f) || f.chains.size() < 2)
+    {
+        return;
+    }
+    const AntChain& chainA = f.chains[0];
+    const AntChain& chainB = f.chains[1];
+    const AntNode& nodeA = chainA.nodes[0];
+    const AntNode& nodeB = chainB.nodes[0];
+
+    auto engineA = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    auto engineB = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    ASSERT_TRUE(engineA && engineB);
+    AntEngine::ANN rootA;
+    AntEngine::ANN rootB;
+    chainRoot(*engineA, f, chainA, rootA);
+    chainRoot(*engineB, f, chainB, rootB);
+
+    AntEngine::ANN refBestA;
+    AntEngine::ANN refBestB;
+    const unsigned int refScoreA = walkNode(*engineA, f, chainA, nodeA, rootA, refBestA);
+    const unsigned int refScoreB = walkNode(*engineB, f, chainB, nodeB, rootB, refBestB);
+    EXPECT_EQ(refScoreA, nodeA.score);
+    EXPECT_EQ(refScoreB, nodeB.score);
+
+    AntPool pool;
+    ASSERT_TRUE(pool.start(8, f.tb.topo, f.tb.data));
+
+    AntEngine::ANN bestB;
+    auto soloStart = std::chrono::steady_clock::now();
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        EXPECT_EQ(walkNode(*engineB, f, chainB, nodeB, rootB, bestB), refScoreB);
+    }
+    const double soloMs = elapsedMs(soloStart);
+    EXPECT_EQ(memcmp(&bestB, &refBestB, sizeof(bestB)), 0);
+
+    AntEngine::ANN bestA;
+    unsigned int scoreA = 0;
+    const unsigned long long stepsBefore = pool.stepsParallel.load();
+    std::thread precompute([&]()
+    {
+        AntScope scope(LiteParallelScore::Precompute);
+        scoreA = walkNode(*engineA, f, chainA, nodeA, rootA, bestA);
+    });
+    auto waitStart = std::chrono::steady_clock::now();
+    while (pool.stepsParallel.load() < stepsBefore + 5 && elapsedMs(waitStart) < 60000.0)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_GE(pool.stepsParallel.load(), stepsBefore + 5) << "precompute walk never started";
+
+    auto preemptStart = std::chrono::steady_clock::now();
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        EXPECT_EQ(walkNode(*engineB, f, chainB, nodeB, rootB, bestB), refScoreB);
+    }
+    const double preemptedMs = elapsedMs(preemptStart);
+    precompute.join();
+
+    EXPECT_EQ(memcmp(&bestB, &refBestB, sizeof(bestB)), 0);
+    EXPECT_EQ(scoreA, refScoreA);
+    EXPECT_EQ(memcmp(&bestA, &refBestA, sizeof(bestA)), 0);
+    EXPECT_GT(pool.stepsPriorityWait.load(), 0u);
+    EXPECT_LE(preemptedMs, soloMs * 2.0 + 200.0) << "solo " << soloMs << " ms, preempted " << preemptedMs << " ms";
+    std::cout << "[ tick-path walk solo " << soloMs << " ms, over a precompute walk " << preemptedMs << " ms ]" << std::endl;
+
+    unsigned int scoreA2 = 0;
+    unsigned int scoreB2 = 0;
+    std::thread precompute1([&]()
+    {
+        AntScope scope(LiteParallelScore::Precompute);
+        scoreA2 = walkNode(*engineA, f, chainA, nodeA, rootA, bestA);
+    });
+    std::thread precompute2([&]()
+    {
+        AntScope scope(LiteParallelScore::Precompute);
+        scoreB2 = walkNode(*engineB, f, chainB, nodeB, rootB, bestB);
+    });
+    precompute1.join();
+    precompute2.join();
+    EXPECT_EQ(scoreA2, refScoreA);
+    EXPECT_EQ(scoreB2, refScoreB);
+    EXPECT_EQ(memcmp(&bestA, &refBestA, sizeof(bestA)), 0);
+    EXPECT_EQ(memcmp(&bestB, &refBestB, sizeof(bestB)), 0);
+    EXPECT_EQ((int)pool.armedCount, 0);
+    EXPECT_EQ((int)pool.priorityActive, 0);
+    pool.stop();
+}
+
+// ms per walk, serial vs the pool at N = min(MAX_PARTICIPANTS, hardware_concurrency / 2).
+// --gtest_also_run_disabled_tests --gtest_filter=TestQubicScoreParallel.DISABLED_WalkCostBenchmark
+TEST(TestQubicScoreParallel, DISABLED_WalkCostBenchmark)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f))
+    {
+        return;
+    }
+    auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    ASSERT_TRUE(engine);
+
+    auto walkAll = [&](const char* label) -> double
+    {
+        unsigned long long walks = 0;
+        auto start = std::chrono::steady_clock::now();
+        for (size_t ci = 0; ci < f.chains.size(); ci++)
+        {
+            const AntChain& chain = f.chains[ci];
+            AntEngine::ANN parent;
+            chainRoot(*engine, f, chain, parent);
+            for (size_t d = 0; d < chain.nodes.size(); ++d)
+            {
+                AntEngine::ANN best;
+                EXPECT_EQ(walkNode(*engine, f, chain, chain.nodes[d], parent, best), chain.nodes[d].score) << label << " chain " << ci << " depth " << d;
+                parent = best;
+                walks++;
+            }
+        }
+        const double msPerWalk = elapsedMs(start) / (double)walks;
+        std::cout << "[ " << label << ": " << walks << " walks, " << msPerWalk << " ms/walk ]" << std::endl;
+        return msPerWalk;
+    };
+
+    const double serialMs = walkAll("serial");
+
+    int participants = (int)std::thread::hardware_concurrency() / 2;
+    if (participants > AntPool::MAX_PARTICIPANTS)
+    {
+        participants = AntPool::MAX_PARTICIPANTS;
+    }
+    AntPool pool;
+    ASSERT_TRUE(pool.start(participants, f.tb.topo, f.tb.data));
+    double parallelMs = 0;
+    {
+        AntScope scope(LiteParallelScore::TickPath);
+        parallelMs = walkAll("parallel");
+    }
+    pool.stop();
+    std::cout << "[ N=" << participants << ", speedup " << serialMs / parallelMs << "x ]" << std::endl;
+}
+
+// Per-batch cost of one score() call along a walk. A step cannot finish before its slowest batch,
+// so sum/max is the speedup ceiling for any participant count.
+// --gtest_also_run_disabled_tests --gtest_filter=TestQubicScoreParallel.DISABLED_BatchCostProfile
+TEST(TestQubicScoreParallel, DISABLED_BatchCostProfile)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f))
+    {
+        return;
+    }
+    auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    ASSERT_TRUE(engine);
+    constexpr unsigned long long W = AntEngine::numberOfWindows;
+    constexpr unsigned long long BW = AntPool::BATCH_WINDOWS;
+    const AntChain& chain = f.chains[0];
+    const AntNode& node = chain.nodes[0];
+
+    AntEngine::ANN root;
+    chainRoot(*engine, f, chain, root);
+    AntEngine::ANN best;
+    walkNode(*engine, f, chain, node, root, best);   // leaves this walk's mutation seeds in the engine
+    const unsigned int L = AntEngine::lutEntriesPerStep(node.nonce.m256i_u8);
+
+    engine->expand(root, engine->currentANN);
+    const int steps = 20;
+    double ceilingSum = 0;
+    int slowBatches = 0;
+    for (int s = 0; s < steps; s++)
+    {
+        if (s > 0)
+        {
+            for (unsigned int i = 0; i < L; ++i)
+            {
+                engine->mutate(engine->initValue.mutationSeed[(unsigned long long)(s - 1) * score_engine::MAX_LUT_ENTRIES_PER_STEP + i]);
+            }
+        }
+        double sumMs = 0;
+        double maxMs = 0;
+        int maxBatch = -1;
+        for (int b = 0; b < AntPool::BATCH_COUNT; b++)
+        {
+            const unsigned long long begin = (unsigned long long)b * BW;
+            const unsigned long long end = begin + BW < W ? begin + BW : W;
+            auto t0 = std::chrono::steady_clock::now();
+            engine->scoreSIMD(begin, end);
+            const double ms = elapsedMs(t0);
+            sumMs += ms;
+            if (ms > 1.0)
+            {
+                slowBatches++;
+            }
+            if (ms > maxMs)
+            {
+                maxMs = ms;
+                maxBatch = b;
+            }
+        }
+        ceilingSum += sumMs / maxMs;
+        std::cout << "[ step " << s << ": sum " << sumMs << " ms, max " << maxMs << " ms (batch " << maxBatch << "), ceiling " << sumMs / maxMs << "x ]" << std::endl;
+    }
+    std::cout << "[ mean ceiling " << ceilingSum / steps << "x, batches over 1 ms: " << slowBatches << " of " << steps * AntPool::BATCH_COUNT << " ]" << std::endl;
+}
+
+// Where a pooled step's time goes: independent engines scoring concurrently (hardware scaling) vs
+// the pool at the same participant counts (protocol overhead on top).
+// --gtest_also_run_disabled_tests --gtest_filter=TestQubicScoreParallel.DISABLED_ScalingProfile
+TEST(TestQubicScoreParallel, DISABLED_ScalingProfile)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f))
+    {
+        return;
+    }
+    auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    ASSERT_TRUE(engine);
+    AntEngine::ANN root;
+    chainRoot(*engine, f, f.chains[0], root);
+    engine->expand(root, engine->currentANN);
+    const int rounds = 10;
+
+    auto t0 = std::chrono::steady_clock::now();
+    for (int r = 0; r < rounds; r++)
+    {
+        engine->scoreSIMD();
+    }
+    const double serialMs = elapsedMs(t0) / rounds;
+    std::cout << "[ serial full score " << serialMs << " ms ]" << std::endl;
+
+    const int counts[] = { 2, 4, 8, 16 };
+    for (const int n : counts)
+    {
+        std::vector<std::unique_ptr<AntEngine>> engines;
+        for (int i = 0; i < n; i++)
+        {
+            engines.push_back(makeEngine<ProductionConfig>(f.tb.topo, f.tb.data));
+            engines.back()->expand(root, engines.back()->currentANN);
+        }
+        std::vector<double> perThreadMs((size_t)n, 0.0);
+        std::vector<std::thread> threads;
+        for (int i = 0; i < n; i++)
+        {
+            threads.emplace_back([&, i]()
+            {
+                auto start = std::chrono::steady_clock::now();
+                for (int r = 0; r < rounds; r++)
+                {
+                    engines[(size_t)i]->scoreSIMD();
+                }
+                perThreadMs[(size_t)i] = elapsedMs(start) / rounds;
+            });
+        }
+        for (auto& t : threads)
+        {
+            t.join();
+        }
+        double worst = 0;
+        for (double ms : perThreadMs)
+        {
+            worst = ms > worst ? ms : worst;
+        }
+        std::cout << "[ " << n << " independent engines: worst full score " << worst << " ms (" << worst / serialMs << "x serial) ]" << std::endl;
+    }
+
+    for (const int n : counts)
+    {
+        AntPool pool;
+        ASSERT_TRUE(pool.start(n, f.tb.topo, f.tb.data));
+        AntScope scope(LiteParallelScore::TickPath);
+        engine->score();   // first round warms the workers up
+        auto start = std::chrono::steady_clock::now();
+        for (int r = 0; r < rounds; r++)
+        {
+            engine->score();
+        }
+        const double stepMs = elapsedMs(start) / rounds;
+        std::cout << "[ pool N=" << n << ": " << stepMs << " ms/step, speedup " << serialMs / stepMs << "x ]" << std::endl;
+        pool.stop();
+    }
+}
+
+namespace
+{
+// Timing hook installed over the pool's own: records every score() call of a walk as (ms, timed out).
+AntPool* gStepProfilePool = nullptr;
+std::vector<std::pair<double, bool>> gStepProfileLog;
+
+bool stepProfileHook(AntEngine& engine, unsigned int& out)
+{
+    auto start = std::chrono::steady_clock::now();
+    bool pooled = false;
+    if (gStepProfilePool != nullptr)
+    {
+        pooled = gStepProfilePool->tryScore(engine, out);
+    }
+    if (!pooled)
+    {
+        out = engine.scoreSIMD();
+    }
+    gStepProfileLog.push_back({ elapsedMs(start), out == AntEngine::INFINITE_ERROR });
+    return true;
+}
+
+void printStepProfile(const char* label)
+{
+    double timeoutMs = 0;
+    double normalMs = 0;
+    double normalMax = 0;
+    unsigned long long timeoutSteps = 0;
+    unsigned long long normalSteps = 0;
+    for (const auto& step : gStepProfileLog)
+    {
+        if (step.second)
+        {
+            timeoutSteps++;
+            timeoutMs += step.first;
+        }
+        else
+        {
+            normalSteps++;
+            normalMs += step.first;
+            normalMax = step.first > normalMax ? step.first : normalMax;
+        }
+    }
+    std::cout << "[ " << label << ": " << normalSteps << " normal steps " << normalMs << " ms (mean " << (normalSteps ? normalMs / normalSteps : 0)
+              << ", max " << normalMax << "), " << timeoutSteps << " timeout steps " << timeoutMs << " ms (mean " << (timeoutSteps ? timeoutMs / timeoutSteps : 0)
+              << "), total " << normalMs + timeoutMs << " ms ]" << std::endl;
+    gStepProfileLog.clear();
+}
+}
+
+// Per-step cost along real walks, serial vs pooled, split by steps that returned INFINITE_ERROR.
+// --gtest_also_run_disabled_tests --gtest_filter=TestQubicScoreParallel.DISABLED_StepCostProfile
+TEST(TestQubicScoreParallel, DISABLED_StepCostProfile)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f))
+    {
+        return;
+    }
+    auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    ASSERT_TRUE(engine);
+    const size_t chainCount = f.chains.size() < 8 ? f.chains.size() : 8;
+
+    auto walkChains = [&]()
+    {
+        for (size_t ci = 0; ci < chainCount; ci++)
+        {
+            const AntChain& chain = f.chains[ci];
+            AntEngine::ANN parent;
+            chainRoot(*engine, f, chain, parent);
+            for (size_t d = 0; d < chain.nodes.size(); ++d)
+            {
+                AntEngine::ANN best;
+                EXPECT_EQ(walkNode(*engine, f, chain, chain.nodes[d], parent, best), chain.nodes[d].score);
+                parent = best;
+            }
+        }
+    };
+
+    for (int repeat = 0; repeat < 2; repeat++)
+    {
+        gStepProfilePool = nullptr;
+        AntEngine::parallelScoreHook = &stepProfileHook;
+        walkChains();
+        printStepProfile("serial");
+        AntEngine::parallelScoreHook = nullptr;
+
+        const int counts[] = { 8, 16 };
+        for (const int n : counts)
+        {
+            AntPool pool;
+            ASSERT_TRUE(pool.start(n, f.tb.topo, f.tb.data));
+            gStepProfilePool = &pool;
+            AntEngine::parallelScoreHook = &stepProfileHook;
+            {
+                AntScope scope(LiteParallelScore::TickPath);
+                walkChains();
+            }
+            std::string label = "pool N=" + std::to_string(n);
+            printStepProfile(label.c_str());
+            AntEngine::parallelScoreHook = nullptr;
+            gStepProfilePool = nullptr;
+            pool.stop();
+        }
+    }
+}
+
+#endif // LITE_PARALLEL_SCORE

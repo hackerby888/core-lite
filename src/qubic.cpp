@@ -347,6 +347,7 @@ static PendingTxsPool pendingTxsPool;
 #include "extensions/tx_slot_index.h"
 #include "extensions/tick_bench.h"
 #include "extensions/tx_stats.h"
+#include "extensions/parallel_score.h"
 
 static m256i uniqueNextTickTransactionDigests[NUMBER_OF_COMPUTORS];
 static m256i uniqueCurrentSpectrumDigests[NUMBER_OF_COMPUTORS];
@@ -636,6 +637,7 @@ static void scoreAntSolutionTask(unsigned long long processorNumber, void* paylo
     // Check in the cache first if this sol was computed
     if (!gAntColony.tryGetReplayScore(replayKey, gAntScoredValue[task->txIdx], gAntScoredAnn[task->txIdx]))
     {
+        LiteParallelScore::Scope parallelScope(LiteParallelScore::TickPath);
         // Straight into this transaction's own result slot, so nothing is copied afterwards.
         gAntScoredValue[task->txIdx] = score->computeAntChildScore(
             processorNumber, parentAnn, task->pubkey, task->nonce,
@@ -2004,6 +2006,7 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
                             unsigned int preScore = 0;
                             if (!gAntColony.tryGetReplayScore(preKey, preScore, gAntChildAnnScratch[processorNumber]))
                             {
+                                LiteParallelScore::Scope parallelScope(LiteParallelScore::Precompute);
                                 preScore = score->computeAntChildScore(processorNumber, preParentAnn,
                                     antTx->sourcePublicKey, antTx->nonce, preAnchorDigest,
                                     gAntChildAnnScratch[processorNumber]);
@@ -4088,6 +4091,7 @@ static void processTickTransactionAntColonySolution(
             makeAntReplayKey(transaction->sourcePublicKey, transaction->nonce, parentRef, anchorDigest);
         if (!gAntColony.tryGetReplayScore(replayKey, childScore, childAnnScratch))
         {
+            LiteParallelScore::Scope parallelScope(LiteParallelScore::TickPath);
             childScore = score->computeAntChildScore(
                 processorNumber, parentAnn, transaction->sourcePublicKey, transaction->nonce,
                 anchorDigest, childAnnScratch);
@@ -9662,6 +9666,7 @@ static void deinitialize()
     fastTxWindow.deinit();
     gAntPendingSolutions.deinit();
     AntWalker::stop();
+    LiteParallelScore::stop();
     gAntColony.deinit();
 
     if (score)
@@ -10794,6 +10799,7 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     forkCensusResetForChildPromote();
     const unsigned int releasedAntClaims = AntColonyMaintenance::releaseInheritedClaims(gAntColony);
     AntWalker::restartAfterPromote();
+    LiteParallelScore::restartAfterPromote();
     if (releasedAntClaims)
     {
         fprintf(stderr, "[FORK] CHILD: released %u inherited ant network claims\n", releasedAntClaims);
@@ -11943,6 +11949,7 @@ void processArgs(int argc, const char* argv[]) {
         ("ant-debug", "Trace ant-colony accepts, over-accepts and network rebuilds (budgeted per epoch)", cxxopts::value<bool>())
         ("ant-walker-threads", "Ant network walks handed to the walker sidecar (0=off)", cxxopts::value<unsigned int>()->default_value("0"))
         ("ant-walker-debug", "Trace every ant walker job and result", cxxopts::value<bool>())
+        ("parallel-score-threads", "Threads per ant score step, caller included (0=off, -1=auto: min(8, max(2, cpus/2)))", cxxopts::value<int>()->default_value("-1"))
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
@@ -12173,6 +12180,15 @@ void processArgs(int argc, const char* argv[]) {
         {
             logColorToScreen("INFO", "Ant walker sidecar enabled, " + std::to_string(antWalkerThreads)
                 + " threads, socket " + antWalkerSocket);
+        }
+    }
+
+    {
+        const int parallelScoreThreads = result["parallel-score-threads"].as<int>();
+        LiteParallelScore::configure(parallelScoreThreads);
+        if (parallelScoreThreads == 0)
+        {
+            logColorToScreen("INFO", "Parallel ant score disabled");
         }
     }
 
@@ -12602,6 +12618,7 @@ int main(int argc, const char* argv[])
     startRpcServices();
 #endif
     AntWalker::start();
+    LiteParallelScore::start();
 #if defined(LITE_WASM_SC) && !defined(NO_RPC)
     // Wasm testnet serves HTTP in-process; the unix-socket/sidecar stack is compiled out.
     QubicHttpServer::start(httpPort);

@@ -426,11 +426,20 @@ struct ScoreBpp9000
 #endif
     }
 
+    // Lite hook: a parallel driver may score currentANN on behalf of score(); nullptr = serial.
+    // Static on purpose: ScoreEngine/ScoreFunction initMemory() zero the instance, never this.
+    static inline bool (*parallelScoreHook)(ScoreBpp9000&, unsigned int&) = nullptr;
+
     // Sliding-window self-clocked score via the window-batched SIMD kernel
     // Apply on the curANN
     unsigned int score()
     {
         // PROFILE_NAMED_SCOPE("bpp9000:score");
+        unsigned int r;
+        if (parallelScoreHook != nullptr && parallelScoreHook(*this, r))
+        {
+            return r;
+        }
         return scoreSIMD();
     }
 
@@ -479,7 +488,7 @@ struct ScoreBpp9000
 
     // Window-batched score: SIMD_WINDOWS windows/batch, two per byte-lane (lo bits[0:3], hi bits[4:7]),
     // halves independent. INFINITE_ERROR iff any window times out, else the failure count.
-    unsigned int scoreSIMD()
+    unsigned int scoreSIMD(unsigned long long windowBegin = 0, unsigned long long windowEnd = numberOfWindows)
     {
         unsigned int numberOfFailures = 0;
 
@@ -545,10 +554,10 @@ struct ScoreBpp9000
             return _mm512_subs_epu8(kLaneB, _mm512_set1_epi8((char)(unsigned char)d));
         };
 
-        for (unsigned long long base = 0; base < numberOfWindows; base += SIMD_WINDOWS)
+        for (unsigned long long base = windowBegin; base < windowEnd; base += SIMD_WINDOWS)
         {
             const unsigned long long batch =
-                (numberOfWindows - base) < SIMD_WINDOWS ? (numberOfWindows - base) : SIMD_WINDOWS;
+                (windowEnd - base) < SIMD_WINDOWS ? (windowEnd - base) : SIMD_WINDOWS;
             const unsigned long long loBatch = batch < 64 ? batch : 64;
             const unsigned long long hiBatch = batch > 64 ? batch - 64 : 0;
             const unsigned long long hiOrigin = base + 64;
@@ -891,7 +900,7 @@ struct ScoreBpp9000
     }
 
     // AVX2 window-batched score
-    unsigned int scoreSIMD()
+    unsigned int scoreSIMD(unsigned long long windowBegin = 0, unsigned long long windowEnd = numberOfWindows)
     {
         unsigned int numberOfFailures = 0;
         const unsigned int sigIdx = signalNeuronIndex;
@@ -899,10 +908,10 @@ struct ScoreBpp9000
         unsigned char* cur = simdCur;
         unsigned char* nxt = simdNxt;
 
-        for (unsigned long long base = 0; base < numberOfWindows; base += SIMD_LANES)
+        for (unsigned long long base = windowBegin; base < windowEnd; base += SIMD_LANES)
         {
             const unsigned long long batch =
-                (numberOfWindows - base) < SIMD_LANES ? (numberOfWindows - base) : SIMD_LANES;
+                (windowEnd - base) < SIMD_LANES ? (windowEnd - base) : SIMD_LANES;
 
             setMem(cur, maxNumberOfNeurons * SIMD_LANES, TRIT_UNKNOWN);
             for (unsigned long long l = 0; l < SIMD_LANES; ++l)
