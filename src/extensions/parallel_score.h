@@ -93,7 +93,7 @@ struct Pool
     std::atomic<unsigned long long> walksPrecompute{ 0 };
     std::atomic<unsigned long long> walksSerial{ 0 };
     std::atomic<unsigned long long> stepsParallel{ 0 };
-    std::atomic<unsigned long long> stepsPriorityWait{ 0 };
+    std::atomic<unsigned long long> stepsPriorityWait{ 0 };   // precompute walks that waited for the tick path
     std::atomic<unsigned long long> stepsSerialFallback{ 0 };
 
     static inline Pool* sActive = nullptr;
@@ -308,23 +308,6 @@ struct Pool
             return false;
         }
 
-        if (cls == Precompute)
-        {
-            bool waited = false;
-            while (ATOMIC_LOAD32(priorityActive) > 0)
-            {
-                if (ATOMIC_LOAD32(stopping) != 0)
-                {
-                    return false;
-                }
-                waited = true;
-                _mm_pause();
-            }
-            if (waited)
-            {
-                stepsPriorityWait++;
-            }
-        }
         while (ATOMIC_CAS32(busy, 1, 0) != 0)
         {
             if (ATOMIC_LOAD32(stopping) != 0)
@@ -342,7 +325,7 @@ struct Pool
         ATOMIC_STORE32(nextBatch, 0);
         ATOMIC_STORE32(abort, 0);
         ATOMIC_STORE32(done, 0);
-        const int g = ATOMIC_ADD32(generation, 1) + 1;
+        const int g = (int)((unsigned int)ATOMIC_ADD32(generation, 1) + 1u);
 
         unsigned int total = claimLoop(primary, g);
 
@@ -392,6 +375,21 @@ struct Pool
             {
                 p->walksSerial++;
                 return;
+            }
+            // A precompute walk waits here, before the caller takes its engine-slot lock, until no
+            // tick-path walk is active; once started it shares rounds rather than parking mid-walk.
+            if (requested == Precompute)
+            {
+                bool waited = false;
+                while (ATOMIC_LOAD32(p->priorityActive) != 0 && ATOMIC_LOAD32(p->stopping) == 0)
+                {
+                    waited = true;
+                    _mm_pause();
+                }
+                if (waited)
+                {
+                    p->stepsPriorityWait++;
+                }
             }
             pool = p;
             cls = requested;

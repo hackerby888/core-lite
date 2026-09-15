@@ -1871,9 +1871,28 @@ TEST(TestQubicScoreParallel, TickPathPreemptsPrecompute)
     EXPECT_EQ(memcmp(&bestB, &refBestB, sizeof(bestB)), 0);
     EXPECT_EQ(scoreA, refScoreA);
     EXPECT_EQ(memcmp(&bestA, &refBestA, sizeof(bestA)), 0);
-    EXPECT_GT(pool.stepsPriorityWait.load(), 0u);
     EXPECT_LE(preemptedMs, soloMs * 2.0 + 200.0) << "solo " << soloMs << " ms, preempted " << preemptedMs << " ms";
     std::cout << "[ tick-path walk solo " << soloMs << " ms, over a precompute walk " << preemptedMs << " ms ]" << std::endl;
+
+    // A precompute walk that starts while a tick-path scope is active waits at its scope, before any lock.
+    {
+        const unsigned long long waitsBefore = pool.stepsPriorityWait.load();
+        auto holdStart = std::chrono::steady_clock::now();
+        double precomputeAdmittedMs = 0;
+        std::thread latePrecompute;
+        {
+            AntScope tickScope(LiteParallelScore::TickPath);
+            latePrecompute = std::thread([&]()
+            {
+                AntScope scope(LiteParallelScore::Precompute);
+                precomputeAdmittedMs = elapsedMs(holdStart);
+            });
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        }
+        latePrecompute.join();
+        EXPECT_GE(precomputeAdmittedMs, 250.0);
+        EXPECT_GT(pool.stepsPriorityWait.load(), waitsBefore);
+    }
 
     unsigned int scoreA2 = 0;
     unsigned int scoreB2 = 0;

@@ -588,6 +588,7 @@ struct ScoreBpp9000
             __mmask64 fcGEMaskHi = 0;
             __mmask64 fedSinceSnapLo = 0;
             __mmask64 fedSinceSnapHi = 0;
+            bool stuckSnapValid = false;
             __m512i relLo = kLaneB;
             __m512i relHi = kLaneB;
             unsigned int bLo = 0, bHi = 0;
@@ -863,8 +864,9 @@ struct ScoreBpp9000
                     if (tick % STUCK_SNAPSHOT_TICKS == 0)
                     {
                         copyMem(stuckSnap, cur, stuckRows * SIMD_LANES);
+                        stuckSnapValid = true;
                     }
-                    else if (tick % STUCK_CHECK_TICKS == 0)
+                    else if (stuckSnapValid && tick % STUCK_CHECK_TICKS == 0)
                     {
                         __m512i diff = _mm512_setzero_si512();
                         for (unsigned long long r = 0; r < stuckRows; ++r)
@@ -972,6 +974,7 @@ struct ScoreBpp9000
             }
             unsigned long long remaining = batch;
             unsigned int fedSinceSnap = 0;
+            bool stuckSnapValid = false;
 
             unsigned long long tick;
             for (tick = 0; tick < maxNumberOfTicks; ++tick)
@@ -1029,8 +1032,9 @@ struct ScoreBpp9000
                     if (tick % STUCK_SNAPSHOT_TICKS == 0)
                     {
                         copyMem(stuckSnap, cur, maxNumberOfNeurons * SIMD_LANES);
+                        stuckSnapValid = true;
                     }
-                    else if (tick % STUCK_CHECK_TICKS == 0)
+                    else if (stuckSnapValid && tick % STUCK_CHECK_TICKS == 0)
                     {
                         __m256i diff = _mm256_setzero_si256();
                         for (unsigned long long r = 0; r < maxNumberOfNeurons; ++r)
