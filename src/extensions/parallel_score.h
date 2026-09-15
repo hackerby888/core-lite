@@ -253,7 +253,7 @@ struct Pool
             {
                 windowEnd = WINDOW_COUNT;
             }
-            const unsigned int r = engine.scoreSIMD(windowBegin, windowEnd);
+            const unsigned int r = engine.scoreSIMD(windowBegin, windowEnd, &abort);
             if (r == Engine::INFINITE_ERROR)
             {
                 ATOMIC_STORE32(abort, 1);
@@ -448,10 +448,6 @@ inline void configure(int participants)
     gRequestedParticipants = participants;
 }
 
-// Auto caps at 8: a step that times out ends with its slowest in-flight batch spinning to
-// maxNumberOfTicks, so past ~8 participants extra threads only add in-flight stuck batches.
-inline constexpr int AUTO_PARTICIPANTS_CAP = 8;
-
 inline int resolvedParticipants()
 {
     if (gRequestedParticipants >= 0)
@@ -462,10 +458,6 @@ inline int resolvedParticipants()
     if (n < 2)
     {
         n = 2;
-    }
-    if (n > AUTO_PARTICIPANTS_CAP)
-    {
-        n = AUTO_PARTICIPANTS_CAP;
     }
     if (n > NodePool::MAX_PARTICIPANTS)
     {

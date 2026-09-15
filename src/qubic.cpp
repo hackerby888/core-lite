@@ -11949,7 +11949,8 @@ void processArgs(int argc, const char* argv[]) {
         ("ant-debug", "Trace ant-colony accepts, over-accepts and network rebuilds (budgeted per epoch)", cxxopts::value<bool>())
         ("ant-walker-threads", "Ant network walks handed to the walker sidecar (0=off)", cxxopts::value<unsigned int>()->default_value("0"))
         ("ant-walker-debug", "Trace every ant walker job and result", cxxopts::value<bool>())
-        ("parallel-score-threads", "Threads per ant score step, caller included (0=off, -1=auto: min(8, max(2, cpus/2)))", cxxopts::value<int>()->default_value("-1"))
+        ("parallel-score-threads", "Threads per ant score step, caller included (0=off, -1=auto: min(32, max(2, cpus/2)))", cxxopts::value<int>()->default_value("-1"))
+        ("score-stuck-early-out", "Return INFINITE_ERROR as soon as a window provably never settles (1=on, 0=off)", cxxopts::value<int>()->default_value("1"))
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
@@ -12189,6 +12190,11 @@ void processArgs(int argc, const char* argv[]) {
         if (parallelScoreThreads == 0)
         {
             logColorToScreen("INFO", "Parallel ant score disabled");
+        }
+        score_engine::ScoreBpp9000T::stuckLaneEarlyOut = result["score-stuck-early-out"].as<int>() != 0;
+        if (!score_engine::ScoreBpp9000T::stuckLaneEarlyOut)
+        {
+            logColorToScreen("INFO", "Score stuck-lane early-out disabled");
         }
     }
 

@@ -430,6 +430,13 @@ struct ScoreBpp9000
     // Static on purpose: ScoreEngine/ScoreFunction initMemory() zero the instance, never this.
     static inline bool (*parallelScoreHook)(ScoreBpp9000&, unsigned int&) = nullptr;
 
+    // Lite early-out: a window whose state repeats without a feed in between can never settle, so its
+    // timeout verdict is returned at the repeat instead of at maxNumberOfTicks. Runtime switch for A/B.
+    static inline bool stuckLaneEarlyOut = true;
+    static constexpr unsigned long long STUCK_SNAPSHOT_TICKS = 2048;
+    static constexpr unsigned long long STUCK_CHECK_TICKS = 8;
+    static constexpr unsigned long long ABORT_POLL_TICKS = 256;
+
     // Sliding-window self-clocked score via the window-batched SIMD kernel
     // Apply on the curANN
     unsigned int score()
@@ -488,7 +495,7 @@ struct ScoreBpp9000
 
     // Window-batched score: SIMD_WINDOWS windows/batch, two per byte-lane (lo bits[0:3], hi bits[4:7]),
     // halves independent. INFINITE_ERROR iff any window times out, else the failure count.
-    unsigned int scoreSIMD(unsigned long long windowBegin = 0, unsigned long long windowEnd = numberOfWindows)
+    unsigned int scoreSIMD(unsigned long long windowBegin = 0, unsigned long long windowEnd = numberOfWindows, const volatile int* abortFlag = nullptr)
     {
         unsigned int numberOfFailures = 0;
 
@@ -521,6 +528,7 @@ struct ScoreBpp9000
 
         unsigned char* cur = simdCur;
         unsigned char* nxt = simdNxt;
+        alignas(64) unsigned char stuckSnap[maxNumberOfNeurons * SIMD_LANES];
 
         // Constants for the vectorized feed step (shared by both halves).
         const __m512i kLaneLo = _mm512_set_epi16(31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);
@@ -578,6 +586,8 @@ struct ScoreBpp9000
 
             __mmask64 fcGEMaskLo = 0;
             __mmask64 fcGEMaskHi = 0;
+            __mmask64 fedSinceSnapLo = 0;
+            __mmask64 fedSinceSnapHi = 0;
             __m512i relLo = kLaneB;
             __m512i relHi = kLaneB;
             unsigned int bLo = 0, bHi = 0;
@@ -607,6 +617,13 @@ struct ScoreBpp9000
                 const __mmask64 finishHi = unkActiveHi & fcGEHi;
                 const __mmask64 feedLo = unkActiveLo & ~fcGELo;
                 const __mmask64 feedHi = unkActiveHi & ~fcGEHi;
+                if (tick % STUCK_SNAPSHOT_TICKS == 0)
+                {
+                    fedSinceSnapLo = 0;
+                    fedSinceSnapHi = 0;
+                }
+                fedSinceSnapLo |= feedLo;
+                fedSinceSnapHi |= feedHi;
 
                 // Output complete
                 if (finishLo | finishHi)
@@ -834,6 +851,38 @@ struct ScoreBpp9000
                     }
                 }
 
+                // Both early-outs are bit-exact: the abort flag says the caller already holds INFINITE_ERROR
+                // for this score; a live lane equal to its snapshot with no feed since can never settle.
+                if (abortFlag != nullptr && tick % ABORT_POLL_TICKS == ABORT_POLL_TICKS - 1 && *abortFlag != 0)
+                {
+                    return INFINITE_ERROR;
+                }
+                if (stuckLaneEarlyOut)
+                {
+                    const unsigned long long stuckRows = numberOfUpdatedNeurons + numLiveInputs;
+                    if (tick % STUCK_SNAPSHOT_TICKS == 0)
+                    {
+                        copyMem(stuckSnap, cur, stuckRows * SIMD_LANES);
+                    }
+                    else if (tick % STUCK_CHECK_TICKS == 0)
+                    {
+                        __m512i diff = _mm512_setzero_si512();
+                        for (unsigned long long r = 0; r < stuckRows; ++r)
+                        {
+                            diff = _mm512_or_si512(diff, _mm512_xor_si512(
+                                _mm512_loadu_si512((const void*)&cur[r * SIMD_LANES]),
+                                _mm512_loadu_si512((const void*)&stuckSnap[r * SIMD_LANES])));
+                        }
+                        const __m512i m0F = _mm512_set1_epi8((char)0x0F);
+                        const __mmask64 stuckLo = _mm512_testn_epi8_mask(diff, m0F) & ~doneLo & ~fedSinceSnapLo;
+                        const __mmask64 stuckHi = _mm512_testn_epi8_mask(diff, mF0) & ~doneHi & ~fedSinceSnapHi;
+                        if (stuckLo | stuckHi)
+                        {
+                            return INFINITE_ERROR;
+                        }
+                    }
+                }
+
                 processTickSIMD(cur, nxt);
 
                 // Swapt pointer
@@ -900,13 +949,14 @@ struct ScoreBpp9000
     }
 
     // AVX2 window-batched score
-    unsigned int scoreSIMD(unsigned long long windowBegin = 0, unsigned long long windowEnd = numberOfWindows)
+    unsigned int scoreSIMD(unsigned long long windowBegin = 0, unsigned long long windowEnd = numberOfWindows, const volatile int* abortFlag = nullptr)
     {
         unsigned int numberOfFailures = 0;
         const unsigned int sigIdx = signalNeuronIndex;
         const unsigned int outIdx = outputNeuronIndices[0];
         unsigned char* cur = simdCur;
         unsigned char* nxt = simdNxt;
+        alignas(64) unsigned char stuckSnap[maxNumberOfNeurons * SIMD_LANES];
 
         for (unsigned long long base = windowBegin; base < windowEnd; base += SIMD_LANES)
         {
@@ -921,11 +971,16 @@ struct ScoreBpp9000
                 simdDone[l] = (l >= batch);
             }
             unsigned long long remaining = batch;
+            unsigned int fedSinceSnap = 0;
 
             unsigned long long tick;
             for (tick = 0; tick < maxNumberOfTicks; ++tick)
             {
                 const unsigned char* const sigRow = cur + (unsigned long long)sigIdx * SIMD_LANES;
+                if (tick % STUCK_SNAPSHOT_TICKS == 0)
+                {
+                    fedSinceSnap = 0;
+                }
                 for (unsigned long long l = 0; l < batch; ++l)
                 {
                     if (simdDone[l])
@@ -947,6 +1002,7 @@ struct ScoreBpp9000
                             cur[(unsigned long long)inputNeuronIndices[i] * SIMD_LANES + l] = inputs[sample][i];
                         }
                         ++simdFeedCounter[l];
+                        fedSinceSnap |= 1u << l;
                     }
                     else
                     {
@@ -960,6 +1016,39 @@ struct ScoreBpp9000
                 if (remaining == 0)
                 {
                     break;
+                }
+
+                // Both early-outs are bit-exact: the abort flag says the caller already holds INFINITE_ERROR
+                // for this score; a live lane equal to its snapshot with no feed since can never settle.
+                if (abortFlag != nullptr && tick % ABORT_POLL_TICKS == ABORT_POLL_TICKS - 1 && *abortFlag != 0)
+                {
+                    return INFINITE_ERROR;
+                }
+                if (stuckLaneEarlyOut)
+                {
+                    if (tick % STUCK_SNAPSHOT_TICKS == 0)
+                    {
+                        copyMem(stuckSnap, cur, maxNumberOfNeurons * SIMD_LANES);
+                    }
+                    else if (tick % STUCK_CHECK_TICKS == 0)
+                    {
+                        __m256i diff = _mm256_setzero_si256();
+                        for (unsigned long long r = 0; r < maxNumberOfNeurons; ++r)
+                        {
+                            diff = _mm256_or_si256(diff, _mm256_xor_si256(
+                                _mm256_loadu_si256((const __m256i*)&cur[r * SIMD_LANES]),
+                                _mm256_loadu_si256((const __m256i*)&stuckSnap[r * SIMD_LANES])));
+                        }
+                        unsigned int unchanged = (unsigned int)_mm256_movemask_epi8(_mm256_cmpeq_epi8(diff, _mm256_setzero_si256()));
+                        unchanged &= ~fedSinceSnap;
+                        for (unsigned long long l = 0; l < batch; ++l)
+                        {
+                            if (!simdDone[l] && ((unchanged >> l) & 1u))
+                            {
+                                return INFINITE_ERROR;
+                            }
+                        }
+                    }
                 }
 
                 processTickSIMD(cur, nxt);

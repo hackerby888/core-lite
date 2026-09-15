@@ -3,6 +3,7 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 #define ENABLE_PROFILING 0
 
@@ -1969,8 +1970,13 @@ TEST(TestQubicScoreParallel, DISABLED_BatchCostProfile)
     AntEngine::ANN root;
     chainRoot(*engine, f, chain, root);
     AntEngine::ANN best;
-    walkNode(*engine, f, chain, node, root, best);   // leaves this walk's mutation seeds in the engine
-    const unsigned int L = AntEngine::lutEntriesPerStep(node.nonce.m256i_u8);
+    m256i nonce = node.nonce;
+    if (getenv("PS_SYNTHETIC") != nullptr && atoi(getenv("PS_SYNTHETIC")) != 0)
+    {
+        nonce = makeAntNonce(3, 50, 1);
+    }
+    engine->computeScoreFromParent(root, chain.pubkey.m256i_u8, nonce.m256i_u8, node.anchor.m256i_u8, f.pools[chain.poolIndex].data());   // leaves the mutation seeds in the engine
+    const unsigned int L = AntEngine::lutEntriesPerStep(nonce.m256i_u8);
 
     engine->expand(root, engine->currentANN);
     const int steps = 20;
@@ -2152,6 +2158,8 @@ TEST(TestQubicScoreParallel, DISABLED_StepCostProfile)
     ASSERT_TRUE(engine);
     const size_t chainCount = f.chains.size() < 8 ? f.chains.size() : 8;
 
+    // PS_SYNTHETIC=1: walk synthetic canonical nonces from each chain's root instead of the golden nodes.
+    const bool synthetic = getenv("PS_SYNTHETIC") != nullptr && atoi(getenv("PS_SYNTHETIC")) != 0;
     auto walkChains = [&]()
     {
         for (size_t ci = 0; ci < chainCount; ci++)
@@ -2159,6 +2167,15 @@ TEST(TestQubicScoreParallel, DISABLED_StepCostProfile)
             const AntChain& chain = f.chains[ci];
             AntEngine::ANN parent;
             chainRoot(*engine, f, chain, parent);
+            if (synthetic)
+            {
+                for (unsigned int k = 0; k < 4; k++)
+                {
+                    const m256i nonce = makeAntNonce((unsigned char)(1 + (ci + k) % 10), (unsigned char)((ci * 4 + k) * 7 % 101), (unsigned char)(ci * 4 + k));
+                    engine->computeScoreFromParent(parent, chain.pubkey.m256i_u8, nonce.m256i_u8, chain.nodes[0].anchor.m256i_u8, f.pools[chain.poolIndex].data());
+                }
+                continue;
+            }
             for (size_t d = 0; d < chain.nodes.size(); ++d)
             {
                 AntEngine::ANN best;
@@ -2194,6 +2211,251 @@ TEST(TestQubicScoreParallel, DISABLED_StepCostProfile)
             pool.stop();
         }
     }
+}
+
+namespace
+{
+thread_local std::vector<unsigned int>* tlStepLog = nullptr;
+
+bool stepLogHook(AntEngine& engine, unsigned int& out)
+{
+    out = engine.scoreSIMD();
+    if (tlStepLog != nullptr)
+    {
+        tlStepLog->push_back(out);
+    }
+    return true;
+}
+
+struct LoggedWalk
+{
+    unsigned int score = 0;
+    AntEngine::ANN best;
+    std::vector<unsigned int> steps;
+};
+}
+
+// The abort flag turns a running score into INFINITE_ERROR within one poll interval; unset it is inert.
+TEST(TestQubicScoreParallel, AbortFlagStopsKernel)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f))
+    {
+        return;
+    }
+    auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    ASSERT_TRUE(engine);
+    AntEngine::ANN root;
+    chainRoot(*engine, f, f.chains[0], root);
+    engine->expand(root, engine->currentANN);
+    constexpr unsigned long long W = AntEngine::numberOfWindows;
+
+    const unsigned int full = engine->scoreSIMD();
+    ASSERT_NE(full, AntEngine::INFINITE_ERROR);
+    volatile int flag = 0;
+    EXPECT_EQ(engine->scoreSIMD(0, W, &flag), full);
+    flag = 1;
+    auto start = std::chrono::steady_clock::now();
+    EXPECT_EQ(engine->scoreSIMD(0, W, &flag), AntEngine::INFINITE_ERROR);
+    EXPECT_LT(elapsedMs(start), 50.0);
+}
+
+// The stuck-lane early-out must change nothing but time: every step's score, the walk score and
+// bestANN are compared with the plain 100k-tick path over the golden chains plus root walks with
+// synthetic nonces (timeouts are common there).
+TEST(TestQubicScoreParallel, StuckEarlyOutMatchesFull)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f))
+    {
+        return;
+    }
+    const size_t chainCount = f.chains.size();
+    const size_t extraPerChain = 1;
+
+    auto runPhase = [&](bool earlyOut, std::vector<std::vector<LoggedWalk>>& out)
+    {
+        AntEngine::stuckLaneEarlyOut = earlyOut;
+        AntEngine::parallelScoreHook = &stepLogHook;
+        out.assign(chainCount, std::vector<LoggedWalk>());
+        runWorkers(workerThreadCount(chainCount), [&](unsigned int threadIdx, unsigned int numThreads)
+        {
+            auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+            if (!engine)
+            {
+                return;
+            }
+            for (size_t ci = threadIdx; ci < chainCount; ci += numThreads)
+            {
+                const AntChain& chain = f.chains[ci];
+                std::vector<LoggedWalk>& walks = out[ci];
+                walks.resize(chain.nodes.size() + extraPerChain);
+                AntEngine::ANN root;
+                chainRoot(*engine, f, chain, root);
+                AntEngine::ANN parent = root;
+                for (size_t d = 0; d < chain.nodes.size(); ++d)
+                {
+                    tlStepLog = &walks[d].steps;
+                    walks[d].score = walkNode(*engine, f, chain, chain.nodes[d], parent, walks[d].best);
+                    parent = walks[d].best;
+                }
+                for (size_t k = 0; k < extraPerChain; ++k)
+                {
+                    LoggedWalk& walk = walks[chain.nodes.size() + k];
+                    const m256i nonce = makeAntNonce((unsigned char)(1 + ci % 10), (unsigned char)(ci * 7 % 100), (unsigned char)(ci + k));
+                    tlStepLog = &walk.steps;
+                    walk.score = engine->computeScoreFromParent(root, chain.pubkey.m256i_u8, nonce.m256i_u8, chain.nodes[0].anchor.m256i_u8,
+                                                                f.pools[chain.poolIndex].data());
+                    engine->getBestANN(walk.best);
+                }
+                tlStepLog = nullptr;
+            }
+        });
+        AntEngine::parallelScoreHook = nullptr;
+    };
+
+    std::vector<std::vector<LoggedWalk>> withEarlyOut;
+    std::vector<std::vector<LoggedWalk>> plain;
+    auto start = std::chrono::steady_clock::now();
+    runPhase(true, withEarlyOut);
+    const double earlyOutMs = elapsedMs(start);
+    start = std::chrono::steady_clock::now();
+    runPhase(false, plain);
+    const double plainMs = elapsedMs(start);
+    AntEngine::stuckLaneEarlyOut = true;
+
+    unsigned long long steps = 0;
+    unsigned long long timeoutSteps = 0;
+    for (size_t ci = 0; ci < chainCount; ci++)
+    {
+        const AntChain& chain = f.chains[ci];
+        ASSERT_EQ(withEarlyOut[ci].size(), plain[ci].size());
+        for (size_t w = 0; w < plain[ci].size(); ++w)
+        {
+            const LoggedWalk& a = withEarlyOut[ci][w];
+            const LoggedWalk& b = plain[ci][w];
+            if (w < chain.nodes.size())
+            {
+                EXPECT_EQ(a.score, chain.nodes[w].score) << "golden chain " << ci << " depth " << w;
+            }
+            EXPECT_EQ(a.score, b.score) << "chain " << ci << " walk " << w;
+            EXPECT_EQ(a.steps, b.steps) << "step scores chain " << ci << " walk " << w;
+            EXPECT_EQ(memcmp(&a.best, &b.best, sizeof(a.best)), 0) << "bestANN chain " << ci << " walk " << w;
+            steps += b.steps.size();
+            for (const unsigned int r : b.steps)
+            {
+                timeoutSteps += (r == AntEngine::INFINITE_ERROR) ? 1 : 0;
+            }
+        }
+    }
+    std::cout << "[ " << steps << " steps, " << timeoutSteps << " timeouts; early-out " << earlyOutMs << " ms vs plain " << plainMs << " ms ]" << std::endl;
+}
+
+// Throughput of many walks from the epoch root with synthetic canonical nonces (what a miner or a
+// catching-up verifier does). PS_BENCH_WALKS (default 1000) pooled walks at PS_BENCH_THREADS (default
+// hardware_concurrency/2), then PS_BENCH_SERIAL (default 20) serial walks, each phase with the
+// early-out on and off.
+// --gtest_also_run_disabled_tests --gtest_filter=TestQubicScoreParallel.DISABLED_NonceThroughputBenchmark
+TEST(TestQubicScoreParallel, DISABLED_NonceThroughputBenchmark)
+{
+    AntChainFixture f;
+    if (!makeAntChainFixture(f))
+    {
+        return;
+    }
+    auto engine = makeEngine<ProductionConfig>(f.tb.topo, f.tb.data);
+    ASSERT_TRUE(engine);
+    const AntChain& chain = f.chains[0];
+    AntEngine::ANN root;
+    chainRoot(*engine, f, chain, root);
+
+    auto envOr = [](const char* name, int fallback)
+    {
+        const char* v = getenv(name);
+        return v != nullptr ? atoi(v) : fallback;
+    };
+    const int pooledWalks = envOr("PS_BENCH_WALKS", 1000);
+    const int serialWalks = envOr("PS_BENCH_SERIAL", 20);
+    int participants = envOr("PS_BENCH_THREADS", (int)std::thread::hardware_concurrency() / 2);
+    if (participants > AntPool::MAX_PARTICIPANTS)
+    {
+        participants = AntPool::MAX_PARTICIPANTS;
+    }
+
+    auto makeNonce = [](unsigned int i)
+    {
+        m256i n = m256i::zero();
+        n.m256i_u8[0] = (unsigned char)score_engine::AlgoType::Bpp9000;
+        n.m256i_u8[1] = (unsigned char)(1 + i % 10);
+        n.m256i_u8[2] = (unsigned char)(i * 7 % 101);
+        for (int b = 3; b < 32; b++)
+        {
+            n.m256i_u8[b] = (unsigned char)((i * 2654435761u + (unsigned int)b * 40503u) >> ((b % 4) * 8));
+        }
+        return n;
+    };
+
+    auto runPhase = [&](const char* label, int walks, bool earlyOut, AntPool* pool)
+    {
+        AntEngine::stuckLaneEarlyOut = earlyOut;
+        gStepProfileLog.clear();
+        gStepProfilePool = pool;
+        AntEngine::parallelScoreHook = &stepProfileHook;   // forwards to the pool when scoped, logs every step
+        std::vector<unsigned int> scores;
+        scores.reserve((size_t)walks);
+        auto start = std::chrono::steady_clock::now();
+        {
+            std::unique_ptr<AntScope> scope;
+            if (pool != nullptr)
+            {
+                scope = std::make_unique<AntScope>(LiteParallelScore::TickPath);
+            }
+            for (int i = 0; i < walks; i++)
+            {
+                const m256i nonce = makeNonce((unsigned int)i);
+                const unsigned int s = engine->computeScoreFromParent(root, chain.pubkey.m256i_u8, nonce.m256i_u8,
+                                                                      chain.nodes[0].anchor.m256i_u8, f.pools[chain.poolIndex].data());
+                scores.push_back(s);
+            }
+        }
+        const double totalMs = elapsedMs(start);
+        AntEngine::parallelScoreHook = nullptr;
+        gStepProfilePool = nullptr;
+
+        unsigned long long timeouts = 0;
+        for (const auto& step : gStepProfileLog)
+        {
+            timeouts += step.second ? 1 : 0;
+        }
+        const size_t stepCount = gStepProfileLog.size();
+        gStepProfileLog.clear();
+        std::vector<unsigned int> sorted = scores;
+        std::sort(sorted.begin(), sorted.end());
+        unsigned int under4000 = 0;
+        unsigned int invalid = 0;
+        for (const unsigned int s : scores)
+        {
+            under4000 += (s <= 4000) ? 1 : 0;
+            invalid += (s == AntEngine::INFINITE_ERROR) ? 1 : 0;
+        }
+        std::cout << "[ " << label << ": " << walks << " walks in " << totalMs / 1000.0 << " s = " << totalMs / walks << " ms/walk; steps " << stepCount
+                  << ", timeout steps " << timeouts << " (" << (stepCount == 0 ? 0.0 : 100.0 * timeouts / stepCount) << "%); score min " << sorted.front()
+                  << " median " << sorted[sorted.size() / 2] << " max " << sorted.back() << ", <=4000: " << under4000 << ", walks ending INFINITE_ERROR: " << invalid << " ]"
+                  << std::endl;
+    };
+
+    {
+        AntPool pool;
+        ASSERT_TRUE(pool.start(participants, f.tb.topo, f.tb.data));
+        std::string label = "pool N=" + std::to_string(participants) + " early-out on";
+        runPhase(label.c_str(), pooledWalks, true, &pool);
+        label = "pool N=" + std::to_string(participants) + " early-out off";
+        runPhase(label.c_str(), pooledWalks / 10 > 0 ? pooledWalks / 10 : 1, false, &pool);
+        pool.stop();
+    }
+    runPhase("serial early-out on", serialWalks, true, nullptr);
+    runPhase("serial early-out off", serialWalks / 2 > 0 ? serialWalks / 2 : 1, false, nullptr);
+    AntEngine::stuckLaneEarlyOut = true;
 }
 
 #endif // LITE_PARALLEL_SCORE
