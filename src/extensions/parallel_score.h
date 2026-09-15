@@ -40,7 +40,7 @@ struct Stats
     unsigned long long walksPrecompute;
     unsigned long long walksSerial;
     unsigned long long stepsParallel;
-    unsigned long long stepsPriorityWait;
+    unsigned long long walksPriorityWait;
     unsigned long long stepsSerialFallback;
 };
 
@@ -99,7 +99,7 @@ struct Pool
     std::atomic<unsigned long long> walksPrecompute{ 0 };
     std::atomic<unsigned long long> walksSerial{ 0 };
     std::atomic<unsigned long long> stepsParallel{ 0 };
-    std::atomic<unsigned long long> stepsPriorityWait{ 0 };   // precompute walks that waited for the tick path
+    std::atomic<unsigned long long> walksPriorityWait{ 0 };
     std::atomic<unsigned long long> stepsSerialFallback{ 0 };
 
     static inline Pool* sActive = nullptr;
@@ -318,6 +318,14 @@ struct Pool
             return false;
         }
 
+        // A precompute step runs serially while a tick-path walk is active, so the pool stays with the
+        // tick and nothing waits while holding the engine-slot lock.
+        if (cls == Precompute && ATOMIC_LOAD32(priorityActive) != 0)
+        {
+            stepsSerialFallback++;
+            return false;
+        }
+
         for (unsigned int spins = 0; ATOMIC_CAS32(busy, 1, 0) != 0; spins++)
         {
             if (ATOMIC_LOAD32(stopping) != 0)
@@ -368,7 +376,7 @@ struct Pool
         s.walksPrecompute = walksPrecompute.load(std::memory_order_relaxed);
         s.walksSerial = walksSerial.load(std::memory_order_relaxed);
         s.stepsParallel = stepsParallel.load(std::memory_order_relaxed);
-        s.stepsPriorityWait = stepsPriorityWait.load(std::memory_order_relaxed);
+        s.walksPriorityWait = walksPriorityWait.load(std::memory_order_relaxed);
         s.stepsSerialFallback = stepsSerialFallback.load(std::memory_order_relaxed);
         return s;
     }
@@ -405,7 +413,7 @@ struct Pool
                 }
                 if (waited)
                 {
-                    p->stepsPriorityWait++;
+                    p->walksPriorityWait++;
                 }
             }
             pool = p;
@@ -571,7 +579,7 @@ struct Stats
     unsigned long long walksPrecompute;
     unsigned long long walksSerial;
     unsigned long long stepsParallel;
-    unsigned long long stepsPriorityWait;
+    unsigned long long walksPriorityWait;
     unsigned long long stepsSerialFallback;
 };
 

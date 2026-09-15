@@ -97,7 +97,7 @@ RPC_ROUTE("GET", "/v1/tick-bench")
     parallelScore["walksPrecompute"] = Json::UInt64(ps.walksPrecompute);
     parallelScore["walksSerial"] = Json::UInt64(ps.walksSerial);
     parallelScore["stepsParallel"] = Json::UInt64(ps.stepsParallel);
-    parallelScore["stepsPriorityWait"] = Json::UInt64(ps.stepsPriorityWait);
+    parallelScore["walksPriorityWait"] = Json::UInt64(ps.walksPriorityWait);
     parallelScore["stepsSerialFallback"] = Json::UInt64(ps.stepsSerialFallback);
     result["parallelScore"] = parallelScore;
 

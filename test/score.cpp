@@ -1848,6 +1848,7 @@ TEST(TestQubicScoreParallel, TickPathPreemptsPrecompute)
     AntEngine::ANN bestA;
     unsigned int scoreA = 0;
     const unsigned long long stepsBefore = pool.stepsParallel.load();
+    const unsigned long long serialFallbackBefore = pool.stepsSerialFallback.load();
     std::thread precompute([&]()
     {
         AntScope scope(LiteParallelScore::Precompute);
@@ -1871,12 +1872,15 @@ TEST(TestQubicScoreParallel, TickPathPreemptsPrecompute)
     EXPECT_EQ(memcmp(&bestB, &refBestB, sizeof(bestB)), 0);
     EXPECT_EQ(scoreA, refScoreA);
     EXPECT_EQ(memcmp(&bestA, &refBestA, sizeof(bestA)), 0);
-    EXPECT_LE(preemptedMs, soloMs * 2.0 + 200.0) << "solo " << soloMs << " ms, preempted " << preemptedMs << " ms";
+    // The precompute walk's steps go serial while the tick-path walk is active, so the tick-path walk
+    // keeps the whole pool.
+    EXPECT_GT(pool.stepsSerialFallback.load(), serialFallbackBefore);
+    EXPECT_LE(preemptedMs, soloMs * 1.5 + 200.0) << "solo " << soloMs << " ms, preempted " << preemptedMs << " ms";
     std::cout << "[ tick-path walk solo " << soloMs << " ms, over a precompute walk " << preemptedMs << " ms ]" << std::endl;
 
     // A precompute walk that starts while a tick-path scope is active waits at its scope, before any lock.
     {
-        const unsigned long long waitsBefore = pool.stepsPriorityWait.load();
+        const unsigned long long waitsBefore = pool.walksPriorityWait.load();
         auto holdStart = std::chrono::steady_clock::now();
         double precomputeAdmittedMs = 0;
         std::thread latePrecompute;
@@ -1891,7 +1895,7 @@ TEST(TestQubicScoreParallel, TickPathPreemptsPrecompute)
         }
         latePrecompute.join();
         EXPECT_GE(precomputeAdmittedMs, 250.0);
-        EXPECT_GT(pool.stepsPriorityWait.load(), waitsBefore);
+        EXPECT_GT(pool.walksPriorityWait.load(), waitsBefore);
     }
 
     unsigned int scoreA2 = 0;
