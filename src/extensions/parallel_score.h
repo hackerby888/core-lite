@@ -65,6 +65,10 @@ struct Pool
     static constexpr int BATCH_COUNT = (int)((WINDOW_COUNT + BATCH_WINDOWS - 1) / BATCH_WINDOWS);
     // Batches per claim. 1 = best tail balance; raise only if the per-call setup shows in a profile.
     static constexpr int CLAIM_CHUNK = 1;
+    // A queued caller pause-spins about one round for a fast handoff, then sleeps so its core goes
+    // to the workers of the round in flight.
+    static constexpr unsigned int QUEUE_SPINS = 20000;
+    static constexpr unsigned int QUEUE_SLEEP_US = 50;
     static constexpr int MAX_PARTICIPANTS = BATCH_COUNT / 2;
 
     struct alignas(64) Slot
@@ -84,8 +88,10 @@ struct Pool
     alignas(64) volatile int stopping = 0;
 
     std::vector<Slot> slots;
-    int workerCount = 0;
-    int startPid = 0;
+    // Read from any thread (Scope, stats); written only by the single-threaded lifecycle calls.
+    std::atomic<int> ready{ 0 };
+    std::atomic<int> workerCount{ 0 };
+    std::atomic<int> startPid{ 0 };
     // Heap so a fork child can abandon the handles without running ~thread on joinable ghosts.
     std::vector<std::thread>* threads = nullptr;
 
@@ -111,12 +117,13 @@ struct Pool
 
     bool isAvailable() const
     {
-        return threads != nullptr && workerCount > 0 && startPid == currentPid() && stopping == 0;
+        return ready.load(std::memory_order_acquire) != 0 && startPid.load(std::memory_order_relaxed) == currentPid()
+            && ATOMIC_LOAD32(stopping) == 0;
     }
 
     int participants() const
     {
-        return threads != nullptr ? workerCount + 1 : 0;
+        return ready.load(std::memory_order_acquire) != 0 ? workerCount.load(std::memory_order_relaxed) + 1 : 0;
     }
 
     static bool hookThunk(Engine& primary, unsigned int& out)
@@ -168,29 +175,30 @@ struct Pool
         ATOMIC_STORE32(priorityActive, 0);
         ATOMIC_STORE32(stopping, 0);
 
-        workerCount = n - 1;
-        slots = std::vector<Slot>((size_t)workerCount);
-        for (int w = 0; w < workerCount; w++)
+        const int workers = n - 1;
+        slots = std::vector<Slot>((size_t)workers);
+        for (int w = 0; w < workers; w++)
         {
             slots[w].engine = std::make_unique<Engine>();
             slots[w].engine->initMemory();
             if (!slots[w].engine->loadTaskFromMemory(topoBlock, dataBlock))
             {
                 slots.clear();
-                workerCount = 0;
                 return false;
             }
         }
 
-        startPid = currentPid();
+        workerCount.store(workers, std::memory_order_relaxed);
+        startPid.store(currentPid(), std::memory_order_relaxed);
         threads = new std::vector<std::thread>();
-        threads->reserve((size_t)workerCount);
-        for (int w = 0; w < workerCount; w++)
+        threads->reserve((size_t)workers);
+        for (int w = 0; w < workers; w++)
         {
             threads->emplace_back([this, w]() { workerLoop(w); });
         }
         sActive = this;
         Engine::parallelScoreHook = &hookThunk;
+        ready.store(1, std::memory_order_release);
         return true;
     }
 
@@ -200,6 +208,7 @@ struct Pool
         {
             return;
         }
+        ready.store(0, std::memory_order_release);
         // Hold busy so no round can start once stopping is visible; busy stays taken until start().
         while (ATOMIC_CAS32(busy, 1, 0) != 0)
         {
@@ -218,16 +227,17 @@ struct Pool
             Engine::parallelScoreHook = nullptr;
         }
         slots.clear();
-        workerCount = 0;
+        workerCount.store(0, std::memory_order_relaxed);
     }
 
     // Only the calling thread survives fork(): the handles point at threads that do not exist, so
     // they are abandoned (join hangs, ~thread terminates) and the pool is rebuilt.
     void restartAfterPromote(int requestedParticipants, const unsigned char* topoBlock, const unsigned char* dataBlock)
     {
+        ready.store(0, std::memory_order_release);
         threads = nullptr;
         slots.clear();
-        workerCount = 0;
+        workerCount.store(0, std::memory_order_relaxed);
         tlClass = None;
         tlScopeDepth = 0;
         start(requestedParticipants, topoBlock, dataBlock);
@@ -283,7 +293,7 @@ struct Pool
             {
                 break;
             }
-            if (ATOMIC_LOAD32(armedCount) > 0)
+            if (ATOMIC_LOAD32(armedCount) != 0)
             {
                 _mm_pause();
             }
@@ -308,16 +318,23 @@ struct Pool
             return false;
         }
 
-        while (ATOMIC_CAS32(busy, 1, 0) != 0)
+        for (unsigned int spins = 0; ATOMIC_CAS32(busy, 1, 0) != 0; spins++)
         {
             if (ATOMIC_LOAD32(stopping) != 0)
             {
                 return false;
             }
-            _mm_pause();
+            if (spins < QUEUE_SPINS)
+            {
+                _mm_pause();
+            }
+            else
+            {
+                std::this_thread::sleep_for(std::chrono::microseconds(QUEUE_SLEEP_US));
+            }
         }
 
-        const int workers = workerCount;
+        const int workers = workerCount.load(std::memory_order_relaxed);
         for (int w = 0; w < workers; w++)
         {
             copyMem(&slots[(size_t)w].engine->currentANN, &primary.currentANN, sizeof(primary.currentANN));
@@ -384,7 +401,7 @@ struct Pool
                 while (ATOMIC_LOAD32(p->priorityActive) != 0 && ATOMIC_LOAD32(p->stopping) == 0)
                 {
                     waited = true;
-                    _mm_pause();
+                    std::this_thread::sleep_for(std::chrono::microseconds(QUEUE_SLEEP_US));
                 }
                 if (waited)
                 {
