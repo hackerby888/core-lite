@@ -288,6 +288,10 @@ static void finishDispatchTrace(const EngineSlot& slot, const MemoryLayout& layo
         }
     }
 
+    // Post-dispatch version: odd inside the write window, so round up to the next even.
+    const unsigned long long writeSeq = g_stateSeq[trace.entry.contractIndex].load(std::memory_order_acquire);
+    trace.entry.stateVersion = writeSeq + (writeSeq & 1ull);
+
     callContext.trace = nullptr;
     commitTrace(trace.entry);
 }
@@ -443,6 +447,8 @@ static DispatchOutcome dispatchMigration(uint32_t contractIndex, int slotOffset,
     DispatchDepthScope slotDepth(slotCallDepth[slotOffset]);
     DispatchDepthScope frameDepth(dispatchDepth);
     outcome.rootFrame = dispatchDepth == 1;
+    // Migration rewrites the whole state and never nests.
+    StateWriteSeqScope stateSeq(true, contractIndex);
 
     bindEnvironment(environment.execEnv, callContext);
 
@@ -536,6 +542,8 @@ static DispatchOutcome dispatchCall(uint32_t contractIndex, uint16_t inputType, 
     }
 
     DispatchFrameScope frame(slot, environment.execEnv, slotOffset, static_cast<const QPI::QpiContext*>(context), layout, arenaLimit, nested);
+    // After `frame` so it destroys first, once finalizeMemory has re-pointed contractStates.
+    StateWriteSeqScope stateSeq(kind != DispatchKind::UserFunction && !nested, contractIndex);
     DispatchDepthScope frameDepth(dispatchDepth);
     outcome.rootFrame = dispatchDepth == 1;
     frame.callContext().contractIndex = contractIndex;

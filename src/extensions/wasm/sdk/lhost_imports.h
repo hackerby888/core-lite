@@ -68,7 +68,9 @@ LH_IMPORT(isAssetIssued)  unsigned int lh_isAssetIssued(const void* issuer32, un
 LH_IMPORT(issueAsset) long long lh_issueAsset(unsigned long long name, const void* issuer32, unsigned int decimals, long long shares, unsigned long long unit);
 LH_IMPORT(numberOfShares) long long lh_numberOfShares(const void* asset, const void* ownSel, const void* posSel);
 LH_IMPORT(numberOfPossessedShares) long long lh_numberOfPossessedShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, unsigned int om, unsigned int pm);
-LH_IMPORT(assetEnumerate) unsigned int lh_assetEnumerate(unsigned int kind, const void* issuance, const void* ownership, const void* possession, void* out, unsigned int capacity);
+LH_IMPORT(assetIterBegin) void lh_assetIterBegin(unsigned int kind, const void* issuance, const void* ownership, const void* possession, unsigned int* issuanceIdx, unsigned int* ownershipIdx, unsigned int* possessionIdx);
+LH_IMPORT(assetIterNext) unsigned int lh_assetIterNext(unsigned int kind, const void* issuance, const void* ownership, const void* possession, unsigned int* issuanceIdx, unsigned int* ownershipIdx, unsigned int* possessionIdx);
+LH_IMPORT(assetIterRecord) void lh_assetIterRecord(unsigned int kind, unsigned int ownershipIdx, unsigned int possessionIdx, void* entry);
 LH_IMPORT(transferShareOwnershipAndPossession) long long lh_transferShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, const void* newOwner32);
 LH_IMPORT(acquireShares) long long lh_acquireShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned int srcOwnMgmt, unsigned int srcPosMgmt, long long offeredFee);
 LH_IMPORT(releaseShares) long long lh_releaseShares(unsigned long long name, const void* issuer32, const void* owner32, const void* possessor32, long long shares, unsigned int dstOwnMgmt, unsigned int dstPosMgmt, long long offeredFee);

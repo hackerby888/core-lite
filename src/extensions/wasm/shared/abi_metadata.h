@@ -1,7 +1,7 @@
 #pragma once
 
 // Canonical rows shared by WAMR registration and SDK metadata generation.
-#define WASM_ABI_VERSION 6u
+#define WASM_ABI_VERSION 7u
 
 // G/H selects generated or handwritten adapters; Q/I selects QPI-bound or infrastructure calls.
 
@@ -59,7 +59,9 @@
     HQ("issueAsset",                          issueAsset,     w_issueAsset,         "(IiiII)I")  \
     GQ("numberOfShares",                      numberOfShares,                       "(iii)I")    \
     GQ("numberOfPossessedShares",             numberOfPossessedShares,              "(Iiiiii)I") \
-    HQ("assetEnumerate",                      assetEnumerate,      w_assetEnumerate,             "(iiiiii)i") \
+    HQ("assetIterBegin",                      assetIterBegin,      w_assetIterBegin,             "(iiiiiii)") \
+    HQ("assetIterNext",                       assetIterNext,       w_assetIterNext,              "(iiiiiii)i") \
+    HQ("assetIterRecord",                     assetIterRecord,     w_assetIterRecord,            "(iiii)")   \
     HQ("transferShareOwnershipAndPossession", transferShareOwnershipAndPossession, w_transferShares, "(IiiiIi)I") \
     HQ("acquireShares",                       acquireShares,       w_acquireShares,              "(IiiiIiiI)I") \
     HQ("releaseShares",                       releaseShares,       w_releaseShares,              "(IiiiIiiI)I") \

@@ -38,6 +38,7 @@ add_executable(
 		# linker keeps the first COMDAT copy of TickStorage inlines for every TU (oracle tests include it too).
 		tick_storage.cpp
 		assets.cpp
+		wasm_asset_iterator.cpp
    		common_def.cpp
    		contract_core.cpp
 		contract_invocation_alignment.cpp
@@ -134,6 +135,9 @@ foreach(TEST_TARGET IN ITEMS qubic_core_tests qubic_state_tests)
             -mrdrnd -Wno-error -mbmi -mlzcnt -fshort-wchar -w)
     endif()
 endforeach()
+if(LITE_PARALLEL_SCORE)
+    target_compile_definitions(qubic_core_tests PRIVATE LITE_PARALLEL_SCORE)
+endif()
 
 target_link_libraries(
   qubic_core_tests PRIVATE
@@ -180,7 +184,14 @@ if(LITE_WASM_SC)
         add_library(vmlib STATIC ${WAMR_RUNTIME_LIB_SOURCE})
     endif()
 
-    add_executable(qubic_wasm_tests wasm_contracts.cpp wasm_state_write.cpp wasm_state_journal.cpp)
+    add_executable(qubic_wasm_tests wasm_contracts.cpp wasm_state_write.cpp wasm_state_journal.cpp wasm_k12_shim.cpp)
+    # kangaroo_twelve.h casts bytes to unsigned long long; -Wcast-align -Werror rejects it.
+    # MSVC has no such flag and errors on it (D8021), so relax /WX there instead.
+    if(MSVC)
+        set_source_files_properties(wasm_k12_shim.cpp PROPERTIES COMPILE_OPTIONS "/WX-")
+    else()
+        set_source_files_properties(wasm_k12_shim.cpp PROPERTIES COMPILE_OPTIONS "-Wno-cast-align;-Wno-comment;-Wno-unused-parameter;-Wno-unused-function")
+    endif()
     target_compile_definitions(qubic_wasm_tests PRIVATE
         LITE_WASM_SC
         TESTNET
