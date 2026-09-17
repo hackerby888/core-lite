@@ -74,6 +74,7 @@ static bool loadFromBytes(unsigned int contractIndex, const unsigned char* bytes
 static bool isContractLoaded(unsigned int contractIndex);
 static bool hasPendingMigration(unsigned int contractIndex);
 static void runPendingMigration(unsigned int contractIndex);
+static bool wasStateSeeded(unsigned int contractIndex);
 
 [[maybe_unused]] static void deployModule(unsigned long long sessionId, unsigned int targetSlot, const unsigned char* finalHash, unsigned int abiVersion,
     unsigned int /*stateLayoutVersion*/,
@@ -137,6 +138,12 @@ static void runPendingMigration(unsigned int contractIndex);
     slot.version++;
     logToConsole(L"LITEDYN: Deploy accepted, slot armed");
 
+    // a seeded slot is already constructed, now and for every later redeploy
+    if (wasStateSeeded(targetSlot))
+    {
+        slot.everInitialized = true;
+    }
+
     slot.needsMigrate = hasPendingMigration(targetSlot);
     slot.constructed = slot.everInitialized && !slot.needsMigrate;
     if (slot.needsMigrate)
@@ -196,8 +203,46 @@ static void runPendingMigration(unsigned int contractIndex);
     }
 }
 
+// native contracts have no deploy to take a staged state, so the tick thread writes it between ticks, where INITIALIZE would run
+static void applyStagedNativeStates()
+{
+    if (!g_nativeStateStaged.exchange(false, std::memory_order_acquire))
+    {
+        return;
+    }
+
+    for (unsigned int contractIndex = 1; contractIndex < WASM_RESERVED_SLOT_BASE; contractIndex++)
+    {
+        unsigned char* stagedBytes = nullptr;
+        unsigned long long stagedSize = 0;
+        if (!takeStagedState(contractIndex, stagedBytes, stagedSize, /*dropIncomplete=*/false))
+        {
+            continue;
+        }
+
+        if (stagedSize == contractDescriptions[contractIndex].stateSize && contractStates[contractIndex])
+        {
+            contractStateLock[contractIndex].acquireWrite();
+            {
+                StateWriteSeqScope writeSeq(true, contractIndex);
+                copyMem(contractStates[contractIndex], stagedBytes, stagedSize);
+            }
+            __markContractStateDirty(contractIndex);
+            contractStateLock[contractIndex].releaseWrite();
+            logColorToScreen("INFO", "LITEDYN: staged state applied idx=" + std::to_string(contractIndex) + " (" + std::to_string(stagedSize) + " bytes)");
+        }
+
+        free(stagedBytes);
+    }
+}
+
 static bool hasPendingActivation()
 {
+    if (g_nativeStateStaged.load(std::memory_order_acquire))
+    {
+        return true;
+    }
+
     for (unsigned int slotOffset = 0; slotOffset < WASM_RESERVED_SLOT_COUNT; slotOffset++)
     {
         const ContractSlot& slot = contractSlots[slotOffset];
@@ -212,6 +257,8 @@ static bool hasPendingActivation()
 
 [[maybe_unused]] static void activatePendingContracts()
 {
+    applyStagedNativeStates();
+
     for (unsigned int slotOffset = 0; slotOffset < WASM_RESERVED_SLOT_COUNT; slotOffset++)
     {
         ContractSlot& slot = contractSlots[slotOffset];

@@ -24,6 +24,40 @@ static void captureState(const EngineSlot& slot, unsigned int contractIndex, Sta
     }
 }
 
+// swaps a staged initial state in for the captured one; false when it fits neither the new StateData nor its MIGRATE input
+static bool adoptStagedState(unsigned int contractIndex, const ModuleResources& moduleSet, const ModuleLayout& layout, StateSnapshot& snapshot, bool& seeded)
+{
+    unsigned char* stagedBytes = nullptr;
+    unsigned long long stagedSize = 0;
+
+    seeded = false;
+    if (!takeStagedState(contractIndex, stagedBytes, stagedSize, /*dropIncomplete=*/true))
+    {
+        return true;
+    }
+
+    wasm_function_inst_t hasMigration = wasm_runtime_lookup_function(moduleSet.instance, "has_migrate");
+    wasm_function_inst_t oldStateSize = wasm_runtime_lookup_function(moduleSet.instance, "migrate_old_state_size");
+    const bool migrates = hasMigration && oldStateSize && callU32(moduleSet.execEnv, hasMigration);
+    const uint32_t migrationOldStateSize = migrates ? callU32(moduleSet.execEnv, oldStateSize) : 0;
+
+    if (stagedSize != layout.stateSize && !(migrates && stagedSize == migrationOldStateSize))
+    {
+        free(stagedBytes);
+        logColorToScreen(
+            "ERROR", "LITEWASM: staged state is " + std::to_string(stagedSize) + " bytes, contract state is " + std::to_string(layout.stateSize)
+                         + (migrates ? " (MIGRATE reads " + std::to_string(migrationOldStateSize) + ")" : ""));
+        return false;
+    }
+
+    snapshot.buffer.allocate(0);
+    snapshot.buffer.data = stagedBytes;
+    snapshot.size = (uint32_t)stagedSize;
+    seeded = true;
+    logColorToScreen("INFO", "LITEWASM: state seeded from staged bytes — " + std::to_string(stagedSize) + " bytes");
+    return true;
+}
+
 static void unloadSlot(EngineSlot& slot)
 {
     if (slot.loadExecEnv)

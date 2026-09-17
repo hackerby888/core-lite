@@ -1013,6 +1013,58 @@ RPC_ROUTE("POST", "/live/v1/dev/contract-source")
     return jsonResp(json);
 }
 
+// stage an initial contract state in ordered chunks: a wasm slot takes it at its next deploy, a native slot at the next tick. total=0 clears.
+RPC_ROUTE("POST", "/live/v1/dev/state-stage")
+{
+    Json::Value json;
+    const int slotIndex = std::atoi(req.getParameter("slot").c_str());
+    const unsigned long long offset = std::strtoull(req.getParameter("off").c_str(), nullptr, 10);
+    const unsigned long long totalBytes = std::strtoull(req.getParameter("total").c_str(), nullptr, 10);
+    const bool nativeSlot = slotIndex >= 1 && slotIndex < (int)WASM_RESERVED_SLOT_BASE && contractStates[slotIndex];
+    const bool wasmSlot = slotIndex >= (int)WASM_RESERVED_SLOT_BASE && slotIndex < (int)(WASM_RESERVED_SLOT_BASE + WASM_RESERVED_SLOT_COUNT);
+
+    json["ok"] = false;
+    if (!nativeSlot && !wasmSlot)
+    {
+        json["message"] = "bad slot";
+        return jsonResp(json, 400);
+    }
+
+    if (totalBytes == 0)
+    {
+        Wasm::Runtime::clearStagedState((unsigned int)slotIndex);
+        json["ok"] = true;
+        json["slot"] = slotIndex;
+        json["received"] = 0;
+        json["total"] = 0;
+        return jsonResp(json);
+    }
+
+    // a native state has one size; a wasm slot's is only known once the module it is staged for loads
+    if (totalBytes > MAX_CONTRACT_STATE_SIZE || (nativeSlot && totalBytes != contractDescriptions[slotIndex].stateSize))
+    {
+        const unsigned long long expectedBytes = nativeSlot ? contractDescriptions[slotIndex].stateSize : MAX_CONTRACT_STATE_SIZE;
+        json["message"] = "total is " + std::to_string(totalBytes) + " bytes, slot " + std::to_string(slotIndex) + (nativeSlot ? " holds exactly " : " holds at most ")
+                          + std::to_string(expectedBytes);
+        return jsonResp(json, 400);
+    }
+
+    unsigned long long receivedBytes = 0;
+    const char* refusal = Wasm::Runtime::stageStateChunk(
+        (unsigned int)slotIndex, offset, totalBytes, (const unsigned char*)req.body.data(), req.body.size(), receivedBytes);
+    if (refusal)
+    {
+        json["message"] = std::string(refusal) + "; expected offset " + std::to_string(receivedBytes);
+        return jsonResp(json, 400);
+    }
+
+    json["ok"] = true;
+    json["slot"] = slotIndex;
+    json["received"] = (Json::UInt64)receivedBytes;
+    json["total"] = (Json::UInt64)totalBytes;
+    return jsonResp(json);
+}
+
 static unsigned int liteDevEpochLastTick()
 {
     return system.initialTick + (unsigned int)TESTNET_EPOCH_DURATION - 1;
