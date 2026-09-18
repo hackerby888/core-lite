@@ -875,6 +875,33 @@ RPC_ROUTE("GET", "/live/v1/dev/state-read")
     return jsonResp(json);
 }
 
+// The same slice as raw bytes, for dumps: hex-in-JSON doubles the payload and costs an encode and a decode per byte.
+RPC_ROUTE("GET", "/live/v1/dev/state-bytes")
+{
+    const int slotIndex = std::atoi(req.getParameter("slot").c_str());
+    unsigned long long offset = strtoull(req.getParameter("off").c_str(), nullptr, 10);
+    unsigned long long length = strtoull(req.getParameter("len").c_str(), nullptr, 10);
+    unsigned long long stateSize = 0;
+    if (!rpcResolveContractSlot(slotIndex, stateSize))
+    {
+        Json::Value json;
+        json["message"] = "bad slot";
+        return jsonResp(json, 400);
+    }
+
+    if (offset > stateSize)
+        offset = stateSize;
+    if (offset + length > stateSize)
+        length = stateSize - offset;
+
+    // Same lock-free copy as state-read; a dump spans many requests, so it is only as consistent as a quiet node.
+    RpcResp resp;
+    resp.contentType = "application/octet-stream";
+    resp.body.assign((const char*)contractStates[slotIndex] + offset, (size_t)length);
+    resp.headers.push_back({ "X-State-Size", std::to_string(stateSize) });
+    return resp;
+}
+
 // Canonical K12 digest of a contract's effective state.
 RPC_ROUTE("GET", "/live/v1/dev/contract-digest")
 {
