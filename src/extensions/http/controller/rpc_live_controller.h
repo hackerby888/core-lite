@@ -1097,6 +1097,15 @@ static unsigned int liteDevEpochLastTick()
     return system.initialTick + (unsigned int)TESTNET_EPOCH_DURATION - 1;
 }
 
+static bool liteDevNodeHalted()
+{
+#ifdef LITE_WASM_SC
+    return Wasm::Runtime::faultSnapshot().set;
+#else
+    return false;
+#endif
+}
+
 // Fast-forward with a timeout, then restore the configured tick delay.
 static unsigned int liteDevFastForwardTo(unsigned int target, unsigned int timeoutMs)
 {
@@ -1106,7 +1115,7 @@ static unsigned int liteDevFastForwardTo(unsigned int target, unsigned int timeo
     const unsigned long long savedTickDelay = tickDelay;
     tickDelay = 0;
     const auto startTime = std::chrono::steady_clock::now();
-    while (system.tick < target)
+    while (system.tick < target && !liteDevNodeHalted())
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime);
@@ -1200,7 +1209,7 @@ RPC_ROUTE("GET", "/live/v1/dev/advance-epoch")
     tickDelay = 0;
     forceSwitchEpoch = true;
     const auto startTime = std::chrono::steady_clock::now();
-    while ((unsigned int)system.epoch == startEpoch)
+    while ((unsigned int)system.epoch == startEpoch && !liteDevNodeHalted())
     {
         // Keep the transition moving through its clean-memory wait.
         epochTransitionCleanMemoryFlag = 1;
