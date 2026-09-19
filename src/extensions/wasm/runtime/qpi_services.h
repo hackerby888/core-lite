@@ -410,6 +410,22 @@ struct CheatContextImage
 };
 static_assert(sizeof(CheatContextImage) == sizeof(QPI::QpiContext), "CheatContextImage out of sync with QPI::QpiContext");
 
+// the context is copied into module memory byte for byte, and a wasm32 module reads it at these offsets.
+struct QpiContextLayoutProbe : QPI::QpiContext
+{
+    static void check()
+    {
+        static_assert(alignof(m256i) == 8, "a module lays m256i out at 8-byte alignment");
+        static_assert(offsetof(QpiContextLayoutProbe, _currentContractIndex) == 0, "QpiContext::_currentContractIndex moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _stackIndex) == 4, "QpiContext::_stackIndex moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _currentContractId) == 8, "QpiContext::_currentContractId moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _originator) == 40, "QpiContext::_originator moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _invocator) == 72, "QpiContext::_invocator moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _invocationReward) == 104, "QpiContext::_invocationReward moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _entryPoint) == 112, "QpiContext::_entryPoint moved");
+    }
+};
+
 static void clearCheatWarp()
 {
 #if defined(TESTNET)
