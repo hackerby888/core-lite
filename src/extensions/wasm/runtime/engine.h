@@ -13,7 +13,7 @@ namespace Wasm::Runtime
     const int slotOffset = engineSlotOffset(contractIndex);
     if (slotOffset < 0)
     {
-        return false;
+        return loadFail("slot " + std::to_string(contractIndex) + " is not a dynamic contract slot");
     }
 
     EngineSlot& slot = engineSlots[slotOffset];

@@ -76,24 +76,58 @@ static bool hasPendingMigration(unsigned int contractIndex);
 static void runPendingMigration(unsigned int contractIndex);
 static bool wasStateSeeded(unsigned int contractIndex);
 
+// the HTTP thread reads the record while the tick thread writes it.
+static void recordDeployOutcome(unsigned long long sessionId, unsigned int slot, unsigned int tick, const char* code, const std::string& message)
+{
+    TraceLockScope lock;
+    storeDeployOutcome(lastDeployOutcome, sessionId, slot, tick, code, message);
+}
+
+[[maybe_unused]] static DeployOutcome deployOutcomeSnapshot()
+{
+    TraceLockScope lock;
+    return lastDeployOutcome;
+}
+
 [[maybe_unused]] static void deployModule(unsigned long long sessionId, unsigned int targetSlot, const unsigned char* finalHash, unsigned int abiVersion,
     unsigned int /*stateLayoutVersion*/,
-    const char* name)
+    const char* name, unsigned int tick)
 {
+    const auto refuse = [&](const char* code, const std::string& message)
+    {
+        logColorToScreen("ERROR", "LITEDYN: deploy refused; " + message);
+        recordDeployOutcome(sessionId, targetSlot, tick, code, message);
+    };
+
     const int slotOffset = reservedSlotOffset(targetSlot);
     if (slotOffset < 0)
     {
+        refuse(DEPLOY_CODE_BAD_SLOT, "slot " + std::to_string(targetSlot) + " is not a dynamic contract slot");
         return;
     }
 
     if (abiVersion != WASM_ABI_VERSION)
     {
-        logColorToScreen("ERROR", "LITEDYN: unsupported Wasm ABI version " + std::to_string(abiVersion) + "; expected " + std::to_string(WASM_ABI_VERSION));
+        refuse(DEPLOY_CODE_ABI_MISMATCH, "unsupported Wasm ABI version " + std::to_string(abiVersion) + "; expected " + std::to_string(WASM_ABI_VERSION));
         return;
     }
 
-    if (sessionId != moduleUpload.sessionId || !moduleUploadComplete())
+    if (sessionId != moduleUpload.sessionId)
     {
+        refuse(DEPLOY_CODE_SESSION_MISMATCH, "session " + std::to_string(sessionId) + " is not the upload session on this node");
+        return;
+    }
+
+    if (!moduleUpload.active || moduleUpload.receivedCount != moduleUpload.chunkCount)
+    {
+        refuse(DEPLOY_CODE_INCOMPLETE,
+            "upload incomplete (" + std::to_string(moduleUpload.active ? moduleUpload.receivedCount : 0u) + "/" + std::to_string(moduleUpload.chunkCount) + " chunks)");
+        return;
+    }
+
+    if (!moduleUploadComplete())
+    {
+        refuse(DEPLOY_CODE_HASH_MISMATCH, "uploaded bytes do not hash to the digest the upload announced");
         return;
     }
 
@@ -101,6 +135,7 @@ static bool wasStateSeeded(unsigned int contractIndex);
     {
         if (finalHash[index] != moduleUpload.finalHash[index])
         {
+            refuse(DEPLOY_CODE_HASH_MISMATCH, "deploy names a different module digest than the upload");
             return;
         }
     }
@@ -111,12 +146,16 @@ static bool wasStateSeeded(unsigned int contractIndex);
 
     if (hasWasmMagic)
     {
+        lastLoadError.clear();
         loadOk = loadFromBytes(targetSlot, moduleUploadBuffer, moduleUpload.totalSize);
-        logToConsole(loadOk ? L"LITEDYN: wasm contract loaded" : L"LITEDYN: ERROR wasm load failed");
+        if (!loadOk)
+        {
+            refuse(DEPLOY_CODE_LOAD_FAILED, lastLoadError.empty() ? "wasm load failed" : lastLoadError);
+        }
     }
     else
     {
-        logToConsole(L"LITEDYN: ERROR upload is not a wasm module ('\\0asm' expected)");
+        refuse(DEPLOY_CODE_NOT_WASM, "upload is not a wasm module ('\\0asm' expected)");
     }
 
     if (!loadOk)
@@ -152,6 +191,7 @@ static bool wasStateSeeded(unsigned int contractIndex);
     }
 
     moduleUpload.active = false;
+    recordDeployOutcome(sessionId, targetSlot, tick, DEPLOY_CODE_OK, "slot armed");
 }
 
 
@@ -199,7 +239,7 @@ static bool wasStateSeeded(unsigned int contractIndex);
             name = reinterpret_cast<const char*>(input + sizeof(message));
         }
 
-        deployModule(message.sessionId, message.targetSlot, message.finalHash, message.abiVersion, message.stateLayoutVersion, name);
+        deployModule(message.sessionId, message.targetSlot, message.finalHash, message.abiVersion, message.stateLayoutVersion, name, tick);
     }
 }
 

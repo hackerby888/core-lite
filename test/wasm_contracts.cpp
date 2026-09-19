@@ -400,6 +400,42 @@ TEST(WasmContracts, UploadChunksAcceptExactSequentialPayloads)
     EXPECT_EQ(moduleUploadBuffer[totalSize - 1], 0x88);
 }
 
+TEST(WasmContracts, DeployOutcomeKeepsASessionsFirstVerdict)
+{
+    using namespace Wasm::Runtime;
+
+    DeployOutcome stored;
+    storeDeployOutcome(stored, 7, WASM_RESERVED_SLOT_BASE, 100, DEPLOY_CODE_INCOMPLETE, "upload incomplete (3/4 chunks)");
+    EXPECT_TRUE(stored.set);
+    EXPECT_FALSE(stored.ok);
+    EXPECT_STREQ(stored.code, "incomplete");
+    EXPECT_STREQ(stored.message, "upload incomplete (3/4 chunks)");
+
+    // the missing chunk arrived and the resent DEPLOY went through.
+    storeDeployOutcome(stored, 7, WASM_RESERVED_SLOT_BASE, 101, DEPLOY_CODE_OK, "slot armed");
+    EXPECT_TRUE(stored.ok);
+    EXPECT_EQ(stored.tick, 101u);
+
+    // a resend that lands after the success finds the upload closed, and must not undo it.
+    storeDeployOutcome(stored, 7, WASM_RESERVED_SLOT_BASE, 102, DEPLOY_CODE_INCOMPLETE, "upload incomplete (0/4 chunks)");
+    EXPECT_TRUE(stored.ok);
+    EXPECT_EQ(stored.tick, 101u);
+
+    storeDeployOutcome(stored, 8, WASM_RESERVED_SLOT_BASE + 1u, 103, DEPLOY_CODE_ABI_MISMATCH, "unsupported Wasm ABI version 6; expected 7");
+    EXPECT_EQ(stored.sessionId, 8u);
+    EXPECT_EQ(stored.slot, WASM_RESERVED_SLOT_BASE + 1u);
+    EXPECT_STREQ(stored.code, "abi-mismatch");
+
+    // after a definitive refusal each resend fails earlier, and none of them may replace the reason.
+    storeDeployOutcome(stored, 8, WASM_RESERVED_SLOT_BASE + 1u, 104, DEPLOY_CODE_SESSION_MISMATCH, "session 8 is not the upload session on this node");
+    EXPECT_STREQ(stored.code, "abi-mismatch");
+    EXPECT_EQ(stored.tick, 103u);
+
+    const std::string oversized(1000, 'x');
+    storeDeployOutcome(stored, 9, WASM_RESERVED_SLOT_BASE, 105, DEPLOY_CODE_LOAD_FAILED, oversized);
+    EXPECT_EQ(strlen(stored.message), sizeof(stored.message) - 1);
+}
+
 TEST(WasmContracts, ReservedSlotOffsetRejectsNonDynamicContractSlots)
 {
     using namespace Wasm::Runtime;

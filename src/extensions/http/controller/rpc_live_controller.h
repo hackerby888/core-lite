@@ -635,6 +635,25 @@ RPC_ROUTE("GET", "/live/v1/dyn-upload")
     }
     json["missing"] = missing;
     json["missingCount"] = missingCount;
+
+    const Wasm::Runtime::DeployOutcome outcome = Wasm::Runtime::deployOutcomeSnapshot();
+    if (outcome.set)
+    {
+        char outcomeSessionId[32];
+        snprintf(outcomeSessionId, sizeof(outcomeSessionId), "%llu", outcome.sessionId);
+        Json::Value lastDeploy;
+        lastDeploy["sessionId"] = std::string(outcomeSessionId);
+        lastDeploy["slot"] = outcome.slot;
+        lastDeploy["tick"] = outcome.tick;
+        lastDeploy["ok"] = outcome.ok;
+        lastDeploy["code"] = std::string(outcome.code);
+        lastDeploy["message"] = std::string(outcome.message);
+        json["lastDeploy"] = lastDeploy;
+    }
+    else
+    {
+        json["lastDeploy"] = Json::Value::null;
+    }
     return jsonResp(json);
 }
 
