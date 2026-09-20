@@ -1251,6 +1251,100 @@ RPC_ROUTE("GET", "/live/v1/dev/advance-epoch")
     return jsonResp(json);
 }
 
+// Queries waiting for an oracle machine reply. Only contract queries are listed, because a user query is answered by its sender.
+RPC_ROUTE("GET", "/live/v1/dev/oracle-pending")
+{
+    (void)req;
+    OracleEngine::PendingContractQuery pendingQueries[MAX_SIMULTANEOUS_ORACLE_QUERIES];
+    const unsigned int count = oracleEngine.getPendingContractQueries(pendingQueries, MAX_SIMULTANEOUS_ORACLE_QUERIES);
+
+    Json::Value queries(Json::arrayValue);
+    for (unsigned int idx = 0; idx < count; idx++)
+    {
+        const auto& pending = pendingQueries[idx];
+        if (pending.interfaceIndex >= OI::oracleInterfacesCount)
+            continue;
+
+        const uint16_t querySize = (uint16_t)OI::oracleInterfaces[pending.interfaceIndex].querySize;
+        unsigned char queryData[MAX_ORACLE_QUERY_SIZE];
+        if (!oracleEngine.getOracleQuery(pending.queryId, queryData, querySize))
+            continue;
+
+        Json::Value entry;
+        entry["queryId"] = std::to_string(pending.queryId);
+        entry["slot"] = pending.contractIndex;
+        entry["interfaceIndex"] = pending.interfaceIndex;
+        entry["query"] = base64_encode(queryData, querySize);
+        queries.append(entry);
+    }
+
+    Json::Value json;
+    json["queries"] = queries;
+    return jsonResp(json);
+}
+
+// Answer a pending query as an oracle machine would, so a contract can be developed without one. The commit, quorum and reveal steps still run.
+RPC_ROUTE("POST", "/live/v1/dev/oracle-resolve")
+{
+    Json::Value json;
+    json["ok"] = false;
+    try
+    {
+        auto body = rpcJsonBody(req.body);
+        if (!body)
+        {
+            return rpcErr(3, "Invalid JSON", 400);
+        }
+
+        const int64_t queryId = std::strtoll((*body)["queryId"].asString().c_str(), nullptr, 10);
+        const unsigned int status = (*body)["status"].isNull() ? ORACLE_QUERY_STATUS_SUCCESS : (*body)["status"].asUInt();
+        const auto reply = base64_decode((*body)["reply"].asString());
+
+        struct
+        {
+            OracleMachineReply metadata;
+            unsigned char data[MAX_ORACLE_REPLY_SIZE];
+        } machineReply;
+        setMem(&machineReply, sizeof(machineReply), 0);
+        machineReply.metadata.oracleQueryId = (unsigned long long)queryId;
+
+        if (status == ORACLE_QUERY_STATUS_SUCCESS)
+        {
+            if (reply.size() > MAX_ORACLE_REPLY_SIZE)
+            {
+                json["message"] = "reply too large";
+                return jsonResp(json);
+            }
+            copyMem(machineReply.data, reply.data(), reply.size());
+        }
+        else if (status == ORACLE_QUERY_STATUS_UNRESOLVABLE)
+        {
+            // an oracle machine reports a failure with an error flag; the query then rides out to its own timeout.
+            machineReply.metadata.oracleMachineErrorFlags = ORACLE_FLAG_ORACLE_UNAVAIL;
+        }
+        else
+        {
+            json["message"] = "status must be success or unresolvable";
+            return jsonResp(json);
+        }
+
+        const uint8_t statusBefore = oracleEngine.getOracleQueryStatus(queryId);
+        const unsigned int replySize = (status == ORACLE_QUERY_STATUS_SUCCESS) ? (unsigned int)reply.size() : 0;
+        oracleEngine.processOracleMachineReply(&machineReply.metadata, sizeof(OracleMachineReply) + replySize);
+
+        // the engine returns nothing, so acceptance is read back from the flags it records on the query.
+        const uint16_t statusFlags = oracleEngine.getOracleQueryStatusFlags(queryId);
+        const uint16_t acceptedFlag = (status == ORACLE_QUERY_STATUS_SUCCESS) ? ORACLE_FLAG_REPLY_RECEIVED : ORACLE_FLAG_OM_ERROR_FLAGS;
+        json["ok"] = statusBefore == ORACLE_QUERY_STATUS_PENDING && (statusFlags & acceptedFlag) != 0;
+        json["status"] = oracleEngine.getOracleQueryStatus(queryId);
+        return jsonResp(json);
+    }
+    catch (const std::exception &e)
+    {
+        return rpcErr(-1, "Exception: " + std::string(e.what()), 500);
+    }
+}
+
 #endif // TESTNET
 #endif // LITE_WASM_SC
 
