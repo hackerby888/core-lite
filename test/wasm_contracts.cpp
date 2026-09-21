@@ -273,7 +273,6 @@ TEST(WasmContracts, UploadChunksRejectInvalidSequenceOrLengthWithoutMutation)
     };
     const unsigned long long activeSessionId = 31;
     const unsigned int twoFullChunksSizeBytes = WASM_UPLOAD_CHUNK_SIZE * 2u;
-    const unsigned int threeFullChunksSizeBytes = WASM_UPLOAD_CHUNK_SIZE * 3u;
     const unsigned int finalChunkSizeBytes = 92;
     const unsigned int partialFinalSizeBytes = WASM_UPLOAD_CHUNK_SIZE + finalChunkSizeBytes;
     const RejectedChunk cases[] = {
@@ -293,20 +292,21 @@ TEST(WasmContracts, UploadChunksRejectInvalidSequenceOrLengthWithoutMutation)
             0,
             WASM_UPLOAD_CHUNK_SIZE + 1u,
         },
+        // only the sequence bound refuses these two: the length each one carries is the length its offset works out to.
         {
-            "gap",
+            "empty chunk after the last",
             twoFullChunksSizeBytes,
             false,
             activeSessionId,
-            1,
-            WASM_UPLOAD_CHUNK_SIZE,
+            2,
+            0,
         },
         {
-            "out of order",
-            threeFullChunksSizeBytes,
-            true,
+            "full chunk past the end",
+            twoFullChunksSizeBytes,
+            false,
             activeSessionId,
-            2,
+            3,
             WASM_UPLOAD_CHUNK_SIZE,
         },
         {
@@ -398,6 +398,39 @@ TEST(WasmContracts, UploadChunksAcceptExactSequentialPayloads)
     EXPECT_EQ(moduleUploadBuffer[0], 0x77);
     EXPECT_EQ(moduleUploadBuffer[WASM_UPLOAD_CHUNK_SIZE], 0x77);
     EXPECT_EQ(moduleUploadBuffer[totalSize - 1], 0x88);
+}
+
+// every chunk of a module is sent for one tick, and nothing promises they are processed in the order they were sent.
+TEST(WasmContracts, UploadChunksAcceptAnyArrivalOrder)
+{
+    using namespace Wasm::Runtime;
+
+    const unsigned int totalSize = WASM_UPLOAD_CHUNK_SIZE * 2u + 1u;
+    unsigned char finalHash[32];
+    std::memset(finalHash, 0x66, sizeof(finalHash));
+    std::vector<unsigned char> firstChunk(WASM_UPLOAD_CHUNK_SIZE, 0x71);
+    std::vector<unsigned char> secondChunk(WASM_UPLOAD_CHUNK_SIZE, 0x72);
+    const unsigned char lastByte = 0x73;
+    moduleUpload = ModuleUpload{};
+    std::memset(moduleUploadBuffer, 0, totalSize);
+    std::memset(receivedChunkBits, 0, sizeof(receivedChunkBits));
+
+    ASSERT_TRUE(tryBeginModuleUpload(42, totalSize, expectedModuleUploadChunkCount(totalSize), finalHash));
+    EXPECT_TRUE(tryReceiveModuleChunk(42, 2, &lastByte, 1));
+    EXPECT_TRUE(tryReceiveModuleChunk(42, 0, firstChunk.data(), WASM_UPLOAD_CHUNK_SIZE));
+    EXPECT_TRUE(tryReceiveModuleChunk(42, 1, secondChunk.data(), WASM_UPLOAD_CHUNK_SIZE));
+
+    EXPECT_EQ(moduleUpload.receivedCount, expectedModuleUploadChunkCount(totalSize));
+    EXPECT_EQ(moduleUploadBuffer[0], 0x71);
+    EXPECT_EQ(moduleUploadBuffer[WASM_UPLOAD_CHUNK_SIZE - 1u], 0x71);
+    EXPECT_EQ(moduleUploadBuffer[WASM_UPLOAD_CHUNK_SIZE], 0x72);
+    EXPECT_EQ(moduleUploadBuffer[totalSize - 2u], 0x72);
+    EXPECT_EQ(moduleUploadBuffer[totalSize - 1u], 0x73);
+
+    // a repeat is refused whenever it arrives, and leaves the bytes it would have replaced.
+    EXPECT_FALSE(tryReceiveModuleChunk(42, 0, secondChunk.data(), WASM_UPLOAD_CHUNK_SIZE));
+    EXPECT_EQ(moduleUpload.receivedCount, expectedModuleUploadChunkCount(totalSize));
+    EXPECT_EQ(moduleUploadBuffer[0], 0x71);
 }
 
 TEST(WasmContracts, DeployOutcomeKeepsASessionsFirstVerdict)

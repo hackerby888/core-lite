@@ -105,7 +105,8 @@ static inline bool tryReceiveModuleChunk(unsigned long long sessionId, unsigned 
     }
 
     const unsigned long long destinationOffset = (unsigned long long)sequence * WASM_UPLOAD_CHUNK_SIZE;
-    if (!data || sequence != moduleUpload.receivedCount || sequence >= moduleUpload.chunkCount)
+    // a chunk names its own offset, so arrival order is free: the bitmap refuses a repeat and the digest checks the whole.
+    if (!data || sequence >= moduleUpload.chunkCount)
     {
         return false;
     }
