@@ -2999,6 +2999,8 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
 
     Processor* processor = (Processor*)ProcedureArgument;
     RequestResponseHeader* header = (RequestResponseHeader*)processor->buffer;
+    // a pass that handled a request goes straight to the next one; sleeping per message paces a 676-vote tick by the os timer quantum.
+    bool idle = true;
     while (!shutDownNode)
     {
         PinScope pinScope;
@@ -3006,7 +3008,11 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
         tickFork::requestProcessorParkPoint(processorNumber);
         if (shutDownNode)
             break;
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
+        if (idle)
+        {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+        idle = true;
         // in epoch transition, wait here
         if (epochTransitionState)
         {
@@ -3090,6 +3096,7 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
                 requestQueueElementTail++;
 
                 RELEASE(requestQueueTailLock);
+                idle = false;
                 switch (header->type())
                 {
                 case ExchangePublicPeers::type():
