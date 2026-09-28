@@ -726,6 +726,12 @@ namespace AntWalker
 inline void preemptClaim(unsigned int index);
 }
 
+namespace AntColonyMaintenance
+{
+inline void publishRebuilt(AntColonyBpp9000T& colony, unsigned int index, const AntColonyBpp9000T::Ann& ann, unsigned int annHash,
+    const score_engine::Rating& rating);
+}
+
 // A background walker job holds its claim for a whole walk, so a rebuild the tick needs would queue
 // behind it. Asking repeatedly is free: the walker only hands back a job old enough to be stuck.
 static constexpr unsigned int ANT_ANN_CLAIM_PREEMPT_POLLS = 250;
@@ -827,7 +833,7 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
 
     unsigned int annHash;
     KangarooTwelve(&childAnn, sizeof(childAnn), &annHash, sizeof(annHash));
-    gAntColony.publishAnn(idx, childAnn, annHash, rebuilt.shift);
+    AntColonyMaintenance::publishRebuilt(gAntColony, idx, childAnn, annHash, rebuilt);
 
     // A rebuild costs a full walk, so a tick that takes tens of seconds is attributable here.
     CHAR16 okLine[224];
@@ -1017,6 +1023,7 @@ static void antColonyBeginEpoch()
 #endif
     AntWalker::quiesceBegin();
     gAntPendingSolutions.reset();
+    AntColonyMaintenance::clearRaisedShifts();
     gAntColony.beginEpoch(score->currentRandomSeed, system.initialTick);
     AntWalker::onEpochBegin();
     AntWalker::quiesceEnd();
@@ -4830,6 +4837,9 @@ static void processTick(unsigned long long processorNumber)
 #if ADDON_TX_STATUS_REQUEST
         txStatusData.tickTxIndexStart[system.tick - system.initialTick] = numberOfTransactions; // qli: part of tx_status_request add-on
 #endif
+        // A record rebuilt since the last tick may have reached further than the guess it was ranked on.
+        AntColonyMaintenance::drainRaisedShifts(gAntColony, updateMinerRankingAndFutureComputors);
+
         // Only apply skipping compute solution when in Mainnet with Aux node (except for last tick).
         // A strict replay computes too, and this is what clears the per-transaction pre-score gates so it
         // cannot read the previous tick's answers.

@@ -425,7 +425,7 @@ inline bool dispatchOne()
         }
         unsigned int memoHash;
         KangarooTwelve(&memoAnn, sizeof(memoAnn), &memoHash, sizeof(memoHash));
-        gAntColony.publishAnn(index, memoAnn, memoHash, memo.shift);
+        AntColonyMaintenance::publishRebuilt(gAntColony, index, memoAnn, memoHash, memo);
         gState.memoHits.fetch_add(1, std::memory_order_relaxed);
         gState.materialised.fetch_add(1, std::memory_order_relaxed);
         if (gState.debug)
@@ -558,7 +558,7 @@ inline void applyResult(const AntWalkProto::ResultPayload& result)
     KangarooTwelve(&childAnn, sizeof(childAnn), &annHash, sizeof(annHash));
 
     const score_engine::Rating walked{ result.score, result.shift };
-    gAntColony.publishAnn(job.recordIndex, childAnn, annHash, walked.shift);
+    AntColonyMaintenance::publishRebuilt(gAntColony, job.recordIndex, childAnn, annHash, walked);
     // The cache every scoring path consults, so a strict replay of this solution is a lookup.
     const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(record->pubkey, record->nonce, record->parentRef, job.anchorDigest);
     gAntColony.putReplayScore(replayKey, walked, childAnn);

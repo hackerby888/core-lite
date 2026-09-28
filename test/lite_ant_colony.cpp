@@ -254,3 +254,52 @@ TEST(TestAntColonyMaintenance, AClaimedRecordIsNotOfferedAgain)
     colony->releaseAnnClaim((unsigned int)idx);
     EXPECT_TRUE(AntColonyMaintenance::isRebuildableNow(*colony, (unsigned int)idx));
 }
+
+// A rebuild that reaches past the guess re-ranks its miner once; one that confirms the guess ranks nothing.
+TEST(TestAntColonyMaintenance, RaisedShiftIsRankedOnce)
+{
+    AntColonyBpp9000T* colony = freshColony();
+    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+    AntColonyMaintenance::clearRaisedShifts();
+
+    const m256i me = makeKey(44);
+    const long long raisedIdx = commitRootChildWithoutAnn(colony, me, 3800, 0, 905);
+    const long long confirmedIdx = commitRootChildWithoutAnn(colony, me, 3810, 1, 906);
+    ASSERT_NE(raisedIdx, ANT_INVALID_INDEX);
+    ASSERT_NE(confirmedIdx, ANT_INVALID_INDEX);
+
+    AntColonyBpp9000T::Ann ann;
+    setMem(&ann, sizeof(ann), 0);
+    unsigned int annHash;
+    KangarooTwelve(&ann, sizeof(ann), &annHash, sizeof(annHash));
+
+    ASSERT_EQ(colony->tryClaimAnn((unsigned int)raisedIdx), AntColonyBpp9000T::AnnClaimOwned);
+    AntColonyMaintenance::publishRebuilt(*colony, (unsigned int)raisedIdx, ann, annHash, score_engine::Rating{ 3800, 3 });
+    ASSERT_EQ(colony->tryClaimAnn((unsigned int)confirmedIdx), AntColonyBpp9000T::AnnClaimOwned);
+    AntColonyMaintenance::publishRebuilt(*colony, (unsigned int)confirmedIdx, ann, annHash, score_engine::Rating{ 3810, 0 });
+
+    EXPECT_TRUE(colony->isAnnMaterialised((unsigned int)raisedIdx));
+    EXPECT_EQ(colony->recordAt(raisedIdx)->shift, 3u);
+    EXPECT_EQ(colony->recordAt(confirmedIdx)->shift, 0u);
+
+    unsigned int calls = 0;
+    unsigned int rankedKey = 0;
+    unsigned int rankedTick = 0;
+    m256i rankedMiner = m256i::zero();
+    const auto rank = [&](const m256i& publicKey, unsigned int rankingKey, unsigned int tick)
+    {
+        calls++;
+        rankedMiner = publicKey;
+        rankedKey = rankingKey;
+        rankedTick = tick;
+    };
+
+    EXPECT_EQ(AntColonyMaintenance::drainRaisedShifts(*colony, rank), 1u);
+    EXPECT_EQ(calls, 1u);
+    EXPECT_TRUE(rankedMiner == me);
+    EXPECT_EQ(rankedKey, (score_engine::Rating{ 3800, 3 }).rankingKey());
+    EXPECT_EQ(rankedTick, 100000u);
+
+    EXPECT_EQ(AntColonyMaintenance::drainRaisedShifts(*colony, rank), 0u);
+    EXPECT_EQ(calls, 1u);
+}
