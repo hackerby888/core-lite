@@ -63,7 +63,7 @@ static long long commitRootChildWithoutAnn(AntColonyBpp9000T* colony, const m256
     in.publishTick = tick;
 
     const long long landsAt = (long long)colony->solutionCount();
-    if (colony->commit(in, nullptr, score, nullptr, 0, true) != ValidityResult::Valid)
+    if (colony->commit(in, nullptr, score_engine::Rating{ score, 0 }, nullptr, 0, true) != ValidityResult::Valid)
     {
         return ANT_INVALID_INDEX;
     }
@@ -114,7 +114,7 @@ TEST(TestAntColonyStore, ClaimThenPublishSuppliesTheNetwork)
     rebuilt.lut[5] = 1;
     unsigned int annHash;
     KangarooTwelve(&rebuilt, sizeof(rebuilt), &annHash, sizeof(annHash));
-    colony->publishAnn(slot, rebuilt, annHash);
+    colony->publishAnn(slot, rebuilt, annHash, 0);
 
     EXPECT_TRUE(colony->isAnnMaterialised(slot));
     EXPECT_EQ(colony->tryClaimAnn(slot), AntColonyBpp9000T::AnnClaimReady);
@@ -122,10 +122,7 @@ TEST(TestAntColonyStore, ClaimThenPublishSuppliesTheNetwork)
 
     AntColonyBpp9000T::Ann out;
     ASSERT_TRUE(colony->annOfNonRoot(*colony->recordAt(idx), out));
-    for (unsigned long long i = 0; i < sizeof(out); i++)
-    {
-        ASSERT_EQ(out.lut[i], rebuilt.lut[i]) << "entry " << i;
-    }
+    EXPECT_EQ(memcmp(&out, &rebuilt, sizeof(out)), 0);
 }
 
 // A record with no network must survive the round trip, since the loader re-derives childAnnHash from
@@ -179,7 +176,7 @@ static long long commitChildWithoutAnn(AntColonyBpp9000T* colony, const m256i& o
     in.publishTick = tick;
 
     const long long landsAt = (long long)colony->solutionCount();
-    if (colony->commit(in, parentRec, score, nullptr, 0, true) != ValidityResult::Valid)
+    if (colony->commit(in, parentRec, score_engine::Rating{ score, 0 }, nullptr, 0, true) != ValidityResult::Valid)
     {
         return ANT_INVALID_INDEX;
     }
@@ -233,7 +230,7 @@ TEST(TestAntColonyMaintenance, RebuildableOnlyOnceTheParentHasItsNetwork)
     unsigned int annHash;
     KangarooTwelve(&ann, sizeof(ann), &annHash, sizeof(annHash));
     ASSERT_EQ(colony->tryClaimAnn((unsigned int)parentIdx), AntColonyBpp9000T::AnnClaimOwned);
-    colony->publishAnn((unsigned int)parentIdx, ann, annHash);
+    colony->publishAnn((unsigned int)parentIdx, ann, annHash, 0);
 
     // Materialised records are done, and the level below is now unblocked.
     EXPECT_FALSE(AntColonyMaintenance::isRebuildableNow(*colony, (unsigned int)parentIdx));
