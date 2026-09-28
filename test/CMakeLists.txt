@@ -61,7 +61,7 @@ add_executable(
 		contract_qrwa.cpp
 		contract_qip.cpp
 		contract_qusino.cpp
-		ant_colony.cpp
+		lite_ant_colony.cpp
 		ant_pending_solutions.cpp
 		trit_pack.cpp
 		custom_qubic_mining_storage.cpp

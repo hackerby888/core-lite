@@ -538,6 +538,12 @@ public:
         unsigned int score, const Ann* childAnn, unsigned int childAnnHash,
         bool trustedScore = false);
 
+    ValidityResult commit(const AntCommitInput& in, const AntSolutionRecord* parentRec,
+        unsigned int score, const Ann& childAnn, unsigned int childAnnHash)
+    {
+        return commit(in, parentRec, score, &childAnn, childAnnHash);
+    }
+
 private:
     // Children already recorded under this parent, capped at ANT_MAX_CHILDREN_PER_PARENT. Root
     // children are keyed by miner, deeper ones by parent.
