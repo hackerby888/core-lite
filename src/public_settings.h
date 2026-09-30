@@ -115,12 +115,12 @@ static_assert(AUTO_FORCE_NEXT_TICK_THRESHOLD* TARGET_TICK_DURATION >= PEER_REFRE
 // Config options that should NOT be changed by operators
 
 #define VERSION_A 1
-#define VERSION_B 305
+#define VERSION_B 306
 #define VERSION_C 0
 
 // Epoch and initial tick for node startup
-#define EPOCH 232
-#define TICK 81400000
+#define EPOCH 233
+#define TICK 82400000
 #define TICK_IS_FIRST_TICK_OF_EPOCH 1 // Set to 0 if the network is restarted during the EPOCH with a new initial TICK
 
 #define ARBITRATOR "AFZPUAIYVPNUYGJRQVLUKOPPVLHAZQTGLYAAUUNBXFTVTAMSBKQBLEIEPCVJ"
@@ -180,8 +180,7 @@ static constexpr unsigned long long BPP9000_SHIFT_CAP = 24 * 7;
 // so walks qualify and the tree deepens; deeper nodes must still strictly beat their parent.
 static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 6500;
 #else
-static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT =
-    (unsigned int)(BPP9000_WINDOW_WIDTH * 45 / 100);
+static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 4120;
 #endif
 
 // Ant colony: a solution must be published within this many ticks of the anchor its walk seeded from.
