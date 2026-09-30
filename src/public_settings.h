@@ -180,7 +180,7 @@ static constexpr unsigned long long BPP9000_SHIFT_CAP = 24 * 7;
 // so walks qualify and the tree deepens; deeper nodes must still strictly beat their parent.
 static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 6500;
 #else
-static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 4120;
+static constexpr unsigned int BPP9000_SOLUTION_THRESHOLD_DEFAULT = 4350;
 #endif
 
 // Ant colony: a solution must be published within this many ticks of the anchor its walk seeded from.
