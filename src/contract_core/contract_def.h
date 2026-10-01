@@ -1174,6 +1174,15 @@ public:
 
     bool add(unsigned int procedureId, const UserProcedureData& data)
     {
+        // an id registered again (a redeployed contract) keeps its own row; writing a new row would leave the id
+        // sharing one row with every other re-registered id
+        unsigned int existing;
+        if (idToIndex.get(procedureId, existing))
+        {
+            copyMemory(userProcData[existing], data);
+            return true;
+        }
+
         const unsigned int cnt = (unsigned int)idToIndex.population();
         if (cnt >= idToIndex.capacity())
             return false;
@@ -1182,6 +1191,14 @@ public:
         idToIndex.set(procedureId, cnt);
 
         return true;
+    }
+
+    // the procedure behind the id is gone (its module was unloaded): keep the row, drop the pointer
+    void disable(unsigned int procedureId)
+    {
+        unsigned int idx;
+        if (idToIndex.get(procedureId, idx))
+            userProcData[idx].procedure = nullptr;
     }
 
     const UserProcedureData* get(unsigned int procedureId) const
