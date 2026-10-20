@@ -9812,18 +9812,18 @@ static void logInfo()
         }
     }
 
-    setText(message, L"[+");
+    // Per-second request counters. rx: processed by request processors / discarded on a full request queue / dejavu
+    // duplicates. tx: appended to peer send buffers / dropped on a full send buffer. dsc and drp above 0 = overload.
+    setText(message, L"[rx prc ");
     appendNumber(message, numberOfProcessedRequests - prevNumberOfProcessedRequests, TRUE);
-    appendText(message, L" -");
+    appendText(message, L" dsc ");
     appendNumber(message, numberOfDiscardedRequests - prevNumberOfDiscardedRequests, TRUE);
-    appendText(message, L" *");
+    appendText(message, L" dup ");
     appendNumber(message, numberOfDuplicateRequests - prevNumberOfDuplicateRequests, TRUE);
-    appendText(message, L" /");
+    appendText(message, L" | tx snt ");
     appendNumber(message, numberOfDisseminatedRequests - prevNumberOfDisseminatedRequests, TRUE);
-    appendText(message, L" !");
+    appendText(message, L" drp ");
     appendNumber(message, numberOfDroppedTransmits - prevNumberOfDroppedTransmits, TRUE);
-    appendText(message, L" ?");
-    appendNumber(message, numberOfSkippedBroadcasts - prevNumberOfSkippedBroadcasts, TRUE);
     appendText(message, L"] ");
 
     unsigned int numberOfConnectingSlots = 0, numberOfConnectedSlots = 0, numberOfHandshakedSlots = 0;
@@ -9923,7 +9923,6 @@ static void logInfo()
     prevNumberOfDuplicateRequests = numberOfDuplicateRequests;
     prevNumberOfDisseminatedRequests = numberOfDisseminatedRequests;
     prevNumberOfDroppedTransmits = numberOfDroppedTransmits;
-    prevNumberOfSkippedBroadcasts = numberOfSkippedBroadcasts;
     prevNumberOfReceivedBytes = numberOfReceivedBytes;
     prevNumberOfTransmittedBytes = numberOfTransmittedBytes;
 
