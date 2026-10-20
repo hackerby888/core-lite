@@ -2091,9 +2091,15 @@ static void processRequestQuorumTick(Peer* peer, RequestResponseHeader* header)
                 const Tick* tsTick = tsCompTicks + computorIndices[index];
                 if (tsTick->epoch == tickEpoch)
                 {
+                    // enqueueResponse takes the shared response-queue lock; never hold a per-computor ticks lock across it
+                    Tick tickCopy;
                     ts.ticks.acquireLock(computorIndices[index]);
-                    enqueueResponse(peer, sizeof(Tick), BroadcastTick::type(), header->dejavu(), tsTick);
+                    copyMem(&tickCopy, tsTick, sizeof(Tick));
                     ts.ticks.releaseLock(computorIndices[index]);
+                    if (tickCopy.epoch == tickEpoch)
+                    {
+                        enqueueResponse(peer, sizeof(Tick), BroadcastTick::type(), header->dejavu(), &tickCopy);
+                    }
                 }
             }
 
