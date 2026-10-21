@@ -340,8 +340,8 @@ static PendingTxsPool pendingTxsPool;
 
 // opt/fast-tx headers reference pendingTxsPool, so include them after it.
 #include "optimizations/opt_config.h"
-#include "optimizations/opt_eager_tx_fetch.h"
 #include "extensions/fast_tx_window.h"
+#include "optimizations/opt_eager_tx_fetch.h"
 #include "extensions/tx_slot_index.h"
 #include "extensions/tick_bench.h"
 #include "extensions/tx_stats.h"
@@ -1859,6 +1859,16 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
     Transaction* request = header->getPayload<Transaction>();
     const unsigned int transactionSize = request->totalSize();
     TxStats::onReceive();
+
+    // AUX only stages txs for (system.tick, system.tick + FAST_TX_WINDOW_TICKS]. Anything else is
+    // never used here: skip it before the signature check and do not relay it, so a catching-up
+    // node neither burns CPU on nor amplifies the flood of old transactions.
+    if (!isMainMode()
+        && header->size() >= sizeof(RequestResponseHeader) + sizeof(Transaction)
+        && !FastTxWindow::inWindow(request->tick, system.tick))
+    {
+        return;
+    }
 
 #if !defined(NDEBUG) && 1
     // TODO: remove this debug code when the OM pipeline is fully stable
