@@ -11,7 +11,8 @@
 #include <atomic>
 #include <cstdio>
 
-// Set by --swap-dirty-track. Off => pools are never armed read-only => no faults, no tracking.
+// Turned on by setupSignalHandlers() once the SIGSEGV fast path is installed (--no-swap-dirty-track turns it off).
+// A binary without the handler must leave it off: armed slots would fault with nobody to catch it.
 inline bool gSwapDirtyTrackEnabled = false;
 
 namespace SwapDirtyTrack

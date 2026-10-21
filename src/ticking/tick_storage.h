@@ -125,7 +125,9 @@ private:
     inline static volatile char tickDataLock = 0;
 
     // One lock per computor for securing ticks element in current tick (only the tick system.tick is written)
-    inline static volatile char ticksLocks[NUMBER_OF_COMPUTORS];
+    // One lock per cache line: packed byte-locks made every CAS bounce the line for 63 neighbouring computors
+    struct alignas(64) TickLock { volatile char lock; };
+    inline static TickLock ticksLocks[NUMBER_OF_COMPUTORS];
 
     // Lock for securing tickTransactions and tickTransactionOffsets
     inline static volatile char tickTransactionsLock = 0;
@@ -1381,13 +1383,13 @@ public:
         // Acquire lock for ticks element of specific computor (only ticks >= system.tick are written)
         inline static void acquireLock(unsigned short computorIndex)
         {
-            ACQUIRE(ticksLocks[computorIndex]);
+            ACQUIRE(ticksLocks[computorIndex].lock);
         }
 
         // Release lock for ticks element of specific computor (only ticks >= system.tick are written)
         inline static void releaseLock(unsigned short computorIndex)
         {
-            RELEASE(ticksLocks[computorIndex]);
+            RELEASE(ticksLocks[computorIndex].lock);
         }
 
         // Return pointer to array of one Tick per computor by tick index independent of epoch (checking index with ASSERT)

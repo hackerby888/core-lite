@@ -16,7 +16,7 @@
 #include "extensions/swapvm_dirty_track.h" // gSwapDirtyTrackEnabled + SIGSEGV fast path + pool registry
 
 #ifdef __linux__
-// Runtime toggle for SwapVM page compression (blosc2); off unless --swap-compression is passed.
+// Runtime toggle for SwapVM page compression (blosc2); on by default.
 inline bool gSwapCompressionEnabled = true;
 #endif
 
@@ -1279,9 +1279,9 @@ private:
 
             // Reserve the victim under the lock; do the disk IO with the lock RELEASED.
             const unsigned long long oldPage = cachePageId[victim];
-            // Component B: skip the writeback for a slot never modified since load. Tracking off
-            // (or non-Linux) => slotDirty is always true => write back every occupied victim (Component A).
-            const bool slotDirty = !gSwapDirtyTrackEnabled || dirtyFlags[victim];
+            // Component B: skip the writeback for a slot never modified since load. Tracking off, non-Linux,
+            // or a pool whose page is not OS-page strided (never armed) => write back every occupied victim (Component A).
+            const bool slotDirty = !(gSwapDirtyTrackEnabled && cacheSlotStride) || dirtyFlags[victim];
             const bool needWriteback = (oldPage != INVALID_PAGE_ID) && slotDirty;
             if (oldPage != INVALID_PAGE_ID)
                 (needWriteback ? dirtyEvicts : cleanEvicts)++;
