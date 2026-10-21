@@ -242,7 +242,6 @@ static volatile long long numberOfDiscardedRequests = 0, prevNumberOfDiscardedRe
 static volatile long long numberOfDuplicateRequests = 0, prevNumberOfDuplicateRequests = 0;
 static volatile long long numberOfDisseminatedRequests = 0, prevNumberOfDisseminatedRequests = 0;
 static volatile long long numberOfDroppedTransmits = 0, prevNumberOfDroppedTransmits = 0;   // messages dropped on a full send buffer (peer kept alive)
-static volatile long long numberOfSkippedBroadcasts = 0, prevNumberOfSkippedBroadcasts = 0; // broadcasts skipped to a backlogged peer
 
 static unsigned char* requestQueueBuffer = NULL;
 static unsigned char* responseQueueBuffer = NULL;
@@ -468,13 +467,6 @@ static void pushCustom(RequestResponseHeader* requestResponseHeader, int numberO
         {
             if ((filterFullNode && peers[i].isFullNode()) || (!filterFullNode))
             {
-                // // Throttle: skip peers whose send buffer is already backed up so the broadcast firehose
-                // // doesn't overflow (and drop on) a slow consumer. Direct peer-addressed push() is unaffected.
-                // if (peers[i].dataToTransmitSize > BUFFER_SIZE / 4)
-                // {
-                //     _InterlockedIncrement64(&numberOfSkippedBroadcasts);
-                //     continue;
-                // }
                 suitablePeerIndices[numberOfSuitablePeers++] = i;
             }
         }

@@ -783,6 +783,29 @@ TEST(TestSwapVirtualMemory, DirtyTrackSkipsCleanWriteback) {
     }
 }
 
+// A pool whose page is not a multiple of the OS page cannot be armed read-only, so with tracking on every
+// occupied victim must still be written back: written data survives eviction and reload.
+TEST(TestSwapVirtualMemory, DirtyTrackUnalignedPoolAlwaysWritesBack) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    SwapDirtyTrackTestScope dirtyTrackScope;
+    {
+        const unsigned long long CAP = 384;                       // 16 B * 384 = 6144 B page, not 4K-strided
+        SwapVirtualMemory<E16, wcharToNumber(L"dtun"), wcharToNumber(L"data"), CAP, 4, INDEX_MODE, 0> vm;
+        vm.init();
+        for (unsigned long long p = 0; p < 16; p++) {
+            PinScope _;
+            vm.getRef(p * CAP).a = p + 100;
+        }
+        EXPECT_EQ(vm.getCleanEvicts(), 0u);
+        EXPECT_GT(vm.getDirtyEvicts(), 0u);
+        for (unsigned long long p = 0; p < 16; p++) {
+            PinScope _;
+            EXPECT_EQ(vm.getRef(p * CAP).a, p + 100);
+        }
+    }
+}
+
 TEST(TestSwapVirtualMemory, RestoredCachedPageSurvivesEviction)
 {
     initFilesystem();

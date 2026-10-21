@@ -179,6 +179,7 @@
 
 #include "qpi/impl/qpi_mining_impl.h"
 #include "extensions/core_utils.h"
+#include "extensions/fast_random.h"
 #include "revenue.h"
 
 #if USE_PARALLEL_SIGN_VOTES
@@ -340,8 +341,8 @@ static PendingTxsPool pendingTxsPool;
 
 // opt/fast-tx headers reference pendingTxsPool, so include them after it.
 #include "optimizations/opt_config.h"
-#include "optimizations/opt_eager_tx_fetch.h"
 #include "extensions/fast_tx_window.h"
+#include "optimizations/opt_eager_tx_fetch.h"
 #include "extensions/tx_slot_index.h"
 #include "extensions/tick_bench.h"
 #include "extensions/tx_stats.h"
@@ -1683,9 +1684,9 @@ static void processBroadcastTick(Peer* peer, RequestResponseHeader* header)
             }
             else
             {
-                // hot fix: only accept "empty" votes for stuck tick 77259626
+                // hot fix: only accept "empty" votes for stuck tick 85371950
                 bool isOk = true;
-                if (request->tick.tick == 77259626)
+                if (request->tick.tick == 85371950)
                 {
                     // only accept zero transactionDigest
                     if (!isZero(request->tick.transactionDigest))
@@ -1859,6 +1860,16 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
     Transaction* request = header->getPayload<Transaction>();
     const unsigned int transactionSize = request->totalSize();
     TxStats::onReceive();
+
+    // AUX only stages txs for (system.tick, system.tick + FAST_TX_WINDOW_TICKS]. Anything else is
+    // never used here: skip it before the signature check and do not relay it, so a catching-up
+    // node neither burns CPU on nor amplifies the flood of old transactions.
+    if (!isMainMode()
+        && header->size() >= sizeof(RequestResponseHeader) + sizeof(Transaction)
+        && !FastTxWindow::inWindow(request->tick, system.tick))
+    {
+        return;
+    }
 
 #if !defined(NDEBUG) && 1
     // TODO: remove this debug code when the OM pipeline is fully stable
@@ -2073,27 +2084,32 @@ static void processRequestQuorumTick(Peer* peer, RequestResponseHeader* header)
     if (tickEpoch != 0)
     {
         // Send Tick struct data from tick storage as requested by tick and voteFlags in request->quorumTick.
-        // The order of the computors is randomized using a Fisher–Yates shuffle
-        // Todo: This function may be optimized by moving the checking of voteFlags in the first loop, reducing the number of calls to random().
+        // The order of the computors the requester still lacks is randomized using a Fisher–Yates shuffle
         unsigned short computorIndices[NUMBER_OF_COMPUTORS];
-        unsigned short numberOfComputorIndices;
-        for (numberOfComputorIndices = 0; numberOfComputorIndices < NUMBER_OF_COMPUTORS; numberOfComputorIndices++)
+        unsigned short numberOfComputorIndices = 0;
+        for (unsigned short computorIndex = 0; computorIndex < NUMBER_OF_COMPUTORS; computorIndex++)
         {
-            computorIndices[numberOfComputorIndices] = numberOfComputorIndices;
+            if (!(request->quorumTick.voteFlags[computorIndex >> 3] & (1 << (computorIndex & 7))))
+            {
+                computorIndices[numberOfComputorIndices++] = computorIndex;
+            }
         }
         while (numberOfComputorIndices)
         {
-            const unsigned short index = random(numberOfComputorIndices);
+            const unsigned short index = randomFast(numberOfComputorIndices);
+            const unsigned short computorIndex = computorIndices[index];
 
-            if (!(request->quorumTick.voteFlags[computorIndices[index] >> 3] & (1 << (computorIndices[index] & 7))))
+            const Tick* tsTick = tsCompTicks + computorIndex;
+            if (tsTick->epoch == tickEpoch)
             {
-                // Todo: We should acquire ts.ticks lock here if tick >= system.tick
-                const Tick* tsTick = tsCompTicks + computorIndices[index];
-                if (tsTick->epoch == tickEpoch)
+                // enqueueResponse takes the shared response-queue lock; never hold a per-computor ticks lock across it
+                Tick tickCopy;
+                ts.ticks.acquireLock(computorIndex);
+                copyMem(&tickCopy, tsTick, sizeof(Tick));
+                ts.ticks.releaseLock(computorIndex);
+                if (tickCopy.epoch == tickEpoch)
                 {
-                    ts.ticks.acquireLock(computorIndices[index]);
-                    enqueueResponse(peer, sizeof(Tick), BroadcastTick::type(), header->dejavu(), tsTick);
-                    ts.ticks.releaseLock(computorIndices[index]);
+                    enqueueResponse(peer, sizeof(Tick), BroadcastTick::type(), header->dejavu(), &tickCopy);
                 }
             }
 
@@ -2103,7 +2119,10 @@ static void processRequestQuorumTick(Peer* peer, RequestResponseHeader* header)
     enqueueResponse(peer, 0, EndResponse::type(), header->dejavu(), NULL);
 }
 
-static void processRequestTickData(Peer* peer, RequestResponseHeader* header)
+// One response buffer per processor
+static TickData gTickDataResponseScratch[MAX_NUMBER_OF_PROCESSORS];
+
+static void processRequestTickData(const unsigned long long processorNumber, Peer* peer, RequestResponseHeader* header)
 {
     if (!header->checkPayloadSize(sizeof(RequestTickData)))
         return;
@@ -2114,18 +2133,25 @@ static void processRequestTickData(Peer* peer, RequestResponseHeader* header)
         enqueueResponse(peer, 0, EndResponse::type(), header->dejavu(), NULL);
         return;
     }
-    // SWAP: we need atomic here to avoid flush the page while another thread is writing to it
+    // enqueueResponse takes the shared response-queue lock; copy under tickDataLock, never hold it across the enqueue
+    TickData& tickDataCopy = gTickDataResponseScratch[processorNumber];
+    bool haveTickData = false;
     ts.tickData.acquireLock();
     TickData* td = ts.tickData.getByTickIfNotEmpty(request->requestedTickData.tick);
     if (td)
     {
-        enqueueResponse(peer, sizeof(TickData), BroadcastFutureTickData::type(), header->dejavu(), td);
+        copyMem(&tickDataCopy, td, sizeof(TickData));
+        haveTickData = true;
+    }
+    ts.tickData.releaseLock();
+    if (haveTickData)
+    {
+        enqueueResponse(peer, sizeof(TickData), BroadcastFutureTickData::type(), header->dejavu(), &tickDataCopy);
     }
     else
     {
         enqueueResponse(peer, 0, EndResponse::type(), header->dejavu(), NULL);
     }
-    ts.tickData.releaseLock();
 }
 
 static void processRequestTickTransactions(Peer* peer, RequestResponseHeader* header)
@@ -2149,38 +2175,36 @@ static void processRequestTickTransactions(Peer* peer, RequestResponseHeader* he
 
     if (tickEpoch != 0)
     {
+        // Only transactions that exist and that the requester still lacks take part in the shuffle
         unsigned int tickTransactionIndices[NUMBER_OF_TRANSACTIONS_PER_TICK];
-        unsigned int numberOfTickTransactions;
-        for (numberOfTickTransactions = 0; numberOfTickTransactions < NUMBER_OF_TRANSACTIONS_PER_TICK; numberOfTickTransactions++)
+        unsigned int numberOfTickTransactions = 0;
+        for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
         {
-            tickTransactionIndices[numberOfTickTransactions] = numberOfTickTransactions;
+            if (!(request->transactionFlags[transactionIndex >> 3] & (1 << (transactionIndex & 7)))
+                && tsReqTickTransactionOffsets[transactionIndex])
+            {
+                tickTransactionIndices[numberOfTickTransactions++] = transactionIndex;
+            }
         }
         while (numberOfTickTransactions)
         {
-            const unsigned int index = random(numberOfTickTransactions);
+            const unsigned int index = randomFast(numberOfTickTransactions);
 
-            if (!(request->transactionFlags[tickTransactionIndices[index] >> 3] & (1 << (tickTransactionIndices[index] & 7))))
+            const Transaction* transaction = ts.tickTransactions(tsReqTickTransactionOffsets[tickTransactionIndices[index]]);
+            if (transaction->tick == request->tick && transaction->checkValidity())
             {
-                unsigned long long tickTransactionOffset = tsReqTickTransactionOffsets[tickTransactionIndices[index]];
-                if (tickTransactionOffset)
-                {
-                    const Transaction* transaction = ts.tickTransactions(tickTransactionOffset);
-                    if (transaction->tick == request->tick && transaction->checkValidity())
-                    {
-                        enqueueResponse(peer, transaction->totalSize(), BROADCAST_TRANSACTION, header->dejavu(), (void*)transaction);
-                    }
-                    else
-                    {
-                        // tick storage messed up -> indicates bug such as buffer overflow
+                enqueueResponse(peer, transaction->totalSize(), BROADCAST_TRANSACTION, header->dejavu(), (void*)transaction);
+            }
+            else
+            {
+                // tick storage messed up -> indicates bug such as buffer overflow
 #if !defined(NDEBUG)
-                        CHAR16 dbgMsg[200];
-                        setText(dbgMsg, L"Invalid transaction found in processRequestTickTransactions(), tick ");
-                        appendNumber(dbgMsg, request->tick, FALSE);
-                        addDebugMessage(dbgMsg);
-                        ts.checkStateConsistencyWithAssert();
+                CHAR16 dbgMsg[200];
+                setText(dbgMsg, L"Invalid transaction found in processRequestTickTransactions(), tick ");
+                appendNumber(dbgMsg, request->tick, FALSE);
+                addDebugMessage(dbgMsg);
+                ts.checkStateConsistencyWithAssert();
 #endif
-                    }
-                }
             }
 
             tickTransactionIndices[index] = tickTransactionIndices[--numberOfTickTransactions];
@@ -3169,7 +3193,7 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
 
                 case RequestTickData::type():
                 {
-                    processRequestTickData(peer, header);
+                    processRequestTickData(processorNumber, peer, header);
                 }
                 break;
 
@@ -4219,6 +4243,12 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
         return;
     }
 
+    if (system.tick >= FREEZE_FROM_TICK
+        && isFrozenAddress(transaction->sourcePublicKey))
+    {
+        return;
+    }
+
 #ifdef TESTNET
     // Record the tx with digest
     ts.transactionsDigestAccess.acquireLock();
@@ -4713,6 +4743,47 @@ static void publishAntSolutionFor(unsigned long long processorNumber, unsigned i
     antDebugPending(L"published", entry, payload.tick);
 }
 
+// Move all qus and shares of frozen addresses to FROZEN_ESCROW. Run once, in tick FREEZE_FROM_TICK after BEGIN_TICK.
+static void transferFrozenAssetsToEscrow()
+{
+    for (unsigned long long i = 0; i < FROZEN_ADDRESSES_CAPACITY; i++)
+    {
+        const m256i frozen = gFrozenAddresses[i];
+        if (isZero(frozen))
+        {
+            continue;
+        }
+
+        const int spectrumIndex = ::spectrumIndex(frozen);
+        if (spectrumIndex >= 0)
+        {
+            const long long amount = energy(spectrumIndex);
+            if (amount > 0 && decreaseEnergy(spectrumIndex, amount))
+            {
+                increaseEnergy(frozenEscrowPublicKey, amount);
+                const QuTransfer quTransfer = { frozen, frozenEscrowPublicKey, amount };
+                logger.logQuTransfer(quTransfer);
+            }
+        }
+
+        ACQUIRE(universeLock);
+        unsigned int possessionIndex = frozen.m256i_u32[0] & (ASSETS_CAPACITY - 1);
+        while (assets[possessionIndex].varStruct.possession.type != EMPTY)
+        {
+            const auto& possession = assets[possessionIndex].varStruct.possession;
+            if (possession.type == POSSESSION && possession.publicKey == frozen && possession.numberOfShares > 0
+                && assets[possession.ownershipIndex].varStruct.ownership.publicKey == frozen)
+            {
+                int destinationOwnershipIndex, destinationPossessionIndex;
+                transferShareOwnershipAndPossession((int)possession.ownershipIndex, (int)possessionIndex, frozenEscrowPublicKey, possession.numberOfShares,
+                    &destinationOwnershipIndex, &destinationPossessionIndex, false);
+            }
+            possessionIndex = (possessionIndex + 1) & (ASSETS_CAPACITY - 1);
+        }
+        RELEASE(universeLock);
+    }
+}
+
 static void processTick(unsigned long long processorNumber)
 {
     PROFILE_SCOPE();
@@ -4831,6 +4902,11 @@ static void processTick(unsigned long long processorNumber)
     WAIT_WHILE(contractProcessorState);
     TickBench::add(TickBench::BEGIN_TICK, _btBeginTickStart, __rdtsc());
     PROFILE_SCOPE_END();
+
+    if (system.tick == FREEZE_FROM_TICK)
+    {
+        transferFrozenAssetsToEscrow();
+    }
 
     bool isThereQearnTx = false;
     unsigned int tickIndex = ts.tickToIndexCurrentEpoch(system.tick);
@@ -8201,16 +8277,16 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 tickDataSuits = true;
             }
 
-            // hot fix: force tick 77259626 to be empty
-            if (system.tick == 77259625)
+            // hot fix: force tick 85371950 to be empty
+            if (system.tick == 85371949)
             {
-                // ignore next tick (77259626)
+                // ignore next tick (85371950)
                 targetNextTickDataDigest = m256i::zero();
                 targetNextTickDataDigestIsKnown = true;
             }
 
             // should clear the stale votes in swap vm state too
-            if (system.tick == 77259626)
+            if (system.tick == 85371950)
             {
                 for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
                 {
@@ -9746,18 +9822,18 @@ static void logInfo()
         }
     }
 
-    setText(message, L"[+");
+    // Per-second request counters. rx: processed by request processors / discarded on a full request queue / dejavu
+    // duplicates. tx: appended to peer send buffers / dropped on a full send buffer. dsc and drp above 0 = overload.
+    setText(message, L"[rx prc ");
     appendNumber(message, numberOfProcessedRequests - prevNumberOfProcessedRequests, TRUE);
-    appendText(message, L" -");
+    appendText(message, L" dsc ");
     appendNumber(message, numberOfDiscardedRequests - prevNumberOfDiscardedRequests, TRUE);
-    appendText(message, L" *");
+    appendText(message, L" dup ");
     appendNumber(message, numberOfDuplicateRequests - prevNumberOfDuplicateRequests, TRUE);
-    appendText(message, L" /");
+    appendText(message, L" | tx snt ");
     appendNumber(message, numberOfDisseminatedRequests - prevNumberOfDisseminatedRequests, TRUE);
-    appendText(message, L" !");
+    appendText(message, L" drp ");
     appendNumber(message, numberOfDroppedTransmits - prevNumberOfDroppedTransmits, TRUE);
-    appendText(message, L" ?");
-    appendNumber(message, numberOfSkippedBroadcasts - prevNumberOfSkippedBroadcasts, TRUE);
     appendText(message, L"] ");
 
     unsigned int numberOfConnectingSlots = 0, numberOfConnectedSlots = 0, numberOfHandshakedSlots = 0;
@@ -9857,7 +9933,6 @@ static void logInfo()
     prevNumberOfDuplicateRequests = numberOfDuplicateRequests;
     prevNumberOfDisseminatedRequests = numberOfDisseminatedRequests;
     prevNumberOfDroppedTransmits = numberOfDroppedTransmits;
-    prevNumberOfSkippedBroadcasts = numberOfSkippedBroadcasts;
     prevNumberOfReceivedBytes = numberOfReceivedBytes;
     prevNumberOfTransmittedBytes = numberOfTransmittedBytes;
 
@@ -11906,7 +11981,8 @@ void processArgs(int argc, const char* argv[]) {
         ("http-port", "HTTP/RPC server port", cxxopts::value<int>()->default_value("41841"))
         ("static-peers", "Run in static peer mode: no peer churn, no new incoming connections")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 (Linux only)")
-        ("swap-dirty-track", "Track dirty SwapVM pages via mprotect+SIGSEGV (Linux only)")
+        ("swap-dirty-track", "Track dirty SwapVM pages via mprotect+SIGSEGV (Linux only, default on)")
+        ("no-swap-dirty-track", "Disable SwapVM dirty-page tracking: every evicted page is written back (Linux only)")
         ("auto-flush-stuck-seconds", "Seconds stuck on same tick before auto-rewipe tickData and re-fetch from peers (0=off)", cxxopts::value<int>()->default_value("0"))
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("rollback-mode", "DEPRECATED: accepted but ignored", cxxopts::value<std::string>()->default_value("fork"))
@@ -11967,6 +12043,10 @@ void processArgs(int argc, const char* argv[]) {
     if (result.count("swap-dirty-track")) {
         gSwapDirtyTrackEnabled = true;
         logColorToScreen("INFO", "Swap dirty tracking enabled: clean SwapVM cache pages skip writeback on eviction");
+    }
+    if (result.count("no-swap-dirty-track")) {
+        gSwapDirtyTrackEnabled = false;
+        logColorToScreen("INFO", "Swap dirty tracking disabled: every evicted SwapVM cache page is written back");
     }
 #if !defined(LITE_WASM_SC)
     if (result.count("no-k12-state-cache")) {
@@ -12503,6 +12583,9 @@ void setupSignalHandlers() {
     sigaction(SIGILL,  &sa, NULL); // Illegal instruction
     sigaction(SIGBUS,  &sa, NULL); // Bus error (Alignment/Hardware)
     sigaction(SIGABRT, &sa, NULL); // Abort (Called by assert() or std::terminate)
+
+    // SwapVM dirty tracking relies on the SIGSEGV fast path above; on by default from here, --no-swap-dirty-track reverts
+    gSwapDirtyTrackEnabled = true;
 }
 #endif
 
@@ -12547,6 +12630,7 @@ static void startRpcServices()
 static void prepareLinuxRuntime(int argc, const char* argv[])
 {
     runUnderSupervisor(argc, argv);
+    Zipper::captureProcessCpuMask();
     setupSignalHandlers();
 }
 #endif

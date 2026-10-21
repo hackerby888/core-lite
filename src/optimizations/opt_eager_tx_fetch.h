@@ -55,6 +55,10 @@ static void eagerFetchMissingTransactions(const TickData& tickData)
         if (found)
             continue;
 
+        // Already staged in the AUX fast window (AUX does not feed pendingTxsPool).
+        if (FastTxWindow::lookup(tick, tickData.transactionDigests[i], system.tick))
+            continue;
+
         // Missing — request from peers.
         txFlags[i >> 3] &= ~(1 << (i & 7));
         missingTx++;
@@ -67,7 +71,9 @@ static void eagerFetchMissingTransactions(const TickData& tickData)
     RequestResponseHeader* reqHeader = (RequestResponseHeader*)reqBuffer;
     reqHeader->setSize2(sizeof(reqBuffer));
     reqHeader->setType(RequestTickTransactions::type());
-    reqHeader->setDejavu(0);
+    // Non-zero dejavu: peers answer with the request's dejavu, and a zero-dejavu answer is
+    // re-broadcast by every node that receives it (network-wide flood of old txs during catch-up).
+    reqHeader->randomizeDejavu();
     RequestTickTransactions* req = (RequestTickTransactions*)(reqHeader + 1);
     req->tick = tick;
     copyMem(req->transactionFlags, txFlags, sizeof(txFlags));
