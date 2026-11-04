@@ -4,6 +4,7 @@
 
 #include "platform/memory.h"
 #include "platform/assert.h"
+#include "platform/m256.h"
 
 
 ////////// KangarooTwelve \\\\\\\\\\

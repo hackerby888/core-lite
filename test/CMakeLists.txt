@@ -63,6 +63,8 @@ add_executable(
 		contract_qusino.cpp
 		lite_ant_colony.cpp
 		ant_pending_solutions.cpp
+		solution_settlement_window.cpp
+		solution_settlement_kinds.cpp
 		trit_pack.cpp
 		custom_qubic_mining_storage.cpp
 		fast_tx_window.cpp
