@@ -164,6 +164,9 @@ public:
 
     // Workers. Take the next unclaimed slot and score it; false when there is none.
     bool workerStep(unsigned long long processorNumber);
+    // Clears every result so the window is scored again from _head. Only with no worker mid-slot: a
+    // cleared slot still being written would be claimed twice and _unscored would go negative.
+    void rescoreAll();
     unsigned int unscoredCount() const;
 
     // Any thread. nullptr once the tick is settled or if (tick, txIndex) was never appended.
@@ -432,6 +435,17 @@ inline bool SolutionSettlementWindow::workerStep(unsigned long long processorNum
     }
     scoreSlot(*slot, processorNumber);
     return true;
+}
+
+inline void SolutionSettlementWindow::rescoreAll()
+{
+    LockGuard guard(_lock);
+    for (unsigned long long i = _head; i < _tail; i++)
+    {
+        ATOMIC_STORE8(slotAt(i).scored, 0);
+    }
+    _cursor = _head;
+    _unscored = (long long)(_tail - _head);
 }
 
 inline unsigned int SolutionSettlementWindow::unscoredCount() const

@@ -164,6 +164,7 @@
 #include "mining/bpp9000_task.generated.h"
 #include "mining/ant_colony/ant_colony_bpp9000.h"
 #include "mining/solution_settlement_kinds.h"
+#include "extensions/solution_settlement_trust.h"
 
 #include "oracle_core/oracle_engine.h"
 #include "oracle_core/net_msg_impl.h"
@@ -831,8 +832,9 @@ static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int 
 #include "extensions/ant_walker_worker.h"
 #include "extensions/ant_walker_client.h"
 
-// Settlement glue and fork rollback use isLastTickInEpoch() before its definition.
+// Settlement glue and fork rollback use these before their definitions.
 static bool isLastTickInEpoch();
+static bool isTrustingClaimedSolutionScore();
 
 // ---- ant parent resolution ----
 //
@@ -844,6 +846,25 @@ static void resolveAntParent(const SolutionRef& parentRef, unsigned long long pr
     AntParentView& out)
 {
     ::resolveAntParent(gAntColony, gAntParentAnnScratch[processorNumber], parentRef, out);
+}
+
+// Strict scoring under a parent committed on a claimed score: that record has no network yet, so it
+// is rebuilt first; resolveAntParent() alone answers Absent for it.
+static void resolveAntParentMaterialising(const SolutionRef& parentRef, unsigned long long processorNumber,
+    AntParentView& out)
+{
+    resolveAntParent(parentRef, processorNumber, out);
+    if (out.status == AntParentReady || parentRef.isRoot())
+    {
+        return;
+    }
+    const long long parentIdx = gAntColony.findIndexBySolutionRef(parentRef);
+    if (parentIdx == ANT_INVALID_INDEX
+        || !ensureAntRecordAnn(processorNumber, (unsigned int)parentIdx, gAntParentAnnScratch[processorNumber]))
+    {
+        return;
+    }
+    resolveAntParent(parentRef, processorNumber, out);
 }
 
 // The child's rating: from the replay cache on a hit, by a full walk otherwise. Every walk is cached,
@@ -1155,16 +1176,50 @@ static void scoreStandaloneSolution(SettlementSlot& slot, unsigned long long pro
     copyMem(slot.result, &result, sizeof(result));
 }
 
-// Registered scoreFn for ant solutions. Any unscorable outcome writes an invalid rating, which
-// settlement rejects the same way on every node.
+// Strict path, the upstream walk. Any unscorable outcome writes an invalid rating, which settlement
+// rejects the same way on every node.
+static void scoreAntSolutionStrict(const AntSolutionRecordCapture& record, unsigned long long processorNumber,
+    AntSolutionResultLite& result)
+{
+    setMem(&result, sizeof(result), 0);
+    result.base.rating = score_engine::Rating::worst();
+
+    // The tree only, so no slot depends on another slot and workers may score in any order.
+    AntParentView parentView;
+    resolveAntParentMaterialising(record.parentRef, processorNumber, parentView);
+    if (parentView.status != AntParentReady)
+    {
+        return;
+    }
+
+    m256i anchorDigest;
+    if (!gAntColony.getAnchorDigest(record.anchorTick, anchorDigest))
+    {
+        return;
+    }
+
+    AntColonyBpp9000T::Ann childAnn;
+    result.base.rating = scoreAntChildCached(processorNumber, record.sourcePublicKey, record.nonce, record.parentRef,
+        parentView, anchorDigest, childAnn);
+    if (!result.base.rating.isValid())
+    {
+        return;
+    }
+
+    score_engine::ScoreBpp9000T::store(childAnn, result.base.ann);
+    KangarooTwelve(&childAnn, sizeof(childAnn), &result.base.annHash, sizeof(result.base.annHash));
+}
+
+// Registered scoreFn for ant solutions. AUX outside the strict paths records the claimed score with no
+// walk and no network; the fork checkpoint undoes the settle tick if that disagrees with quorum.
 static void scoreAntSolution(SettlementSlot& slot, unsigned long long processorNumber)
 {
     AntSolutionRecordCapture record;
     copyMem(&record, slot.record, sizeof(record));
 
-    AntSolutionResult result;
+    AntSolutionResultLite result;
     setMem(&result, sizeof(result), 0);
-    result.rating = score_engine::Rating::worst();
+    result.base.rating = score_engine::Rating::worst();
 
     // A parent is always settled before this solution's tick. Phase 1 already refused anything else, so
     // this is the same rule restated where the score depends on it.
@@ -1174,50 +1229,46 @@ static void scoreAntSolution(SettlementSlot& slot, unsigned long long processorN
         return;
     }
 
-    // The tree only, so no slot depends on another slot and workers may score in any order.
+    bool trusted = false;
     AntParentView parentView;
-    resolveAntParent(record.parentRef, processorNumber, parentView);
-    if (parentView.status != AntParentReady)
+    if (isTrustingClaimedSolutionScore())
     {
-        copyMem(slot.result, &result, sizeof(result));
-        return;
+        resolveAntParentRecord(gAntColony, record.parentRef, parentView);
+        trusted = (parentView.status == AntParentReady);
     }
-
-    m256i anchorDigest;
-    if (!gAntColony.getAnchorDigest(record.anchorTick, anchorDigest))
+    if (trusted)
     {
-        copyMem(slot.result, &result, sizeof(result));
-        return;
+        // Only the walk yields the shift and the claim carries none; the parent's is the lowest it can be.
+        result.base.rating.error = record.claimedScore;
+        result.base.rating.shift = parentView.shift;
+        result.trusted = 1;
     }
-
-    AntColonyBpp9000T::Ann childAnn;
-    result.rating = scoreAntChildCached(processorNumber, record.sourcePublicKey, record.nonce, record.parentRef,
-        parentView, anchorDigest, childAnn);
-    if (!result.rating.isValid())
+    else
     {
-        copyMem(slot.result, &result, sizeof(result));
-        return;
+        scoreAntSolutionStrict(record, processorNumber, result);
     }
-
-    score_engine::ScoreBpp9000T::store(childAnn, result.ann);
-    KangarooTwelve(&childAnn, sizeof(childAnn), &result.annHash, sizeof(result.annHash));
 
     copyMem(slot.result, &result, sizeof(result));
 }
 
 // Registered settleFn for ant solutions, on the tick processor. "Now" is slot.tick, never system.tick.
 // The parent is resolved again for the record commit() takes. The anchor is checked again: it only
-// ever leaves the ring, so one present now was present when the worker read it. The rating and network
-// come from the worker's result, which every node computes identically.
+// ever leaves the ring, so one present now was present when the worker read it. A result taken on
+// trust is walked here first once this node is no longer trusting, so a strict path only ever consumes
+// a computed score.
 static void settleAntSolution(const SettlementSlot& slot, unsigned long long processorNumber)
 {
     AntSolutionRecordCapture record;
     copyMem(&record, slot.record, sizeof(record));
-    AntSolutionResult result;
+    AntSolutionResultLite result;
     copyMem(&result, slot.result, sizeof(result));
+    if (result.trusted && !isTrustingClaimedSolutionScore())
+    {
+        scoreAntSolutionStrict(record, processorNumber, result);
+    }
 
     AntParentView parentView;
-    resolveAntParent(record.parentRef, processorNumber, parentView);
+    resolveAntParentRecord(gAntColony, record.parentRef, parentView);
     if (parentView.status != AntParentReady)
     {
         rejectAntSolution(record.sourcePublicKey, record.nonce, record.parentRef, record.anchorTick,
@@ -1233,7 +1284,9 @@ static void settleAntSolution(const SettlementSlot& slot, unsigned long long pro
         return;
     }
 
-    if (!result.rating.isValid())
+    // Rejecting a trusted score leaves no refund for the quorum to disagree with, so the tree would
+    // diverge in silence; accepting turns the lie into a spectrum disagreement instead.
+    if (!result.trusted && !result.base.rating.isValid())
     {
         rejectAntSolution(record.sourcePublicKey, record.nonce, record.parentRef, record.anchorTick,
             ValidityResult::RejectNonCanonicalNonce);
@@ -1242,12 +1295,9 @@ static void settleAntSolution(const SettlementSlot& slot, unsigned long long pro
 
     // Every canonical score folds, whether or not it clears the threshold. Only a non-canonical
     // nonce, rejected above, leaves the digest untouched.
-    resourceTestingDigest ^= result.rating.digestValue();
-    resourceTestingDigest ^= result.annHash;
+    resourceTestingDigest ^= result.base.rating.digestValue();
+    resourceTestingDigest ^= result.base.annHash;
     KangarooTwelve(&resourceTestingDigest, sizeof(resourceTestingDigest), &resourceTestingDigest, sizeof(resourceTestingDigest));
-
-    AntColonyBpp9000T::Ann childAnn;
-    score_engine::ScoreBpp9000T::load(result.ann, childAnn);
 
     const AntCommitInput in = {
         record.sourcePublicKey,
@@ -1257,10 +1307,52 @@ static void settleAntSolution(const SettlementSlot& slot, unsigned long long pro
         record.anchorTick,                                        // ABSOLUTE
         slot.tick };                                               // publishTick, ABSOLUTE (== selfRef.tick)
 
-    const ValidityResult outcome = gAntColony.commit(in, parentView.treeRecord, result.rating, childAnn, result.annHash);
+    ValidityResult outcome;
+    if (result.trusted)
+    {
+        outcome = gAntColony.commit(in, parentView.treeRecord, result.base.rating, nullptr, 0, true);
+    }
+    else
+    {
+        AntColonyBpp9000T::Ann childAnn;
+        score_engine::ScoreBpp9000T::load(result.base.ann, childAnn);
+        outcome = gAntColony.commit(in, parentView.treeRecord, result.base.rating, childAnn, result.base.annHash);
+    }
     logAntSolutionOutcome(record.sourcePublicKey, record.nonce, record.parentRef.tick,
-        record.parentRef.solutionIndexInTick, record.anchorTick, result.rating.error, outcome);
-    antDebugAccepted(slot.tick, result.rating.error, parentView.depth + 1, slot.txIndex, outcome, false);
+        record.parentRef.solutionIndexInTick, record.anchorTick, result.base.rating.error, outcome);
+    antDebugAccepted(slot.tick, result.base.rating.error, parentView.depth + 1, slot.txIndex, outcome, result.trusted != 0);
+
+    // An accept that only stood because the score was trusted is the one that may disagree with quorum.
+    if (result.trusted
+        && (outcome == ValidityResult::Valid || outcome == ValidityResult::ValidNotStored))
+    {
+        score_engine::Rating parentRating = score_engine::Rating::worst();
+        if (parentView.treeRecord != nullptr)
+        {
+            parentRating.error = parentView.treeRecord->score;
+            parentRating.shift = parentView.treeRecord->shift;
+        }
+        // Judged at the guessed shift: a walk that slid the frame further passes where this says it fails.
+        const bool wouldHaveRejected = !result.base.rating.isValid()
+            || !result.base.rating.clearsFloor(gAntColony.errorThreshold())
+            || !result.base.rating.isBetterThan(parentRating);
+        if (wouldHaveRejected && antDebugCanPrint())
+        {
+            CHAR16 msg[256];
+            setText(msg, L"[ant-colony] over-accepted on a trusted score, tick ");
+            appendNumber(msg, slot.tick, FALSE);
+            appendText(msg, L" idx ");
+            appendNumber(msg, slot.txIndex, FALSE);
+            appendText(msg, L" score ");
+            appendNumber(msg, result.base.rating.error, FALSE);
+            appendText(msg, L" threshold ");
+            appendNumber(msg, gAntColony.errorThreshold(), FALSE);
+            appendText(msg, L" parentScore ");
+            appendNumber(msg, parentRating.error, FALSE);
+            appendText(msg, L" - a spectrum disagreement may follow this tick");
+            logToConsole(msg);
+        }
+    }
 
     // ValidNotStored is the store being full: the solution passed every rule and only missed a slot,
     // so it earns its refund and its ranking exactly like a stored one.
@@ -1269,13 +1361,13 @@ static void settleAntSolution(const SettlementSlot& slot, unsigned long long pro
         return;   // commit() counted this one itself
     }
 
-    if (record.claimedScore == result.rating.error)
+    if (record.claimedScore == result.base.rating.error)
     {
         increaseEnergy(record.sourcePublicKey, record.amount);
         const QuTransfer quTransfer = { m256i::zero(), record.sourcePublicKey, record.amount };
         logger.logQuTransfer(quTransfer);
 
-        const unsigned int newScore = result.rating.rankingKey();
+        const unsigned int newScore = result.base.rating.rankingKey();
         updateMinerRankingAndFutureComputors(record.sourcePublicKey, newScore, slot.tick);
     }
 }
@@ -10764,6 +10856,8 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     forkCensusResetForChildPromote();
     const unsigned int releasedAntClaims = AntColonyMaintenance::releaseInheritedClaims(gAntColony);
     AntWalker::restartAfterPromote();
+    // Results taken on trust before the fork are re-walked by the strict replay; no AP runs yet.
+    gSettlementWindow.rescoreAll();
     if (releasedAntClaims)
     {
         fprintf(stderr, "[FORK] CHILD: released %u inherited ant network claims\n", releasedAntClaims);
