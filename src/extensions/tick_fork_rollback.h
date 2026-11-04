@@ -87,6 +87,9 @@ namespace tickFork
     // Only ticks carrying a mining-solution tx can mismatch quorum. Ant counts too: AUX commits it on the claimed score.
     inline bool tickHasSolution(unsigned int tick)
     {
+        // Previous-epoch ticks are served by tick data but would wrap the current-epoch offset table.
+        if (tick < system.initialTick)
+            return false;
         TickData tickDataCopy;
         ts.tickData.acquireLock();
         const TickData* storedTickData = ts.tickData.getByTickIfNotEmpty(tick);
@@ -108,6 +111,13 @@ namespace tickFork
                 return true;
         }
         return false;
+    }
+
+    // A claimed score lands when its tick settles, W ticks after the transaction, so that is the tick to checkpoint.
+    inline bool tickBeingSettledHasSolution()
+    {
+        return system.tick >= SOLUTION_SETTLEMENT_WINDOW_TICKS
+            && tickHasSolution(system.tick - SOLUTION_SETTLEMENT_WINDOW_TICKS);
     }
 
     // Checkpoint-and-replay: k ticks share one fork (amortizes the O(RSS) fork). The checkpoint child
@@ -441,7 +451,7 @@ namespace tickFork
         switch (winState())
         {
         case WindowState::Idle:
-            if (!gForkForceFork && !tickHasSolution(system.tick))
+            if (!gForkForceFork && !tickBeingSettledHasSolution())
             {
                 return;
             }
@@ -454,7 +464,7 @@ namespace tickFork
                 return;
             }
             retireCheckpoint();
-            if (gForkForceFork || tickHasSolution(system.tick))
+            if (gForkForceFork || tickBeingSettledHasSolution())
             {
                 establishCheckpoint();
             }
