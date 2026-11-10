@@ -6,6 +6,7 @@
 #include "rating.h"
 #include "task_file.h"
 #include "trit_pack.h"
+#include "extensions/bpp9000_avx512_simde.h"
 
 namespace score_engine
 {
@@ -182,7 +183,7 @@ struct ScoreBpp9000
 
     void initMemory()
     {
-#ifdef __AVX512F__
+#if defined(__AVX512F__) || defined(LITE_BPP9000_AVX512_VIA_SIMDE)
         buildHoistedConstants();
 #endif
     }
@@ -447,7 +448,7 @@ struct ScoreBpp9000
         return best;
     }
 
-#ifdef __AVX512F__
+#if defined(__AVX512F__) || defined(LITE_BPP9000_AVX512_VIA_SIMDE)
 
     // Neuron-parallel engine: one network, all neurons ticked together in 64-neuron blocks, one lane per neuron.
     static constexpr unsigned long long B = (populationThreshold + 63) / 64;
